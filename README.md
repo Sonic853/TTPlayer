@@ -1,4 +1,7 @@
-# TTPlayer clean reconstruction
+# Thousand Tunes Player
+
+<img width="654" height="463" alt="image" src="https://github.com/user-attachments/assets/ac4133c4-a8fa-4b32-bfa6-72c38bc110ea" />
+
 
 This is a clean, buildable rewrite around the recovered behaviour and file/ABI
 boundaries. It intentionally does not compile Ghidra pseudo-C directly.
