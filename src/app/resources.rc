@@ -1,0 +1,5 @@
+#include <windows.h>
+
+// TTPlayer.exe loads this exact group-icon identifier in FUN_0045FAD8 before
+// associating the resulting 16x16 HICON with command 0xE140.
+128 ICON "../../../Icons/TTPlayer.ico"
