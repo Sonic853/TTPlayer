@@ -1,0 +1,54 @@
+# Stable cross-platform text normalization
+* text=auto
+
+# Source, configuration and documentation use UTF-8 with LF in the repository.
+*.[cC]       text eol=lf working-tree-encoding=UTF-8
+*.[cC][cC]   text eol=lf working-tree-encoding=UTF-8
+*.[cC][pP][pP] text eol=lf working-tree-encoding=UTF-8
+*.[hH]       text eol=lf working-tree-encoding=UTF-8
+*.[hH][pP][pP] text eol=lf working-tree-encoding=UTF-8
+*.[iI][nN][lL] text eol=lf working-tree-encoding=UTF-8
+*.[cC][mM][aA][kK][eE] text eol=lf working-tree-encoding=UTF-8
+[Cc][Mm][Aa][Kk][Ee][Ll][Ii][Ss][Tt][Ss].[Tt][Xx][Tt] text eol=lf working-tree-encoding=UTF-8
+*.[mM][dD]   text eol=lf working-tree-encoding=UTF-8
+*.[pP][yY]   text eol=lf working-tree-encoding=UTF-8
+*.[jJ][sS][oO][nN] text eol=lf working-tree-encoding=UTF-8
+*.[cC][sS][vV] text eol=lf working-tree-encoding=UTF-8
+*.[xX][mM][lL] text eol=lf working-tree-encoding=UTF-8
+*.[rR][cC]   text eol=lf working-tree-encoding=UTF-8
+
+# Native Windows command/project files retain CRLF working-tree endings.
+*.[bB][aA][tT] text eol=crlf
+*.[cC][mM][dD] text eol=crlf
+*.[pP][sS]1    text eol=crlf
+*.[sS][lL][nN] text eol=crlf
+*.[vV][cC][xX][pP][rR][oO][jJ] text eol=crlf
+*.[fF][iI][lL][tT][eE][rR][sS] text eol=crlf
+
+# Original executables, recovered resources, skins and media assets are
+# reverse-engineering inputs. Never apply line-ending conversion to them.
+*.[eE][xX][eE] binary
+*.[dD][lL][lL] binary
+*.[lL][iI][bB] binary
+*.[oO][bB][jJ] binary
+*.[rR][eE][sS] binary
+*.[rR][lL][lL] binary
+*.7[zZ]        binary
+*.[zZ][iI][pP] binary
+*.[sS][kK][nN] binary
+*.[bB][iI][nN] binary
+*.[dD][aA][tT] binary
+*.[gG][bB][fF] binary
+*.[bB][mM][pP] binary
+*.[pP][nN][gG] binary
+*.[jJ][pP][gG] binary
+*.[jJ][pP][eE][gG] binary
+*.[gG][iI][fF] binary
+*.[iI][cC][oO] binary
+*.[cC][uU][rR] binary
+*.[wW][aA][vV] binary
+*.[mM][pP]3    binary
+*.[fF][lL][aA][cC] binary
+*.[oO][gG][gG] binary
+*.[tT][tT][fF] binary
+*.[oO][tT][fF] binary
