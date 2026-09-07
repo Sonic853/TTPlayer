@@ -479,7 +479,6 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
                         ReleaseDC(control, dc);
                     }
                 }
-                if (GetCapture() == control) ReleaseCapture();
                 lyric_line_dragging_ = false;
                 lyric_line_drag_offset_ = 0;
                 // CLyricCtrl::WM_LBUTTONUP at 00442671 invokes generic seek,
@@ -489,6 +488,9 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
                 // over-applied the fade to every lyric release; preserve the
                 // observed original direct-seek behavior here.
                 if (target) audio_.SeekWithoutFade(*target);
+                // ReleaseCapture synchronously sends WM_CAPTURECHANGED.
+                // Publish the target before that handler invalidates/paints.
+                if (GetCapture() == control) ReleaseCapture();
                 InvalidateRect(control, nullptr, FALSE);
             }
         } else {
@@ -1077,11 +1079,11 @@ void PlayerWindow::LeaveDesktopLyricMode() {
 }
 
 void PlayerWindow::CreateLyricControls() {
-    DestroyLyricControls();
     if (!lyric_window_ || !skin_ || !skin_->Lyric().valid) return;
 
     const auto create_button = [this](HWND& destination, UINT command,
                                       bool tab_stop = true) {
+        if (destination && IsWindow(destination)) return;
         destination = CreateWindowExW(0, kEqualizerButtonClass, nullptr,
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
                 (tab_stop ? WS_TABSTOP : 0),
@@ -1093,19 +1095,34 @@ void PlayerWindow::CreateLyricControls() {
     // control at zero extent. This is visible in LX-iPlay's child enumeration.
     create_button(lyric_desklrc_, kCmdDesktopLyrics, false);
     create_button(lyric_ontop_, kCmdLyricTopMost);
-    lyric_control_ = CreateWindowExW(0, kLyricControlClass, nullptr,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, lyric_window_,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLyricControlId)),
-        instance_, this);
+    // 00449451 -> 0044E5CE -> 0044919C rebinds existing controls. In
+    // particular, destroying LyricCtrl also destroyed the unsaved RichEdit
+    // document, its selection/undo history and the full-screen HWND.
+    if (!lyric_control_ || !IsWindow(lyric_control_))
+        lyric_control_ = CreateWindowExW(0, kLyricControlClass, nullptr,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, lyric_window_,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLyricControlId)),
+            instance_, this);
     UpdateLyricScrollTimer();
     create_button(lyric_close_, kCmdShowLyrics);
-    lyric_hidden_button_ = CreateWindowExW(0, kEqualizerButtonClass, nullptr,
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
-        -16, -16, 16, 16, lyric_window_,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(0x82dc)),
-        instance_, this);
+    if (!lyric_hidden_button_ || !IsWindow(lyric_hidden_button_))
+        lyric_hidden_button_ = CreateWindowExW(0, kEqualizerButtonClass, nullptr,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
+            -16, -16, 16, 16, lyric_window_,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(0x82dc)),
+            instance_, this);
 
     RebuildLyricFont(false);
+    if (lyric_editor_) {
+        const bool modified = SendMessageW(lyric_editor_, EM_GETMODIFY, 0, 0) != 0;
+        SetLyricEditorFont(settings_.lyric.font_valid
+            ? settings_.lyric.font : skin_->Lyric().font);
+        SendMessageW(lyric_editor_, EM_SETBKGNDCOLOR, 0,
+            settings_.lyric.background_color != CLR_INVALID
+                ? settings_.lyric.background_color : skin_->Lyric().background_color);
+        FormatLyricEditorAll();
+        SendMessageW(lyric_editor_, EM_SETMODIFY, modified, 0);
+    }
     LayoutLyricControls();
     UpdateLyricToolRects();
 }
@@ -1258,22 +1275,29 @@ void PlayerWindow::ToggleLyricWindow() {
     if (window_) InvalidateRect(window_, nullptr, FALSE);
 }
 
-void PlayerWindow::UpdateLyricWindowSkin() {
+void PlayerWindow::UpdateLyricWindowSkin(bool saved_bounds) {
     const bool desktop_was_visible =
         desktop_lyric_mode_ && desktop_lyrics_.Visible();
     if (!skin_ || !skin_->Lyric().valid) {
         if (lyric_window_) {
             ShowWindow(lyric_window_, SW_HIDE);
-            DestroyLyricControls();
         }
         if (window_) InvalidateRect(window_, nullptr, FALSE);
         desktop_lyrics_.SetSkin(skin_ ? &*skin_ : nullptr);
         return;
     }
     if (!lyric_window_ && !CreateLyricWindow()) return;
-    if (mini_mode_) {
+    ScopedSkinRedraw redraw(lyric_window_);
+    if (mini_mode_ || saved_bounds) {
         CreateLyricControls();
+        redraw.Resume();
         ApplyActiveLyricWindowState();
+        if (desktop_lyric_mode_) {
+            ShowWindow(lyric_window_, SW_HIDE);
+            desktop_lyrics_.SetSkin(&*skin_);
+            desktop_lyrics_.ApplySettings();
+            desktop_lyrics_.Show(desktop_was_visible);
+        }
         return;
     }
     const auto& layout = skin_->Lyric();
@@ -1287,7 +1311,7 @@ void PlayerWindow::UpdateLyricWindowSkin() {
         width = std::max<int>(width, layout.position.right - layout.position.left);
         height = std::max<int>(height, layout.position.bottom - layout.position.top);
     }
-    // 00468363 -> 00449451 rebuilds the lyric HWND from the new package's
+    // 00468363 -> 00449451 rebinds the existing lyric HWND to the package's
     // position. A fixed-size skin such as LX-iPlay must not inherit the prior
     // package's larger dimensions.
     SetWindowPos(lyric_window_, ActiveLyricTopMost()
@@ -1296,6 +1320,7 @@ void PlayerWindow::UpdateLyricWindowSkin() {
         width, height, SWP_NOACTIVATE);
     CreateLyricControls();
     UpdateLyricWindowRegion();
+    redraw.Resume();
     RedrawWindow(lyric_window_, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN |
         RDW_UPDATENOW);

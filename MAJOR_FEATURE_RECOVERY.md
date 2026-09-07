@@ -190,11 +190,19 @@ Directory shell verb，批量结束后只发送一次 `SHCNE_ASSOCCHANGED`。
 
 ## 11. 启动与框架
 
-`TTPlayer_wWinMain` `004C0E8F` 的可见次序已经恢复：ttpcomm `0x50700`
-检查、五秒单实例互斥/转发、TLS、OLE、common-controls、EXE 同目录资源验证、
+原版 `TTPlayer_wWinMain` `004C0E8F` 的 ttpcomm `0x50700` 检查已于
+2026-09-07 按用户要求取消：启动与 `TtpComm_LoadApi` 均不调用版本查询，
+也不要求版本导出存在，允许接口兼容的其他 x86 DLL 版本。后续仍依次执行
+五秒单实例互斥/转发、TLS、OLE、common-controls、EXE 同目录资源验证、
 AddIn/声音库、线程 hook、CoolSB、应用会话，退出时严格逆序释放。资源初始化
 按 `004C077E` 加载 `ttpres.dll` 并验证 string `0x80` 的产品名，而不是只凭同名
 DLL 成功加载。
+
+兼容边界：DLL 加载、资源身份及功能所需导出/结构的检查仍保留，不能保证
+导出序号或调用约定不同的任意 DLL 可用。`ttpcomm_compatibility_tests` 用
+不同版本和无版本导出的模拟 DLL 验证加载层、实际 `TtpCommRuntime` 启动层、
+版本查询零调用、可选导出为空及 EXE 本地路径约束；真实运行仍以提供的 DLL
+验证，不将模拟 DLL 的加载通过等同于其他发行版的完整功能验证。
 
 消息泵按 `004B5470/004B54F2` 在队列空时进入 idle，并仅在非
 `WM_PAINT/WM_NCMOUSEMOVE/WM_TIMER/0x0118/WM_MOUSEMOVE` 后重新允许 idle；

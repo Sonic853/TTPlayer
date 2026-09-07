@@ -592,15 +592,10 @@ std::wstring PlaylistInfoValue(const playlist::Track& track,
     std::string key;
     try { key = core::WideToUtf8(name); }
     catch (const std::exception&) { return {}; }
-    auto value = PlaylistMetadataValue(track, key);
-    if (!value.empty()) return value;
-    if (PlaylistWideEquals(name, L"Title"))
-        return PlaylistUtf8Field(track.title);
-    if (PlaylistWideEquals(name, L"Artist"))
-        return PlaylistUtf8Field(track.artist);
-    if (PlaylistWideEquals(name, L"Album"))
-        return PlaylistUtf8Field(track.album);
-    return {};
+    // 004AEB8F resolves non-built-in placeholders from the metadata bag.
+    // CPlayItem's cached display title is not a Title tag: falling back to it
+    // invents a title row for untagged files (including imported list labels).
+    return PlaylistMetadataValue(track, key);
 }
 
 std::wstring FormatPlaylistItemTip(const playlist::Track& track,
@@ -1577,6 +1572,8 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
         if (catalogue) return static_cast<LRESULT>(playlists_.Size());
         if (tracks) return static_cast<LRESULT>(VisiblePlaylistTrackCount());
         return 0;
+    case LVM_GETTOOLTIPS:
+        return tracks ? reinterpret_cast<LRESULT>(playlist_item_tooltip_) : 0;
     case LVM_GETSELECTEDCOUNT:
         if (catalogue) return playlist_list_selection_ ? 1 : 0;
         if (tracks)
@@ -1896,6 +1893,7 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
         return SendMessageW(parent, message, wparam, lparam);
     case WM_CONTEXTMENU:
     case WM_SETCURSOR:
+    case WM_NOTIFY:
         return SendMessageW(parent, message, wparam, lparam);
     default:
         return DefWindowProcW(control, message, wparam, lparam);
@@ -2147,6 +2145,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam, LPARAM 
             settings_.playlist.split_on_lists = std::clamp<int>(
                 point.x - metrics.list.left, 0, maximum);
             LayoutPlaylistListControls();
+            UpdatePlaylistItemTipRects();
             InvalidateRect(playlist_window_, nullptr, FALSE);
             return 0;
         }
@@ -2834,7 +2833,7 @@ void PlayerWindow::TogglePlaylistWindow() {
     if (window_) InvalidateRect(window_, nullptr, FALSE);
 }
 
-void PlayerWindow::UpdatePlaylistWindowSkin() {
+void PlayerWindow::UpdatePlaylistWindowSkin(bool saved_bounds) {
     if (!skin_ || !skin_->Playlist().valid) {
         if (playlist_window_) ShowWindow(playlist_window_, SW_HIDE);
         if (window_) InvalidateRect(window_, nullptr, FALSE);
@@ -2842,6 +2841,7 @@ void PlayerWindow::UpdatePlaylistWindowSkin() {
     }
     if (!playlist_window_ && !CreatePlaylistWindow()) return;
     const auto& layout = skin_->Playlist();
+    ScopedSkinRedraw redraw(playlist_window_);
     const auto size = layout.background.size;
     if (size.cx > 0 && size.cy > 0) {
         RECT player{};
@@ -2854,13 +2854,20 @@ void PlayerWindow::UpdatePlaylistWindowSkin() {
             width = std::max<int>(width, layout.position.right - layout.position.left);
             height = std::max<int>(height, layout.position.bottom - layout.position.top);
         }
+        const RECT& saved = settings_.player.playlist_window;
+        const bool have_saved = saved_bounds && saved.right > saved.left && saved.bottom > saved.top;
+        if (have_saved && resizable) {
+            width = std::max<int>(size.cx, saved.right - saved.left);
+            height = std::max<int>(size.cy, saved.bottom - saved.top);
+        }
         // CPlayerWnd's skin-rebuild path (00468363 -> 0046BCBE) passes the
         // skin's playlist_window.position translated by the newly sized main
         // HWND.  This is why selecting LX-iPlay places its 500x255 playlist at
         // (player.left, player.top + 50) instead of retaining the previous
         // detached skin's coordinates.
         SetWindowPos(playlist_window_, nullptr,
-            player.left + layout.position.left, player.top + layout.position.top,
+            have_saved ? saved.left : player.left + layout.position.left,
+            have_saved ? saved.top : player.top + layout.position.top,
             width, height, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     playlist_scroll_ = std::min(playlist_scroll_, VisiblePlaylistTrackCount());
@@ -2868,8 +2875,11 @@ void PlayerWindow::UpdatePlaylistWindowSkin() {
     LayoutPlaylistListControls();
     UpdatePlaylistWindowRegion();
     UpdatePlaylistToolRects();
+    redraw.Resume();
     RedrawWindow(playlist_window_, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+    ShowWindow(playlist_window_, !mini_mode_ && settings_.player.playlist_visible
+        ? SW_SHOWNOACTIVATE : SW_HIDE);
 }
 
 void PlayerWindow::UpdatePlaylistWindowRegion() {
@@ -2919,8 +2929,7 @@ bool PlayerWindow::CreateToolTipWindow() {
         window_, nullptr, instance_, nullptr);
     if (!tooltip_) return false;
     SendMessageW(tooltip_, TTM_ACTIVATE, TRUE, 0);
-    // The native list tooltip is capped at 200 pixels so the six information
-    // rows remain a compact block instead of expanding to the full path.
+    // This is the shared skin-control tooltip, not Files' native infotip.
     SendMessageW(tooltip_, TTM_SETMAXTIPWIDTH, 0, 200);
     return true;
 }
@@ -3000,6 +3009,11 @@ void PlayerWindow::CreatePlaylistListControls() {
 }
 
 void PlayerWindow::DestroyPlaylistListControls() {
+    if (playlist_track_control_) RemoveToolTipTools(playlist_track_control_);
+    if (playlist_item_tooltip_ && IsWindow(playlist_item_tooltip_)) {
+        DestroyWindow(playlist_item_tooltip_);
+    }
+    playlist_item_tooltip_ = nullptr;
     for (HWND* control : {&playlist_track_control_, &playlist_list_control_,
                           &playlist_tree_control_}) {
         if (*control && IsWindow(*control)) DestroyWindow(*control);
@@ -3066,7 +3080,7 @@ void PlayerWindow::LayoutPlaylistListControls() {
 }
 
 void PlayerWindow::RemoveToolTipTools(HWND owner) {
-    if (!tooltip_ && !playlist_tooltip_) return;
+    if (!tooltip_ && !playlist_tooltip_ && !playlist_item_tooltip_) return;
     auto item = tooltip_tools_.begin();
     while (item != tooltip_tools_.end()) {
         if (item->owner != owner) {
@@ -3089,8 +3103,8 @@ void PlayerWindow::RemoveToolTipTools(HWND owner) {
 }
 
 void PlayerWindow::AddToolTipTool(HWND owner, UINT_PTR identifier,
-                                  const RECT& bounds) {
-    const HWND target = tooltip_;
+                                  const RECT& bounds, HWND target) {
+    if (!target) target = tooltip_;
     if (!target || !owner || bounds.right <= bounds.left ||
         bounds.bottom <= bounds.top) return;
     TOOLINFOW tool{sizeof(tool)};
@@ -3151,10 +3165,11 @@ bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
             return true;
         }
     }
-    if (tooltip_ && IsWindow(tooltip_)) {
+    for (const HWND target : {tooltip_, playlist_item_tooltip_}) {
+        if (!target || !IsWindow(target)) continue;
         // Preserve hwnd/time/screen coordinates from the original queued MSG;
         // relaying synthesized child-to-parent messages would duplicate input.
-        SendMessageW(tooltip_, TTM_RELAYEVENT, 0,
+        SendMessageW(target, TTM_RELAYEVENT, 0,
             reinterpret_cast<LPARAM>(queued));
     }
     return false;
@@ -3253,24 +3268,40 @@ void PlayerWindow::DestroyPlaylistToolControls() {
 void PlayerWindow::UpdatePlaylistToolRects() {
     if (!playlist_window_ || !CreateToolTipWindow() ||
         !CreatePlaylistToolTipWindow()) return;
-    DestroyPlaylistToolControls();
-    if (!skin_ || !skin_->Playlist().valid) return;
+    // 0047E6FC rebinds the existing toolbar. This function is also called
+    // during WM_SIZE: recreating HWNDs here lost focus/capture on every resize.
+    RemoveToolTipTools(playlist_window_);
+    std::set<UINT_PTR> placed;
+    const auto park_unused = [&] {
+        for (const auto& [identifier, control] : playlist_tool_controls_) {
+            if (!placed.contains(identifier))
+                SetWindowPos(control, nullptr, -1000, -1000, 0, 0,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    };
+    if (!skin_ || !skin_->Playlist().valid) { park_unused(); return; }
     RECT client{};
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
         VisiblePlaylistTrackCount());
-    const auto add_control = [this](UINT_PTR identifier, UINT control_id,
+    const auto add_control = [this, &placed](UINT_PTR identifier, UINT control_id,
                                     const RECT& bounds) {
         if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) return;
-        const HWND control = CreateWindowExW(0, kEqualizerButtonClass, nullptr,
-            WS_CHILD | WS_VISIBLE,
-            bounds.left, bounds.top, bounds.right - bounds.left,
-            bounds.bottom - bounds.top, playlist_window_,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(control_id)),
-            instance_, this);
+        const auto found = std::find_if(playlist_tool_controls_.begin(), playlist_tool_controls_.end(),
+            [identifier](const auto& entry) { return entry.first == identifier; });
+        HWND control = found == playlist_tool_controls_.end() ? nullptr : found->second;
+        if (!control) {
+            control = CreateWindowExW(0, kEqualizerButtonClass, nullptr,
+                WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, playlist_window_,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(control_id)), instance_, this);
+            if (control) playlist_tool_controls_.emplace_back(identifier, control);
+        }
         if (control) {
-            playlist_tool_controls_.emplace_back(identifier, control);
+            placed.insert(identifier);
+            SetWindowPos(control, nullptr, bounds.left, bounds.top,
+                bounds.right - bounds.left, bounds.bottom - bounds.top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
             std::wstring text = identifier == kPlaylistToolFirst + 7
                 ? ResourceText(8)
                 : MenuPositionText(ResourceModule(), kMenuPlaylistToolbar,
@@ -3284,7 +3315,7 @@ void PlayerWindow::UpdatePlaylistToolRects() {
         add_control(kPlaylistToolFirst + 7, kCmdShowPlaylist, metrics.close);
     UpdatePlaylistItemTipRects();
     if (!skin_->Playlist().toolbar.image ||
-        metrics.toolbar.right <= metrics.toolbar.left) return;
+        metrics.toolbar.right <= metrics.toolbar.left) { park_unused(); return; }
     constexpr int count = 7;
     const int height = metrics.toolbar.bottom - metrics.toolbar.top;
     for (int index = 0; index < count; ++index) {
@@ -3302,14 +3333,16 @@ void PlayerWindow::UpdatePlaylistToolRects() {
         add_control(kPlaylistToolFirst + index,
             static_cast<UINT>(kPlaylistToolFirst + index), bounds);
     }
+    park_unused();
 }
 
 void PlayerWindow::UpdatePlaylistItemTipRects() {
     if (!playlist_window_) return;
-    if (tooltip_) {
+    if (tooltip_ || playlist_item_tooltip_) {
         auto item = tooltip_tools_.begin();
         while (item != tooltip_tools_.end()) {
-            const bool playlist_item = item->owner == playlist_window_ &&
+            const bool playlist_item = (item->owner == playlist_window_ ||
+                                       item->owner == playlist_track_control_) &&
                 !item->control && item->identifier >= kCmdFirstTrack &&
                 item->identifier < kPlaylistToolFirst;
             if (!playlist_item) {
@@ -3340,7 +3373,22 @@ void PlayerWindow::UpdatePlaylistItemTipRects() {
         QueuePlaylistInfoRange(playlists_.ActiveIndex(), playlist_scroll_,
             static_cast<size_t>(metrics.visible_rows));
     }
-    if (!tooltip_ || !settings_.playlist.item_tips) return;
+    if (!settings_.playlist.item_tips || !playlist_track_control_) return;
+    if (!playlist_item_tooltip_ || !IsWindow(playlist_item_tooltip_)) {
+        // Files is owner-data in 00482BAF (LVS_EX_INFOTIP, 0x4420), and
+        // 004887AA handles its LVN_GETINFOTIPW. Our painted ListCtrl needs
+        // an equivalent tooltip owned by Files, not tools on its parent:
+        // the queued mouse MSG names Files and uses Files client coordinates.
+        // Native common-controls v6 supplies NOPREFIX/USEVISUALSTYLE and a
+        // 400-pixel infotip width; leave delay times at their system defaults.
+        playlist_item_tooltip_ = CreateWindowExW(WS_EX_TRANSPARENT,
+            TOOLTIPS_CLASSW, nullptr, TTS_NOPREFIX | TTS_USEVISUALSTYLE,
+            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+            playlist_track_control_, nullptr, instance_, nullptr);
+        if (!playlist_item_tooltip_) return;
+        SendMessageW(playlist_item_tooltip_, TTM_SETMAXTIPWIDTH, 0, 400);
+        SendMessageW(playlist_item_tooltip_, TTM_ACTIVATE, TRUE, 0);
+    }
     for (int row = 0; row < metrics.visible_rows; ++row) {
         const size_t index = playlist_scroll_ + static_cast<size_t>(row);
         if (index >= VisiblePlaylistTrackCount()) break;
@@ -3349,7 +3397,10 @@ void PlayerWindow::UpdatePlaylistItemTipRects() {
                     metrics.tracks.right,
                     std::min(metrics.tracks.bottom,
                         metrics.tracks.top + (row + 1) * metrics.row_height)};
-        AddToolTipTool(playlist_window_, kCmdFirstTrack + index, bounds);
+        MapWindowPoints(playlist_window_, playlist_track_control_,
+                        reinterpret_cast<POINT*>(&bounds), 2);
+        AddToolTipTool(playlist_track_control_, kCmdFirstTrack + index, bounds,
+                      playlist_item_tooltip_);
     }
 }
 
@@ -3362,6 +3413,7 @@ bool PlayerWindow::HandleToolTipNotification(HWND owner, LPARAM notification) {
         : nullptr;
     if ((header->hwndFrom != tooltip_ &&
          header->hwndFrom != playlist_tooltip_ &&
+         header->hwndFrom != playlist_item_tooltip_ &&
          header->hwndFrom != lyric_editor_tooltip) ||
         (header->code != TTN_GETDISPINFOW &&
          header->code != TTN_GETDISPINFOA)) return false;
@@ -3373,6 +3425,7 @@ bool PlayerWindow::HandleToolTipNotification(HWND owner, LPARAM notification) {
         owner = lyric_window_;
     if (const auto item = std::find_if(tooltip_tools_.begin(),
             tooltip_tools_.end(), [header](const auto& tool) {
+                if (tool.tooltip != header->hwndFrom) return false;
                 return tool.control
                     ? reinterpret_cast<UINT_PTR>(tool.control) == header->idFrom
                     : tool.identifier == header->idFrom;
@@ -3380,6 +3433,7 @@ bool PlayerWindow::HandleToolTipNotification(HWND owner, LPARAM notification) {
         owner = item->owner;
         identifier = item->identifier;
     }
+    if (owner == playlist_track_control_) owner = playlist_window_;
     if (!settings_.playlist.library_mode && owner == playlist_window_ &&
         identifier >= kCmdFirstTrack &&
         identifier < kPlaylistToolFirst) {

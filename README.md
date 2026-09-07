@@ -1,7 +1,4 @@
-# Thousand Tunes Player
-
-<img width="654" height="463" alt="image" src="https://github.com/user-attachments/assets/ac4133c4-a8fa-4b32-bfa6-72c38bc110ea" />
-
+# TTPlayer clean reconstruction
 
 This is a clean, buildable rewrite around the recovered behaviour and file/ABI
 boundaries. It intentionally does not compile Ghidra pseudo-C directly.
@@ -12,7 +9,7 @@ media library, tags, CD/VCD, URL, associations, settings and startup is in
 Current milestone (0.1):
 
 - native Unicode `wWinMain` reconstructed at the original `004C0E8F` boundary:
-  strict `ttpcomm.dll` 5.7.0 validation, single-instance event/mapping and
+  EXE-local `ttpcomm.dll` loading without version pinning, single-instance event/mapping and
   `WM_COPYDATA` forwarding, TLS/OLE/resource/sound/CoolSB lifecycle, followed
   by a separate application-session message loop;
 - exact `<DEFAULT_SKIN>` ZIP read at runtime from the loaded `ttpres.dll` with
@@ -22,6 +19,9 @@ Current milestone (0.1):
   XML-positioned controls;
 - file picker/drag-and-drop, playlist selection, previous/play-pause/next/stop,
   volume/balance control, playback status, and command-line audio/playlist opening;
+- Windows-native taskbar thumbnail previous/play-pause/next controls with live
+  playback state, without restoring the minimized player; this requested modern
+  extension is documented in [TASKBAR_PLAYBACK.md](TASKBAR_PLAYBACK.md);
 - main-window `WM_CONTEXTMENU` behaviour rebuilt from `CPlayerWnd`: original
   `ttpres.dll` menu hierarchy/text, dynamic current-playlist and installed-skin
   submenus, transparency levels, playback-mode checks and command dispatch;

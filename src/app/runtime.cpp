@@ -98,9 +98,9 @@ std::filesystem::path FindRuntimePath(const std::filesystem::path& relative) {
 
 TtpCommRuntime::~TtpCommRuntime() { Shutdown(); }
 bool TtpCommRuntime::Initialize() {
+    if (api_.module) return true;
     const auto path = FindRuntimePath(L"ttpcomm.dll");
-    return !path.empty() && TtpComm_LoadApi(&api_, path.c_str()) && api_.get_version &&
-           api_.get_version() == kExpectedTtpCommVersion;
+    return !path.empty() && TtpComm_LoadApi(&api_, path.c_str());
 }
 void TtpCommRuntime::Shutdown() { if (api_.module) TtpComm_UnloadApi(&api_); }
 

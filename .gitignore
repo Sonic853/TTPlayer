@@ -1,3 +1,97 @@
 
 tests
 tools
+# CMake build trees and generated project files
+/rebuild/build/
+/build/
+/out/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+
+# Original TTPlayer installation tree.  These root-level runtime files mirror
+# C:\Program Files (x86)\TTPlayer and are not reconstruction sources.  Skin/
+# is deliberately NOT ignored because legacy skin packages are versioned.
+/AddIn/
+/Icons/
+/Lyrics/
+/PlayList/
+/RealCodec/
+/Skin/*.xml
+/FAQ.txt
+/mp3PRO.dll
+/msdmo.dll
+/tak_deco_lib.dll
+/ttpcomm.dll
+/TTPlayer.exe
+/TTPlayer.rll
+/TTPlayer.xml
+/TTPlayerSet.exe
+/ttpres.dll
+/uninstall.exe
+/WMADMOD.DLL
+/卸载.exe
+
+
+/reverse
+
+# Local archive of the original installation.
+/TTPlayer.7z
+
+# Visual Studio / MSVC generated state
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
+*.code-workspace
+*.obj
+*.iobj
+*.ipdb
+*.pdb
+*.ilk
+*.idb
+*.pch
+*.ipch
+*.tlog
+*.lastbuildstate
+*.recipe
+*.exp
+
+# Test, coverage and local runtime output
+Testing/
+TestResults/
+*.coverage
+*.coveragexml
+*.profraw
+*.profdata
+*.log
+*.dmp
+
+# Ghidra session locks and per-user state.  The .gpr and .rep database contents
+# are reverse-engineering sources and are intentionally versioned.
+*.lock
+*.lck
+**/~*.tmp
+/reverse/ghidra/*.rep/user/
+
+# Editor and operating-system noise
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Generic temporary files
+*.tmp
+*.temp

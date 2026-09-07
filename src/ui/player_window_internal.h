@@ -13,6 +13,31 @@
 #include <vector>
 
 namespace ttplayer::ui::detail {
+// The native skin rebinders (0046D0C1/0044E5CE/0046ACE2/0046BCBE)
+// suppress redraw on already visible windows while rebinding their controls.
+// WM_SETREDRAW(TRUE) would show an originally hidden window, so only pair it
+// for windows whose own WS_VISIBLE bit was initially present.
+class ScopedSkinRedraw {
+public:
+    explicit ScopedSkinRedraw(HWND window) : window_(window),
+        suspended_(window && (GetWindowLongPtrW(window, GWL_STYLE) & WS_VISIBLE) != 0) {
+        if (suspended_) SendMessageW(window_, WM_SETREDRAW, FALSE, 0);
+    }
+    ~ScopedSkinRedraw() { Resume(); }
+    void Resume() {
+        if (suspended_ && IsWindow(window_)) {
+            SendMessageW(window_, WM_SETREDRAW, TRUE, 0);
+            RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+        }
+        suspended_ = false;
+    }
+    ScopedSkinRedraw(const ScopedSkinRedraw&) = delete;
+    ScopedSkinRedraw& operator=(const ScopedSkinRedraw&) = delete;
+private:
+    HWND window_{};
+    bool suspended_{};
+};
+
 constexpr wchar_t kWindowClass[] = L"TTPlayer_PlayerWnd";
 constexpr wchar_t kPlaybackTipWindowClass[] = L"TTPlayer_MessageTipWnd";
 constexpr wchar_t kPlaylistWindowClass[] = L"TTPlayer_PlayListWnd";

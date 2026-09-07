@@ -32,7 +32,7 @@
 - `FUN_004B1B81` 的顺序是 ReplayGain，然后 EQ 的槽 4/5，最后
   Surround 的槽 2。seek 时按 `FUN_004B16FE` 重置 EQ 槽 6 与 Surround
   槽 3。
-- EQ/Surround 分别由 EXE 同目录、已通过版本检查的 `ttpcomm.dll`
+- EQ/Surround 分别由 EXE 同目录、已成功加载的 `ttpcomm.dll`
   ordinal 103/104 创建。EQ 初始化槽 1、参数槽 2、处理槽 4/5；Surround
   初始化槽 1、处理槽 2。所有调用保持 x86 `__thiscall`，并置于 SEH
   边界内。

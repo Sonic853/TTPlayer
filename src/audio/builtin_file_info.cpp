@@ -905,8 +905,10 @@ HRESULT ReadWave(const std::filesystem::path& path, BuiltinFileInfo& result) {
             data_bytes * 1000ULL / result.format.nAvgBytesPerSec, MAXDWORD));
         result.encoded_bits_per_second = result.format.nAvgBytesPerSec * 8U;
     }
+    // The native Wave reader's short codec name feeds CPlayItem's Format
+    // placeholder (004AEB8F/0047A68C): an uncompressed WAV displays "PCM".
     result.codec = result.format.wFormatTag == WAVE_FORMAT_PCM
-        ? L"PCM Audio" : L"WAVE Audio";
+        ? L"PCM" : L"WAVE Audio";
     return S_OK;
 }
 

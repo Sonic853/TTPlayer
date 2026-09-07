@@ -2018,8 +2018,7 @@ void AudioEngine::RestoreAfterOutputRestart(
 
         const int64_t target = std::clamp<int64_t>(
             position.count(), 0, duration_ms_.load());
-        seek_request_ms_ = target;
-        position_ms_ = target;
+        QueueSeekLocked(target);
 
         if (paused) {
             // Stop the audible clock promptly. The owning worker repeats the
@@ -2065,6 +2064,12 @@ void AudioEngine::PlaybackWorker(std::filesystem::path path, int subtrack) {
         }
     }
     if (SUCCEEDED(com_result)) CoUninitialize();
+    {
+        std::scoped_lock lock(mutex_);
+        // EOF, cancellation and every failed output/decoder path must release
+        // a target that can no longer be acknowledged by this worker.
+        CancelSeekLocked();
+    }
     SignalOpenComplete();
 }
 
@@ -2386,7 +2391,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
 
         bool natural_replay_gain_end{};
         while (usable && !stop_requested_) {
-            const int64_t requested = seek_request_ms_.exchange(-1);
+            const auto request = TakeSeekRequest();
+            const int64_t requested = request.position_ms;
             if (requested >= 0) {
                 const auto previous_state = state_.load();
                 sound_buffer->Stop();
@@ -2401,10 +2407,10 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 last_cursor = 0;
                 position_base_ms = std::clamp<int64_t>(
                     requested, 0, duration_ms_.load());
-                position_ms_ = position_base_ms;
                 processors.Reset();
                 output_transform.Reset();
                 if (requested >= duration_ms_.load()) {
+                    CompleteSeek(request, position_base_ms);
                     state_ = PlaybackState::stopped;
                     break;
                 }
@@ -2431,6 +2437,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 }
                 last_visual_byte = std::numeric_limits<uint64_t>::max();
                 ClearVisualization();
+                CompleteSeek(request, position_base_ms);
             }
 
             DWORD cursor{};
@@ -2790,7 +2797,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
 
     bool natural_replay_gain_end{};
     while (usable && !stop_requested_) {
-        const int64_t requested = seek_request_ms_.exchange(-1);
+        const auto request = TakeSeekRequest();
+        const int64_t requested = request.position_ms;
         if (requested >= 0) {
             const auto previous_state = state_.load();
             if (ks_sink) {
@@ -2814,8 +2822,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             decoded_offset = 0;
             decoder_eof = false;
             position_base_ms = std::clamp<int64_t>(requested, 0, duration_ms_.load());
-            position_ms_ = position_base_ms;
             if (requested >= duration_ms_.load()) {
+                CompleteSeek(request, position_base_ms);
                 state_ = PlaybackState::stopped;
                 break;
             }
@@ -2841,6 +2849,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 waveOutPause(opened_device);
             else if (usable && queued != 0)
                 publish_at(0, true);
+            if (usable) CompleteSeek(request, position_base_ms);
         }
 
         if ((ks_sink && !ks_sink->SetPaused(state_.load() == PlaybackState::paused)) ||
@@ -2994,7 +3003,8 @@ void AudioEngine::MciWorker(const std::filesystem::path& path) {
     }
 
     while (!stop_requested_) {
-        const int64_t requested = seek_request_ms_.exchange(-1);
+        const auto request = TakeSeekRequest();
+        const int64_t requested = request.position_ms;
         if (requested >= 0) {
             const auto previous_state = state_.load();
             mciSendCommandW(device, MCI_STOP, MCI_WAIT, 0);
@@ -3002,7 +3012,7 @@ void AudioEngine::MciWorker(const std::filesystem::path& path) {
             from.dwFrom = static_cast<DWORD>(std::clamp<int64_t>(
                 requested, 0, duration_ms_.load()));
             if (from.dwFrom >= static_cast<DWORD>(duration_ms_.load())) {
-                position_ms_ = duration_ms_.load();
+                CompleteSeek(request, duration_ms_.load());
                 state_ = PlaybackState::stopped;
                 break;
             }
@@ -3015,6 +3025,7 @@ void AudioEngine::MciWorker(const std::filesystem::path& path) {
             }
             if (previous_state == PlaybackState::paused)
                 mciSendCommandW(device, MCI_PAUSE, 0, 0);
+            CompleteSeek(request, from.dwFrom);
         }
         DWORD position{};
         if (MciStatus(device, MCI_STATUS_POSITION, position)) {
@@ -3161,6 +3172,36 @@ void AudioEngine::SeekWithoutFade(std::chrono::milliseconds position) {
     SeekImpl(position, false);
 }
 
+void AudioEngine::QueueSeekLocked(int64_t position_ms) {
+    const auto state = state_.load();
+    if (state != PlaybackState::playing && state != PlaybackState::paused) return;
+    ++seek_revision_;
+    pending_seek_position_ms_ = position_ms;
+    seek_request_ms_ = position_ms;
+}
+
+AudioEngine::SeekRequest AudioEngine::TakeSeekRequest() {
+    if (seek_request_ms_.load() < 0) return {};
+    std::scoped_lock lock(mutex_);
+    return {seek_request_ms_.exchange(-1), seek_revision_};
+}
+
+void AudioEngine::CompleteSeek(const SeekRequest& request, int64_t position_ms) {
+    std::scoped_lock lock(mutex_);
+    if (request.position_ms < 0 || request.revision != seek_revision_ ||
+        pending_seek_position_ms_.load() < 0) return;
+    // Publish the new output clock before removing the display override.
+    // Repeated seeks to the same millisecond still have distinct revisions.
+    position_ms_ = position_ms;
+    pending_seek_position_ms_ = -1;
+}
+
+void AudioEngine::CancelSeekLocked() {
+    ++seek_revision_;
+    seek_request_ms_ = -1;
+    pending_seek_position_ms_ = -1;
+}
+
 void AudioEngine::SeekImpl(std::chrono::milliseconds position,
                            bool allow_fade) {
     const auto state = state_.load();
@@ -3171,6 +3212,8 @@ void AudioEngine::SeekImpl(std::chrono::milliseconds position,
     HANDLE completion{};
     {
         std::scoped_lock lock(mutex_);
+        if (state_.load() != PlaybackState::playing &&
+            state_.load() != PlaybackState::paused) return;
         const bool supported = backend_.load() == Backend::wave_out ||
                                backend_.load() == Backend::direct_sound;
         if (ShouldBeginRecoveredSeekFade(
@@ -3185,12 +3228,13 @@ void AudioEngine::SeekImpl(std::chrono::milliseconds position,
                 FadeCompletion::seek, target);
             return;
         }
-        // A second lyric drag may arrive while an earlier ordinary seek is
-        // still fading out.  Cancel only that seek transition and restore
+        // A progress/lyric release may interrupt either half of an earlier
+        // ordinary seek fade. Cancel only that seek transition and restore
         // unity gain, otherwise the stale target would be committed later and
-        // the supposedly direct lyric drag would remain partly attenuated.
+        // the supposedly direct drag would remain partly attenuated.
         if (!allow_fade && fade_pending_ &&
-            fade_completion_ == FadeCompletion::seek) {
+            (fade_completion_ == FadeCompletion::seek ||
+             fade_completion_ == FadeCompletion::seek_resume)) {
             fade_pending_ = false;
             fade_completion_ = FadeCompletion::none;
             fade_seek_target_ms_ = -1;
@@ -3198,7 +3242,7 @@ void AudioEngine::SeekImpl(std::chrono::milliseconds position,
             transition_gain_ = 1.0F;
             fade_condition_.notify_all();
         }
-        seek_request_ms_ = target;
+        QueueSeekLocked(target);
         track_gain_ = 1.0F;
         ApplyVolumeLocked();
         completion = completion_event_;
@@ -3210,7 +3254,6 @@ void AudioEngine::RequestStop() noexcept {
     stop_fade_pending_.store(false, std::memory_order_release);
     stop_requested_ = true;
     state_ = PlaybackState::stopped;
-    seek_request_ms_ = -1;
     ClearVisualization();
     if (worker_.joinable()) {
         worker_.request_stop();
@@ -3222,6 +3265,7 @@ void AudioEngine::RequestStop() noexcept {
     HANDLE completion{};
     {
         std::scoped_lock lock(mutex_);
+        CancelSeekLocked();
         fade_pending_ = false;
         ++fade_generation_;
         transition_gain_ = 1.0F;
@@ -3387,7 +3431,7 @@ void AudioEngine::FadeWorker(std::stop_token stop_token) {
                     ApplyVolumeLocked();
                 }
             } else if (completion == FadeCompletion::seek) {
-                seek_request_ms_ = seek_target;
+                QueueSeekLocked(seek_target);
                 track_gain_ = 1.0F;
                 HANDLE completion_event = completion_event_;
                 if (completion_event) SetEvent(completion_event);
@@ -3399,7 +3443,7 @@ void AudioEngine::FadeWorker(std::stop_token stop_token) {
                 fade_target_ = 1.0F;
                 fade_started_ = std::chrono::steady_clock::now();
                 fade_duration_ = completed_duration;
-                fade_completion_ = FadeCompletion::none;
+                fade_completion_ = FadeCompletion::seek_resume;
                 fade_pending_ = true;
                 ++fade_generation_;
                 ApplyVolumeLocked();
@@ -3511,6 +3555,7 @@ void AudioEngine::SetError(std::wstring message) {
     {
         std::scoped_lock lock(mutex_);
         error_ = std::move(message);
+        CancelSeekLocked();
         state_ = PlaybackState::failed;
         open_complete_ = true;
     }

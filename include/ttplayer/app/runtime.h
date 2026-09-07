@@ -7,7 +7,6 @@
 #include <windows.h>
 
 namespace ttplayer::app {
-constexpr DWORD kExpectedTtpCommVersion = 0x00050700;
 std::filesystem::path RuntimePath(const std::filesystem::path& relative);
 std::filesystem::path FindRuntimePath(const std::filesystem::path& relative);
 

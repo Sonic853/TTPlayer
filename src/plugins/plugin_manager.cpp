@@ -1992,7 +1992,12 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderForMetadata(
 std::unique_ptr<LegacyReaderSession> PluginManager::OpenReader(
     const std::filesystem::path& logical_path, IStream* stream,
     HRESULT* result, std::wstring* diagnostic) const {
-    return OpenReaderWithFlags(logical_path, stream, 1, result, diagnostic);
+    // 004B0D80 passes 3 to FUN_004b0b51 -> FUN_004e323b for playback.
+    // Bit 0 enables decoding; bit 1 requests IEEE float ((flags & 2) | 1).
+    // The shipped ttp_aac MP4 decoder writes float samples even with tag 1,
+    // so the integer request mislabels its samples and produces loud noise.
+    // Metadata-only opens deliberately keep flags 0 in the separate path.
+    return OpenReaderWithFlags(logical_path, stream, 3, result, diagnostic);
 }
 
 std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderWithFlags(

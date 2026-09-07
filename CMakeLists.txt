@@ -41,6 +41,8 @@ add_library(ttplayer_core
   src/ui/directory_change_monitor.cpp
   src/ui/file_info_probe_client.cpp
   src/ui/player_window.cpp
+  src/ui/player_window_taskbar.cpp
+  src/ui/taskbar_playback.cpp
   src/ui/player_window_equalizer.cpp
   src/ui/player_window_file_intake.cpp
   src/ui/legacy_output_devices.cpp
@@ -267,6 +269,20 @@ target_compile_options(audio_recovery_tests PRIVATE /W4 /permissive- /EHsc /utf-
 target_link_libraries(audio_recovery_tests PRIVATE ttplayer_core)
 add_dependencies(audio_recovery_tests ttp_mock_incompatible ttp_mock_stalling)
 
+foreach(revision_target IN ITEMS ttpcomm_mock_revision ttpcomm_mock_no_version)
+  add_library(${revision_target} SHARED tests/mock_ttpcomm_revision.c)
+  target_compile_options(${revision_target} PRIVATE /W4 /utf-8)
+endforeach()
+target_compile_definitions(ttpcomm_mock_no_version PRIVATE MOCK_NO_VERSION)
+
+add_executable(ttpcomm_compatibility_tests
+  tests/ttpcomm_compatibility_tests.cpp src/app/runtime.cpp)
+target_compile_definitions(ttpcomm_compatibility_tests PRIVATE
+  UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(ttpcomm_compatibility_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(ttpcomm_compatibility_tests PRIVATE ttplayer_core ttpcomm_api)
+add_dependencies(ttpcomm_compatibility_tests ttpcomm_mock_revision ttpcomm_mock_no_version)
+
 add_executable(native_output_contract_tests tests/native_output_contract_tests.cpp)
 target_include_directories(native_output_contract_tests PRIVATE src/ui)
 target_compile_definitions(native_output_contract_tests PRIVATE
@@ -342,6 +358,26 @@ add_executable(audio_playback_probe tools/probe_audio_playback.cpp)
 target_compile_definitions(audio_playback_probe PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(audio_playback_probe PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(audio_playback_probe PRIVATE ttplayer_core)
+
+add_executable(progress_seek_tests tests/progress_seek_tests.cpp)
+target_compile_definitions(progress_seek_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(progress_seek_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(progress_seek_tests PRIVATE ttplayer_core)
+
+add_executable(taskbar_playback_tests tests/taskbar_playback_tests.cpp)
+target_compile_definitions(taskbar_playback_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(taskbar_playback_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(taskbar_playback_tests PRIVATE ttplayer_core)
+
+add_executable(skin_rebind_tests tests/skin_rebind_tests.cpp)
+target_compile_definitions(skin_rebind_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(skin_rebind_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(skin_rebind_tests PRIVATE ttplayer_core)
+
+add_executable(pcm_integrity_probe tools/probe_pcm_integrity.cpp)
+target_compile_definitions(pcm_integrity_probe PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(pcm_integrity_probe PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(pcm_integrity_probe PRIVATE ttplayer_core)
 
 add_executable(ttpcomm_processor_probe tools/probe_ttpcomm_processors.cpp)
 target_compile_definitions(ttpcomm_processor_probe PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -452,6 +488,10 @@ add_test(NAME desktop_lyrics_tests COMMAND desktop_lyrics_tests
          "${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME audio_recovery_tests COMMAND audio_recovery_tests
          "${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_test(NAME progress_seek_tests COMMAND progress_seek_tests
+         "${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_test(NAME taskbar_playback_tests COMMAND taskbar_playback_tests)
+add_test(NAME skin_rebind_tests COMMAND skin_rebind_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME native_output_contract_tests COMMAND native_output_contract_tests)
 add_test(NAME kernel_streaming_sink_tests COMMAND kernel_streaming_sink_tests)
 add_test(NAME asio_sink_tests COMMAND asio_sink_tests)
@@ -461,6 +501,11 @@ add_test(NAME equalizer_recovery_tests COMMAND equalizer_recovery_tests
          "${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME discord_presence_tests COMMAND discord_presence_tests)
 add_test(NAME ttpcomm_api_test COMMAND ttpcomm_api_test)
+add_test(NAME ttpcomm_compatibility_tests COMMAND ttpcomm_compatibility_tests
+         "$<TARGET_FILE:ttpcomm_mock_revision>"
+         "$<TARGET_FILE:ttpcomm_mock_no_version>")
+set_tests_properties(ttpcomm_compatibility_tests PROPERTIES
+  WORKING_DIRECTORY "$<TARGET_FILE_DIR:ttplayer_rebuild>")
 add_test(NAME ttplayer_ui_smoke COMMAND ttplayer_rebuild --smoke-test)
 add_test(NAME ttpcomm_processor_probe COMMAND ttpcomm_processor_probe
          "$<TARGET_FILE_DIR:ttplayer_rebuild>/ttpcomm.dll")

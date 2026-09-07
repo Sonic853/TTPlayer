@@ -177,10 +177,11 @@ std::optional<size_t> SelectedOutputDeviceEntry(HWND dialog,
 }
 
 constexpr UINT kLinkFirst = 3000;
-constexpr std::array<UINT, 4> kLinkTextIds{32880, 32881, 32882, 32883};
-constexpr std::array<const wchar_t*, 4> kLinkTargets{
-    L"http://ttplayer.qianqian.com/", L"http://music.baidu.com/",
-    L"http://tieba.baidu.com/f?kw=%C7%A7%C7%A7%BE%B2%CC%FD", L"TTPlayer.chm"};
+constexpr std::array<const wchar_t*, 2> kLinkLabels{
+    L"Github仓库", L"提交反馈"};
+constexpr std::array<const wchar_t*, 2> kLinkTargets{
+    L"https://github.com/Sonic853/TTPlayer",
+    L"https://github.com/Sonic853/TTPlayer/issues"};
 constexpr wchar_t kSkinDownloadTarget[] =
     L"http://ttplayer.qianqian.com/skin.htm";
 
@@ -3068,12 +3069,11 @@ void PlayerWindow::InitializeOptionsShell() {
     if (related_label && font) SendMessageW(related_label, WM_SETFONT,
         reinterpret_cast<WPARAM>(font), TRUE);
     int link_x = 58;
-    for (size_t index = 0; index < kLinkTextIds.size(); ++index) {
-        const auto label = ResourceCommandLabel(ResourceModule(),
-                                                 kLinkTextIds[index]);
+    for (size_t index = 0; index < kLinkLabels.size(); ++index) {
+        const std::wstring_view label{kLinkLabels[index]};
         const int width = static_cast<int>(label.size()) * 12;
         const HWND link = CreateWindowExW(
-            0, WC_STATICW, label.c_str(),
+            0, WC_STATICW, kLinkLabels[index],
             WS_CHILD | WS_VISIBLE | SS_NOTIFY,
             scale(link_x), scale(394), scale(width), scale(18), options_window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLinkFirst + index)),
@@ -4876,26 +4876,14 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
         const bool use_default = settings_.skin_file.empty() ||
             _wcsicmp(settings_.skin_file.c_str(), L"<Default_Skin>") == 0;
         if (use_default) {
-            // LoadSkin normally snapshots the old skin windows before a live
-            // package switch.  During Reset All those snapshots must not
-            // overwrite the freshly constructed CSettings defaults.
-            const auto reset_player = settings_.player;
-            const auto reset_playlist = settings_.playlist;
-            const auto reset_lyric = settings_.lyric;
-            const auto reset_visual = settings_.visual;
-            if (LoadSkinResource(ResourceModule(), L"<Default_Skin>")) {
-                settings_.player = reset_player;
-                settings_.playlist = reset_playlist;
-                settings_.lyric = reset_lyric;
-                settings_.visual = reset_visual;
-                settings_.skin_file = L"<Default_Skin>";
-                if (skin_) static_cast<void>(ApplyLoadedSkin(false));
-            }
+            // Rebind once using the freshly constructed defaults. Do not
+            // replace them with an outgoing capture or a saved skin profile.
+            static_cast<void>(LoadSkinResource(ResourceModule(), L"<Default_Skin>", false));
         } else {
             const auto skin_path = CurrentExecutablePath().parent_path() /
                 L"Skin" /
                 std::filesystem::path(settings_.skin_file).filename();
-            static_cast<void>(LoadSkinPackage(skin_path));
+            static_cast<void>(LoadSkinPackage(skin_path, false));
         }
     }
 

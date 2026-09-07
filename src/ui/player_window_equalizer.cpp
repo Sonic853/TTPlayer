@@ -398,25 +398,32 @@ bool PlayerWindow::CreateEqualizerWindow() {
 }
 
 void PlayerWindow::CreateEqualizerControls() {
-    DestroyEqualizerControls();
     if (!equalizer_window_ || !skin_ || !skin_->Equalizer().valid) return;
     const auto& layout = skin_->Equalizer();
     const auto create = [this](int hit, int identifier,
                                const skin::SkinElement& element,
                                const wchar_t* class_name) {
         const bool slider = class_name == kEqualizerSliderClass;
-        if ((!slider && !element.image) ||
+        const bool present = !((!slider && !element.image) ||
             (slider && !element.thumb_image && !element.fill_image &&
-             !element.bar_image)) return;
+             !element.bar_image));
         const RECT bounds = EqualizerElementBounds(element);
-        if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) return;
-        const HWND control = CreateWindowExW(0, class_name, nullptr,
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            bounds.left, bounds.top, bounds.right - bounds.left,
-            bounds.bottom - bounds.top, equalizer_window_,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(identifier)),
-            instance_, this);
-        if (control) equalizer_controls_.emplace_back(hit, control);
+        const auto found = std::find_if(equalizer_controls_.begin(), equalizer_controls_.end(),
+            [hit](const auto& entry) { return entry.first == hit; });
+        HWND control = found == equalizer_controls_.end() ? nullptr : found->second;
+        if (!control) {
+            control = CreateWindowExW(0, class_name, nullptr,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, equalizer_window_,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(identifier)), instance_, this);
+            if (control) equalizer_controls_.emplace_back(hit, control);
+        }
+        // 0042955B updates bitmap/value bindings and positions the controls
+        // created by 00429AAA. Absent skin elements do not destroy their HWND.
+        if (control) SetWindowPos(control, nullptr,
+            present ? bounds.left : -1000, present ? bounds.top : -1000,
+            present ? std::max<LONG>(0, bounds.right - bounds.left) : 0,
+            present ? std::max<LONG>(0, bounds.bottom - bounds.top) : 0,
+            SWP_NOZORDER | SWP_NOACTIVATE);
     };
 
     // Creation order and IDs are taken from FUN_00429AAA.  The close button
@@ -478,21 +485,25 @@ void PlayerWindow::ToggleEqualizerWindow() {
     if (window_) InvalidateRect(window_, nullptr, FALSE);
 }
 
-void PlayerWindow::UpdateEqualizerWindowSkin() {
+void PlayerWindow::UpdateEqualizerWindowSkin(bool saved_bounds) {
     if (!skin_ || !skin_->Equalizer().valid) {
         if (equalizer_window_) {
             ShowWindow(equalizer_window_, SW_HIDE);
-            DestroyEqualizerControls();
+            // The native LX-iPlay switch retains the Equalizer HWND at an
+            // empty off-screen rectangle, not the preceding skin's bounds.
+            SetWindowPos(equalizer_window_, nullptr, 32767, 32767, 0, 0,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
         }
         if (window_) InvalidateRect(window_, nullptr, FALSE);
         return;
     }
     if (!equalizer_window_ && !CreateEqualizerWindow()) return;
     const auto& layout = skin_->Equalizer();
+    ScopedSkinRedraw redraw(equalizer_window_);
     RECT player{};
     GetWindowRect(window_, &player);
     const RECT saved = settings_.player.equalizer_window;
-    const bool have_saved = saved.right > saved.left && saved.bottom > saved.top;
+    const bool have_saved = saved_bounds && saved.right > saved.left && saved.bottom > saved.top;
     SetWindowPos(equalizer_window_, nullptr,
         have_saved ? saved.left : player.left + layout.position.left,
         have_saved ? saved.top : player.top + layout.position.top,
@@ -501,10 +512,11 @@ void PlayerWindow::UpdateEqualizerWindowSkin() {
     CreateEqualizerControls();
     UpdateEqualizerWindowRegion();
     UpdateEqualizerToolRects();
+    redraw.Resume();
     RedrawWindow(equalizer_window_, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
-    if (!mini_mode_ && settings_.player.equalizer_visible)
-        ShowWindow(equalizer_window_, SW_SHOWNOACTIVATE);
+    ShowWindow(equalizer_window_, !mini_mode_ && settings_.player.equalizer_visible
+        ? SW_SHOWNOACTIVATE : SW_HIDE);
 }
 
 void PlayerWindow::UpdateEqualizerWindowRegion() {

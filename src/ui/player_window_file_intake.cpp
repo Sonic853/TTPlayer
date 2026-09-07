@@ -1470,7 +1470,6 @@ void PlayerWindow::HandleDroppedFiles(FileDropSurface surface, IDataObject* data
                 }
             }
             if (copied) {
-                SaveCurrentSkinProfile();
                 static_cast<void>(LoadSkinPackage(installed));
                 // The catalogue scan is a preload optimization, not part of
                 // the skin-switch transaction.  Waiting for it here blocks

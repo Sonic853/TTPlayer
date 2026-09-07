@@ -20,6 +20,7 @@
 struct IDirectSoundBuffer8;
 
 namespace ttplayer::plugins { class PluginManager; }
+namespace ttplayer::testing { struct ProgressSeekAccess; }
 
 namespace ttplayer::audio {
 class WinampDspChain;
@@ -184,10 +185,9 @@ public:
     void Pause();
     void Resume();
     void Seek(std::chrono::milliseconds position);
-    // CLyricCtrl's drag-release callback (00442671) enters generic seek, but
-    // the supplied original runtime does not pass 004ABDE4's extra private
-    // fade-helper/buffer gate for this interaction. Preserve that observable
-    // result without changing seek fades for the main playback controls.
+    // Progress release (00460AB1, notification 4) and lyric drag (00442671)
+    // must seek directly, not inherit the reconstruction's broader generic
+    // fade gate. Keep playback state and leave play/pause/stop fades alone.
     void SeekWithoutFade(std::chrono::milliseconds position);
     void Stop();
     // Explicit UI stop follows bit 3 of SoundFadeMode.  Stop() remains the
@@ -217,7 +217,12 @@ public:
         const std::filesystem::path& path) noexcept;
     [[nodiscard]] PlaybackState State() const noexcept { return state_.load(); }
     [[nodiscard]] std::chrono::milliseconds Position() const noexcept {
-        return std::chrono::milliseconds(position_ms_.load());
+        // Keep the accepted target visible while the worker consumes the
+        // request and resets/refills the output. Its previous clock may still
+        // advance during that interval; consuming a request is not an ACK.
+        const int64_t pending = pending_seek_position_ms_.load();
+        return std::chrono::milliseconds(
+            pending >= 0 ? pending : position_ms_.load());
     }
     [[nodiscard]] std::chrono::milliseconds Duration() const noexcept {
         return std::chrono::milliseconds(duration_ms_.load());
@@ -232,8 +237,13 @@ public:
     [[nodiscard]] VisualizationSamples Visualization() const;
 
 private:
+    friend struct ttplayer::testing::ProgressSeekAccess;
     enum class Backend { none, wave_out, direct_sound, kernel_streaming, asio, mci };
-    enum class FadeCompletion { none, pause, seek, stop };
+    enum class FadeCompletion { none, pause, seek, seek_resume, stop };
+    struct SeekRequest {
+        int64_t position_ms{-1};
+        uint64_t revision{};
+    };
     void PlaybackWorker(std::filesystem::path path, int subtrack);
     void WaveOutWorker(const std::filesystem::path& path, int subtrack);
     void MciWorker(const std::filesystem::path& path);
@@ -243,6 +253,10 @@ private:
     void RequestStop() noexcept;
     [[nodiscard]] bool ReapWorker(std::chrono::milliseconds timeout) noexcept;
     void SeekImpl(std::chrono::milliseconds position, bool allow_fade);
+    void QueueSeekLocked(int64_t position_ms);
+    [[nodiscard]] SeekRequest TakeSeekRequest();
+    void CompleteSeek(const SeekRequest& request, int64_t position_ms);
+    void CancelSeekLocked();
     void ApplyVolumeLocked();
     void QueueFadeLocked(float target, std::chrono::milliseconds duration,
                          FadeCompletion completion,
@@ -258,6 +272,8 @@ private:
     std::atomic<int64_t> position_ms_{};
     std::atomic<int64_t> duration_ms_{};
     std::atomic<int64_t> seek_request_ms_{-1};
+    std::atomic<int64_t> pending_seek_position_ms_{-1};
+    uint64_t seek_revision_{}; // guarded by mutex_; also invalidates stale ACKs
     std::atomic<bool> stop_requested_{true};
     mutable std::mutex mutex_;
     std::condition_variable open_condition_;

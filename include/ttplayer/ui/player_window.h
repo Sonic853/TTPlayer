@@ -13,6 +13,7 @@
 #include "ttplayer/ui/playlist_scrollbar_contract.h"
 #include "ttplayer/ui/playlist_selection_policy.h"
 #include "ttplayer/ui/shell_send_to.h"
+#include "ttplayer/ui/taskbar_playback.h"
 
 #include <array>
 #include <atomic>
@@ -37,6 +38,8 @@
 struct ITextDocument;
 struct IDataObject;
 
+namespace ttplayer::testing { struct SkinRebindAccess; }
+
 namespace ttplayer::ui {
 class VisualRuntime;
 class PlayerWindow {
@@ -59,8 +62,9 @@ public:
         audio_.SetPluginManager(manager);
     }
     void SetTtpCommModule(HMODULE module) noexcept;
-    bool LoadSkinPackage(const std::filesystem::path& path);
-    bool LoadSkinResource(HMODULE module, const wchar_t* name = L"<Default_Skin>");
+    bool LoadSkinPackage(const std::filesystem::path& path, bool restore_profile = true);
+    bool LoadSkinResource(HMODULE module, const wchar_t* name = L"<Default_Skin>",
+                          bool restore_profile = true);
     bool OpenPath(const std::filesystem::path& path, bool start_playback);
     void OpenCommandLinePath(const std::filesystem::path& path,
                              ULONG_PTR mode);
@@ -74,6 +78,8 @@ public:
     [[nodiscard]] HWND Handle() const noexcept { return window_; }
 
 private:
+    friend struct ttplayer::testing::ProgressSeekAccess;
+    friend struct ttplayer::testing::SkinRebindAccess;
     enum class FileDropSurface { player, playlist, lyric };
     enum class ImportPlayback { none, if_idle, force };
     class FileDropTarget;
@@ -188,6 +194,10 @@ private:
     void ApplyOptionsChangeMask(UINT mask, LPARAM source_control);
     void ReloadApplicationIcons();
     void UpdateTrayIcon();
+    [[nodiscard]] TaskbarPlaybackState TaskbarState() const;
+    [[nodiscard]] TaskbarPlaybackLabels TaskbarLabels() const;
+    void UpdateTaskbarPlayback();
+    void HandleTaskbarPlaybackClick(WPARAM wparam);
     void RemoveTrayIcon();
     void ShowPlaybackOpenTip();
     void ClosePlaybackOpenTip();
@@ -255,7 +265,7 @@ private:
     bool HandleContextCommand(UINT command);
     [[nodiscard]] HMODULE ResourceModule() const noexcept;
     [[nodiscard]] std::wstring ResourceText(UINT identifier) const;
-    bool ApplyLoadedSkin(bool apply_visual_settings = true);
+    bool ApplyLoadedSkin(bool apply_visual_settings = true, bool saved_bounds = false);
     void ApplySkinProfileWindowState();
     void ApplySkinWindowAlpha(BYTE alpha);
     void ApplySkinWindowAlpha(HWND target, BYTE alpha);
@@ -307,7 +317,7 @@ private:
     void RefreshPlaylist();
     bool CreatePlaylistWindow();
     void TogglePlaylistWindow();
-    void UpdatePlaylistWindowSkin();
+    void UpdatePlaylistWindowSkin(bool saved_bounds = false);
     void UpdatePlaylistWindowRegion();
     void CreatePlaylistListControls();
     void DestroyPlaylistListControls();
@@ -357,7 +367,8 @@ private:
     bool CreateToolTipWindow();
     bool CreatePlaylistToolTipWindow();
     void RemoveToolTipTools(HWND owner);
-    void AddToolTipTool(HWND owner, UINT_PTR identifier, const RECT& bounds);
+    void AddToolTipTool(HWND owner, UINT_PTR identifier, const RECT& bounds,
+                       HWND target = nullptr);
     void AddToolTipControl(HWND control, UINT_PTR identifier);
     void AddPlaylistToolTipControl(HWND control, UINT_PTR identifier,
                                    std::wstring text);
@@ -378,7 +389,7 @@ private:
     void ToggleLyricWindow();
     void EnterDesktopLyricMode();
     void LeaveDesktopLyricMode();
-    void UpdateLyricWindowSkin();
+    void UpdateLyricWindowSkin(bool saved_bounds = false);
     void RebuildLyricFont(bool repaint = true);
     void ApplyFullScreenLyricTransparency();
     void UpdateLyricWindowRegion();
@@ -472,7 +483,7 @@ private:
     void DestroyEqualizerControls();
     void UpdateEqualizerControlState();
     void ToggleEqualizerWindow();
-    void UpdateEqualizerWindowSkin();
+    void UpdateEqualizerWindowSkin(bool saved_bounds = false);
     void UpdateEqualizerWindowRegion();
     void UpdateEqualizerToolRects();
     [[nodiscard]] std::wstring EqualizerToolText(UINT_PTR tool) const;
@@ -560,7 +571,9 @@ private:
         return opened_track_ ? &*opened_track_ : nullptr;
     }
     [[nodiscard]] const playlist::Track* PlaybackTrackForUi() const noexcept;
-    bool LoadSkin(skin::SkinPackage package, const std::filesystem::path& cache);
+    bool LoadSkin(skin::SkinPackage package, const std::filesystem::path& cache,
+                  const std::wstring& selector, const std::filesystem::path& profile,
+                  bool restore_profile);
     [[nodiscard]] playlist::Playlist& ActivePlaylist() noexcept {
         return playlists_.Active();
     }
@@ -637,6 +650,7 @@ private:
     std::array<HIMAGELIST, 4> options_association_button_images_{};
     HWND tooltip_{};
     HWND playlist_tooltip_{};
+    HWND playlist_item_tooltip_{};
     HWND playlist_list_edit_{};
     HWND progress_{};
     HWND volume_{};
@@ -664,6 +678,7 @@ private:
     HICON window_icon_small_{};
     HICON window_icon_big_{};
     bool tray_icon_added_{};
+    TaskbarPlaybackControls taskbar_playback_;
     HWND playback_tip_window_{};
     std::wstring playback_tip_title_;
     std::wstring playback_tip_body_;
@@ -743,6 +758,7 @@ private:
     int info_vertical_offset_{};
     std::wstring hover_skin_element_;
     std::wstring pressed_skin_element_;
+    std::optional<std::chrono::milliseconds> progress_tracking_position_;
     bool dragging_skin_background_{};
     HWND skin_drag_window_{};
     POINT skin_drag_anchor_{};

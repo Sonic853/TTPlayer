@@ -1,8 +1,57 @@
 # Reconstruction status
 
+2026-09-07: skin replacement now rebinds existing HWNDs/controls following
+`0045D5FA -> 0045DDEE -> 00468363`. Removed the duplicate menu skin application,
+unconditional shadow hide/show, and lyric/EQ/playlist-toolbar recreation.
+Preserves live RichEdit content/selection and playlist selection; sidecars are
+committed before presentation. Native/rebuilt host menu round trips for default,
+LX-iPlay, TT2012 and Let's Vista retain all observed HWNDs. Release and all 25
+CTest cases pass, including tagged-handle, hidden-profile and mini-exit tests.
+See [SKIN_REBIND.md](SKIN_REBIND.md) for original addresses and test boundaries.
+
+2026-09-07: added Windows-native taskbar thumbnail transport controls as a
+requested modern extension: previous/play-pause/next, resource-backed labels,
+live enabled/playback state, minimized-window operation and shell recreation
+handling. Existing mini/tool-window and tray visibility rules are unchanged.
+Release build and all 24 CTest cases pass. Real host thumbnail mouse clicks
+verified play/pause/resume/next/previous without restoring the player; tests use
+an isolated silent runtime. See [TASKBAR_PLAYBACK.md](TASKBAR_PLAYBACK.md).
+
+2026-09-07: fixed the transient old-position flash after progress/lyric release.
+The audio engine now exposes the accepted seek target until the output worker
+acknowledges the matching request revision; consuming the mailbox no longer
+releases the target, and stale/same-target ACKs cannot overwrite a newer seek.
+Stop/error/worker exit discard pending targets. Lyric release publishes the
+target before releasing capture. Extended `progress_seek_tests` covers the
+handoff and samples the real host clock throughout the first 250 ms after seek.
+Release build, all 23 CTest cases, and silent host waveOut/DirectSound playback
+checks (normal/mini, forward/backward/paused seeks) pass.
+
+2026-09-07: progress slider tracking now previews without seeking; release
+commits its final position once without a seek fade, following the notification
+split in `00460AB1` and tracking guard in `00428DCD`. Cancel/capture loss discards
+the preview. Normal/mini and horizontal/vertical sliders share this behavior;
+play/pause/stop fade settings remain independent. Added `progress_seek_tests`
+for real mouse-message handlers and fade scheduling, plus explicit silent host
+playback checks on waveOut/DirectSound. See [AUDIO_ENGINE.md](AUDIO_ENGINE.md).
+Release build and all 23 CTest cases pass on the host. Explicit playback checks
+also pass for playing and paused seeks in both normal and mini layouts.
+
+2026-09-07: removed exact `ttpcomm.dll` version gates in both the API loader and
+startup runtime. Version queries are optional and are never called at startup;
+EXE-local loading and per-feature ABI/resource checks remain. Compatibility tests
+cover a differing version, an absent version export and missing EXE-local DLLs.
+Release build and all 22 CTest cases pass on the host; the existing DLL's UI
+startup smoke test passes too. Other real DLL releases still require ABI testing.
+
+2026-09-07: restored Files-owned playlist item infotips, child-coordinate mouse
+hit testing and notification routing, native metadata-only placeholders and PCM
+short codec name. See [PLAYLIST_ITEM_TIPS.md](PLAYLIST_ITEM_TIPS.md) for original
+addresses, host comparison coverage and the repeatable probe.
+
 | Module | Current state | Next compatibility target |
 | --- | --- | --- |
-| Core/build | recovered `004C0E8F` `wWinMain` lifecycle, ttpcomm `0x50700` check, five-second single-instance forwarding (including `/a`/`/e` payload mode), TLS/OLE/common-controls, validated EXE-local `ttpres.dll`, sound/CoolSB startup and reverse teardown. `/reg` opens the original reduced About+association sheet; `/unreg` removes owned per-user extension, AudioCD and Directory registrations. The `004B5470/004B54F2` idle-aware message pump and tooltip hook behavior are live. | private thread-diagnostic object, WTL command-bar/button wrapper and CBT shadow/theme wrapper cannot be reconstructed from the pseudo-C object layout alone |
+| Core/build | recovered `004C0E8F` `wWinMain` lifecycle with intentionally version-independent EXE-local ttpcomm loading, five-second single-instance forwarding (including `/a`/`/e` payload mode), TLS/OLE/common-controls, validated EXE-local `ttpres.dll`, sound/CoolSB startup and reverse teardown. `/reg` opens the original reduced About+association sheet; `/unreg` removes owned per-user extension, AudioCD and Directory registrations. The `004B5470/004B54F2` idle-aware message pump and tooltip hook behavior are live. | private thread-diagnostic object, WTL command-bar/button wrapper and CBT shadow/theme wrapper cannot be reconstructed from the pseudo-C object layout alone |
 | Audio | recovered reader and decoder registries plus synchronous x86 creator/`IStream`/six-slot-buffer chains; APE, TAK, VQF and the supplied FLAC decode/read/seek are real-sample validated. A shared decoded-source and PCM-output chain covers AddIn, Media Foundation URL/WAV/MPEG, AIFF/AIFC/AU, exact 75 Hz CUE and raw CD-DA; output bit depth, SSRC ordinal 102, dither, ReplayGain, EQ, Surround and Winamp DSP feed bounded waveOut, DirectSound, KS or ASIO streams. `AutoScanGain` analyzes the same pre-gain playback PCM and commits only at natural EOF; it does not launch a second decoder. Encoder creators execute Configure/Open/Start/Write/Finalize for playlist conversion. All five fade-mode transitions and four duration fields have runtime consumers where the original output supports them; `WM_CLOSE` now starts the bit-3 stop fade before window teardown and retains the original `FadeDuration[3] + 500 ms` bounded exit guard. | validate CD-DA on physical optical hardware and KS/ASIO on compatible devices; retain explicit device-specific KS topology and retired network-reader boundaries |
 | Playlist | independent `TTPlayer_PlayListWnd`, all 23 supplied `playlist_window` skins, original `0x7D66` show/hide command, skin-relative switching, fixed/native and resizable/minimum-size window modes, client-edge/corner resizing, attached main-window group movement, nine-slice background painting, multi-list `%04d.ttbl` store with `%03d` migration and current-row persistence, M3U/M3U8 plus TTPL/version-4 XML reading and writing, native-style multi-selection, internal selected-row drag reorder plus Ctrl copy to another catalogue, 16-pixel owner-draw rows, skinned splitter/scrollbar/title/close, resource-backed toolbar/context menus, delayed atomic saving/slot compaction, Vista+ Common Item Dialog single/multi-file and folder intake, and real OLE `CF_HDROP` routing for main replace/play, playlist positional insertion/catalogue import, archive/CUE expansion and lyric-first-item loading are live; the equalizer intentionally rejects drops. The resource-backed file-information sheet reaches reader-QI metadata/thumbnail setters or the executable's built-in MP3 tag path through a bounded helper. | same-process private clipboard/data-object interoperability and retired service dialogs |
 | Lyrics | normal/mini `TTPlayer_LyricWnd` popup plus detached full-screen `LyricCtrl` and independent layered `DeskLrcCtrl/Paint/Bar` subsystem recovered: independent normal/mini/full-screen scroll, font, alignment, spacing, fade, karaoke, colors and transparency; exact `AutoFontFS` width fitting; opaque, desktop-color-key and visual-overlay layouts; native full-screen/desktop menus; menu/physical-Escape restoration; `004A88D0` skin/Lyric.xml parsing, local LRC discovery, editing, metadata, smooth scrolling and pixel-to-time dragging are live. Lyric drag/line-step seeks preserve the supplied original's direct audible transition instead of applying the reconstruction's broader generic seek fade gate. | a provider-neutral replacement for the retired online service |

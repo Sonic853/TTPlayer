@@ -1902,39 +1902,43 @@ bool PlayerWindow::DrawPopupMenuItem(const DRAWITEMSTRUCT& item) const {
     return true;
 }
 
-bool PlayerWindow::LoadSkinPackage(const std::filesystem::path& path) {
+bool PlayerWindow::LoadSkinPackage(const std::filesystem::path& path, bool restore_profile) {
     try {
         auto package = skin::SkinPackage::Open(path);
         const auto stamp = std::filesystem::last_write_time(path).time_since_epoch().count();
         const auto cache = std::filesystem::temp_directory_path() / L"TTPlayerRebuild" /
             (path.stem().wstring() + L"-" + std::to_wstring(stamp));
-        if (!LoadSkin(std::move(package), cache)) return false;
-        // CSettings::PackageName stores the package file name, including its
-        // .skn/.zip suffix. Persisting only path.stem() made the menu switch
-        // transient and caused the following launch to select the old skin.
-        settings_.skin_file = path.filename().wstring();
-        return true;
+        auto profile = path;
+        profile += L".xml";
+        return LoadSkin(std::move(package), cache, path.filename().wstring(),
+                        profile, restore_profile);
     } catch (const std::exception&) { return false; }
 }
 
-bool PlayerWindow::LoadSkinResource(HMODULE module, const wchar_t* name) {
+bool PlayerWindow::LoadSkinResource(HMODULE module, const wchar_t* name, bool restore_profile) {
     try {
         skin_resources_ = module;
         auto package = skin::SkinPackage::OpenResource(module, name, L"ZIP");
         const auto cache = std::filesystem::temp_directory_path() / L"TTPlayerRebuild" /
             (L"DefaultSkin-resource-" + std::to_wstring(package.Fingerprint()));
-        if (!LoadSkin(std::move(package), cache)) return false;
-        settings_.skin_file = L"<Default_Skin>";
-        return true;
+        return LoadSkin(std::move(package), cache, L"<Default_Skin>",
+            CurrentSkinProfilePath().parent_path() / L"Default.xml", restore_profile);
     } catch (const std::exception&) { return false; }
 }
 
 bool PlayerWindow::LoadSkin(skin::SkinPackage package,
-                            const std::filesystem::path& cache) {
+                            const std::filesystem::path& cache,
+                            const std::wstring& selector,
+                            const std::filesystem::path& profile, bool restore_profile) {
     if (!package.IsLegacyCompatible()) return false;
     package.ExtractTo(cache, ttpcomm_module_);
     auto next = skin::LegacySkin::Load(cache);
     if (!next.Valid()) return false;
+    const HRGN region = next.CreateWindowRegion();
+    RECT bounds{};
+    const bool valid_region = region && GetRgnBox(region, &bounds) > NULLREGION;
+    if (region) DeleteObject(region);
+    if (!valid_region) return false;
 
     // 004683xx/00464B6C leave mini mode before replacing the package because
     // every live child/control points into the old skin object.
@@ -1946,7 +1950,15 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
         CompleteSkinWindowFadeForReplacement();
         if (!window_ || !IsWindow(window_) || close_after_skin_window_fade_)
             return false;
+        if (restore_profile) SaveCurrentSkinProfile();
+        // 0045DDEE restores an iconic main window before rebinding it.
+        if (IsIconic(window_)) ShowWindow(window_, SW_RESTORE);
     }
+    const auto previous_player = settings_.player;
+    const auto previous_playlist = settings_.playlist;
+    const auto previous_lyric = settings_.lyric;
+    const auto previous_visual = settings_.visual;
+    const auto previous_selector = settings_.skin_file;
     if (window_ && mini_mode_) {
         ToggleMiniMode();
         // 00464B6C is synchronous in the original.  The recovered fade is a
@@ -1956,20 +1968,6 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
         CompleteSkinWindowFadeForReplacement();
         if (!window_ || !IsWindow(window_) || mini_mode_) return false;
     }
-    if (lyric_window_) {
-        GetWindowRect(lyric_window_, &settings_.player.lyric_window);
-        if (skin_ && skin_->Lyric().valid)
-            settings_.player.lyric_visible =
-                desktop_lyric_mode_ ? desktop_lyrics_.Visible()
-                                    : IsWindowVisible(lyric_window_) != FALSE;
-    }
-    if (equalizer_window_) {
-        GetWindowRect(equalizer_window_, &settings_.player.equalizer_window);
-        if (skin_ && skin_->Equalizer().valid)
-            settings_.player.equalizer_visible =
-                IsWindowVisible(equalizer_window_) != FALSE;
-    }
-
     // Runtime switching is transactional.  The HWND can still own the old
     // skin's HICON and a synchronous style/region change can cause WM_PAINT.
     // Keep every old GDI object alive until the new skin has been completely
@@ -1980,12 +1978,46 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
     desktop_lyrics_.SetSkin(nullptr);
     auto previous = std::move(skin_);
     skin_.emplace(std::move(next));
-    if (window_ && !ApplyLoadedSkin()) {
+    // Load the target configuration before presenting it. The old menu path
+    // applied the package, repainted/recreated its controls, then loaded the
+    // sidecar and applied everything again with a second set of HWNDs.
+    bool profile_loaded = false;
+    if (window_) {
+        if (restore_profile) {
+            ApplySkinVisualSettings();
+            SetRectEmpty(&settings_.player.mini_lyric_window);
+            // 0045D5FA defaults the auxiliary visibility flags to one before
+            // reading a runtime target profile; availability is applied by
+            // each skin-window binder. An absent sidecar is not a snapshot
+            // of the outgoing package's hidden windows.
+            settings_.player.lyric_visible = true;
+            settings_.player.playlist_visible = true;
+            settings_.player.equalizer_visible = true;
+            profile_loaded = settings::LoadSkinVisualProfile(profile, settings_.player,
+                settings_.playlist, settings_.lyric, settings_.visual);
+            if (!profile_loaded) {
+                ApplyPlaylistSkinDefaults(skin_->Playlist(), settings_.playlist);
+                ApplyLyricSkinDefaults(skin_->Lyric(), settings_.lyric);
+            }
+        } else {
+            // Options Reset All supplies its own freshly built settings.
+            settings_.player = previous_player;
+            settings_.player.mini_mode = mini_mode_;
+        }
+    }
+    settings_.skin_file = selector;
+    if (window_ && !ApplyLoadedSkin(false, profile_loaded || !restore_profile)) {
         skin_.reset();
         skin_ = std::move(previous);
-        if (skin_) static_cast<void>(ApplyLoadedSkin());
+        settings_.player = previous_player;
+        settings_.playlist = previous_playlist;
+        settings_.lyric = previous_lyric;
+        settings_.visual = previous_visual;
+        settings_.skin_file = previous_selector;
+        if (skin_) static_cast<void>(ApplyLoadedSkin(false));
         return false;
     }
+    if (window_ && (profile_loaded || !restore_profile)) ApplySkinProfileWindowState();
     previous.reset();
     return true;
 }
@@ -2291,6 +2323,7 @@ LRESULT CALLBACK PlayerWindow::PlaybackTipWindowProc(
 
 LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
     static const UINT taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
+    static const UINT taskbar_button_created = RegisterWindowMessageW(L"TaskbarButtonCreated");
     if (message == kMsgPlaylistInfoReady)
         return ApplyPlaylistInfoResult(lparam);
     if (message == kMsgMediaLibraryReady)
@@ -2308,8 +2341,14 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         return 0;
     }
     if (message == taskbar_created) {
+        taskbar_playback_.Reset();
         tray_icon_added_ = false;
         UpdateTrayIcon();
+        return 0;
+    }
+    if (message == taskbar_button_created) {
+        static_cast<void>(taskbar_playback_.OnButtonCreated(
+            window_, TaskbarState(), TaskbarLabels()));
         return 0;
     }
     switch (message) {
@@ -2496,6 +2535,14 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             const auto released = HitTestSkin(point);
             const auto action = std::exchange(pressed_skin_element_, {});
+            if (action == L"progress" && GetCapture() == window_) {
+                // 00460AB1 commits only SB_THUMBPOSITION (4), not the
+                // intermediate tracking notifications. Use the release point
+                // even if it lies outside the control or no move preceded it.
+                SetSkinProgressFromPoint(point);
+                if (progress_tracking_position_)
+                    audio_.SeekWithoutFade(*progress_tracking_position_);
+            }
             EndSkinMouseCapture();
             if (!action.empty() && action == released && action != L"volume" && action != L"progress") {
                 InvokeSkinAction(action);
@@ -2517,6 +2564,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         break;
     case WM_CAPTURECHANGED:
         if (skin_) {
+            progress_tracking_position_.reset();
             dragging_skin_background_ = false;
             skin_drag_window_ = nullptr;
             skin_drag_hit_ = 0;
@@ -2630,6 +2678,10 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         ApplyOptionsChangeMask(static_cast<UINT>(wparam), lparam);
         return 0;
     case WM_COMMAND:
+        if (HIWORD(wparam) == THBN_CLICKED) {
+            HandleTaskbarPlaybackClick(wparam);
+            return 0;
+        }
         switch (LOWORD(wparam)) {
         case kOpen: ChooseFiles(); return 0;
         case kPrevious: SelectRelative(false); return 0;
@@ -2840,6 +2892,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         mini_mode_fade_continuation_ = false;
         mini_mode_fade_queued_ = false;
         close_after_skin_window_fade_ = true;
+        UpdateTaskbarPlayback();
         close_skin_window_fade_finished_ = false;
         for (const HWND target : {window_, lyric_window_, playlist_window_,
                                   equalizer_window_}) {
@@ -2868,6 +2921,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         }
         return 0;
     case WM_DESTROY:
+        taskbar_playback_.Reset();
         KillTimer(window_, kCloseAudioFadeTimer);
         close_waiting_for_audio_fade_ = false;
         close_skin_window_fade_finished_ = false;
@@ -3159,8 +3213,9 @@ void PlayerWindow::PaintSkin(HDC dc) const {
         const int control_width = progress->bounds.right - progress->bounds.left;
         const int control_height = progress->bounds.bottom - progress->bounds.top;
         const auto duration = audio_.Duration().count();
-        const auto position = std::clamp<int64_t>(audio_.Position().count(), 0,
-                                                  std::max<int64_t>(0, duration));
+        const auto position = std::clamp<int64_t>(
+            progress_tracking_position_.value_or(audio_.Position()).count(), 0,
+            std::max<int64_t>(0, duration));
         const int safe_duration = static_cast<int>(
             std::clamp<int64_t>(duration, 1, INT_MAX));
         const int safe_position = static_cast<int>(
@@ -3349,9 +3404,11 @@ void PlayerWindow::PaintSkin(HDC dc) const {
     }
 
     if (const auto* led = FindActiveSkinElement(L"led"); led && led->image) {
+        const auto displayed_position =
+            progress_tracking_position_.value_or(audio_.Position());
         const auto value_time = settings_.player.show_elapsed_time
-            ? audio_.Position()
-            : audio_.Position() - audio_.Duration();
+            ? displayed_position
+            : displayed_position - audio_.Duration();
         const std::wstring value = FormatLedTime(value_time);
         constexpr int glyph_count = 12; // 0..9, ':', '-'
         const int source_width = led->image_size.cx / glyph_count;
@@ -3863,6 +3920,7 @@ void PlayerWindow::ContinueSkinBackgroundDrag(HWND source, POINT point) {
 }
 
 void PlayerWindow::EndSkinMouseCapture() {
+    progress_tracking_position_.reset();
     HWND captured = skin_drag_window_;
     if (!captured) {
         const HWND current = GetCapture();
@@ -4640,112 +4698,18 @@ bool PlayerWindow::HandleContextCommand(UINT command) {
         return true;
     }
     if (command == kCmdDefaultSkin) {
-        if (settings_.skin_file.empty() ||
-            settings_.skin_file == L"<Default_Skin>") {
-            skin_commands_.clear();
-            return true;
-        }
-        SaveCurrentSkinProfile();
-        const auto previous_playlist = settings_.playlist;
-        const auto previous_lyric = settings_.lyric;
-        const auto previous_player = settings_.player;
-        const auto previous_visual = settings_.visual;
-        auto target_playlist = previous_playlist;
-        auto target_lyric = previous_lyric;
-        auto target_player = previous_player;
-        auto target_visual = previous_visual;
-        // FUN_0045DDEE clears DAT_005477FC whenever the package object
-        // changes. A profile may repopulate LyricWnd2; otherwise the first
-        // mini entry creates the native right-of-player 200-pixel default.
-        SetRectEmpty(&target_player.mini_lyric_window);
-        const auto profile = FindRuntimePath(std::filesystem::path(L"Skin") /
-                                             L"Default.xml");
-        if (LoadSkinResource(skin_resources_, L"<Default_Skin>")) {
-            // FUN_0045D5FA first materialises the package Visual.xml, then
-            // deserialises the per-skin snapshot.  Type/FPS remain global,
-            // while the sidecar's colour/font fields win over the package.
-            target_visual = settings_.visual;
-            const bool profile_loaded = !profile.empty() &&
-                settings::LoadSkinVisualProfile(profile, target_player,
-                                                 target_playlist, target_lyric,
-                                                 target_visual);
-            settings_.player = target_player;
-            settings_.playlist = target_playlist;
-            settings_.lyric = target_lyric;
-            settings_.visual = target_visual;
-            if (!profile_loaded && skin_) {
-                ApplyPlaylistSkinDefaults(skin_->Playlist(), settings_.playlist);
-                ApplyLyricSkinDefaults(skin_->Lyric(), settings_.lyric);
-            }
-            if (profile_loaded && settings_.player.player_window.right >
-                    settings_.player.player_window.left)
-                SetWindowPos(window_, nullptr, settings_.player.player_window.left,
-                    settings_.player.player_window.top, 0, 0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            static_cast<void>(ApplyLoadedSkin(false));
-            if (profile_loaded) ApplySkinProfileWindowState();
-            settings_.skin_file = L"<Default_Skin>";
-            if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
-        } else {
-            settings_.player = previous_player;
-            settings_.playlist = previous_playlist;
-            settings_.lyric = previous_lyric;
-            settings_.visual = previous_visual;
-            if (skin_) static_cast<void>(ApplyLoadedSkin(false));
-        }
+        if (!settings_.skin_file.empty() && settings_.skin_file != L"<Default_Skin>")
+            static_cast<void>(LoadSkinResource(skin_resources_, L"<Default_Skin>"));
         skin_commands_.clear();
         return true;
     }
     for (const auto& entry : skin_commands_) {
         if (!entry.embedded_default && command == entry.command) {
-            const auto& path = entry.path;
-            // 00465695 compares the package selector with wcscmp here (the
-            // check-mark population above deliberately uses _wcsicmp).
-            if (settings_.skin_file == entry.package_name) {
-                skin_commands_.clear();
-                return true;
-            }
-            SaveCurrentSkinProfile();
-            const auto previous_playlist = settings_.playlist;
-            const auto previous_lyric = settings_.lyric;
-            const auto previous_player = settings_.player;
-            const auto previous_visual = settings_.visual;
-            auto target_playlist = previous_playlist;
-            auto target_lyric = previous_lyric;
-            auto target_player = previous_player;
-            auto target_visual = previous_visual;
-            SetRectEmpty(&target_player.mini_lyric_window);
-            auto profile = path;
-            profile += L".xml";
-            if (LoadSkinPackage(path)) {
-                target_visual = settings_.visual;
-                const bool profile_loaded =
-                    settings::LoadSkinVisualProfile(profile, target_player,
-                                                    target_playlist, target_lyric,
-                                                    target_visual);
-                settings_.player = target_player;
-                settings_.playlist = target_playlist;
-                settings_.lyric = target_lyric;
-                settings_.visual = target_visual;
-                if (!profile_loaded && skin_) {
-                    ApplyPlaylistSkinDefaults(skin_->Playlist(), settings_.playlist);
-                    ApplyLyricSkinDefaults(skin_->Lyric(), settings_.lyric);
-                }
-                if (profile_loaded && settings_.player.player_window.right >
-                        settings_.player.player_window.left)
-                    SetWindowPos(window_, nullptr, settings_.player.player_window.left,
-                        settings_.player.player_window.top, 0, 0,
-                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                static_cast<void>(ApplyLoadedSkin(false));
-                if (profile_loaded) ApplySkinProfileWindowState();
-                settings_.skin_file = path.filename().wstring();
-                if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
-            } else {
-                settings_.player = previous_player;
-                settings_.playlist = previous_playlist;
-                settings_.lyric = previous_lyric;
-                settings_.visual = previous_visual;
-                if (skin_) static_cast<void>(ApplyLoadedSkin(false));
+            // 00465695 compares selectors case-sensitively, then invokes one
+            // 0045D5FA transaction (save outgoing, load target, rebind in place).
+            if (settings_.skin_file != entry.package_name) {
+                const auto path = entry.path;
+                static_cast<void>(LoadSkinPackage(path));
             }
             skin_commands_.clear();
             return true;
@@ -4877,7 +4841,7 @@ bool PlayerWindow::HandleContextCommand(UINT command) {
     return true;
 }
 
-bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings) {
+bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings, bool saved_bounds) {
     if (!skin_ || !skin_->Valid()) return false;
 
     // FUN_0045D5FA validates and constructs the replacement skin before it
@@ -4893,12 +4857,17 @@ bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings) {
     EndSkinMouseCapture();
     hover_skin_element_.clear();
     pressed_skin_element_.clear();
+    if (EqualizerOwnsCapture()) ReleaseEqualizerCapture();
+    equalizer_hover_ = 0;
+    lyric_hover_command_ = 0;
+    lyric_pressed_command_ = 0;
 
     // The original main skin HWND remains WS_EX_LAYERED across a package
     // change.  Clearing and restoring that bit while TrackPopupMenuEx owns a
     // modal menu can invalidate both redirected surfaces and was the source
     // of the observed apparent/actual process exit on some Windows builds.
     const LONG_PTR current_style = GetWindowLongPtrW(window_, GWL_STYLE);
+    ScopedSkinRedraw redraw(window_);
     const LONG_PTR desired_style =
         WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPSIBLINGS |
         (current_style & (WS_VISIBLE | WS_DISABLED));
@@ -4910,8 +4879,10 @@ bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings) {
         SetWindowLongPtrW(window_, GWL_EXSTYLE, desired_extended);
     ApplySkinWindowAlpha(EffectiveSkinWindowAlpha(window_));
     const SIZE size = skin_->WindowSize();
-    SetWindowPos(window_, nullptr, 0, 0, size.cx, size.cy,
-        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+    const RECT& saved = settings_.player.player_window;
+    const bool place_main = saved_bounds && saved.right > saved.left && saved.bottom > saved.top;
+    SetWindowPos(window_, nullptr, place_main ? saved.left : 0, place_main ? saved.top : 0, size.cx, size.cy,
+        (place_main ? 0 : SWP_NOMOVE) | SWP_NOZORDER | SWP_NOACTIVATE |
         (frame_changed ? SWP_FRAMECHANGED : 0));
     // SetWindowRgn takes ownership on success.  The old region remains active
     // until this atomic replacement, matching the original rebuild sequence.
@@ -4931,11 +4902,11 @@ bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings) {
     if (small_icon) SendMessageW(window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
     if (big) SendMessageW(window_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
     UpdateTrayIcon();
-    UpdateLyricWindowSkin();
+    UpdateLyricWindowSkin(saved_bounds);
     desktop_lyrics_.SetSkin(&*skin_);
     desktop_lyrics_.ApplySettings();
-    UpdatePlaylistWindowSkin();
-    UpdateEqualizerWindowSkin();
+    UpdatePlaylistWindowSkin(saved_bounds);
+    UpdateEqualizerWindowSkin(saved_bounds);
     ApplyWindowShadow();
     UpdateVisualWindowLayout();
     UpdateVisualFrame();
@@ -4945,6 +4916,7 @@ bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings) {
     ApplySkinWindowAlpha(EffectiveSkinWindowAlpha(window_));
     UpdateMainToolRects();
     ResetSkinInfoScroll();
+    redraw.Resume();
     RedrawWindow(window_, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
     return true;
@@ -4982,11 +4954,17 @@ void PlayerWindow::ApplyWindowShadow() {
     for (const HWND target : {window_, lyric_window_, playlist_window_,
                               equalizer_window_}) {
         if (!target || !IsWindow(target)) continue;
-        const bool visible = IsWindowVisible(target) != FALSE;
-        if (visible) ShowWindow(target, SW_HIDE);
-        LONG_PTR style = GetClassLongPtrW(target, GCL_STYLE);
+        const LONG_PTR previous_style = GetClassLongPtrW(target, GCL_STYLE);
+        LONG_PTR style = previous_style;
         if (settings_.player.window_shadow) style |= CS_DROPSHADOW;
         else style &= ~static_cast<LONG_PTR>(CS_DROPSHADOW);
+        // 004A43E8/004710A5 is the shadow-option path, not the package
+        // rebind path (00468363). Do not hide/show an unchanged class during
+        // skin loading: that removes/recreates the taskbar button and fades
+        // the owned window group even though all top-level HWNDs survived.
+        if (style == previous_style) continue;
+        const bool visible = IsWindowVisible(target) != FALSE;
+        if (visible) ShowWindow(target, SW_HIDE);
         SetClassLongPtrW(target, GCL_STYLE, style);
         if (visible) ShowWindow(target, SW_SHOW);
     }
@@ -5255,7 +5233,7 @@ void PlayerWindow::ApplySkinProfileWindowState() {
     };
 
     if (skin_->Lyric().valid && lyric_window_) {
-        ApplyActiveLyricWindowState();
+        if (!desktop_lyric_mode_) ApplyActiveLyricWindowState();
     }
     if (skin_->Playlist().valid && playlist_window_) {
         place(playlist_window_, settings_.player.playlist_window,
@@ -5325,8 +5303,8 @@ void PlayerWindow::SetSkinProgressFromPoint(POINT point) {
         if (span <= 0) return;
         const int first_center = progress->bounds.top + slider_inset + thumb / 2;
         value = span - std::clamp<int>(point.y - first_center, 0, span);
-        audio_.Seek(std::chrono::milliseconds(
-            duration.count() * value / span));
+        progress_tracking_position_ = std::chrono::milliseconds(
+            duration.count() * value / span);
     } else {
         const int width = progress->bounds.right - progress->bounds.left;
         const int thumb = progress->thumb_image ? progress->thumb_size.cx / 4 : 0;
@@ -5334,10 +5312,14 @@ void PlayerWindow::SetSkinProgressFromPoint(POINT point) {
         if (span <= 0) return;
         const int first_center = progress->bounds.left + slider_inset + thumb / 2;
         value = std::clamp<int>(point.x - first_center, 0, span);
-        audio_.Seek(std::chrono::milliseconds(
-            duration.count() * value / span));
+        progress_tracking_position_ = std::chrono::milliseconds(
+            duration.count() * value / span);
     }
+    // 00428DCD ignores timer updates while tracking; 0045CE05 previews the
+    // LED without moving the decoder/lyrics clock until the release seek.
     InvalidateRect(window_, &progress->bounds, FALSE);
+    if (const auto* led = FindActiveSkinElement(L"led"))
+        InvalidateRect(window_, &led->bounds, FALSE);
 }
 
 void PlayerWindow::DrawButton(const DRAWITEMSTRUCT& item) const {
@@ -5383,6 +5365,7 @@ void PlayerWindow::RefreshPlaylist() {
 }
 
 void PlayerWindow::RefreshPlaybackUi() {
+    UpdateTaskbarPlayback();
     UpdateMainWindowCaption();
     const auto text = PlaybackStatusText();
     if (status_) SetWindowTextW(status_, text.c_str());
