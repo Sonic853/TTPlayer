@@ -1,5 +1,17 @@
 # Reconstruction status
 
+2026-09-11: restored the optional mp3PRO Winamp input bridge following
+004E6CBD/004E6FB6, including enhanced-rate selection, bounded PCM buffering,
+single-reader ownership, pause/resume, asynchronous seek flushing and stop.
+Keeps MPEG fallback and metadata; loads only EXE-local mp3PRO.dll without a
+file-version check or another EXE dependency. Fixed paused waveOut seek
+prefill briefly advancing the output clock. Mock ABI/PCM, CUE and silent
+waveOut/DirectSound tests pass; the real DLL passes synthetic ordinary-MPEG
+fallback/EOF/seek checks. A genuine mp3PRO sample is still needed for SBR
+comparison against the original. Release build and all 28 CTest cases pass
+on the host (24.28 s); 27 existing configuration/playlist/skin XML files
+retain their SHA-256 hashes. See [MP3PRO_RECOVERY.md](MP3PRO_RECOVERY.md).
+
 2026-09-11: removed the remaining sidecar EXE runtime dependencies. DSP scan,
 per-DLL inspection/configuration and output-device catalogue/details now run
 in private modes of the player itself; metadata callers no longer construct

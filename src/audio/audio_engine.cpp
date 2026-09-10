@@ -4,6 +4,7 @@
 #include "ttplayer/audio/native_output_contract.h"
 #include "ttplayer/audio/asio_sink.h"
 #include "ttplayer/audio/kernel_streaming_sink.h"
+#include "ttplayer/audio/mp3pro_source.h"
 #include "ttplayer/audio/pcm_output_transform.h"
 #include "ttplayer/audio/replay_gain_policy.h"
 #include "ttplayer/audio/replay_gain_scanner.h"
@@ -1031,11 +1032,12 @@ std::unique_ptr<DecodedAudioSource> MakeBaseSource(
     if (extension == L".aif" || extension == L".aifc" ||
         extension == L".aiff" || extension == L".au" || extension == L".snd")
         return std::make_unique<BigEndianPcmSource>();
-    return std::make_unique<MediaFoundationSource>(ttpcomm);
+    return WrapMp3ProSource(std::make_unique<MediaFoundationSource>(ttpcomm));
 }
 
 class CueSegmentSource final : public DecodedAudioSource {
 public:
+    void SetPaused(bool paused) override { if (inner_) inner_->SetPaused(paused); }
     CueSegmentSource(const plugins::PluginManager* manager, HMODULE ttpcomm,
                      int subtrack)
         : manager_(manager), ttpcomm_(ttpcomm), subtrack_(subtrack) {}
@@ -2391,6 +2393,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
 
         bool natural_replay_gain_end{};
         while (usable && !stop_requested_) {
+            source->SetPaused(state_.load() == PlaybackState::paused);
             const auto request = TakeSeekRequest();
             const int64_t requested = request.position_ms;
             if (requested >= 0) {
@@ -2797,6 +2800,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
 
     bool natural_replay_gain_end{};
     while (usable && !stop_requested_) {
+        source->SetPaused(state_.load() == PlaybackState::paused);
         const auto request = TakeSeekRequest();
         const int64_t requested = request.position_ms;
         if (requested >= 0) {
@@ -2805,7 +2809,14 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 if (!ks_sink->Reset()) { SetError(ks_sink->Error()); break; }
             } else if (asio_sink) {
                 if (!asio_sink->Reset()) { SetError(asio_sink->Error()); break; }
-            } else waveOutReset(opened_device);
+            } else {
+                waveOutReset(opened_device);
+                // Reset clears waveOut's pause state. A push decoder can
+                // take several callbacks to prefill; pause BEFORE the first
+                // waveOutWrite or a paused seek audibly advances 10-20 ms.
+                if (previous_state == PlaybackState::paused)
+                    waveOutPause(opened_device);
+            }
             for (auto& buffer : buffers) {
                 if (!ks_sink && !asio_sink &&
                     (buffer.header.dwFlags & WHDR_PREPARED))

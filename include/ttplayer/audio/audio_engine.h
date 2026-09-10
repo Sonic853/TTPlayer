@@ -153,6 +153,10 @@ public:
                       std::vector<std::byte>& output,
                       bool& end_of_stream) = 0;
     virtual bool Seek(std::chrono::milliseconds position) = 0;
+    // Push decoders (the optional mp3PRO input DLL) also have a producer
+    // thread. Called on the source owner thread, never directly by the UI.
+    // Read may temporarily resume that producer for paused seek prefill.
+    virtual void SetPaused(bool) {}
     [[nodiscard]] virtual const WAVEFORMATEX& OutputFormat() const = 0;
     [[nodiscard]] virtual AudioFormat DisplayFormat() const = 0;
     [[nodiscard]] virtual std::chrono::milliseconds Duration() const = 0;

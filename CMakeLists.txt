@@ -26,6 +26,7 @@ add_library(ttplayer_core
   src/audio/builtin_file_info.cpp
   src/audio/cue_sheet.cpp
   src/audio/kernel_streaming_sink.cpp
+  src/audio/mp3pro_source.cpp
   src/audio/native_output_contract.cpp
   src/audio/pcm_output_transform.cpp
   src/audio/replay_gain_scanner.cpp
@@ -486,6 +487,24 @@ add_custom_command(TARGET ttplayer_rebuild POST_BUILD
 )
 
 enable_testing()
+add_library(mp3pro_input_mock SHARED tests/mock_winamp_input.cpp tests/mock_winamp_input.def)
+target_compile_definitions(mp3pro_input_mock PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(mp3pro_input_mock PRIVATE /W4 /EHsc /utf-8)
+add_executable(mp3pro_source_tests tests/mp3pro_source_tests.cpp)
+target_compile_definitions(mp3pro_source_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(mp3pro_source_tests PRIVATE /W4 /EHsc /utf-8 /UNDEBUG)
+target_link_libraries(mp3pro_source_tests PRIVATE ttplayer_core)
+add_dependencies(mp3pro_source_tests mp3pro_input_mock)
+add_test(NAME mp3pro_source_tests COMMAND mp3pro_source_tests
+    "$<TARGET_FILE:mp3pro_input_mock>" "${CMAKE_CURRENT_SOURCE_DIR}/../mp3PRO.dll")
+set_tests_properties(mp3pro_source_tests PROPERTIES TIMEOUT 60)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../mp3PRO.dll")
+  add_custom_command(TARGET ttplayer_rebuild POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/../mp3PRO.dll"
+            "$<TARGET_FILE_DIR:ttplayer_rebuild>/mp3PRO.dll"
+    VERBATIM)
+endif()
 add_test(NAME ttplayer_tests COMMAND ttplayer_tests)
 add_test(NAME shell_send_to_tests COMMAND shell_send_to_tests)
 add_test(NAME playlist_network_commands_tests
