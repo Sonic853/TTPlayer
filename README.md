@@ -8,6 +8,14 @@ The current address-by-address status for AddIn, native outputs, PCM, fades,
 media library, tags, CD/VCD, URL, associations, settings and startup is in
 [`MAJOR_FEATURE_RECOVERY.md`](MAJOR_FEATURE_RECOVERY.md).
 
+The player no longer requires sidecar helper EXEs. File metadata/cover/tag jobs,
+DSP discovery/configuration and output-device discovery/details are embedded
+private modes of the player EXE, with process isolation retained. The original
+EXE-local DLLs, AddIns and skins are still required. Build `ttplayer_rebuild` to
+build the player only; a full developer build also produces test/probe tools
+which do not need to be distributed. See [EMBEDDED_WORKERS.md](EMBEDDED_WORKERS.md)
+and [PORTABLE_FILE_PROPERTIES.md](PORTABLE_FILE_PROPERTIES.md).
+
 Current milestone (0.1):
 
 - native Unicode `wWinMain` reconstructed at the original `004C0E8F` boundary:

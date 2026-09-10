@@ -1,9 +1,13 @@
 #include "ttplayer/app/application.h"
+#include "ttplayer/app/file_info_worker.h"
 #include "ttplayer/app/runtime.h"
 #include "ttplayer/app/single_instance.h"
+#include "ttplayer/app/worker_process.h"
+#include "../ui/file_info_probe_client.h"
 
 #include <commctrl.h>
 #include <objbase.h>
+#include <shellapi.h>
 #include <string>
 #include <windows.h>
 
@@ -110,5 +114,28 @@ int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, int show_command) {
+    int count{};
+    wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &count);
+    // Private workers bypass DLL startup, single-instance IPC, settings and
+    // all player windows. Dispatch even malformed requests here: a failed
+    // probe must never fall through to launch another player instance.
+    if (arguments && count >= 2) {
+        int result{};
+        bool worker = true;
+        if (wcscmp(arguments[1], ttplayer::app::kFileInfoWorkerSwitch) == 0)
+            result = ttplayer::app::RunFileInfoWorker(count - 1, arguments + 1);
+        else if (wcscmp(arguments[1], ttplayer::app::kDspWorkerSwitch) == 0)
+            result = ttplayer::app::RunDspWorker(count - 1, arguments + 1, true);
+        else if (wcscmp(arguments[1], ttplayer::app::kOutputDeviceWorkerSwitch) == 0)
+            result = ttplayer::app::RunOutputDeviceWorker(count - 1, arguments + 1);
+        else
+            worker = false;
+        if (worker) {
+            LocalFree(arguments);
+            return result;
+        }
+    }
+    if (arguments) LocalFree(arguments);
+    ttplayer::ui::detail::EnableEmbeddedFileInfoProbe();
     return TTPlayer_wWinMain(instance, previous, command_line, show_command);
 }

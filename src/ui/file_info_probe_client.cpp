@@ -1,11 +1,15 @@
 #include "file_info_probe_client.h"
+#include "ttplayer/app/file_info_worker.h"
+#include "ttplayer/app/worker_process.h"
 
 #include <algorithm>
+#include <atomic>
 #include <iterator>
 #include <string_view>
 
 namespace ttplayer::ui::detail {
 namespace {
+std::atomic_bool embedded_worker_enabled{};
 
 class UniqueHandle {
 public:
@@ -39,25 +43,7 @@ private:
 };
 
 std::wstring QuoteProbeArgument(std::wstring_view value) {
-    std::wstring quoted(1, L'"');
-    size_t slashes{};
-    for (const wchar_t character : value) {
-        if (character == L'\\') {
-            ++slashes;
-            continue;
-        }
-        if (character == L'"') {
-            quoted.append(slashes * 2 + 1, L'\\');
-            quoted.push_back(L'"');
-        } else {
-            quoted.append(slashes, L'\\');
-            quoted.push_back(character);
-        }
-        slashes = 0;
-    }
-    quoted.append(slashes * 2, L'\\');
-    quoted.push_back(L'"');
-    return quoted;
+    return app::QuoteWorkerArgument(value);
 }
 
 void TerminateProbe(HANDLE job, HANDLE process, DWORD reason) noexcept {
@@ -105,6 +91,10 @@ std::optional<FileInfoProbeReadResult> RunReadMode(
 
 } // namespace
 
+void EnableEmbeddedFileInfoProbe() noexcept {
+    embedded_worker_enabled.store(true, std::memory_order_relaxed);
+}
+
 std::filesystem::path ProbeTemporaryFile() {
     wchar_t directory[MAX_PATH + 1]{};
     const DWORD length = GetTempPathW(
@@ -119,12 +109,21 @@ FileInfoProbeProcessResult RunFileInfoProbe(
     std::stop_token stop, const std::filesystem::path& helper,
     const std::vector<std::wstring>& arguments, DWORD timeout_milliseconds) {
     FileInfoProbeProcessResult result;
+    const bool embedded = helper.empty() ||
+        embedded_worker_enabled.load(std::memory_order_relaxed);
+    // Prefer our own matching worker code, even if an older standalone helper
+    // was left beside the executable. Copying/renaming the player remains safe.
+    const auto executable = embedded ? app::CurrentExecutablePath() : helper;
     std::error_code path_error;
-    if (helper.empty() ||
-        !std::filesystem::is_regular_file(helper, path_error) || path_error)
+    if (executable.empty() ||
+        !std::filesystem::is_regular_file(executable, path_error) || path_error)
         return result;
 
-    std::wstring command = QuoteProbeArgument(helper.wstring());
+    std::wstring command = QuoteProbeArgument(executable.wstring());
+    if (embedded) {
+        command.push_back(L' ');
+        command += app::kFileInfoWorkerSwitch;
+    }
     for (const auto& argument : arguments) {
         command.push_back(L' ');
         command += QuoteProbeArgument(argument);
@@ -132,9 +131,9 @@ FileInfoProbeProcessResult RunFileInfoProbe(
 
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION raw_process{};
-    if (!CreateProcessW(helper.c_str(), command.data(), nullptr, nullptr,
+    if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr,
             FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr,
-            helper.parent_path().c_str(), &startup, &raw_process))
+            executable.parent_path().c_str(), &startup, &raw_process))
         return result;
     UniqueHandle process(raw_process.hProcess);
     UniqueHandle thread(raw_process.hThread);

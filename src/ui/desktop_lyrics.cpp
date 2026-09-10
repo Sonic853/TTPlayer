@@ -1,4 +1,5 @@
 #include "ttplayer/ui/desktop_lyrics.h"
+#include "ttplayer/ui/desktop_lyric_layout.h"
 
 #include "ttplayer/core/text.h"
 #include "ttplayer/lyrics/lrc_parser.h"
@@ -256,7 +257,8 @@ public:
 
     struct GlyphMask final {
         std::wstring text;
-        RECT text_bounds{};
+        int width{};
+        int height{};
         int row{};
         std::vector<unsigned char> alpha;
     };
@@ -1670,15 +1672,19 @@ private:
         return true;
     }
 
-    GlyphMask BuildMask(std::wstring text, int row, int rows, int width,
-                        int height, size_t line_index) const {
+    GlyphMask BuildMask(std::wstring text, int row, int rows, int height) const {
         GlyphMask result;
         result.text = std::move(text);
         result.row = row;
-        result.alpha.resize(static_cast<size_t>(width) * height);
-        if (result.text.empty() || !font_ || width <= 0 || height <= 0)
+        if (result.text.empty() || !font_ || height <= 0)
             return result;
 
+        // 00417B8B/004B2B2E cache the whole line, including horizontal padding
+        // (eight glyph-render pixels plus the two one-pixel border margins).
+        // A window-sized mask permanently clips the text needed while scrolling.
+        const int width = TextWidth(result.text) + 10;
+        height /= std::max(1, rows);
+        if (width <= 0 || height <= 0) return result;
         BITMAPINFO info{};
         info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         info.bmiHeader.biWidth = width;
@@ -1698,33 +1704,24 @@ private:
         std::memset(raw, 0xff,
                     static_cast<size_t>(width) * height * sizeof(uint32_t));
         HDC memory = CreateCompatibleDC(screen.dc);
+        if (!memory) {
+            DeleteObject(bitmap);
+            return result;
+        }
         const HGDIOBJ old_bitmap = SelectObject(memory, bitmap);
         const HGDIOBJ old_font = SelectObject(memory, font_);
         SetBkMode(memory, TRANSPARENT);
         SetTextColor(memory, RGB(0, 0, 0));
 
-        const int row_height = height / std::max(1, rows);
-        RECT row_bounds{4, row * row_height, width - 4,
-                        (row + 1) * row_height};
-        UINT format = DT_SINGLELINE | DT_NOPREFIX | DT_VCENTER;
-        int alignment = settings_ ? settings_->align : 0;
-        if (alignment == 3)
-            alignment = (line_index & 1U) == 0U ? 1 : 2;
-        if (alignment == 1) format |= DT_LEFT;
-        else if (alignment == 2) format |= DT_RIGHT;
-        else format |= DT_CENTER;
+        RECT row_bounds{5, 0, width - 5, height};
+        const UINT format = DT_SINGLELINE | DT_NOPREFIX | DT_VCENTER | DT_LEFT;
         DrawTextW(memory, result.text.c_str(),
                   static_cast<int>(result.text.size()), &row_bounds, format);
 
-        SIZE extent{};
-        GetTextExtentPoint32W(memory, result.text.c_str(),
-                             static_cast<int>(result.text.size()), &extent);
-        int left = row_bounds.left;
-        if (alignment == 0) left = (width - extent.cx) / 2;
-        else if (alignment == 2) left = row_bounds.right - extent.cx;
-        result.text_bounds = RECT{left, row_bounds.top,
-                                  left + extent.cx, row_bounds.bottom};
-
+        GdiFlush();
+        result.width = width;
+        result.height = height;
+        result.alpha.resize(static_cast<size_t>(width) * height);
         const auto* pixels = static_cast<const unsigned char*>(raw);
         for (size_t pixel = 0; pixel < result.alpha.size(); ++pixel) {
             const unsigned char* source = pixels + pixel * 4;
@@ -1747,16 +1744,15 @@ private:
         const int rows = settings_ ? std::clamp(settings_->lines, 1, 2) : 1;
         if (current == std::numeric_limits<size_t>::max()) {
             if (!fallback_text_.empty())
-                masks_.push_back(BuildMask(fallback_text_, 0, rows, width,
-                                           height, 0));
+                masks_.push_back(BuildMask(fallback_text_, 0, rows, height));
         } else {
             const int current_row = rows == 2
                 ? static_cast<int>(current & 1U) : 0;
             masks_.push_back(BuildMask(LineText(current), current_row, rows,
-                                       width, height, current));
+                                       height));
             if (rows == 2 && lyrics_ && current + 1 < lyrics_->lines.size()) {
                 masks_.push_back(BuildMask(LineText(current + 1),
-                    1 - current_row, rows, width, height, current + 1));
+                    1 - current_row, rows, height));
             }
         }
         rendered_line_ = current;
@@ -1765,8 +1761,8 @@ private:
         mask_cache_dirty_ = false;
     }
 
-    double KaraokeFraction(size_t current,
-                            std::chrono::milliseconds position) const {
+    double LineFraction(size_t current,
+                        std::chrono::milliseconds position) const {
         if (!lyrics_ || current >= lyrics_->lines.size()) return 0.0;
         const auto start = lyrics_->lines[current].time + lyrics_->offset;
         const auto end = current + 1 < lyrics_->lines.size()
@@ -1782,33 +1778,38 @@ private:
     void CompositeMask(std::vector<unsigned char>& target,
                        const GlyphMask& mask, COLORREF solid,
                        const std::array<COLORREF, 3>* gradient,
-                       int gradient_count, int offset_x, int offset_y,
+                       int gradient_count, int line_x, int offset_x, int offset_y,
                        bool outline, int clip_right) const {
         if (!settings_ || mask.alpha.empty()) return;
         const int width = mask_width_;
         const int height = mask_height_;
         const int row_height = height / std::max(1, settings_->lines);
         const int row_top = mask.row * row_height;
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                const int destination_x = x + offset_x;
-                const int destination_y = y + offset_y;
-                if (destination_x < 0 || destination_x >= width ||
-                    destination_y < 0 || destination_y >= height ||
-                    destination_x >= clip_right) continue;
+        // Iterate only the visible slice, not every pixel of a possibly very
+        // long cached line. The same translation applies to all paint layers.
+        const int x_begin = std::max(0, line_x + offset_x - (outline ? 1 : 0));
+        const int x_end = std::min({width, clip_right,
+            line_x + offset_x + mask.width + (outline ? 1 : 0)});
+        for (int destination_y = std::max(0, row_top + offset_y);
+             destination_y < std::min(height, row_top + offset_y + mask.height);
+             ++destination_y) {
+            const int y = destination_y - row_top - offset_y;
+            for (int destination_x = x_begin; destination_x < x_end;
+                 ++destination_x) {
+                const int x = destination_x - line_x - offset_x;
                 unsigned int alpha{};
                 if (!outline) {
-                    alpha = mask.alpha[static_cast<size_t>(y) * width + x];
+                    alpha = mask.alpha[static_cast<size_t>(y) * mask.width + x];
                 } else {
                     for (int dy = -1; dy <= 1; ++dy) {
                         const int source_y = y + dy;
-                        if (source_y < 0 || source_y >= height) continue;
+                        if (source_y < 0 || source_y >= mask.height) continue;
                         for (int dx = -1; dx <= 1; ++dx) {
                             const int source_x = x + dx;
-                            if (source_x < 0 || source_x >= width) continue;
+                            if (source_x < 0 || source_x >= mask.width) continue;
                             alpha = std::max<unsigned int>(alpha,
                                 mask.alpha[static_cast<size_t>(source_y) *
-                                           width + source_x]);
+                                           mask.width + source_x]);
                         }
                     }
                 }
@@ -1817,7 +1818,7 @@ private:
                 if (alpha == 0) continue;
                 COLORREF color = solid;
                 if (gradient) color = GradientColor(*gradient,
-                    gradient_count, std::clamp(y - row_top, 0, row_height - 1),
+                    gradient_count, std::clamp(y, 0, row_height - 1),
                     row_height);
                 CompositePixel(target.data() +
                     (static_cast<size_t>(destination_y) * width +
@@ -1857,25 +1858,30 @@ private:
             static_cast<size_t>(render_width) * render_height * 4, 0);
         for (size_t index = 0; index < masks_.size(); ++index) {
             const GlyphMask& mask = masks_[index];
+            const bool active = index == 0 &&
+                current != std::numeric_limits<size_t>::max();
+            const int played_pixels = active
+                ? static_cast<int>(std::lround(mask.width * LineFraction(current, position)))
+                : 0;
+            const auto viewport = CalculateDesktopLyricViewport(mask.width,
+                render_width, played_pixels, settings_->align,
+                settings_->lines, mask.row);
+            const int line_x = viewport.destination_x - viewport.source_x;
             if (settings_->shadow)
                 CompositeMask(pixels, mask, settings_->shadow_color, nullptr,
-                              0, 2, 2, false, render_width);
+                              0, line_x, 2, 2, false, render_width);
             if (settings_->border)
                 CompositeMask(pixels, mask, settings_->border_color, nullptr,
-                              0, 0, 0, true, render_width);
+                              0, line_x, 0, 0, true, render_width);
             CompositeMask(pixels, mask, 0, &settings_->current.background_colors,
-                settings_->current.background_count, 0, 0, false,
+                settings_->current.background_count, line_x, 0, 0, false,
                 render_width);
-            if (index == 0 && current != std::numeric_limits<size_t>::max()) {
-                int clip = render_width;
-                if (settings_->karaoke_mode) {
-                    const double fraction = KaraokeFraction(current, position);
-                    clip = mask.text_bounds.left + static_cast<int>(std::lround(
-                        Width(mask.text_bounds) * fraction));
-                }
+            if (active) {
+                const int clip = settings_->karaoke_mode
+                    ? viewport.played_right : render_width;
                 CompositeMask(pixels, mask, 0,
                     &settings_->current.played_colors,
-                    settings_->current.played_count, 0, 0, false, clip);
+                    settings_->current.played_count, line_x, 0, 0, false, clip);
             }
         }
 

@@ -742,7 +742,7 @@ void BeginSearch(LocalSearchDialogState& state, HWND dialog) {
     request.formats = std::move(formats);
     request.minimum_enabled = minimum_enabled;
     request.minimum_seconds = minimum_seconds;
-    request.helper = runtime / L"ttplayer_file_info_probe.exe";
+    request.helper.clear(); // Embedded worker in this EXE.
     request.addin_directory = runtime / L"AddIn";
     request.ttpcomm_path = runtime / L"ttpcomm.dll";
     request.generation = state.generation;

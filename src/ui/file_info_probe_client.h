@@ -11,6 +11,10 @@
 
 namespace ttplayer::ui::detail {
 
+// The player opts in at startup because its own entry point understands the
+// private worker switch. Other hosts/tests may keep using a standalone helper.
+void EnableEmbeddedFileInfoProbe() noexcept;
+
 enum class FileInfoProbeProcessState {
     completed,
     launch_failed,
@@ -31,6 +35,8 @@ struct FileInfoProbeProcessResult {
 
 [[nodiscard]] std::filesystem::path ProbeTemporaryFile();
 
+// Empty helper selects the current EXE's private mode. An explicit helper is
+// supported only for development hosts which have not opted into that mode.
 [[nodiscard]] FileInfoProbeProcessResult RunFileInfoProbe(
     std::stop_token stop, const std::filesystem::path& helper,
     const std::vector<std::wstring>& arguments, DWORD timeout_milliseconds);

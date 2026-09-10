@@ -1,5 +1,33 @@
 # Reconstruction status
 
+2026-09-11: removed the remaining sidecar EXE runtime dependencies. DSP scan,
+per-DLL inspection/configuration and output-device catalogue/details now run
+in private modes of the player itself; metadata callers no longer construct
+old helper filenames. The player build target no longer depends on probe
+executables. Release and all 27 CTest cases pass; host UI tests with a renamed
+EXE and no helpers show one accepted DSP (a stalling fixture is timed out),
+eight output devices and a FLAC cover, with all six properties close checks
+passing. Process isolation remains an intentional difference from the original
+in-process architecture. See [EMBEDDED_WORKERS.md](EMBEDDED_WORKERS.md).
+
+2026-09-11: fixed portable File Properties when only the player EXE is copied
+into an existing installation. Metadata/cover/tag jobs now run in an isolated
+private mode of the same EXE, before normal startup/IPC, without requiring the
+standalone helper. Fixed SC_CLOSE and completed-modeless-sheet teardown so the
+owner cannot remain disabled behind an orphan properties shell. Host tests
+with D:\Programs\TTPlayer DLLs, a renamed EXE, no helper and a different working
+directory show the FLAC cover and pass six close-command checks. Release and
+all 25 CTest cases pass. See [PORTABLE_FILE_PROPERTIES.md](PORTABLE_FILE_PROPERTIES.md).
+
+2026-09-11: desktop lyrics now cache full-width lines and scroll the visible
+slice following `00417342`, independently of karaoke highlighting. The head
+stays still until playback passes the window midpoint; the tail stops at the
+right edge. All paint layers share the offset, two-line previews stay at their
+heads, and seeks/pauses derive directly from playback time. Added actual
+UpdateLayeredWindow DIB comparisons and timing/boundary regressions to the local
+desktop lyric tests. Release build and all 25 CTest cases pass on the host.
+See [DESKTOP_LYRIC_SCROLL.md](DESKTOP_LYRIC_SCROLL.md).
+
 2026-09-07: skin replacement now rebinds existing HWNDs/controls following
 `0045D5FA -> 0045DDEE -> 00468363`. Removed the duplicate menu skin application,
 unconditional shadow hide/show, and lyric/EQ/playlist-toolbar recreation.
@@ -509,8 +537,9 @@ runtime context-menu switching test are documented in
   now matches all 13 original visits at eight
   devices with selection index four by applying the original KS render-alias,
   exclusive-overlapped-open and sink/input/interface/medium pin filters.
-- Output-device discovery and the currently recovered detail fields run in the
-  same-bitness `ttplayer_output_device_probe` helper. First page creation waits
+- Output-device discovery and the currently recovered detail fields run in a
+  same-bitness worker (the player's private mode since 2026-09-11, formerly
+  `ttplayer_output_device_probe`). First page creation waits
   synchronously for up to four seconds and a failed helper gets up to one further
   second for Job-backed termination; this is finite isolation, not asynchronous
   refresh. Successful catalogue snapshots preserve device order and keys.

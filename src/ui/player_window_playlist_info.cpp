@@ -302,7 +302,7 @@ void PlayerWindow::StartNextPlaylistInfoRead() {
         playlist_info_working_ = true;
         const auto receiver = playlist_info_receiver_;
         const auto runtime = RuntimeDirectory();
-        const auto helper = runtime / L"ttplayer_file_info_probe.exe";
+        const std::filesystem::path helper{}; // Embedded worker in this EXE.
         const auto addin_directory = runtime / L"AddIn";
         const auto ttpcomm_path = runtime / L"ttpcomm.dll";
         const auto stop = receiver->stop.get_token();

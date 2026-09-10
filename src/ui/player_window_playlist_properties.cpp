@@ -1311,7 +1311,11 @@ void CreateFileInfoButtons(FileInfoContext& context) {
     if (!cancel) return;
     SetWindowTextW(cancel, context.strings.close.c_str());
     const HWND okay = GetDlgItem(context.sheet, IDOK);
-    if (okay) ShowWindow(okay, SW_HIDE);
+    if (okay) {
+        ShowWindow(okay, SW_HIDE);
+        EnableWindow(okay, FALSE);
+    }
+    SendMessageW(context.sheet, DM_SETDEFID, IDCANCEL, 0);
 
     RECT cancel_bounds{};
     GetWindowRect(cancel, &cancel_bounds);
@@ -1343,6 +1347,12 @@ LRESULT CALLBACK FileInfoSheetSubclass(HWND window, UINT message,
                                        UINT_PTR, DWORD_PTR reference) {
     auto* context = reinterpret_cast<FileInfoContext*>(reference);
     if (!context) return DefSubclassProc(window, message, wparam, lparam);
+    if (message == WM_SYSCOMMAND && (wparam & 0xfff0U) == SC_CLOSE) {
+        // A property sheet consumes SC_CLOSE internally; it need not forward
+        // it as WM_CLOSE. Unwind the non-client handler before cancellation.
+        PostMessageW(window, WM_CLOSE, 0, 0);
+        return 0;
+    }
     if (message == kFileInfoReadComplete) {
         if (context->read_worker.joinable()) context->read_worker.join();
         std::unique_ptr<FileInfoReadResult> result;
@@ -1382,12 +1392,13 @@ LRESULT CALLBACK FileInfoSheetSubclass(HWND window, UINT message,
             NavigateFileInfo(shared, 1);
             return 0;
         }
-        if (command == IDCANCEL) {
+        if (command == IDCANCEL || command == IDOK) {
             SendMessageW(window, WM_CLOSE, 0, 0);
             return 0;
         }
     }
     if (message == WM_CLOSE) {
+        if (context->closing) return 0;
         const std::wstring* question{};
         if (context->saving && !context->strings.save_cancel_question.empty())
             question = &context->strings.save_cancel_question;
@@ -1408,6 +1419,10 @@ LRESULT CALLBACK FileInfoSheetSubclass(HWND window, UINT message,
         return 0;
     }
     if (message == WM_NCDESTROY) {
+        context->closing = true;
+        context->post_target.store(nullptr, std::memory_order_release);
+        context->read_worker.request_stop();
+        context->save_worker.request_stop();
         RemoveWindowSubclass(window, FileInfoSheetSubclass, 1);
         context->sheet = nullptr;
     }
@@ -1472,7 +1487,7 @@ void PlayerWindow::ShowPlaylistProperties(
     if (executable_length == 0 || executable_length >= executable.size()) return;
     executable.resize(executable_length);
     const auto runtime = std::filesystem::path(executable).parent_path();
-    context->helper = runtime / L"ttplayer_file_info_probe.exe";
+    context->helper.clear(); // Embedded worker in this EXE.
     context->addin_directory = runtime / L"AddIn";
     context->ttpcomm_path = runtime / L"ttpcomm.dll";
 
@@ -1528,8 +1543,11 @@ void PlayerWindow::ShowPlaylistProperties(
     if (created <= 0) return;
     context->sheet = reinterpret_cast<HWND>(created);
     context->post_target.store(context->sheet, std::memory_order_release);
-    SetWindowSubclass(context->sheet, FileInfoSheetSubclass, 1,
-                      reinterpret_cast<DWORD_PTR>(context.get()));
+    if (!SetWindowSubclass(context->sheet, FileInfoSheetSubclass, 1,
+                           reinterpret_cast<DWORD_PTR>(context.get()))) {
+        DestroyWindow(context->sheet);
+        return;
+    }
     CreateFileInfoButtons(*context);
     UpdateSheetState(*context);
     BeginRead(context);
@@ -1551,6 +1569,13 @@ void PlayerWindow::ShowPlaylistProperties(
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        // A modeless property sheet may end its current page while keeping
+        // the outer HWND alive (e.g. PSM_PRESSBUTTON or keyboard navigation).
+        // Windows requires the host loop to destroy that completed sheet;
+        // merely testing IsWindow leaves an uncloseable disabled shell.
+        if (context->sheet && IsWindow(context->sheet) &&
+            !SendMessageW(context->sheet, PSM_GETCURRENTPAGEHWND, 0, 0))
+            break;
     }
     context->closing = true;
     context->post_target.store(nullptr, std::memory_order_release);

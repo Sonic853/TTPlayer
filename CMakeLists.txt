@@ -17,6 +17,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(ttplayer_core
+  src/app/dsp_worker.cpp
+  src/app/file_info_worker.cpp
+  src/app/output_device_worker.cpp
   src/audio/archive_member.cpp
   src/audio/asio_sink.cpp
   src/audio/audio_engine.cpp
@@ -91,21 +94,23 @@ target_compile_definitions(ttplayer_rebuild PRIVATE UNICODE _UNICODE NOMINMAX WI
 target_compile_options(ttplayer_rebuild PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_rebuild PRIVATE ttplayer_core ttpcomm_api comctl32 comdlg32 shell32)
 
-# Winamp DSP DLLs are untrusted legacy in-process extensions.  The options
-# page inspects/configures them through this same-bitness helper so a broken
-# DllMain or header callback cannot hang or crash the player UI process.
-add_executable(ttplayer_dsp_probe tools/dsp_plugin_probe.cpp)
+# Standalone development/test front ends only. The shipped player embeds all
+# three workers and relaunches itself in private modes for fault isolation;
+# building/distributing ttplayer_rebuild does not require any helper EXE.
+add_executable(ttplayer_dsp_probe EXCLUDE_FROM_ALL
+  tools/dsp_plugin_probe.cpp src/app/dsp_worker.cpp)
+target_include_directories(ttplayer_dsp_probe PRIVATE include)
 target_compile_definitions(ttplayer_dsp_probe PRIVATE
   UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(ttplayer_dsp_probe PRIVATE /W4 /permissive- /EHsc /utf-8)
 set_property(TARGET ttplayer_dsp_probe PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
-add_dependencies(ttplayer_rebuild ttplayer_dsp_probe)
 
 # Legacy output discovery enters SetupAPI, KS miniports and DirectSound driver
 # code.  Keep the original catalogue/order, but run that blocking boundary in
 # a same-bitness helper which the modeless Options window can time out safely.
-add_executable(ttplayer_output_device_probe
+add_executable(ttplayer_output_device_probe EXCLUDE_FROM_ALL
   tools/output_device_probe.cpp
+  src/app/output_device_worker.cpp
   src/audio/asio_sink.cpp
   src/audio/native_output_contract.cpp
   src/ui/legacy_output_devices.cpp
@@ -119,21 +124,19 @@ target_link_libraries(ttplayer_output_device_probe PRIVATE
   winmm dsound setupapi ole32)
 set_property(TARGET ttplayer_output_device_probe PROPERTY
   MSVC_RUNTIME_LIBRARY MultiThreaded)
-add_dependencies(ttplayer_rebuild ttplayer_output_device_probe)
 
 # CFileInfoDlg enters third-party reader/tag-writer vtables on worker threads.
 # Keep that recovered ABI, but isolate it so Close/cancel can enforce a hard
 # bound even when an old add-in never returns from Open or metadata slot 6.
-add_executable(ttplayer_file_info_probe tools/file_info_probe.cpp)
+add_executable(ttplayer_file_info_probe EXCLUDE_FROM_ALL tools/file_info_probe.cpp)
 target_include_directories(ttplayer_file_info_probe PRIVATE src/ui)
 target_compile_definitions(ttplayer_file_info_probe PRIVATE
   UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(ttplayer_file_info_probe PRIVATE
   /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_file_info_probe PRIVATE ttplayer_core)
-add_dependencies(ttplayer_rebuild ttplayer_file_info_probe)
 
-foreach(dsp_fixture IN ITEMS valid old stall fault pacemaker)
+foreach(dsp_fixture IN ITEMS valid old stall fault pacemaker configure)
   add_library(dsp_probe_${dsp_fixture} SHARED tests/mock_winamp_dsp.cpp)
   target_compile_definitions(dsp_probe_${dsp_fixture} PRIVATE
     UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -149,6 +152,16 @@ target_compile_definitions(dsp_probe_stall PRIVATE TTPLAYER_DSP_STALL_HEADER)
 target_compile_definitions(dsp_probe_fault PRIVATE TTPLAYER_DSP_FAULT_MODIFY)
 target_compile_definitions(dsp_probe_pacemaker PRIVATE
   TTPLAYER_DSP_PACEMAKER_HEADER)
+target_compile_definitions(dsp_probe_configure PRIVATE TTPLAYER_DSP_CONFIGURE_HEADER)
+
+add_executable(portable_worker_tests tests/portable_worker_tests.cpp)
+target_include_directories(portable_worker_tests PRIVATE src/ui)
+target_compile_definitions(portable_worker_tests PRIVATE
+  UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(portable_worker_tests PRIVATE /W4 /permissive- /EHsc /utf-8 /UNDEBUG)
+target_link_libraries(portable_worker_tests PRIVATE ttplayer_core)
+add_dependencies(portable_worker_tests ttplayer_rebuild dsp_probe_configure
+  ttplayer_output_device_probe)
 
 add_executable(dsp_probe_tests tests/dsp_probe_tests.cpp)
 target_compile_definitions(dsp_probe_tests PRIVATE
@@ -185,7 +198,8 @@ target_compile_options(file_association_tests PRIVATE
   /W4 /permissive- /EHsc /utf-8 /UNDEBUG)
 target_link_libraries(file_association_tests PRIVATE ttplayer_core)
 
-add_executable(desktop_lyrics_tests tests/desktop_lyrics_tests.cpp)
+add_executable(desktop_lyrics_tests tests/desktop_lyrics_tests.cpp
+  tests/desktop_lyric_scroll_tests.cpp)
 target_compile_definitions(desktop_lyrics_tests PRIVATE
   UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(desktop_lyrics_tests PRIVATE
@@ -210,7 +224,7 @@ target_link_libraries(playlist_network_commands_tests PRIVATE ttplayer_core)
 add_executable(file_info_probe_protocol_tests
   tests/file_info_probe_protocol_tests.cpp
   src/ui/file_info_probe_client.cpp)
-target_include_directories(file_info_probe_protocol_tests PRIVATE src/ui)
+target_include_directories(file_info_probe_protocol_tests PRIVATE src/ui include)
 target_compile_definitions(file_info_probe_protocol_tests PRIVATE
   UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(file_info_probe_protocol_tests PRIVATE
@@ -514,6 +528,16 @@ add_test(NAME dsp_probe_tests COMMAND dsp_probe_tests
          "$<TARGET_FILE:dsp_probe_valid>"
          "$<TARGET_FILE:dsp_probe_old>"
          "$<TARGET_FILE:dsp_probe_stall>")
+add_test(NAME embedded_dsp_probe_tests COMMAND dsp_probe_tests
+         "$<TARGET_FILE:ttplayer_rebuild>"
+         "$<TARGET_FILE:dsp_probe_valid>"
+         "$<TARGET_FILE:dsp_probe_old>"
+         "$<TARGET_FILE:dsp_probe_stall>" --embedded)
+add_test(NAME portable_worker_tests COMMAND portable_worker_tests
+         "$<TARGET_FILE:ttplayer_rebuild>"
+         "$<TARGET_FILE:dsp_probe_configure>"
+         "$<TARGET_FILE:ttplayer_output_device_probe>")
+set_tests_properties(portable_worker_tests embedded_dsp_probe_tests PROPERTIES TIMEOUT 45)
 add_test(NAME winamp_dsp_runtime_tests COMMAND winamp_dsp_runtime_tests
          "$<TARGET_FILE:dsp_probe_valid>"
          "$<TARGET_FILE:dsp_probe_old>"

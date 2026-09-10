@@ -2,6 +2,7 @@
 #include "player_window_internal.h"
 #include "legacy_output_devices.h"
 #include "modern_file_dialog.h"
+#include "ttplayer/app/worker_process.h"
 #include "ttplayer/settings/file_association.h"
 #include "ttplayer/ui/player_runtime_policy.h"
 
@@ -440,13 +441,7 @@ std::filesystem::path DspTemporaryFile() {
 }
 
 std::wstring QuoteDspArgument(std::wstring_view argument) {
-    std::wstring result{L"\""};
-    for (const wchar_t value : argument) {
-        if (value == L'\"') result += L'\\';
-        result += value;
-    }
-    result += L'\"';
-    return result;
+    return app::QuoteWorkerArgument(argument);
 }
 
 bool WriteDspRequest(const std::filesystem::path& request,
@@ -518,8 +513,8 @@ std::optional<std::vector<DspProbeResult>> ReadDspResults(
 }
 
 std::optional<std::vector<LegacyOutputDevice>> RunOutputDeviceProbe(
-    const std::filesystem::path& helper,
     const LegacyOutputDevice* selected_device = nullptr) {
+    const auto helper = app::CurrentExecutablePath();
     if (helper.empty()) return std::nullopt;
     const auto request = selected_device ? DspTemporaryFile()
                                          : std::filesystem::path{};
@@ -536,7 +531,8 @@ std::optional<std::vector<LegacyOutputDevice>> RunOutputDeviceProbe(
         return std::nullopt;
     }
 
-    std::wstring command = QuoteDspArgument(helper.wstring());
+    std::wstring command = app::WorkerCommandPrefix(
+        helper, app::kOutputDeviceWorkerSwitch);
     if (selected_device) {
         command += L" --details " + QuoteDspArgument(request.wstring());
     }
@@ -2331,8 +2327,13 @@ void PlayerWindow::StartOptionsDspScan(
         return;
     }
 
-    const auto helper = FindRuntimePath(L"ttplayer_dsp_probe.exe");
-    std::wstring command = QuoteDspArgument(helper.wstring()) + L" --scan " +
+    const auto helper = app::CurrentExecutablePath();
+    if (helper.empty()) {
+        CancelOptionsDspScan();
+        return;
+    }
+    std::wstring command = app::WorkerCommandPrefix(helper, app::kDspWorkerSwitch) +
+                           L" --scan " +
                            QuoteDspArgument(options_dsp_scan_request_.wstring()) +
                            L" " +
                            QuoteDspArgument(options_dsp_scan_output_.wstring());
@@ -2357,8 +2358,12 @@ void PlayerWindow::StartOptionsDspScan(
             options_dsp_scan_job_ = nullptr;
         }
     }
-    ResumeThread(process.hThread);
+    const DWORD resumed = ResumeThread(process.hThread);
     CloseHandle(process.hThread);
+    if (resumed == static_cast<DWORD>(-1)) {
+        CancelOptionsDspScan();
+        return;
+    }
     options_dsp_scan_started_ = GetTickCount64();
     SetTimer(dialog, kOptionsDspPollTimer, kOptionsDspPollMilliseconds,
              nullptr);
@@ -2426,8 +2431,9 @@ void PlayerWindow::PollOptionsDspScan(HWND dialog) {
 
 void PlayerWindow::LaunchOptionsDspConfiguration(
     HWND dialog, const std::filesystem::path& module) {
-    const auto helper = FindRuntimePath(L"ttplayer_dsp_probe.exe");
-    std::wstring command = QuoteDspArgument(helper.wstring()) +
+    const auto helper = app::CurrentExecutablePath();
+    if (helper.empty()) return;
+    std::wstring command = app::WorkerCommandPrefix(helper, app::kDspWorkerSwitch) +
                            L" --configure " +
                            QuoteDspArgument(module.wstring()) + L" " +
                            std::to_wstring(reinterpret_cast<ULONG_PTR>(dialog));
@@ -3572,8 +3578,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         // isolate every driver call in a same-bitness kill-on-close helper:
         // SetupDi/CreateFile/DirectSound callbacks themselves have no usable
         // in-process cancellation contract if a legacy driver stalls.
-        auto discovered = RunOutputDeviceProbe(
-            FindRuntimePath(L"ttplayer_output_device_probe.exe"));
+        auto discovered = RunOutputDeviceProbe();
         const bool complete_catalog = discovered.has_value();
         const auto append_devices = [this](
                 std::vector<LegacyOutputDevice> sources) {
@@ -4991,8 +4996,7 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
         request.class_id = entry.identifier;
         request.has_class_id = entry.has_identifier;
         request.details = entry.details;
-        auto resolved = RunOutputDeviceProbe(
-            FindRuntimePath(L"ttplayer_output_device_probe.exe"), &request);
+        auto resolved = RunOutputDeviceProbe(&request);
         if (resolved && resolved->size() == 1 &&
             (*resolved)[0].backend == entry.backend &&
             _wcsicmp((*resolved)[0].key.c_str(), entry.key.c_str()) == 0) {
