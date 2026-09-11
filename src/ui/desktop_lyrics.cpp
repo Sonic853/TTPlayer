@@ -4,7 +4,7 @@
 #include "ttplayer/core/text.h"
 #include "ttplayer/lyrics/lrc_parser.h"
 #include "ttplayer/settings/settings.h"
-#include "ttplayer/skin/legacy_skin.h"
+#include "ttplayer/skin/skin.h"
 
 #include <algorithm>
 #include <array>

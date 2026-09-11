@@ -1,4 +1,4 @@
-#include "legacy_output_devices.h"
+#include "output_devices.h"
 #include "ttplayer/audio/asio_sink.h"
 #include "ttplayer/audio/native_output_contract.h"
 

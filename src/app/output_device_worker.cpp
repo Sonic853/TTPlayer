@@ -1,5 +1,5 @@
 #include "ttplayer/app/worker_process.h"
-#include "../ui/legacy_output_devices.h"
+#include "../ui/output_devices.h"
 
 #include <windows.h>
 #include <objbase.h>

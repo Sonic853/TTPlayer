@@ -6,7 +6,7 @@
 #include "ttplayer/playlist/playlist_store.h"
 #include "ttplayer/plugins/plugin_manager.h"
 #include "ttplayer/settings/settings.h"
-#include "ttplayer/skin/legacy_skin.h"
+#include "ttplayer/skin/skin.h"
 #include "ttplayer/skin/skin_package.h"
 #include "ttplayer/ui/desktop_lyrics.h"
 #include "ttplayer/ui/playlist_rating_input.h"

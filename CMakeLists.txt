@@ -41,7 +41,7 @@ add_library(ttplayer_core
   src/plugins/plugin_manager.cpp
   src/settings/file_association.cpp
   src/settings/settings.cpp
-  src/skin/legacy_skin.cpp
+  src/skin/skin.cpp
   src/skin/skin_package.cpp
   src/ui/desktop_lyrics.cpp
   src/ui/directory_change_monitor.cpp
@@ -51,7 +51,7 @@ add_library(ttplayer_core
   src/ui/taskbar_playback.cpp
   src/ui/player_window_equalizer.cpp
   src/ui/player_window_file_intake.cpp
-  src/ui/legacy_output_devices.cpp
+  src/ui/output_devices.cpp
   src/ui/modern_file_dialog.cpp
   src/ui/player_control_packet.cpp
   src/ui/player_window_lyrics.cpp
@@ -87,7 +87,7 @@ target_compile_definitions(ttpcomm_api PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_M
 
 add_executable(ttplayer_rebuild WIN32
   src/app/application.cpp
-  src/app/legacy_exports.cpp
+  src/app/exports.cpp
   src/app/main.cpp
   src/app/resources.rc
   src/app/runtime.cpp
@@ -145,7 +145,7 @@ add_executable(ttplayer_output_device_probe EXCLUDE_FROM_ALL
   src/app/output_device_worker.cpp
   src/audio/asio_sink.cpp
   src/audio/native_output_contract.cpp
-  src/ui/legacy_output_devices.cpp
+  src/ui/output_devices.cpp
 )
 target_include_directories(ttplayer_output_device_probe PRIVATE src/ui include)
 target_compile_definitions(ttplayer_output_device_probe PRIVATE
@@ -311,7 +311,7 @@ set_property(TARGET ttp_mock_stalling PROPERTY MSVC_RUNTIME_LIBRARY MultiThreade
 
 add_executable(audio_recovery_tests tests/audio_recovery_tests.cpp)
 add_executable(conversion_recovery_tests tests/conversion_recovery_tests.cpp
-  src/app/legacy_exports.cpp)
+  src/app/exports.cpp)
 target_compile_definitions(conversion_recovery_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(conversion_recovery_tests PRIVATE /W4 /permissive- /EHsc /utf-8 /UNDEBUG)
 target_link_libraries(conversion_recovery_tests PRIVATE ttplayer_core)

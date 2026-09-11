@@ -1,4 +1,4 @@
-#include "ttplayer/skin/legacy_skin.h"
+#include "ttplayer/skin/skin.h"
 
 #include <algorithm>
 #include <array>

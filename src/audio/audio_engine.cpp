@@ -11,7 +11,7 @@
 #include "ttplayer/audio/replay_gain_scanner.h"
 #include "ttplayer/audio/winamp_dsp.h"
 #include "ttplayer/plugins/plugin_manager.h"
-#include "../ui/legacy_output_devices.h"
+#include "../ui/output_devices.h"
 
 #include <algorithm>
 #include <array>

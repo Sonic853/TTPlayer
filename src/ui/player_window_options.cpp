@@ -1,6 +1,6 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
-#include "legacy_output_devices.h"
+#include "output_devices.h"
 #include "modern_file_dialog.h"
 #include "ttplayer/app/worker_process.h"
 #include "ttplayer/settings/file_association.h"
