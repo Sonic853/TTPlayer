@@ -3124,6 +3124,7 @@ void PlayerWindow::AddToolTipTool(HWND owner, UINT_PTR identifier,
 
 bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
     auto* queued = const_cast<MSG*>(&message);
+    if (TranslatePlaylistConverterMessage(*queued)) return true;
     // PSH_MODELESS requires the application's message filter to run the
     // property-sheet dialog manager.  Omitting this was also enough to make
     // keyboard navigation appear hung while the audio/UI thread remained up.
@@ -5051,30 +5052,30 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
         if (playlist_selected_rows_.empty() ||
             !PlaylistConvertCommandAvailable(sound_library_)) return true;
         std::vector<playlist::Track> tracks;
+        std::vector<std::wstring> display_titles;
         tracks.reserve(playlist_selected_rows_.size());
         for (const size_t row : playlist_selected_rows_) {
-            if (const auto* track = VisiblePlaylistTrack(row))
+            if (const auto* track = VisiblePlaylistTrack(row)) {
                 tracks.push_back(*track);
+                display_titles.push_back(PlaylistDisplayText(*track));
+            }
         }
         if (tracks.empty()) return true;
-        const auto outputs = ShowPlaylistConverter(
-            playlist_window_, ResourceModule(), ttpcomm_module_,
+        ShowPlaylistConverter(
+            window_, ResourceModule(), ttpcomm_module_,
             sound_library_, std::move(tracks), settings_.convert,
-            settings_.equalizer);
-        if (outputs && !outputs->empty() &&
-            settings_.convert.add_to_playlist) {
+            settings_.equalizer, [this](const std::filesystem::path& path) {
             if (settings_.playlist.library_mode) {
                 std::vector<playlist::Track> converted;
-                for (const auto& path : *outputs)
-                    static_cast<void>(CollectImportedTracks(path, converted));
+                static_cast<void>(CollectImportedTracks(path, converted));
                 static_cast<void>(CommitMediaLibraryTracks(
                     std::move(converted), VisiblePlaylistTrackCount(), false));
             } else {
                 static_cast<void>(ImportFiles(
-                    *outputs, playlists_.ActiveIndex(), std::nullopt, false,
+                    {path}, playlists_.ActiveIndex(), std::nullopt, false,
                     ImportPlayback::none));
             }
-        }
+        }, std::move(display_titles));
         return true;
     }
     if (command == kPlaylistReplayGainScan) {

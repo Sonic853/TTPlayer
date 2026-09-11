@@ -26,6 +26,8 @@ constexpr std::uint32_t kCloseOpcode = 2;
 constexpr std::uint32_t kPingOpcode = 3;
 constexpr std::uint32_t kPongOpcode = 4;
 constexpr std::uint32_t kMaximumPayloadBytes = 1024U * 1024U;
+// Local coalescing policy, not a claim about Discord's server-side rate limit.
+constexpr auto kLyricUpdateInterval = std::chrono::seconds(2);
 
 class UniqueHandle final {
 public:
@@ -83,6 +85,92 @@ std::wstring ClampText(std::wstring_view text, size_t maximum_characters) {
         ++characters;
     }
     return result;
+}
+
+size_t CharacterCount(std::wstring_view text) {
+    size_t count{};
+    for (size_t index = 0; index < text.size(); ++index, ++count) {
+        if (text[index] >= 0xD800 && text[index] <= 0xDBFF &&
+            index + 1 < text.size() && text[index + 1] >= 0xDC00 &&
+            text[index + 1] <= 0xDFFF) ++index;
+    }
+    return count;
+}
+
+std::wstring Ellipsize(std::wstring_view text, size_t budget) {
+    if (CharacterCount(text) <= budget) return std::wstring(text);
+    return budget == 0 ? std::wstring{} : ClampText(text, budget - 1) + L"…";
+}
+
+std::wstring ClockText(std::chrono::milliseconds position) {
+    const auto seconds = std::max<std::int64_t>(0, position.count() / 1000);
+    const auto two_digits = [](std::int64_t value) {
+        return (value < 10 ? L"0" : L"") + std::to_wstring(value);
+    };
+    if (seconds < 3600)
+        return two_digits(seconds / 60) + L":" + two_digits(seconds % 60);
+    return std::to_wstring(seconds / 3600) + L":" +
+           two_digits(seconds / 60 % 60) + L":" + two_digits(seconds % 60);
+}
+
+std::wstring ActivityStateText(const DiscordTrackPresence& presence) {
+    const bool known_duration = presence.duration.count() > 0;
+    const bool radio = presence.audio_kind == DiscordAudioKind::radio;
+    std::wstring prefix;
+    if (presence.playback == DiscordPlaybackState::paused) {
+        prefix = L"已暂停 · ";
+        if (radio && !known_duration) prefix += L"已收听 ";
+        prefix += ClockText(discord_presence_detail::ProjectPresencePosition(
+            presence, std::chrono::milliseconds::zero()));
+        if (known_duration) prefix += L" / " + ClockText(presence.duration);
+        else if (!radio) prefix += L" / 未知时长";
+    } else if (radio) {
+        prefix = known_duration ? L"电台" : L"电台直播";
+    } else if (presence.audio_kind == DiscordAudioKind::network_audio) {
+        prefix = known_duration ? L"网络音频" : L"网络音频 · 时长未知";
+    } else if (!known_duration) {
+        prefix = L"时长未知";
+    }
+
+    std::vector<std::wstring> parts;
+    const bool have_lyric = !presence.lyric.empty() &&
+        presence.position >= presence.lyric_start &&
+        (!presence.lyric_end || presence.position < *presence.lyric_end);
+    if (have_lyric) parts.push_back(L"♪ " + presence.lyric);
+    if (!presence.station.empty() && presence.station != presence.title)
+        parts.push_back(presence.station);
+    if (auto artist = Trim(presence.artist); !artist.empty())
+        parts.push_back(std::move(artist));
+    if (auto album = Trim(presence.album); !album.empty())
+        parts.push_back(L"专辑：" + album);
+    if (parts.empty()) return prefix.empty() ? L"正在播放" : prefix;
+
+    // Preserve the complete pause/time prefix and share the remaining 128
+    // Unicode characters fairly. A long artist must not erase the album (or
+    // station); unused space from short fields is assigned to the longer ones.
+    constexpr size_t maximum_characters = 128;
+    const size_t separators = parts.size() - (prefix.empty() ? 1 : 0);
+    size_t remaining = maximum_characters - CharacterCount(prefix) - separators * 3;
+    std::vector<size_t> budgets(parts.size());
+    std::vector<size_t> lengths;
+    for (const auto& part : parts) lengths.push_back(CharacterCount(part));
+    while (remaining != 0) {
+        bool allocated{};
+        for (size_t index = 0; index < parts.size() && remaining != 0; ++index) {
+            if (budgets[index] == lengths[index]) continue;
+            const auto allocation = std::min({remaining, lengths[index] - budgets[index],
+                size_t{have_lyric && index == 0 ? 3U : 1U}});
+            budgets[index] += allocation;
+            remaining -= allocation;
+            allocated = true;
+        }
+        if (!allocated) break;
+    }
+    for (size_t index = 0; index < parts.size(); ++index) {
+        if (!prefix.empty()) prefix += L" · ";
+        prefix += Ellipsize(parts[index], budgets[index]);
+    }
+    return prefix;
 }
 
 std::string JsonEscape(std::wstring_view value) {
@@ -190,10 +278,12 @@ bool AwaitFrame(HANDLE pipe, std::string_view marker,
     return false;
 }
 
-UniqueHandle ConnectPipe(std::string_view application_id) {
-    for (int index = 0; index < 10; ++index) {
-        const std::wstring name = L"\\\\?\\pipe\\discord-ipc-" +
-                                  std::to_wstring(index);
+UniqueHandle ConnectPipe(std::string_view application_id,
+                         const std::wstring& test_pipe_name) {
+    for (int index = 0; index < (test_pipe_name.empty() ? 10 : 1); ++index) {
+        const std::wstring name = test_pipe_name.empty()
+            ? L"\\\\?\\pipe\\discord-ipc-" + std::to_wstring(index)
+            : test_pipe_name;
         UniqueHandle pipe(CreateFileW(
             name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
             OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr));
@@ -239,7 +329,11 @@ bool SameStableActivity(const DiscordTrackPresence& left,
                         const DiscordTrackPresence& right) noexcept {
     return left.title == right.title && left.artist == right.artist &&
            left.album == right.album && left.duration == right.duration &&
-           left.playback == right.playback;
+           left.playback == right.playback &&
+           left.audio_kind == right.audio_kind && left.station == right.station &&
+           left.track_identity == right.track_identity &&
+           left.timeline_revision == right.timeline_revision &&
+           left.seek_pending == right.seek_pending;
 }
 
 } // namespace
@@ -264,6 +358,17 @@ std::string BuildHandshakeJson(std::string_view application_id) {
            "\"}";
 }
 
+std::chrono::milliseconds ProjectPresencePosition(
+    const DiscordTrackPresence& presence, std::chrono::milliseconds elapsed) {
+    auto position = std::max(presence.position, std::chrono::milliseconds::zero());
+    if (presence.playback == DiscordPlaybackState::playing &&
+        !presence.seek_pending && elapsed.count() > 0) {
+        position += std::min(elapsed, std::chrono::milliseconds::max() - position);
+    }
+    if (presence.duration.count() > 0) position = std::min(position, presence.duration);
+    return position;
+}
+
 std::string BuildSetActivityJson(const DiscordTrackPresence* presence,
                                  std::uint32_t process_id,
                                  std::string_view nonce,
@@ -273,29 +378,26 @@ std::string BuildSetActivityJson(const DiscordTrackPresence* presence,
     if (!presence || presence->playback == DiscordPlaybackState::stopped) {
         result += "null";
     } else {
-        std::wstring title = presence->title.empty()
-            ? std::wstring(L"未知曲目") : presence->title;
-        std::wstring state;
-        if (presence->playback == DiscordPlaybackState::paused)
-            state = L"已暂停";
-        if (!presence->artist.empty()) {
-            if (!state.empty()) state += L" · ";
-            state += presence->artist;
-        }
-        if (!presence->album.empty()) {
-            if (!state.empty()) state += L" · ";
-            state += presence->album;
-        }
-        if (state.empty()) state = L"正在播放";
-
-        result += "{\"type\":2,\"details\":\"" + JsonEscape(title) +
-                  "\",\"state\":\"" + JsonEscape(state) + "\"";
+        auto title = Trim(presence->title);
+        if (title.empty()) title = presence->station.empty()
+            ? L"未知曲目" : presence->station;
+        // Details (2) makes the member-list status show the song/program title
+        // without changing the registered application name. This is local RPC;
+        // its timestamps use Unix seconds, not Gateway's millisecond encoding.
+        result += "{\"type\":2,\"status_display_type\":2,\"details\":\"" +
+                  JsonEscape(Ellipsize(title, 128)) + "\",\"state\":\"" +
+                  JsonEscape(ActivityStateText(*presence)) + "\"";
         if (presence->playback == DiscordPlaybackState::playing) {
-            const auto position_seconds = std::max<std::int64_t>(
-                0, presence->position.count() / 1000);
+            const auto position_seconds = ProjectPresencePosition(
+                *presence, std::chrono::milliseconds::zero()).count() / 1000;
             const auto duration_seconds = std::max<std::int64_t>(
                 0, presence->duration.count() / 1000);
-            if (duration_seconds > position_seconds) {
+            if (presence->duration.count() <= 0) {
+                // Unknown duration is not an error and has no fictitious end
+                // time. Discord counts up from the elapsed/listening position.
+                result += ",\"timestamps\":{\"start\":" +
+                    std::to_string(unix_time_seconds - position_seconds) + "}";
+            } else if (duration_seconds > position_seconds) {
                 result += ",\"timestamps\":{\"start\":" +
                     std::to_string(unix_time_seconds - position_seconds) +
                     ",\"end\":" +
@@ -325,7 +427,8 @@ std::vector<std::uint8_t> BuildRpcFrame(std::uint32_t opcode,
 
 class DiscordPresence::Impl final {
 public:
-    Impl() : worker_([this] { Run(); }) {}
+    explicit Impl(std::wstring test_pipe_name = {})
+        : test_pipe_name_(std::move(test_pipe_name)), worker_([this] { Run(); }) {}
 
     ~Impl() {
         {
@@ -349,30 +452,42 @@ public:
         changed_.notify_one();
     }
 
-    void Update(DiscordTrackPresence presence) {
+    void Update(DiscordTrackPresence presence,
+                std::chrono::steady_clock::time_point observed_at) {
         const auto now = std::chrono::steady_clock::now();
+        observed_at = std::min(observed_at, now);
         {
             std::lock_guard lock(mutex_);
             if (presence.playback == DiscordPlaybackState::stopped) {
                 if (!desired_) return;
                 desired_.reset();
+                clock_anchor_.reset();
+                ++urgent_revision_;
             } else {
-                // RefreshPlaybackUi runs four times per second.  Discord's
-                // timestamp continues on its own, so only publish a seek when
-                // the observed clock departs materially from that projection.
-                if (desired_ && SameStableActivity(*desired_, presence)) {
-                    if (presence.playback != DiscordPlaybackState::playing &&
-                        desired_->position == presence.position) return;
-                    if (presence.playback == DiscordPlaybackState::playing) {
-                        const auto projected = desired_->position +
-                            std::chrono::duration_cast<std::chrono::milliseconds>(
-                                now - desired_time_);
-                        if (std::chrono::abs(projected - presence.position) <
-                            std::chrono::seconds(3)) return;
-                    }
+                bool urgent = !desired_ || !SameStableActivity(*desired_, presence);
+                if (!urgent && presence.playback == DiscordPlaybackState::paused)
+                    urgent = desired_->position != presence.position;
+                if (!urgent && clock_anchor_) {
+                    const auto projected = discord_presence_detail::ProjectPresencePosition(
+                        *clock_anchor_, std::chrono::duration_cast<std::chrono::milliseconds>(
+                            observed_at - clock_anchor_time_));
+                    // Recovery for unannounced clock discontinuities only.
+                    // Explicit seeks use timeline_revision, with NO size threshold.
+                    urgent = std::chrono::abs(projected - presence.position) >=
+                        std::chrono::seconds(3);
                 }
+                const bool lyric_changed = !desired_ || desired_->lyric != presence.lyric;
+                // Always retain the newest audio sample, even when the visible
+                // activity is unchanged. Reconnect must not use a minutes-old
+                // sample just because regular clock updates were deduplicated.
                 desired_ = std::move(presence);
-                desired_time_ = now;
+                desired_time_ = observed_at;
+                if (!urgent && !lyric_changed) return;
+                if (urgent) {
+                    clock_anchor_ = desired_;
+                    clock_anchor_time_ = observed_at;
+                    ++urgent_revision_;
+                }
             }
             ++revision_;
         }
@@ -384,7 +499,9 @@ public:
             std::lock_guard lock(mutex_);
             if (!desired_) return;
             desired_.reset();
+            clock_anchor_.reset();
             ++revision_;
+            ++urgent_revision_;
         }
         changed_.notify_one();
     }
@@ -395,11 +512,24 @@ private:
         std::wstring application_id;
         std::optional<DiscordTrackPresence> desired;
         std::uint64_t revision{};
+        std::chrono::steady_clock::time_point observed_at;
+        std::uint64_t urgent_revision{};
+        bool stopping{};
     };
 
     Snapshot GetSnapshot() {
         std::lock_guard lock(mutex_);
-        return {enabled_, application_id_, desired_, revision_};
+        return {enabled_, application_id_, desired_, revision_, desired_time_,
+                urgent_revision_, stopping_};
+    }
+
+    void WaitForChange(std::uint64_t revision,
+                       std::chrono::steady_clock::time_point deadline) {
+        std::unique_lock lock(mutex_);
+        const auto changed = [&] { return stopping_ || revision_ != revision; };
+        if (deadline == std::chrono::steady_clock::time_point::max())
+            changed_.wait(lock, changed);
+        else changed_.wait_until(lock, deadline, changed);
     }
 
     void Run() noexcept {
@@ -407,35 +537,21 @@ private:
             UniqueHandle pipe;
             std::wstring connected_id;
             bool published = false;
-            std::uint64_t processed_revision = 0;
+            std::uint64_t processed_revision{};
+            std::uint64_t processed_urgent_revision{};
+            bool needs_publish{};
             auto next_probe = std::chrono::steady_clock::time_point::max();
+            auto retry_after = std::chrono::steady_clock::time_point::min();
+            auto next_lyric_send = std::chrono::steady_clock::time_point::min();
+            std::wstring retry_id;
 
             for (;;) {
-                bool periodic = false;
-                {
-                    std::unique_lock lock(mutex_);
-                    if (next_probe == std::chrono::steady_clock::time_point::max()) {
-                        changed_.wait(lock, [&] {
-                            return stopping_ || revision_ != processed_revision;
-                        });
-                    } else if (!changed_.wait_until(lock, next_probe, [&] {
-                                   return stopping_ ||
-                                          revision_ != processed_revision;
-                               })) {
-                        periodic = true;
-                    }
-                    if (stopping_) {
-                        lock.unlock();
-                        if (pipe && published) static_cast<void>(Publish(pipe.Get(), nullptr));
-                        return;
-                    }
-                }
-
-                const std::uint64_t previous_revision = processed_revision;
                 const Snapshot state = GetSnapshot();
-                const bool state_changed =
-                    state.revision != previous_revision;
-                processed_revision = state.revision;
+                if (state.stopping) {
+                    if (pipe && published) static_cast<void>(Publish(pipe.Get(), nullptr));
+                    return;
+                }
+                const auto now = std::chrono::steady_clock::now();
                 const bool valid = state.enabled &&
                     discord_presence_detail::IsValidApplicationId(
                         state.application_id);
@@ -445,7 +561,9 @@ private:
                     pipe.Reset();
                     connected_id.clear();
                     published = false;
-                    next_probe = std::chrono::steady_clock::time_point::max();
+                    needs_publish = false;
+                    retry_after = std::chrono::steady_clock::time_point::min();
+                    WaitForChange(state.revision, std::chrono::steady_clock::time_point::max());
                     continue;
                 }
 
@@ -453,8 +571,7 @@ private:
                 try { application_id = core::WideToUtf8(state.application_id); }
                 catch (...) { application_id.clear(); }
                 if (application_id.empty()) {
-                    next_probe = std::chrono::steady_clock::now() +
-                                 std::chrono::seconds(5);
+                    WaitForChange(state.revision, now + std::chrono::seconds(5));
                     continue;
                 }
 
@@ -463,39 +580,67 @@ private:
                     pipe.Reset();
                     published = false;
                 }
-                // A Configure/Update may race the instant a periodic wait
-                // expires.  Publish that newer revision first; treating it as
-                // a pure health probe would acknowledge and then lose it.
-                if (periodic && !state_changed && pipe) {
-                    if (ProbeConnection(pipe.Get())) {
-                        next_probe = std::chrono::steady_clock::now() +
-                                     std::chrono::seconds(15);
+                if (!pipe) {
+                    if (retry_id == state.application_id && now < retry_after) {
+                        WaitForChange(state.revision, retry_after);
                         continue;
                     }
-                    pipe.Reset();
-                    published = false;
-                }
-                if (!pipe) {
-                    pipe = ConnectPipe(application_id);
-                    if (pipe) connected_id = state.application_id;
+                    pipe = ConnectPipe(application_id, test_pipe_name_);
+                    if (pipe) {
+                        connected_id = state.application_id;
+                        needs_publish = true;
+                        next_probe = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+                    } else {
+                        retry_id = state.application_id;
+                        retry_after = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                    }
+                    // Connect/READY can block. Re-read ALL state afterwards,
+                    // including a seek, pause, new track or disable during it.
+                    continue;
                 }
 
-                bool success = false;
-                if (pipe) {
-                    success = Publish(pipe.Get(), state.desired
-                        ? &*state.desired : nullptr);
-                    if (success) published = state.desired.has_value();
+                if (needs_publish || state.revision != processed_revision) {
+                    const bool urgent = needs_publish ||
+                        state.urgent_revision != processed_urgent_revision || !state.desired;
+                    if (!urgent && now < next_lyric_send) {
+                        WaitForChange(state.revision, next_lyric_send);
+                        continue;
+                    }
+                    // Do not queue individual lyric lines. At the send deadline
+                    // this snapshot is the newest UI sample, not the first line
+                    // which originally woke the thread. Expired lines are hidden
+                    // by ActivityStateText if I/O/UI timing crosses a boundary.
+                    auto projected = state.desired;
+                    if (projected) projected->position =
+                        discord_presence_detail::ProjectPresencePosition(*projected,
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - state.observed_at));
+                    if (Publish(pipe.Get(), projected ? &*projected : nullptr)) {
+                        published = state.desired.has_value();
+                        processed_revision = state.revision;
+                        processed_urgent_revision = state.urgent_revision;
+                        needs_publish = false;
+                        next_lyric_send = std::chrono::steady_clock::now() + kLyricUpdateInterval;
+                        next_probe = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+                    } else {
+                        pipe.Reset();
+                        published = false;
+                        retry_id = state.application_id;
+                        retry_after = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                    }
+                    continue;
                 }
-                if (!success) {
-                    pipe.Reset();
-                    connected_id.clear();
-                    published = false;
-                    next_probe = std::chrono::steady_clock::now() +
-                                 std::chrono::seconds(5);
-                } else {
-                    next_probe = std::chrono::steady_clock::now() +
-                                 std::chrono::seconds(15);
+                if (now >= next_probe) {
+                    if (!ProbeConnection(pipe.Get())) {
+                        pipe.Reset();
+                        published = false;
+                        retry_id = state.application_id;
+                        retry_after = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                    }
+                    next_probe = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+                    continue;
                 }
+                WaitForChange(state.revision, next_probe);
             }
         } catch (...) {
             // Presence is optional.  No transport or allocation failure may
@@ -510,19 +655,26 @@ private:
     std::wstring application_id_;
     std::optional<DiscordTrackPresence> desired_;
     std::chrono::steady_clock::time_point desired_time_{};
+    std::optional<DiscordTrackPresence> clock_anchor_;
+    std::chrono::steady_clock::time_point clock_anchor_time_{};
     std::uint64_t revision_{};
+    std::uint64_t urgent_revision_{};
+    const std::wstring test_pipe_name_;
     std::thread worker_;
 };
 
 DiscordPresence::DiscordPresence() : impl_(std::make_unique<Impl>()) {}
+DiscordPresence::DiscordPresence(std::wstring test_pipe_name)
+    : impl_(std::make_unique<Impl>(std::move(test_pipe_name))) {}
 DiscordPresence::~DiscordPresence() = default;
 
 void DiscordPresence::Configure(bool enabled, std::wstring application_id) {
     impl_->Configure(enabled, std::move(application_id));
 }
 
-void DiscordPresence::Update(DiscordTrackPresence presence) {
-    impl_->Update(std::move(presence));
+void DiscordPresence::Update(DiscordTrackPresence presence,
+                              std::chrono::steady_clock::time_point observed_at) {
+    impl_->Update(std::move(presence), observed_at);
 }
 
 void DiscordPresence::Clear() { impl_->Clear(); }

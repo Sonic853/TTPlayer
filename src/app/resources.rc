@@ -3,3 +3,19 @@
 // TTPlayer.exe loads this exact group-icon identifier in FUN_0045FAD8 before
 // associating the resulting 16x16 HICON with command 0xE140.
 128 ICON "../../../Icons/TTPlayer.ico"
+
+// New optional LAME DLL configuration; legacy AddIns keep their own dialogs.
+4090 DIALOGEX 0, 0, 202, 99
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "LAME MP3"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "Mode:", -1, 10, 12, 65, 12
+    COMBOBOX 100, 80, 10, 110, 65, CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL
+    LTEXT "Bitrate (kbps):", -1, 10, 34, 65, 12
+    COMBOBOX 101, 80, 32, 110, 110, CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL
+    LTEXT "VBR quality (0-9):", -1, 10, 56, 65, 12
+    COMBOBOX 102, 80, 54, 110, 100, CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL
+    DEFPUSHBUTTON "OK", IDOK, 80, 78, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 140, 78, 50, 14
+END

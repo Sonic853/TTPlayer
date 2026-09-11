@@ -744,6 +744,7 @@ struct MpegHeader {
     unsigned bitrate_kbps{};
     unsigned sample_rate{};
     unsigned channels{};
+    std::uint32_t frames{};
 };
 
 std::optional<MpegHeader> DecodeMpegHeader(std::uint32_t value) {
@@ -794,7 +795,24 @@ std::optional<MpegHeader> FindMpegHeader(HANDLE file,
     if (!ReadRange(file, layout.body_begin, length, bytes)) return std::nullopt;
     for (size_t index = 0; index + 4 <= bytes.size(); ++index) {
         const std::uint32_t header = ReadBe32(bytes.data() + index);
-        if (const auto decoded = DecodeMpegHeader(header)) return decoded;
+        if (auto decoded = DecodeMpegHeader(header)) {
+            if (decoded->layer == 3) {
+                const size_t side = decoded->version == 1
+                    ? (decoded->channels == 1 ? 17U : 32U)
+                    : (decoded->channels == 1 ? 9U : 17U);
+                const size_t xing = index + 4U + side;
+                if (xing + 12U <= bytes.size() &&
+                    (std::memcmp(bytes.data()+xing,"Xing",4)==0 ||
+                     std::memcmp(bytes.data()+xing,"Info",4)==0) &&
+                    (ReadBe32(bytes.data()+xing+4)&1U))
+                    decoded->frames = ReadBe32(bytes.data()+xing+8);
+                const size_t vbri = index + 36U;
+                if (!decoded->frames && vbri+18U <= bytes.size() &&
+                    std::memcmp(bytes.data()+vbri,"VBRI",4)==0)
+                    decoded->frames = ReadBe32(bytes.data()+vbri+14);
+            }
+            return decoded;
+        }
     }
     return std::nullopt;
 }
@@ -824,11 +842,21 @@ HRESULT ReadMp3(const std::filesystem::path& path,
         result.codec = L"MPEG " + std::to_wstring(header->version) +
             L" Layer " + std::to_wstring(header->layer);
         if (header->bitrate_kbps != 0 && layout.body_end > layout.body_begin) {
-            const std::uint64_t milliseconds =
-                (layout.body_end - layout.body_begin) * 8ULL /
-                header->bitrate_kbps;
+            // LAME's Xing/Info frame carries the actual frame count. The
+            // first frame bitrate is not the bitrate of a VBR/ABR stream.
+            const unsigned frame_samples = header->version == 1 ? 1152U : 576U;
+            const std::uint64_t milliseconds = header->frames
+                ? static_cast<std::uint64_t>(header->frames) * frame_samples *
+                    1000ULL / header->sample_rate
+                : (layout.body_end - layout.body_begin) * 8ULL / header->bitrate_kbps;
             result.duration_ms = static_cast<DWORD>(
                 std::min<std::uint64_t>(milliseconds, MAXDWORD));
+            if (header->frames && milliseconds) {
+                result.encoded_bits_per_second = static_cast<DWORD>(
+                    std::min<std::uint64_t>((layout.body_end-layout.body_begin)*8000ULL /
+                        milliseconds,MAXDWORD));
+                result.format.nAvgBytesPerSec=result.encoded_bits_per_second/8U;
+            }
         }
     }
     return S_OK;

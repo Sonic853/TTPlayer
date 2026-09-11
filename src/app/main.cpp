@@ -114,6 +114,12 @@ int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, int show_command) {
+    // Original AddIns use pre-ATL-8 heap window thunks. Keep DEP enabled,
+    // but let Windows emulate those thunks, rather than declaring the whole
+    // legacy plugin graph NX-compatible. Paired with /NXCOMPAT:NO in CMake;
+    // applies before both normal startup and embedded plugin workers.
+    // AlwaysOn/AlwaysOff or externally imposed process policy takes precedence.
+    SetProcessDEPPolicy(PROCESS_DEP_ENABLE);
     int count{};
     wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &count);
     // Private workers bypass DLL startup, single-instance IPC, settings and

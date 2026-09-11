@@ -15,6 +15,10 @@
 
 namespace ttplayer::plugins {
 
+// 004C51D3, also exported by the host EXE for old AddIns using temporary WAVs.
+HRESULT CreateLegacyFileStream(const wchar_t* path, DWORD mode,
+                              IStream** output) noexcept;
+
 // One entry in the sound-reader registry built by CSoundLibrary_Initialize.
 // The description is supplied by the successfully instantiated reader
 // creator; it is not read directly from the DLL's string table.
@@ -173,6 +177,11 @@ public:
     HRESULT WritePcm(std::span<const std::byte> pcm,
                      DWORD* encoded_bytes = nullptr) noexcept;
     HRESULT Finalize() noexcept;
+    // ISoundEncoder slot 7 may change with the creator's configuration (AAC
+    // ADTS versus MP4, or an external command-line encoder preset).
+    [[nodiscard]] std::wstring FileExtension() const;
+    // FUN_004121C4 copies nonempty metadata except replaygain_* before Start.
+    HRESULT SetMetadata(std::span<const MetadataEntry> entries) noexcept;
     HRESULT QueryInterface(REFIID iid, void** result) const noexcept;
     [[nodiscard]] const std::filesystem::path& ModulePath() const noexcept;
 
@@ -268,7 +277,8 @@ public:
 
     // FUN_004CD21E and FUN_004CD28F: show a creator's configuration UI or
     // create the selected encoder instance.
-    HRESULT ConfigureEncoder(size_t index, HWND parent) const noexcept;
+    HRESULT ConfigureEncoder(size_t index, HWND parent,
+                             std::wstring* diagnostic = nullptr) const noexcept;
     [[nodiscard]] std::unique_ptr<LegacyEncoderSession> CreateEncoder(
         size_t index, HRESULT* result = nullptr,
         std::wstring* diagnostic = nullptr) const;
@@ -315,10 +325,15 @@ private:
         mutable void* provider{};
     };
 
+    struct EncoderDependencyState;
     struct LoadedModule {
         HMODULE module{};
         void* addin{};
+        std::shared_ptr<EncoderDependencyState> encoder_dependencies;
     };
+
+    HRESULT PrepareEncoderDependencies(size_t module_index,
+                                       std::wstring* diagnostic = nullptr) const noexcept;
 
     [[nodiscard]] void* ResolveCategoryInterface(
         size_t module_index, DWORD enumeration_index,

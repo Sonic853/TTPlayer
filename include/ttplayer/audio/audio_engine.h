@@ -26,6 +26,14 @@ namespace ttplayer::audio {
 class WinampDspChain;
 enum class PlaybackState { stopped, opening, playing, paused, failed };
 
+struct PlaybackClockSnapshot {
+    PlaybackState state{PlaybackState::stopped};
+    std::chrono::milliseconds position{}, duration{};
+    std::uint64_t timeline_revision{};
+    bool seek_pending{};
+    std::chrono::steady_clock::time_point observed_at;
+};
+
 // CSound::ReadThreadProc (004AC605) uses FadeDuration[0] for an ordinary
 // play/resume transition and FadeDuration[2] only when its seek-transition
 // flag is set.  Keep the recovered offset choice independently testable.
@@ -220,6 +228,9 @@ public:
     [[nodiscard]] static bool IsNetworkMediaLocation(
         const std::filesystem::path& path) noexcept;
     [[nodiscard]] PlaybackState State() const noexcept { return state_.load(); }
+    // Read position and its seek generation together: even a one-millisecond
+    // seek must be distinguishable from an ordinary output-clock refresh.
+    [[nodiscard]] PlaybackClockSnapshot ClockSnapshot() const;
     [[nodiscard]] std::chrono::milliseconds Position() const noexcept {
         // Keep the accepted target visible while the worker consumes the
         // request and resets/refills the output. Its previous clock may still

@@ -1,4 +1,5 @@
 #include "ttplayer/plugins/plugin_manager.h"
+#include "ttplayer/core/text.h"
 
 #include <algorithm>
 #include <array>
@@ -1081,6 +1082,66 @@ bool PatternMatchesPath(std::wstring_view pattern,
 
 } // namespace
 
+HRESULT CreateLegacyFileStream(const wchar_t* path, DWORD mode,
+                              IStream** output) noexcept {
+    if (!output) return E_POINTER;
+    *output = nullptr;
+    if (!path || !*path) return E_INVALIDARG;
+    try {
+        return CreateNamedFileStream(std::filesystem::path(path), mode, output);
+    } catch (...) {
+        return E_OUTOFMEMORY;
+    }
+}
+
+struct PluginManager::EncoderDependencyState {
+    std::filesystem::path directory;
+    std::mutex mutex;
+    std::vector<HMODULE> modules;
+
+    explicit EncoderDependencyState(std::filesystem::path value)
+        : directory(std::move(value)) { modules.reserve(3); }
+    ~EncoderDependencyState() {
+        for (auto it = modules.rbegin(); it != modules.rend(); ++it)
+            FreeLibrary(*it);
+    }
+};
+
+HRESULT PluginManager::PrepareEncoderDependencies(
+    size_t module_index, std::wstring* diagnostic) const noexcept {
+    if (module_index >= loaded_modules_.size()) return E_INVALIDARG;
+    const auto state = loaded_modules_[module_index].encoder_dependencies;
+    if (!state) return S_OK;
+    try {
+        std::lock_guard lock(state->mutex);
+        // ttp_aac!60003CC7 loads Aac.dll by name; aacenc32 subsequently
+        // delay-loads NeroIPP. Its Nero-6 registry fallback does not reliably
+        // find a portable AddIn install. Resolve the existing local chain
+        // before invoking the original creator (including its Configure UI).
+        // Shared by retained library snapshots; unloaded after all add-in
+        // interfaces/modules are released, never after a single conversion.
+        constexpr const wchar_t* names[]{L"NeroIPP.dll", L"aacenc32.dll", L"Aac.dll"};
+        for (size_t index = state->modules.size(); index < std::size(names); ++index) {
+            const auto path = std::filesystem::absolute(state->directory / names[index]);
+            const HMODULE module = LoadLibraryExW(
+                path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            if (!module) {
+                const DWORD error = GetLastError();
+                if (diagnostic) *diagnostic = L"Unable to load Nero component: " + path.wstring();
+                return HRESULT_FROM_WIN32(error ? error : ERROR_MOD_NOT_FOUND);
+            }
+            state->modules.push_back(module);
+        }
+        if (!GetProcAddress(state->modules.back(), "NERO_PLUGIN_GetPrimaryAudioObject")) {
+            if (diagnostic) *diagnostic = L"Aac.dll has no NERO_PLUGIN_GetPrimaryAudioObject export";
+            return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+        }
+        return S_OK;
+    } catch (...) {
+        return E_OUTOFMEMORY;
+    }
+}
+
 struct LegacyReaderSession::Impl {
     void* reader{};
     void* metadata{};
@@ -1621,6 +1682,31 @@ HRESULT LegacyEncoderSession::QueryInterface(
         : InvokeQueryInterface(impl_->encoder, iid, result);
 }
 
+std::wstring LegacyEncoderSession::FileExtension() const {
+    return impl_ && impl_->encoder
+        ? ReadInterfaceString(impl_->encoder, 7) : std::wstring{};
+}
+
+HRESULT LegacyEncoderSession::SetMetadata(
+    std::span<const MetadataEntry> entries) noexcept {
+    void* metadata{};
+    HRESULT result = QueryInterface(kSoundMetadataInterface, &metadata);
+    if (FAILED(result) || !metadata) return FAILED(result) ? result : E_NOINTERFACE;
+    try {
+        result = S_OK;
+        for (const auto& entry : entries) {
+            if (entry.name.empty() || entry.value.empty() ||
+                _wcsnicmp(entry.name.c_str(), L"replaygain_", 11) == 0) continue;
+            const auto name = core::WideToUtf8(entry.name);
+            const HRESULT written = InvokeMetadataSet(
+                metadata, name.c_str(), entry.value.c_str());
+            if (FAILED(written) && SUCCEEDED(result)) result = written;
+        }
+    } catch (...) { result = E_OUTOFMEMORY; }
+    Release(metadata);
+    return result;
+}
+
 const std::filesystem::path& LegacyEncoderSession::ModulePath() const noexcept {
     static const std::filesystem::path empty;
     return impl_ ? impl_->module_path : empty;
@@ -1687,7 +1773,7 @@ PluginManager::RetainForBackground() const noexcept {
         }
         try {
             retained->loaded_modules_.push_back(
-                LoadedModule{module, loaded.addin});
+                LoadedModule{module, loaded.addin, loaded.encoder_dependencies});
         } catch (...) {
             if (loaded.addin) Release(loaded.addin);
             FreeLibrary(module);
@@ -1884,7 +1970,10 @@ HRESULT PluginManager::Load(const std::filesystem::path& directory) {
         info.registered = recognized;
         if (recognized) {
             info.result = S_OK;
-            loaded_modules_.push_back(LoadedModule{module, addin});
+            std::shared_ptr<EncoderDependencyState> dependencies;
+            if (_wcsicmp(path.filename().c_str(), L"ttp_aac.dll") == 0)
+                dependencies = std::make_shared<EncoderDependencyState>(path.parent_path());
+            loaded_modules_.push_back(LoadedModule{module, addin, std::move(dependencies)});
         } else {
             info.result = E_NOTIMPL;
             info.error = "no recognized sound interfaces";
@@ -2362,9 +2451,13 @@ std::unique_ptr<LegacyDecoderSession> PluginManager::OpenDecoder(
     return {};
 }
 
-HRESULT PluginManager::ConfigureEncoder(size_t index, HWND parent) const noexcept {
+HRESULT PluginManager::ConfigureEncoder(size_t index, HWND parent,
+                                        std::wstring* diagnostic) const noexcept {
+    if (diagnostic) diagnostic->clear();
     if (index >= encoder_factories_.size()) return E_INVALIDARG;
     const auto& factory = encoder_factories_[index];
+    const HRESULT prepared = PrepareEncoderDependencies(factory.module_index, diagnostic);
+    if (FAILED(prepared)) return prepared;
     void* creator = ResolveCategoryInterface(
         factory.module_index, factory.enumeration_index,
         kEncoderCreatorCategory, factory.provider);
@@ -2384,6 +2477,11 @@ std::unique_ptr<LegacyEncoderSession> PluginManager::CreateEncoder(
     }
 
     const auto& factory = encoder_factories_[index];
+    const HRESULT prepared = PrepareEncoderDependencies(factory.module_index, diagnostic);
+    if (FAILED(prepared)) {
+        if (result) *result = prepared;
+        return {};
+    }
     void* creator = ResolveCategoryInterface(
         factory.module_index, factory.enumeration_index,
         kEncoderCreatorCategory, factory.provider);

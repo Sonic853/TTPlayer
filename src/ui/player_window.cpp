@@ -5,6 +5,7 @@
 #include "ttplayer/core/text.h"
 #include "ttplayer/skin/skin_package.h"
 #include "ttplayer/ui/playback_track_state.h"
+#include "ttplayer/ui/playlist_transforms.h"
 #include "ttplayer/ui/player_runtime_policy.h"
 #include "ttplayer/ui/tooltip_policy.h"
 #include "ttplayer/ui/window_fade_policy.h"
@@ -2540,8 +2541,10 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                 // intermediate tracking notifications. Use the release point
                 // even if it lies outside the control or no move preceded it.
                 SetSkinProgressFromPoint(point);
-                if (progress_tracking_position_)
+                if (progress_tracking_position_) {
                     audio_.SeekWithoutFade(*progress_tracking_position_);
+                    UpdateDiscordPresence();
+                }
             }
             EndSkinMouseCapture();
             if (!action.empty() && action == released && action != L"volume" && action != L"progress") {
@@ -2921,6 +2924,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         }
         return 0;
     case WM_DESTROY:
+        ClosePlaylistConverter(window_);
         taskbar_playback_.Reset();
         KillTimer(window_, kCloseAudioFadeTimer);
         close_waiting_for_audio_fade_ = false;
@@ -5404,7 +5408,12 @@ void PlayerWindow::RefreshPlaybackUi() {
 }
 
 void PlayerWindow::UpdateDiscordPresence() {
-    const auto state = audio_.State();
+    if (!settings_.general.send_title_to_msn) {
+        discord_presence_.Clear();
+        return;
+    }
+    const auto clock = audio_.ClockSnapshot();
+    const auto state = clock.state;
     if (state != audio::PlaybackState::playing &&
         state != audio::PlaybackState::paused) {
         discord_presence_.Clear();
@@ -5417,20 +5426,17 @@ void PlayerWindow::UpdateDiscordPresence() {
         return;
     }
 
-    integrations::DiscordTrackPresence presence;
-    try { presence.title = core::Utf8ToWide(track->title); }
-    catch (const std::exception&) {}
-    try { presence.artist = core::Utf8ToWide(track->artist); }
-    catch (const std::exception&) {}
-    try { presence.album = core::Utf8ToWide(track->album); }
-    catch (const std::exception&) {}
-    if (presence.title.empty()) presence.title = DisplayName(*track);
-    presence.position = audio_.Position();
-    presence.duration = audio_.Duration();
-    presence.playback = state == audio::PlaybackState::playing
-        ? integrations::DiscordPlaybackState::playing
-        : integrations::DiscordPlaybackState::paused;
-    discord_presence_.Update(std::move(presence));
+    auto presence = integrations::BuildDiscordTrackPresence(
+        *track, clock.position, clock.duration,
+        state == audio::PlaybackState::playing
+            ? integrations::DiscordPlaybackState::playing
+            : integrations::DiscordPlaybackState::paused,
+        audio::AudioEngine::IsNetworkMediaLocation(track->path));
+    presence.timeline_revision = clock.timeline_revision;
+    presence.seek_pending = clock.seek_pending;
+    if (settings_.general.discord_sync_lyrics)
+        integrations::ApplyDiscordLyric(presence, lyrics_);
+    discord_presence_.Update(std::move(presence), clock.observed_at);
 }
 
 void PlayerWindow::UpdateMainWindowCaption() {

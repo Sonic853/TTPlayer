@@ -1,0 +1,17 @@
+# Fix only the misspelled option in Nero CLI nodes. Preserve user choices,
+# paths, encoding and unrelated/custom presets. No network operation.
+if(NOT EXISTS "${PRESET_FILE}")
+  return()
+endif()
+file(READ "${PRESET_FILE}" original)
+set(repaired "${original}")
+string(REGEX MATCHALL "<preset[ \t\r\n][^>]*>" presets "${original}")
+foreach(preset IN LISTS presets)
+  if(preset MATCHES "encoder=\"[^\"]*neroAacEnc\\.exe\"")
+    string(REPLACE "-ignorelenth " "-ignorelength " fixed "${preset}")
+    string(REPLACE "${preset}" "${fixed}" repaired "${repaired}")
+  endif()
+endforeach()
+if(NOT repaired STREQUAL original)
+  file(WRITE "${PRESET_FILE}" "${repaired}")
+endif()

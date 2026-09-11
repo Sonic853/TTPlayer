@@ -4,6 +4,8 @@
 
 #include "ttplayer/audio/archive_member.h"
 #include "ttplayer/audio/audio_engine.h"
+#include "ttplayer/audio/builtin_file_info.h"
+#include "ttplayer/audio/file_encoder.h"
 #include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/audio/pcm_output_transform.h"
 #include "ttplayer/audio/replay_gain_scanner.h"
@@ -15,6 +17,7 @@
 #include <atomic>
 #include <commctrl.h>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <cwchar>
 #include <limits>
@@ -40,6 +43,43 @@ constexpr int kScanButton = 0x88b;
 constexpr UINT kScanRefresh = WM_APP + 0x2a0;
 constexpr UINT kConvertComplete = WM_APP + 0x2a1;
 constexpr UINT kConvertRowComplete = WM_APP + 0x2a2;
+constexpr UINT kConvertPrompt = WM_APP + 0x2a3;
+constexpr UINT kConvertRefresh = WM_APP + 0x2a4;
+HWND g_convert_dialog{};
+
+LRESULT CALLBACK ConvertButtonImageProc(HWND button, UINT message, WPARAM wparam,
+    LPARAM lparam, UINT_PTR subclass, DWORD_PTR data) {
+    if (message != WM_NCDESTROY)
+        return DefSubclassProc(button,message,wparam,lparam);
+    RemoveWindowSubclass(button,ConvertButtonImageProc,subclass);
+    const LRESULT result=DefSubclassProc(button,message,wparam,lparam);
+    if (data) ImageList_Destroy(reinterpret_cast<HIMAGELIST>(data));
+    return result;
+}
+
+void InstallConvertBitmap(HWND dialog, int control, HMODULE resources, UINT resource) {
+    const HWND button=GetDlgItem(dialog,control);
+    const HBITMAP bitmap=static_cast<HBITMAP>(LoadImageW(resources,
+        MAKEINTRESOURCEW(resource),IMAGE_BITMAP,0,0,LR_CREATEDIBSECTION));
+    if (!button || !bitmap) { if (bitmap) DeleteObject(bitmap); return; }
+    BITMAP details{};
+    GetObjectW(bitmap,sizeof(details),&details);
+    const HIMAGELIST images=ImageList_Create(details.bmWidth,details.bmHeight,
+                                            ILC_COLOR24|ILC_MASK,1,0);
+    const int added=images ? ImageList_AddMasked(images,bitmap,RGB(192,192,192)) : -1;
+    DeleteObject(bitmap);
+    if (added<0) { if (images) ImageList_Destroy(images); return; }
+    BUTTON_IMAGELIST layout{};
+    layout.himl=images;
+    layout.margin={3,0,3,0};
+    layout.uAlign=GetWindowTextLengthW(button) ? BUTTON_IMAGELIST_ALIGN_LEFT
+                                            : BUTTON_IMAGELIST_ALIGN_CENTER;
+    if (!SetWindowSubclass(button,ConvertButtonImageProc,0x54544342,
+                           reinterpret_cast<DWORD_PTR>(images))) {
+        ImageList_Destroy(images); return;
+    }
+    SendMessageW(button,BCM_SETIMAGELIST,0,reinterpret_cast<LPARAM>(&layout));
+}
 
 constexpr int kConvertEncoder = 0x802;
 constexpr int kConvertConfigure = 0x3f7;
@@ -380,14 +420,41 @@ struct ConvertProgressState {
     HMODULE ttpcomm{};
     std::shared_ptr<plugins::PluginManager> library;
     std::vector<playlist::Track> tracks;
+    std::vector<std::wstring> display_titles;
     size_t encoder_index{};
     std::vector<std::filesystem::path> destinations;
     settings::ConvertSettings settings;
     settings::EqualizerSettings equalizer;
     std::mutex mutex;
     std::vector<PlaylistConversionResult> results;
-    std::jthread worker;
+    std::stop_source cancellation;
+    std::condition_variable condition;
+    bool paused{}, finished{};
+    std::atomic<HWND> dialog{};
+    std::atomic_size_t active{};
+    std::atomic_uint percent{};
+    std::wstring prompt_path;
+    std::wstring pause_text, resume_text;
+    bool dialog_initialized{};
+    SIZE initial_client{}, minimum_window{};
+    std::array<RECT,4> controls{};
+    HIMAGELIST images{};
+    std::function<void(const std::filesystem::path&)> completed;
+    bool Checkpoint() {
+        std::unique_lock lock(mutex);
+        condition.wait(lock, [this] {
+            return !paused || cancellation.stop_requested();
+        });
+        return !cancellation.stop_requested();
+    }
+    void Cancel() {
+        cancellation.request_stop();
+        { const std::scoped_lock lock(mutex); paused = false; }
+        condition.notify_all();
+    }
+    ~ConvertProgressState() { if (ttpcomm) FreeLibrary(ttpcomm); }
 };
+using ConvertLifetime = std::shared_ptr<ConvertProgressState>;
 
 constexpr HRESULT kConversionPending =
     HRESULT_FROM_WIN32(ERROR_IO_PENDING);
@@ -418,12 +485,13 @@ void PopulateConvertProgress(HWND dialog, ConvertProgressState& state) {
     const HWND list = GetDlgItem(dialog, kScanList);
     if (!list) return;
     ListView_SetExtendedListViewStyleEx(
-        list, LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT);
+        list, 0, 0x4130 | LVS_EX_INFOTIP | LVS_EX_DOUBLEBUFFER);
     const auto columns = Split(LoadText(state.resources, 0x8155));
-    const int widths[] = {180, 70, 250, 250};
+    const int widths[] = {130, 68, 180, 180};
     for (int index{}; index < 4; ++index) {
         LVCOLUMNW column{};
-        column.mask = LVCF_TEXT | LVCF_WIDTH;
+        column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
+        column.fmt = index == 1 ? LVCFMT_CENTER : LVCFMT_LEFT;
         std::wstring label = index < static_cast<int>(columns.size())
             ? columns[static_cast<size_t>(index)] : std::wstring{};
         column.pszText = label.data();
@@ -431,7 +499,10 @@ void PopulateConvertProgress(HWND dialog, ConvertProgressState& state) {
         ListView_InsertColumn(list, index, &column);
     }
     for (size_t index{}; index < state.tracks.size(); ++index) {
-        auto title = TrackTitle(state.tracks[index]);
+        // 00412B48 uses CPlayItem::GetDisplayTitle (004AE7FD), including
+        // the playlist's configured title pattern, not the raw tag Title.
+        auto title = index < state.display_titles.size() ? state.display_titles[index]
+                                                        : TrackTitle(state.tracks[index]);
         LVITEMW item{};
         item.mask = LVIF_TEXT;
         item.iItem = static_cast<int>(index);
@@ -781,10 +852,6 @@ private:
     std::wstring error_;
 };
 
-void DeleteIncompleteOutput(const std::filesystem::path& path) noexcept {
-    if (!path.empty()) static_cast<void>(DeleteFileW(path.c_str()));
-}
-
 std::wstring SafeOutputStem(const playlist::Track& track) {
     std::wstring stem;
     if (track.subtrack != 0 && !track.title.empty()) {
@@ -837,6 +904,7 @@ struct ConvertConfigState {
     HMODULE resources{};
     const plugins::PluginManager* library{};
     settings::ConvertSettings* settings{};
+    bool lame{};
 };
 
 int AddComboItem(HWND combo, std::wstring_view text, LPARAM data) {
@@ -890,20 +958,27 @@ void UpdateEncoderConfigurationButton(HWND dialog,
     const LPARAM selected = SelectedComboData(
         GetDlgItem(dialog, kConvertEncoder), -1);
     bool configurable{};
-    if (selected >= 0 &&
-        static_cast<size_t>(selected) < state.library->EncoderFactories().size())
+    if (selected > 0 &&
+        static_cast<size_t>(selected) <= state.library->EncoderFactories().size())
         configurable = state.library->EncoderFactories()[
-            static_cast<size_t>(selected)].configurable;
+            static_cast<size_t>(selected)-1].configurable;
+    if (state.lame && selected ==
+        static_cast<LPARAM>(state.library->EncoderFactories().size()+1)) configurable = true;
     EnableWindow(GetDlgItem(dialog, kConvertConfigure), configurable);
+    EnableWindow(GetDlgItem(dialog, kConvertBits), selected == 0);
 }
 
 void PopulateConvertConfiguration(HWND dialog, ConvertConfigState& state) {
     const auto& factories = state.library->EncoderFactories();
     HWND combo = GetDlgItem(dialog, kConvertEncoder);
+    AddComboItem(combo, LoadText(state.resources, 0x811a), 0);
     for (size_t index{}; index < factories.size(); ++index) {
         AddComboItem(combo, factories[index].name,
-                     static_cast<LPARAM>(index));
+                     static_cast<LPARAM>(index+1));
     }
+    state.lame = audio::LameEncoderAvailable();
+    if (state.lame) AddComboItem(combo, L"MP3 (LAME DLL)",
+                                static_cast<LPARAM>(factories.size()+1));
     SelectComboData(combo, state.settings->writer_index);
     UpdateEncoderConfigurationButton(dialog, state);
 
@@ -918,7 +993,7 @@ void PopulateConvertConfiguration(HWND dialog, ConvertConfigState& state) {
         48000, 64000, 88200, 96000, 176400, 192000};
     combo = GetDlgItem(dialog, kConvertRate);
     for (const int rate : rates)
-        AddComboItem(combo, std::to_wstring(rate), rate);
+        AddComboItem(combo, std::to_wstring(rate)+L" Hz", rate);
     const int rate_selection = SelectComboData(
         combo, state.settings->resample_rate, 6);
     const bool resample = state.settings->resample_rate != 0 &&
@@ -970,8 +1045,8 @@ bool CommitConvertConfiguration(HWND dialog, ConvertConfigState& state) {
     auto& settings = *state.settings;
     const LPARAM writer = SelectedComboData(
         GetDlgItem(dialog, kConvertEncoder), -1);
-    if (writer < 0 ||
-        static_cast<size_t>(writer) >= state.library->EncoderFactories().size())
+    if (writer < 0 || static_cast<size_t>(writer) >
+        state.library->EncoderFactories().size() + (state.lame ? 1U : 0U))
         return false;
     settings.writer_index = static_cast<int>(writer);
     settings.output_bits = static_cast<int>(SelectedComboData(
@@ -999,6 +1074,35 @@ bool CommitConvertConfiguration(HWND dialog, ConvertConfigState& state) {
     return true;
 }
 
+INT_PTR CALLBACK LameConfigProc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* settings = reinterpret_cast<settings::ConvertSettings*>(GetWindowLongPtrW(dialog,DWLP_USER));
+    if (message == WM_INITDIALOG) {
+        settings = reinterpret_cast<settings::ConvertSettings*>(lparam);
+        SetWindowLongPtrW(dialog,DWLP_USER,lparam);
+        AddComboItem(GetDlgItem(dialog,100),L"CBR",0);
+        AddComboItem(GetDlgItem(dialog,100),L"VBR",1);
+        AddComboItem(GetDlgItem(dialog,100),L"ABR",2);
+        SelectComboData(GetDlgItem(dialog,100),settings->lame_mode);
+        for (int rate : {8,16,24,32,40,48,56,64,80,96,112,128,144,160,192,224,256,320})
+            AddComboItem(GetDlgItem(dialog,101),std::to_wstring(rate),rate);
+        SelectComboData(GetDlgItem(dialog,101),settings->lame_bitrate,14);
+        for (int quality=0;quality<10;++quality)
+            AddComboItem(GetDlgItem(dialog,102),std::to_wstring(quality),quality);
+        SelectComboData(GetDlgItem(dialog,102),settings->lame_quality);
+    } else if (message == WM_COMMAND && LOWORD(wparam) == IDOK && settings) {
+        settings->lame_mode = static_cast<int>(SelectedComboData(GetDlgItem(dialog,100)));
+        settings->lame_bitrate = static_cast<int>(SelectedComboData(GetDlgItem(dialog,101),192));
+        settings->lame_quality = static_cast<int>(SelectedComboData(GetDlgItem(dialog,102),2));
+        EndDialog(dialog,IDOK); return TRUE;
+    } else if (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wparam) == IDCANCEL)) {
+        EndDialog(dialog,IDCANCEL); return TRUE;
+    } else if (!(message == WM_COMMAND && LOWORD(wparam) == 100)) return FALSE;
+    const auto mode = SelectedComboData(GetDlgItem(dialog,100));
+    EnableWindow(GetDlgItem(dialog,101),mode != 1);
+    EnableWindow(GetDlgItem(dialog,102),mode == 1);
+    return TRUE;
+}
+
 INT_PTR CALLBACK ConvertConfigProc(HWND dialog, UINT message,
                                    WPARAM wparam, LPARAM lparam) {
     auto* state = reinterpret_cast<ConvertConfigState*>(
@@ -1010,6 +1114,10 @@ INT_PTR CALLBACK ConvertConfigProc(HWND dialog, UINT message,
         SetWindowLongPtrW(dialog, DWLP_USER,
                           reinterpret_cast<LONG_PTR>(state));
         PopulateConvertConfiguration(dialog, *state);
+        InstallConvertBitmap(dialog,kConvertConfigure,state->resources,0x160);
+        InstallConvertBitmap(dialog,kConvertBrowse,state->resources,kConvertBrowse);
+        InstallConvertBitmap(dialog,IDOK,state->resources,IDOK);
+        InstallConvertBitmap(dialog,IDCANCEL,state->resources,IDCANCEL);
         return TRUE;
     case WM_COMMAND:
         if (!state) return FALSE;
@@ -1021,9 +1129,26 @@ INT_PTR CALLBACK ConvertConfigProc(HWND dialog, UINT message,
         case kConvertConfigure: {
             const LPARAM selected = SelectedComboData(
                 GetDlgItem(dialog, kConvertEncoder), -1);
-            if (selected >= 0)
-                static_cast<void>(state->library->ConfigureEncoder(
-                    static_cast<size_t>(selected), dialog));
+            if (selected > 0 && static_cast<size_t>(selected) <=
+                state->library->EncoderFactories().size()) {
+                std::wstring diagnostic;
+                const HRESULT result=state->library->ConfigureEncoder(
+                    static_cast<size_t>(selected)-1, dialog, &diagnostic);
+                // Native Nero reports cancellation as a failed HRESULT too.
+                // 0047D9A4 ignores that value; only surface an actual loader
+                // diagnostic, never turn closing the plugin UI into an alert.
+                if (FAILED(result) && !diagnostic.empty()) {
+                    wchar_t code[32]{};
+                    swprintf_s(code,L"\n0x%08lX",static_cast<unsigned long>(result));
+                    diagnostic+=code;
+                    MessageBoxW(dialog,diagnostic.c_str(),WindowCaption(dialog).c_str(),
+                                MB_OK|MB_ICONERROR);
+                }
+            }
+            else if (state->lame && selected ==
+                     static_cast<LPARAM>(state->library->EncoderFactories().size()+1))
+                DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(4090),
+                    dialog,LameConfigProc,reinterpret_cast<LPARAM>(state->settings));
             return TRUE;
         }
         case kConvertResample: {
@@ -1062,131 +1187,275 @@ INT_PTR CALLBACK ConvertConfigProc(HWND dialog, UINT message,
     return FALSE;
 }
 
-INT_PTR CALLBACK ConvertProgressProc(HWND dialog, UINT message,
-                                     WPARAM wparam, LPARAM lparam) {
-    auto* state = reinterpret_cast<ConvertProgressState*>(
-        GetWindowLongPtrW(dialog, DWLP_USER));
+void PostConvert(ConvertProgressState& state, UINT message, LPARAM parameter = 0) {
+    if (const HWND window = state.dialog.load())
+        PostMessageW(window,message,reinterpret_cast<WPARAM>(&state),parameter);
+}
+
+void RunConversion(ConvertLifetime lifetime) {
+    auto& state = *lifetime;
+    const HRESULT ole = CoInitialize(nullptr);
+    SetThreadPriority(GetCurrentThread(), ThreadPriorityFromSetting(state.settings.thread_priority));
+    ConversionCallbacks callbacks;
+    callbacks.checkpoint = [&] { return state.Checkpoint(); };
+    callbacks.progress = [&](unsigned value) {
+        state.percent.store(value);
+        PostConvert(state,kConvertRefresh);
+    };
+    for (const auto& track : state.tracks) callbacks.protected_sources.push_back(track.path);
+    callbacks.confirm_replace = [&](const auto& path) {
+        { const std::scoped_lock lock(state.mutex); state.prompt_path = path.wstring(); }
+        if (const HWND window = state.dialog.load())
+            return SendMessageW(window,kConvertPrompt,
+                reinterpret_cast<WPARAM>(&state),0) == IDYES;
+        return false;
+    };
+    for (size_t index=0; index<state.tracks.size(); ++index) {
+        if (!state.Checkpoint()) break;
+        state.active.store(index);
+        state.percent.store(0);
+        PostConvert(state,kConvertRefresh);
+        PlaylistConversionResult converted;
+        try {
+            converted = ConvertPlaylistTrack(*state.library,state.tracks[index],
+                state.encoder_index,state.destinations[index],state.settings,state.ttpcomm,
+                &state.equalizer,state.cancellation.get_token(),callbacks);
+        } catch (...) {
+            converted.result = E_FAIL;
+            converted.diagnostic = L"conversion worker exception";
+        }
+        { const std::scoped_lock lock(state.mutex); state.results[index] = std::move(converted); }
+        PostConvert(state,kConvertRowComplete,static_cast<LPARAM>(index));
+    }
+    if (SUCCEEDED(ole)) CoUninitialize();
+    PostConvert(state,kConvertComplete);
+}
+
+void DrawConversionProgress(HDC dc, RECT bounds, unsigned percent) {
+    // 004132B8 -> 00411ECD: blue fill, white remainder, inverted percentage.
+    InflateRect(&bounds,0,-1);
+    const COLORREF blue = RGB(0,128,255);
+    const int saved = SaveDC(dc);
+    HBRUSH brush = CreateSolidBrush(blue);
+    FrameRect(dc,&bounds,brush);
+    InflateRect(&bounds,-1,-1);
+    RECT filled=bounds, empty=bounds;
+    filled.right=filled.left+MulDiv(bounds.right-bounds.left,percent,100);
+    empty.left=filled.right;
+    FillRect(dc,&filled,brush);
+    FillRect(dc,&empty,static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+    SetBkMode(dc,TRANSPARENT);
+    const auto text=std::to_wstring(percent)+L"%";
+    IntersectClipRect(dc,filled.left,filled.top,filled.right,filled.bottom);
+    SetTextColor(dc,RGB(255,255,255));
+    DrawTextW(dc,text.c_str(),-1,&bounds,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+    RestoreDC(dc,saved);
+    const int second=SaveDC(dc);
+    IntersectClipRect(dc,empty.left,empty.top,empty.right,empty.bottom);
+    SetBkMode(dc,TRANSPARENT);
+    SetTextColor(dc,blue);
+    DrawTextW(dc,text.c_str(),-1,&bounds,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+    RestoreDC(dc,second);
+    DeleteObject(brush);
+}
+
+INT_PTR CALLBACK ConvertProgressProc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* holder=reinterpret_cast<ConvertLifetime*>(GetWindowLongPtrW(dialog,DWLP_USER));
+    auto* state=holder ? holder->get() : nullptr;
+    if (message >= kConvertComplete && message <= kConvertRefresh &&
+        (!state || reinterpret_cast<ConvertProgressState*>(wparam) != state)) return TRUE;
     switch (message) {
     case WM_INITDIALOG: {
-        state = reinterpret_cast<ConvertProgressState*>(lparam);
-        if (!state || !state->library) return FALSE;
-        SetWindowLongPtrW(dialog, DWLP_USER,
-                          reinterpret_cast<LONG_PTR>(state));
-        if (state->tracks.empty() ||
-            state->tracks.size() != state->destinations.size() ||
-            state->tracks.size() != state->results.size()) return FALSE;
-        PopulateConvertProgress(dialog, *state);
-        const auto status = FormatProgress(
-            state->resources, 0x8161, 1, state->tracks.size());
-        SetDlgItemTextW(dialog, kScanStatus, status.c_str());
-        try {
-            state->worker = std::jthread([state, dialog](std::stop_token stop) {
-                // CConvertDlg::CWorkThread::Run (004128D4) brackets the whole
-                // conversion transaction with CoInitialize/CoUninitialize.
-                const HRESULT ole = CoInitialize(nullptr);
-                SetThreadPriority(GetCurrentThread(),
-                    ThreadPriorityFromSetting(state->settings.thread_priority));
-                for (size_t index{}; index < state->tracks.size(); ++index) {
-                    if (stop.stop_requested()) break;
-                    bool pending{};
-                    {
-                        const std::scoped_lock lock(state->mutex);
-                        pending = state->results[index].result ==
-                                  kConversionPending;
-                    }
-                    if (pending) {
-                        PlaylistConversionResult converted;
-                        try {
-                            converted = ConvertPlaylistTrack(
-                                *state->library, state->tracks[index],
-                                state->encoder_index,
-                                state->destinations[index], state->settings,
-                                state->ttpcomm, &state->equalizer, stop);
-                        } catch (...) {
-                            converted.result = E_OUTOFMEMORY;
-                            converted.diagnostic =
-                                L"conversion worker exception";
-                        }
-                        const std::scoped_lock lock(state->mutex);
-                        state->results[index] = std::move(converted);
-                    }
-                    PostMessageW(dialog, kConvertRowComplete,
-                                 static_cast<WPARAM>(index), 0);
-                }
-                if (SUCCEEDED(ole)) CoUninitialize();
-                PostMessageW(dialog, kConvertComplete, 0, 0);
-            });
-        } catch (...) {
-            for (auto& result : state->results) {
-                if (result.result != kConversionPending) continue;
-                result.result = E_OUTOFMEMORY;
-                result.diagnostic = L"unable to start conversion worker";
-            }
-            PostMessageW(dialog, kConvertComplete, 0, 0);
+        holder=reinterpret_cast<ConvertLifetime*>(lparam);
+        if (!holder || !*holder) return FALSE;
+        state=holder->get();
+        state->dialog_initialized=true;
+        SetWindowLongPtrW(dialog,DWLP_USER,reinterpret_cast<LONG_PTR>(holder));
+        g_convert_dialog=dialog;
+        state->dialog.store(dialog);
+        const auto captions=Split(DialogItemText(dialog,kScanButton));
+        state->pause_text=captions.empty() ? L"" : captions[0];
+        state->resume_text=captions.size()>1 ? captions[1] : L"";
+        SetDlgItemTextW(dialog,kScanButton,state->pause_text.c_str());
+        InstallConvertBitmap(dialog,IDCANCEL,state->resources,IDCANCEL);
+        PopulateConvertProgress(dialog,*state);
+        RECT client{}, bounds{};
+        GetClientRect(dialog,&client);
+        GetWindowRect(dialog,&bounds);
+        state->initial_client={client.right,client.bottom};
+        state->minimum_window={bounds.right-bounds.left,bounds.bottom-bounds.top};
+        constexpr int ids[]{kScanList,kScanStatus,kScanButton,IDCANCEL};
+        for (size_t index=0;index<state->controls.size();++index) {
+            GetWindowRect(GetDlgItem(dialog,ids[index]),&state->controls[index]);
+            MapWindowPoints(nullptr,dialog,reinterpret_cast<POINT*>(&state->controls[index]),2);
         }
+        const auto bitmap=static_cast<HBITMAP>(LoadImageW(state->resources,
+            MAKEINTRESOURCEW(0x164),IMAGE_BITMAP,0,0,LR_CREATEDIBSECTION));
+        if (bitmap) {
+            state->images=ImageList_Create(16,16,ILC_COLOR32|ILC_MASK,3,0);
+            if (state->images) {
+                ImageList_AddMasked(state->images,bitmap,RGB(255,255,255));
+                ListView_SetImageList(GetDlgItem(dialog,kScanList),state->images,LVSIL_SMALL);
+            }
+            DeleteObject(bitmap);
+        }
+        try { std::thread([lifetime=*holder] { RunConversion(lifetime); }).detach(); }
+        catch (...) {
+            for (auto& result:state->results) result.result=E_OUTOFMEMORY;
+            PostConvert(*state,kConvertComplete);
+        }
+        return TRUE;
+    }
+    case kConvertPrompt: {
+        std::wstring path;
+        { const std::scoped_lock lock(state->mutex); path=state->prompt_path; }
+        if (state->cancellation.stop_requested()) {
+            SetWindowLongPtrW(dialog,DWLP_MSGRESULT,IDNO);
+            return TRUE;
+        }
+        const auto question=FormatPathQuestion(state->resources,0x814d,path);
+        const int answer = MessageBoxW(dialog,question.c_str(),WindowCaption(dialog).c_str(),
+                                      MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2);
+        SetWindowLongPtrW(dialog,DWLP_MSGRESULT,answer);
+        return TRUE;
+    }
+    case kConvertRefresh: {
+        if (state->finished) return TRUE;
+        const size_t active=state->active.load();
+        const auto text=FormatProgress(state->resources,0x8161,active+1,state->tracks.size());
+        SetDlgItemTextW(dialog,kScanStatus,text.c_str());
+        const HWND list=GetDlgItem(dialog,kScanList);
+        ListView_EnsureVisible(list,static_cast<int>(active),FALSE);
+        ListView_RedrawItems(list,static_cast<int>(active),static_cast<int>(active));
         return TRUE;
     }
     case kConvertRowComplete: {
-        if (!state) return TRUE;
-        const size_t index = static_cast<size_t>(wparam);
-        if (index >= state->results.size()) return TRUE;
-        HRESULT result{};
-        {
-            const std::scoped_lock lock(state->mutex);
-            result = state->results[index].result;
-        }
-        SetConversionRowState(dialog, state->resources, index, result);
-        const size_t next = std::min(index + 2U, state->tracks.size());
-        const auto status = FormatProgress(
-            state->resources, 0x8161, next, state->tracks.size());
-        SetDlgItemTextW(dialog, kScanStatus, status.c_str());
+        const size_t index=static_cast<size_t>(lparam);
+        if (index>=state->results.size()) return TRUE;
+        PlaylistConversionResult result;
+        { const std::scoped_lock lock(state->mutex); result=state->results[index]; }
+        SetConversionRowState(dialog,state->resources,index,result.result);
+        LVITEMW item{};
+        item.mask=LVIF_IMAGE;
+        item.iItem=static_cast<int>(index);
+        item.iImage=FAILED(result.result) ? 2 : 1;
+        const HWND list=GetDlgItem(dialog,kScanList);
+        ListView_SetItem(list,&item);
+        auto destination=result.destination.wstring();
+        ListView_SetItemText(list,static_cast<int>(index),3,destination.data());
+        if (result.result==S_OK && state->settings.add_to_playlist && state->completed)
+            state->completed(result.destination);
         return TRUE;
     }
     case kConvertComplete: {
-        if (!state) return TRUE;
-        if (state->worker.joinable()) state->worker.join();
-        std::vector<PlaylistConversionResult> results;
+        bool failed{};
         {
             const std::scoped_lock lock(state->mutex);
-            results = state->results;
-        }
-        bool failed{};
-        bool cancelled{};
-        for (size_t index{}; index < results.size(); ++index) {
-            if (results[index].result == kConversionPending) {
-                results[index].result = HRESULT_FROM_WIN32(ERROR_CANCELLED);
-                cancelled = true;
+            state->finished=true;
+            state->paused=false;
+            for (size_t index=0;index<state->results.size();++index) {
+                auto& result=state->results[index];
+                if (result.result==kConversionPending)
+                    result.result=HRESULT_FROM_WIN32(ERROR_CANCELLED);
+                SetConversionRowState(dialog,state->resources,index,result.result);
+                failed=failed || FAILED(result.result);
             }
-            SetConversionRowState(dialog, state->resources, index,
-                                  results[index].result);
-            cancelled = cancelled ||
-                        ConversionCancelled(results[index].result);
-            failed = failed || (FAILED(results[index].result) &&
-                                !ConversionCancelled(results[index].result));
         }
-        if (failed)
-            ShowResourceError(dialog, state->resources, 0x814e);
-        EndDialog(dialog, failed || cancelled ? IDCANCEL : IDOK);
+        EnableWindow(GetDlgItem(dialog,kScanButton),FALSE);
+        SetDlgItemTextW(dialog,IDCANCEL,LoadText(state->resources,8).c_str());
+        InvalidateRect(GetDlgItem(dialog,kScanList),nullptr,FALSE);
+        // 00412E61 keeps failures visible, without a blocking generic alert.
+        if (!failed) DestroyWindow(dialog);
         return TRUE;
     }
-    case WM_COMMAND:
-        if (LOWORD(wparam) == IDCANCEL || LOWORD(wparam) == kScanButton) {
-            if (state && state->worker.joinable()) {
-                state->worker.request_stop();
-                EnableWindow(GetDlgItem(dialog, kScanButton), FALSE);
-            } else {
-                EndDialog(dialog, IDCANCEL);
+    case WM_NOTIFY: {
+        if (!state) return FALSE;
+        auto* header=reinterpret_cast<NMHDR*>(lparam);
+        if (header->idFrom!=kScanList) return FALSE;
+        if (header->code==LVN_GETINFOTIPW) {
+            auto* tip=reinterpret_cast<NMLVGETINFOTIPW*>(lparam);
+            const std::scoped_lock lock(state->mutex);
+            if (tip->iItem>=0 && static_cast<size_t>(tip->iItem)<state->results.size())
+                wcsncpy_s(tip->pszText,tip->cchTextMax,
+                    state->results[tip->iItem].diagnostic.c_str(),_TRUNCATE);
+            return TRUE;
+        }
+        if (header->code!=NM_CUSTOMDRAW) return FALSE;
+        auto* draw=reinterpret_cast<NMLVCUSTOMDRAW*>(lparam);
+        LRESULT result=CDRF_DODEFAULT;
+        if (draw->nmcd.dwDrawStage==CDDS_PREPAINT ||
+            draw->nmcd.dwDrawStage==CDDS_ITEMPREPAINT) result=CDRF_NOTIFYSUBITEMDRAW;
+        else if (draw->nmcd.dwDrawStage==(CDDS_ITEMPREPAINT|CDDS_SUBITEM) &&
+                 draw->iSubItem==1 && !state->finished &&
+                 draw->nmcd.dwItemSpec==state->active.load()) {
+            bool pending{};
+            { const std::scoped_lock lock(state->mutex);
+              pending=state->results[state->active.load()].result==kConversionPending; }
+            if (pending) {
+                RECT bounds{};
+                ListView_GetSubItemRect(header->hwndFrom,
+                    static_cast<int>(draw->nmcd.dwItemSpec),1,LVIR_BOUNDS,&bounds);
+                DrawConversionProgress(draw->nmcd.hdc,bounds,state->percent.load());
+                result=CDRF_SKIPDEFAULT;
             }
+        }
+        SetWindowLongPtrW(dialog,DWLP_MSGRESULT,result);
+        return TRUE;
+    }
+    case WM_SIZE: {
+        if (!state || !state->initial_client.cx || wparam==SIZE_MINIMIZED) return FALSE;
+        RECT client{}; GetClientRect(dialog,&client);
+        const int dx=client.right-state->initial_client.cx;
+        const int dy=client.bottom-state->initial_client.cy;
+        constexpr int ids[]{kScanList,kScanStatus,kScanButton,IDCANCEL};
+        for (size_t index=0;index<state->controls.size();++index) {
+            auto r=state->controls[index];
+            if (index==0) { r.right+=dx; r.bottom+=dy; }
+            else {
+                OffsetRect(&r,index>1 ? dx : 0,dy);
+                if (index==1) r.right+=dx;
+            }
+            MoveWindow(GetDlgItem(dialog,ids[index]),r.left,r.top,
+                       r.right-r.left,r.bottom-r.top,TRUE);
+        }
+        return TRUE;
+    }
+    case WM_GETMINMAXINFO:
+        if (state && state->minimum_window.cx)
+            reinterpret_cast<MINMAXINFO*>(lparam)->ptMinTrackSize=
+                {state->minimum_window.cx,state->minimum_window.cy};
+        return FALSE;
+    case WM_COMMAND:
+        if (!state) return FALSE;
+        if (LOWORD(wparam)==kScanButton && !state->finished) {
+            { const std::scoped_lock lock(state->mutex); state->paused=!state->paused; }
+            state->condition.notify_all();
+            SetDlgItemTextW(dialog,kScanButton,
+                state->paused ? state->resume_text.c_str() : state->pause_text.c_str());
             return TRUE;
         }
-        break;
+        if (LOWORD(wparam)!=IDCANCEL) break;
+        [[fallthrough]];
     case WM_CLOSE:
-        if (state && state->worker.joinable()) {
-            state->worker.request_stop();
-            EnableWindow(GetDlgItem(dialog, kScanButton), FALSE);
-            return TRUE;
+        if (state) state->Cancel();
+        DestroyWindow(dialog);
+        return TRUE;
+    case WM_DESTROY:
+        if (state) {
+            state->dialog.store(nullptr);
+            state->Cancel();
+            state->completed={};
+            if (state->images) {
+                ListView_SetImageList(GetDlgItem(dialog,kScanList),nullptr,LVSIL_SMALL);
+                ImageList_Destroy(state->images);
+                state->images=nullptr;
+            }
         }
-        EndDialog(dialog, IDCANCEL);
+        if (g_convert_dialog==dialog) g_convert_dialog=nullptr;
+        return TRUE;
+    case WM_NCDESTROY:
+        SetWindowLongPtrW(dialog,DWLP_USER,0);
+        delete holder;
         return TRUE;
     }
     return FALSE;
@@ -1200,310 +1469,380 @@ bool ReplayGainScanCommandAvailable(const plugins::PluginManager* library,
            audio::LegacyReplayGainAvailable(ttpcomm);
 }
 
-bool PlaylistConvertCommandAvailable(
-    const plugins::PluginManager* library) noexcept {
-    return library && std::ranges::any_of(
-        library->EncoderFactories(),
-        [](const plugins::EncoderFactoryInfo& factory) {
-            return !factory.extension.empty();
+bool PlaylistConvertCommandAvailable(const plugins::PluginManager* library) noexcept {
+    // 004CA3BE is registered before AddIns: Wave never requires a plugin DLL.
+    return library != nullptr;
+}
+
+namespace {
+bool SameConversionFile(const std::filesystem::path& left,
+                        const std::filesystem::path& right) {
+    if (left.empty() || right.empty()) return false;
+    std::error_code error;
+    if (std::filesystem::equivalent(left, right, error) && !error) return true;
+    error.clear();
+    auto a = std::filesystem::weakly_canonical(left, error);
+    if (error) a = left.lexically_normal();
+    error.clear();
+    auto b = std::filesystem::weakly_canonical(right, error);
+    if (error) b = right.lexically_normal();
+    return _wcsicmp(a.c_str(), b.c_str()) == 0;
+}
+
+bool ConversionTargetsSource(const std::filesystem::path& output,
+                             const playlist::Track& track) {
+    if (SameConversionFile(output, track.path)) return true;
+    audio::ArchiveMemberPath member;
+    if (audio::ParseArchiveMemberPath(track.path.wstring(), member))
+        return SameConversionFile(output, member.archive);
+    if (_wcsicmp(track.path.extension().c_str(), L".cue") == 0) {
+        try {
+            const auto sheet = audio::CueSheet::Load(track.path);
+            for (const auto& part : sheet.Tracks())
+                if (SameConversionFile(output, part.audio_path)) return true;
+        } catch (...) {
+            // Failure to inspect a CUE must not authorize replacement.
+            return true;
+        }
+    }
+    return false;
+}
+
+struct ConversionOutput {
+    std::filesystem::path directory;
+    std::filesystem::path temporary;
+    ~ConversionOutput() {
+        if (!temporary.empty()) DeleteFileW(temporary.c_str());
+        if (!directory.empty()) RemoveDirectoryW(directory.c_str());
+    }
+    HRESULT Create(const std::filesystem::path& destination) {
+        std::error_code error;
+        const auto folder = destination.parent_path();
+        if (!folder.empty()) std::filesystem::create_directories(folder, error);
+        if (error) return HRESULT_FROM_WIN32(error.value());
+        GUID id{};
+        if (FAILED(CoCreateGuid(&id))) return E_FAIL;
+        wchar_t unique[40]{};
+        StringFromGUID2(id, unique, 40);
+        const auto candidate = folder / (std::wstring(L".ttconvert-") + unique);
+        // 00412575 removes an existing output before 004CD30C opens it. Nero's
+        // Aac.dll treats an empty placeholder as an existing MP4 to read and
+        // leaks its failed-parser read handle (Aac+5F37B -> +61D3C). Finalize
+        // closes the writer, not that handle. Reserve a private directory, NOT
+        // an empty media file: preserve both the original absent-file contract
+        // and our atomic, same-volume replacement of the real destination.
+        if (!CreateDirectoryW(candidate.c_str(), nullptr))
+            return HRESULT_FROM_WIN32(GetLastError());
+        directory = candidate;
+        temporary = directory / (L"output" + destination.extension().wstring());
+        return S_OK;
+    }
+    HRESULT Commit(const std::filesystem::path& destination, bool replace) {
+        if (!MoveFileExW(temporary.c_str(), destination.c_str(),
+                        MOVEFILE_WRITE_THROUGH | (replace ? MOVEFILE_REPLACE_EXISTING : 0)))
+            return HRESULT_FROM_WIN32(GetLastError());
+        temporary.clear();
+        return S_OK;
+    }
+};
+
+std::vector<plugins::MetadataEntry> ConversionMetadata(
+    const audio::AudioMetadata& source, const playlist::Track& track) {
+    std::vector<plugins::MetadataEntry> entries;
+    for (const auto& [name, value] : source.entries) entries.push_back({name,value});
+    auto put = [&](std::wstring name, std::wstring value) {
+        if (value.empty()) return;
+        const auto found = std::ranges::find_if(entries, [&](const auto& entry) {
+            return _wcsicmp(entry.name.c_str(), name.c_str()) == 0;
         });
+        if (found == entries.end()) entries.push_back({std::move(name),std::move(value)});
+        else found->value = std::move(value);
+    };
+    // CUE metadata must describe the sub-track, not the source album image.
+    put(L"title", source.title.empty() ? core::Utf8ToWide(track.title) : source.title);
+    put(L"artist", source.artist.empty() ? core::Utf8ToWide(track.artist) : source.artist);
+    put(L"album", source.album.empty() ? core::Utf8ToWide(track.album) : source.album);
+    if (track.subtrack) put(L"tracknumber", std::to_wstring(track.subtrack));
+    return entries;
+}
 }
 
 PlaylistConversionResult ConvertPlaylistTrack(
     plugins::PluginManager& library, const playlist::Track& track,
     size_t encoder_index, const std::filesystem::path& destination,
     const settings::ConvertSettings& settings, HMODULE ttpcomm,
-    const settings::EqualizerSettings* equalizer,
-    std::stop_token stop) {
+    const settings::EqualizerSettings* equalizer, std::stop_token stop,
+    const ConversionCallbacks& callbacks) {
     PlaylistConversionResult converted;
-    const auto& factories = library.EncoderFactories();
-    if (encoder_index >= factories.size()) {
-        converted.result = E_INVALIDARG;
-        converted.diagnostic = L"encoder index is out of range";
+    converted.destination = destination;
+    auto fail = [&](HRESULT error, std::wstring text) {
+        converted.result = error;
+        converted.diagnostic = std::move(text);
         return converted;
-    }
-    if (destination.empty()) {
-        converted.result = E_INVALIDARG;
-        converted.diagnostic = L"conversion destination is empty";
-        return converted;
-    }
+    };
+    auto checkpoint = [&] {
+        return !stop.stop_requested() &&
+            (!callbacks.checkpoint || callbacks.checkpoint());
+    };
+    if (!checkpoint()) return fail(HRESULT_FROM_WIN32(ERROR_CANCELLED), L"conversion cancelled");
+    const bool wave = encoder_index == kWaveConversionEncoder;
+    const bool lame = encoder_index == kLameConversionEncoder;
+    if (!wave && !lame && encoder_index >= library.EncoderFactories().size())
+        return fail(E_INVALIDARG, L"encoder index is out of range");
+    if (destination.empty()) return fail(E_INVALIDARG, L"conversion destination is empty");
 
-    const DWORD existing_attributes = GetFileAttributesW(destination.c_str());
-    if (existing_attributes != INVALID_FILE_ATTRIBUTES) {
-        if ((existing_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-            converted.result = HRESULT_FROM_WIN32(ERROR_DIRECTORY);
-            converted.diagnostic = L"conversion destination is a directory";
-            return converted;
-        }
-        // FUN_004124F0: 0 skips, 1 asks in the owning dialog and reaches the
-        // worker only after deletion, and 2 unconditionally replaces.
-        if (settings.save_mode == 0) {
-            converted.result = S_FALSE;
-            converted.diagnostic = L"conversion destination was skipped";
-            return converted;
-        }
-        if (settings.save_mode != 2) {
-            converted.result = HRESULT_FROM_WIN32(ERROR_FILE_EXISTS);
-            converted.diagnostic = L"conversion destination requires prompt";
-            return converted;
-        }
-        if (!DeleteFileW(destination.c_str())) {
-            converted.result = HRESULT_FROM_WIN32(GetLastError());
-            converted.diagnostic = L"unable to replace conversion destination";
-            return converted;
-        }
-    }
-
-    // CConvertDlg uses the same decoded stream selection as CSound: AddIn
-    // reader+decoder first, then built-in AIFF/AU and CD-DA, with Media
-    // Foundation covering WAV/MPEG/URL.  Keeping this lifetime local also
-    // makes the callable conversion service safe outside the dialog worker.
     ConversionRuntime runtime;
-    auto source = audio::CreateDecodedAudioSource(
-        track.path, track.subtrack, &library, ttpcomm);
-    if (!source) {
-        converted.result = E_OUTOFMEMORY;
-        converted.diagnostic = L"unable to create decoded audio source";
-        return converted;
+    ConversionOutput transaction;
+    HRESULT result = S_OK;
+    std::unique_ptr<plugins::LegacyEncoderSession> encoder;
+    std::unique_ptr<audio::FileEncoder> file_encoder;
+    if (!wave && !lame) {
+        encoder = library.CreateEncoder(encoder_index, &result, &converted.diagnostic);
+        if (!encoder) return fail(FAILED(result) ? result : E_NOINTERFACE,
+                                  converted.diagnostic);
+        auto extension = PrimaryEncoderExtension(encoder->FileExtension());
+        if (extension.empty()) extension = PrimaryEncoderExtension(
+            library.EncoderFactories()[encoder_index].extension);
+        if (extension.empty() || extension.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos)
+            return fail(E_INVALIDARG, L"encoder has no valid configured file extension");
+        converted.destination.replace_extension(extension);
+    } else {
+        converted.destination.replace_extension(wave ? L".wav" : L".mp3");
+        file_encoder = std::make_unique<audio::FileEncoder>();
     }
+    const auto& output = converted.destination;
+    if (ConversionTargetsSource(output, track))
+        return fail(HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION),
+                    L"conversion destination is a source file");
+    for (const auto& path : callbacks.protected_sources) {
+        playlist::Track other;
+        other.path = path;
+        if (ConversionTargetsSource(output, other))
+            return fail(HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION),
+                        L"conversion destination is another batch source");
+    }
+
+    const DWORD attributes = GetFileAttributesW(output.c_str());
+    bool replace = settings.save_mode == 2;
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        if (attributes & FILE_ATTRIBUTE_DIRECTORY)
+            return fail(HRESULT_FROM_WIN32(ERROR_DIRECTORY), L"destination is a directory");
+        if (settings.save_mode == 0) return fail(S_FALSE, L"destination skipped");
+        if (settings.save_mode != 2) {
+            if (!callbacks.confirm_replace)
+                return fail(HRESULT_FROM_WIN32(ERROR_FILE_EXISTS), L"destination requires prompt");
+            if (!callbacks.confirm_replace(output)) return fail(S_FALSE, L"destination skipped");
+            replace = true;
+        }
+    }
+    if (!checkpoint()) return fail(HRESULT_FROM_WIN32(ERROR_CANCELLED), L"conversion cancelled");
+    auto source = audio::CreateDecodedAudioSource(track.path, track.subtrack, &library, ttpcomm);
+    if (!source) return fail(E_OUTOFMEMORY, L"unable to create decoded audio source");
     audio::PlaybackOptions source_options;
     source_options.file_buffer_bytes = 64 * 1024;
-    if (!source->Open(track.path, source_options)) {
-        converted.result = !runtime.Available()
-            ? runtime.Result() : HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-        converted.diagnostic = source->Error();
-        if (converted.diagnostic.empty())
-            converted.diagnostic = L"decoded audio source open failed";
-        return converted;
-    }
+    if (!source->Open(track.path, source_options))
+        return fail(!runtime.Available() ? runtime.Result() :
+                    HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED), source->Error());
     const WAVEFORMATEX& source_format = source->OutputFormat();
-    if (source_format.nChannels == 0 || source_format.nSamplesPerSec == 0 ||
-        source_format.nAvgBytesPerSec == 0 ||
-        source_format.nBlockAlign == 0) {
-        converted.result = E_INVALIDARG;
-        converted.diagnostic = L"decoded audio source returned an invalid PCM format";
-        return converted;
+    if (!source_format.nChannels || !source_format.nSamplesPerSec ||
+        !source_format.nAvgBytesPerSec || !source_format.nBlockAlign)
+        return fail(E_INVALIDARG, L"invalid decoded PCM format");
+
+    // 004B0D1A -> ReplayGain/EQ/surround -> 004AA360 (Wave only).
+    // Quantizing before effects/resampling destroyed precision and gave native
+    // encoders the wrong ABI. The original AddIn input is IEEE float64.
+    audio::PcmOutputTransform decoded_transform;
+    audio::PcmOutputTransformOptions decoded_options;
+    decoded_options.floating_point = true;
+    decoded_options.resample_rate = settings.resample_rate;
+    if (!decoded_transform.Open(source_format, decoded_options, ttpcomm))
+        return fail(HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED), decoded_transform.Error());
+    const auto intermediate = decoded_transform.OutputFormat();
+    const auto metadata = source->Metadata();
+    OfflinePcmProcessor processors(intermediate, ttpcomm);
+    if (!processors.Open(settings, equalizer, metadata))
+        return fail(HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED), processors.Error());
+
+    audio::PcmOutputTransform quantizer;
+    WAVEFORMATEX output_format = intermediate;
+    if (wave || lame) {
+        audio::PcmOutputTransformOptions output_options;
+        int bits=settings.output_bits ? settings.output_bits
+                                     : source->DisplayFormat().bits_per_sample;
+        // 004122CD asks the reader (slot 10), not the double-PCM decoder;
+        // unreported/unsupported source depths fall back to 16 bits.
+        if (bits!=8 && bits!=16 && bits!=24 && bits!=32) bits=16;
+        output_options.output_bits = lame ? 16 : bits;
+        if (!quantizer.Open(intermediate, output_options, ttpcomm))
+            return fail(HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED), quantizer.Error());
+        output_format = quantizer.OutputFormat();
     }
 
-    HRESULT result{};
-    auto encoder = library.CreateEncoder(
-        encoder_index, &result, &converted.diagnostic);
-    if (!encoder) {
-        converted.result = FAILED(result) ? result : E_NOINTERFACE;
-        return converted;
+    // An existing destination remains intact until the complete encoder and
+    // metadata transaction succeeds. Temporary files are ours, never sources.
+    result = transaction.Create(output);
+    if (FAILED(result)) return fail(result, L"unable to create output file");
+    result = encoder ? encoder->Open(transaction.temporary, output_format) :
+        file_encoder->Open(transaction.temporary, output_format, lame,
+            {settings.lame_mode, settings.lame_bitrate, settings.lame_quality});
+    if (FAILED(result)) return fail(result, L"encoder destination open failed");
+    const auto entries = ConversionMetadata(metadata, track);
+    if (encoder) {
+        // Missing tag interface and unsupported individual tags are nonfatal,
+        // as in 004125C1/004121C4. Never propagate ReplayGain into new audio.
+        static_cast<void>(encoder->SetMetadata(entries));
+        result = encoder->Start();
+        if (FAILED(result)) return fail(result, L"ISoundEncoder slot 4 start failed");
     }
 
-    audio::PcmOutputTransform transform;
-    audio::PcmOutputTransformOptions transform_options;
-    const WORD source_bits = source_format.wBitsPerSample;
-    transform_options.output_bits = settings.output_bits != 0
-        ? settings.output_bits
-        : ((source_bits == 8 || source_bits == 16 || source_bits == 24 ||
-            source_bits == 32) ? source_bits : 16);
-    transform_options.resample_rate = settings.resample_rate;
-    if (!transform.Open(source_format, transform_options, ttpcomm)) {
-        converted.result = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-        converted.diagnostic = transform.Error();
-        return converted;
-    }
-    OfflinePcmProcessor processors(source_format, ttpcomm);
-    if (!processors.Open(settings, equalizer, source->Metadata())) {
-        converted.result = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-        converted.diagnostic = processors.Error();
-        return converted;
-    }
-
-    const WAVEFORMATEX output_format = transform.OutputFormat();
-    result = encoder->Open(destination, output_format);
-    if (FAILED(result)) {
-        converted.result = result;
-        converted.diagnostic = L"ISoundEncoder destination open failed";
-        encoder.reset();
-        DeleteIncompleteOutput(destination);
-        return converted;
-    }
-    result = encoder->Start();
-    if (FAILED(result)) {
-        converted.result = result;
-        converted.diagnostic = L"ISoundEncoder slot 4 start failed";
-        encoder.reset();
-        DeleteIncompleteOutput(destination);
-        return converted;
-    }
-
-    std::vector<std::byte> pcm;
-    std::vector<std::byte> transformed;
-    const size_t requested = std::max<size_t>(
-        static_cast<size_t>(source_options.file_buffer_bytes),
-        static_cast<size_t>(source_format.nBlockAlign));
-    while (!stop.stop_requested()) {
-        bool end_of_stream{};
-        if (!source->Read(requested, pcm, end_of_stream)) {
-            result = E_FAIL;
-            converted.diagnostic = source->Error();
-            if (converted.diagnostic.empty())
-                converted.diagnostic = L"decoded audio source PCM read failed";
+    std::vector<std::byte> pcm, transformed, quantized;
+    const auto duration = source->Duration().count();
+    unsigned last_percent = 101;
+    for (;;) {
+        if (!checkpoint()) {
+            result = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+            converted.diagnostic = L"conversion cancelled";
             break;
         }
-        pcm.resize(pcm.size() - pcm.size() % source_format.nBlockAlign);
+        bool end{};
+        if (!source->Read(64 * 1024, pcm, end)) {
+            result = E_FAIL; converted.diagnostic = source->Error(); break;
+        }
+        if (pcm.size() % source_format.nBlockAlign) {
+            result = E_UNEXPECTED; converted.diagnostic = L"partial decoded PCM frame"; break;
+        }
         converted.pcm_bytes += pcm.size();
-        if (!processors.Process(pcm)) {
+        if (!decoded_transform.Process(pcm, transformed, end) || !processors.Process(transformed)) {
             result = E_FAIL;
-            converted.diagnostic = processors.Error();
+            converted.diagnostic = processors.Error().empty()
+                ? decoded_transform.Error() : processors.Error();
             break;
         }
-        if (!transform.Process(pcm, transformed, end_of_stream)) {
-            result = E_FAIL;
-            converted.diagnostic = transform.Error();
-            break;
-        }
-        if (!transformed.empty()) {
-            DWORD encoded_bytes{};
-            result = encoder->WritePcm(transformed, &encoded_bytes);
-            if (FAILED(result)) {
-                converted.diagnostic = L"ISoundEncoder slot 6 write failed";
-                break;
+        if (file_encoder) {
+            if (!quantizer.Process(transformed, quantized, end)) {
+                result = E_FAIL; converted.diagnostic = quantizer.Error(); break;
             }
-        } else if (pcm.empty() && !end_of_stream) {
-            result = E_UNEXPECTED;
-            converted.diagnostic = L"reader returned an empty non-final buffer";
-            break;
+            if (!quantized.empty()) result = file_encoder->Write(quantized);
+        } else if (!transformed.empty()) result = encoder->WritePcm(transformed);
+        if (FAILED(result)) { converted.diagnostic = L"encoder PCM write failed"; break; }
+        if (callbacks.progress) {
+            const unsigned percent = duration > 0
+                ? static_cast<unsigned>(std::clamp<long double>(
+                    static_cast<long double>(converted.pcm_bytes) * 100000.0L /
+                    source_format.nAvgBytesPerSec / duration, 0, 100)) : 0;
+            if (percent != last_percent) { callbacks.progress(percent); last_percent = percent; }
         }
-        if (end_of_stream) {
-            result = S_OK;
-            break;
+        if (end) break;
+        if (pcm.empty()) {
+            result = E_UNEXPECTED; converted.diagnostic = L"empty non-final PCM block"; break;
         }
     }
-    if (stop.stop_requested() && SUCCEEDED(result)) {
-        result = HRESULT_FROM_WIN32(ERROR_CANCELLED);
-        converted.diagnostic = L"conversion cancelled";
-    }
-
-    const HRESULT finalized = encoder->Finalize();
+    const HRESULT finalized = encoder ? encoder->Finalize() : file_encoder->Finalize();
     if (SUCCEEDED(result) && FAILED(finalized)) {
-        result = finalized;
-        converted.diagnostic = L"ISoundEncoder slot 5 finalize failed";
+        result = finalized; converted.diagnostic = L"encoder finalize failed";
     }
     encoder.reset();
-    if (FAILED(result)) DeleteIncompleteOutput(destination);
+    file_encoder.reset();
+    if (SUCCEEDED(result) && lame && !entries.empty()) {
+        std::vector<audio::BuiltinTagWriteField> tags;
+        for (const auto& entry : entries)
+            if (!entry.name.empty() && !entry.value.empty() &&
+                _wcsnicmp(entry.name.c_str(), L"replaygain_", 11) != 0)
+                tags.push_back({core::WideToUtf8(entry.name), entry.value});
+        const auto written = audio::WriteBuiltinFileInfo(transaction.temporary, {}, tags);
+        if (FAILED(written.status)) {
+            result = written.status; converted.diagnostic = L"MP3 metadata write failed";
+        }
+    }
+    if (SUCCEEDED(result) && !checkpoint()) result = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    if (SUCCEEDED(result)) {
+        result = transaction.Commit(output, replace);
+        if (FAILED(result)) converted.diagnostic = L"unable to commit converted file";
+    }
+    if (SUCCEEDED(result)) {
+        converted.diagnostic.clear();
+        if (callbacks.progress) callbacks.progress(100);
+    }
     converted.result = result;
-    if (SUCCEEDED(result)) converted.diagnostic.clear();
     return converted;
 }
 
-std::optional<std::vector<std::filesystem::path>> ShowPlaylistConverter(
+bool ShowPlaylistConverter(
     HWND owner, HMODULE resources, HMODULE ttpcomm,
-    const plugins::PluginManager* library,
-    std::vector<playlist::Track> tracks,
-    settings::ConvertSettings& settings,
-    const settings::EqualizerSettings& equalizer) {
-    if (!owner || !resources || !library || tracks.empty() ||
-        !PlaylistConvertCommandAvailable(library)) return std::nullopt;
-
-    ConvertConfigState configuration{resources, library, &settings};
-    if (DialogBoxParamW(resources, MAKEINTRESOURCEW(kConvertConfigDialog),
-                        owner, ConvertConfigProc,
-                        reinterpret_cast<LPARAM>(&configuration)) != IDOK)
-        return std::nullopt;
-
-    const auto& factories = library->EncoderFactories();
-    size_t encoder_index = settings.writer_index >= 0
-        ? static_cast<size_t>(settings.writer_index) : factories.size();
-    if (encoder_index >= factories.size() ||
-        PrimaryEncoderExtension(factories[encoder_index].extension).empty()) {
-        const auto available = std::ranges::find_if(
-            factories, [](const plugins::EncoderFactoryInfo& factory) {
-                return !PrimaryEncoderExtension(factory.extension).empty();
-            });
-        if (available == factories.end()) return std::nullopt;
-        encoder_index = static_cast<size_t>(available - factories.begin());
+    const plugins::PluginManager* library, std::vector<playlist::Track> tracks,
+    settings::ConvertSettings& settings, const settings::EqualizerSettings& equalizer,
+    std::function<void(const std::filesystem::path&)> completed,
+    std::vector<std::wstring> display_titles) {
+    // 00412A8D/00412AB8: one modeless conversion task; reopening raises it.
+    if (g_convert_dialog && IsWindow(g_convert_dialog)) {
+        ShowWindow(g_convert_dialog,SW_RESTORE);
+        SetForegroundWindow(g_convert_dialog);
+        return true;
     }
-
-    std::wstring extension = PrimaryEncoderExtension(
-        factories[encoder_index].extension);
-    if (extension.empty()) {
-        ShowResourceError(owner, resources, 0x814e);
-        return std::nullopt;
+    if (!owner || !resources || !library || tracks.empty()) return false;
+    ConvertConfigState configuration{resources,library,&settings};
+    if (DialogBoxParamW(resources,MAKEINTRESOURCEW(kConvertConfigDialog),owner,
+        ConvertConfigProc,reinterpret_cast<LPARAM>(&configuration)) != IDOK) return false;
+    const size_t count=library->EncoderFactories().size();
+    size_t encoder=kWaveConversionEncoder;
+    std::wstring extension=L"wav";
+    if (settings.writer_index>0 && static_cast<size_t>(settings.writer_index)<=count) {
+        encoder=static_cast<size_t>(settings.writer_index)-1;
+        extension=PrimaryEncoderExtension(library->EncoderFactories()[encoder].extension);
+    } else if (configuration.lame && static_cast<size_t>(settings.writer_index)==count+1) {
+        encoder=kLameConversionEncoder;
+        extension=L"mp3";
     }
-
-    if (settings.save_mode < 0 || settings.save_mode > 2)
-        settings.save_mode = 1;
-
-    const std::filesystem::path folder = settings.folder;
-    std::vector<std::filesystem::path> destinations;
-    destinations.reserve(tracks.size());
-    for (size_t index{}; index < tracks.size(); ++index) {
-        const auto item_folder = folder.empty()
-            ? tracks[index].path.parent_path() : folder;
-        destinations.push_back(MakeOutputPath(
-            item_folder, tracks[index], extension,
-            settings.add_number != 0, index + 1));
+    auto state=std::make_shared<ConvertProgressState>();
+    state->resources=resources;
+    state->ttpcomm=RetainModule(ttpcomm);
+    state->library=library->RetainForBackground();
+    if (!state->library || (ttpcomm && !state->ttpcomm)) {
+        ShowResourceError(owner,resources,0x814e);
+        return false;
     }
-
-    settings.writer_index = static_cast<int>(encoder_index);
-    auto retained = library->RetainForBackground();
-    if (!retained) {
-        ShowResourceError(owner, resources, 0x814e);
-        return std::nullopt;
+    state->encoder_index=encoder;
+    state->settings=settings;
+    state->equalizer=equalizer;
+    state->completed=std::move(completed);
+    state->tracks=std::move(tracks);
+    state->display_titles=std::move(display_titles);
+    for (size_t index=0;index<state->tracks.size();++index) {
+        const auto& track=state->tracks[index];
+        auto folder=settings.folder.empty() ? track.path.parent_path() : settings.folder;
+        audio::ArchiveMemberPath member;
+        if (settings.folder.empty() && audio::ParseArchiveMemberPath(track.path.wstring(),member))
+            folder=member.archive.parent_path();
+        // An empty creator extension is valid for ttp_clienc: slot 7 on the
+        // created encoder supplies the configured preset's real extension.
+        state->destinations.push_back(MakeOutputPath(folder,track,extension,
+                                                      settings.add_number!=0,index+1));
     }
-
-    ConvertProgressState progress;
-    progress.resources = resources;
-    progress.ttpcomm = ttpcomm;
-    progress.library = std::move(retained);
-    progress.tracks = std::move(tracks);
-    progress.encoder_index = encoder_index;
-    progress.destinations = std::move(destinations);
-    progress.settings = settings;
-    progress.equalizer = equalizer;
-    progress.results.resize(progress.tracks.size());
-    for (auto& result : progress.results) result.result = kConversionPending;
-
-    for (size_t index{}; index < progress.destinations.size(); ++index) {
-        const auto& destination = progress.destinations[index];
-        const DWORD attributes = GetFileAttributesW(destination.c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES) continue;
-        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-            progress.results[index].result =
-                HRESULT_FROM_WIN32(ERROR_DIRECTORY);
-            continue;
-        }
-        if (settings.save_mode == 0) {
-            progress.results[index].result = S_FALSE;
-            continue;
-        }
-        if (settings.save_mode == 1) {
-            const auto question = FormatPathQuestion(
-                resources, 0x814d, destination);
-            const auto caption = WindowCaption(owner);
-            const int answer = MessageBoxW(
-                owner, question.empty() ? nullptr : question.c_str(),
-                caption.empty() ? nullptr : caption.c_str(),
-                MB_YESNO | MB_ICONQUESTION);
-            if (answer != IDYES) {
-                progress.results[index].result = S_FALSE;
-                continue;
-            }
-        }
-        // The single-file mode-1 prompt was already owned by IFileSaveDialog;
-        // batch mode asked with ttpres 0x814D above.  004124F0 removes the old
-        // file before the encoder's STGM_CREATE stream open.
-        if (!DeleteFileW(destination.c_str())) {
-            progress.results[index].result =
-                HRESULT_FROM_WIN32(GetLastError());
-        }
+    state->results.resize(state->tracks.size());
+    for (auto& result:state->results) result.result=kConversionPending;
+    auto* holder=new ConvertLifetime(state);
+    const HWND dialog=CreateDialogParamW(resources,MAKEINTRESOURCEW(kConvertProgressDialog),
+        owner,ConvertProgressProc,reinterpret_cast<LPARAM>(holder));
+    if (!dialog) {
+        // WM_NCDESTROY normally consumes the holder after WM_INITDIALOG.
+        // A template lookup failure never delivers either message.
+        if (!state->dialog_initialized) delete holder;
+        return false;
     }
+    ShowWindow(dialog,SW_SHOWNORMAL);
+    return true;
+}
 
-    const INT_PTR converted = DialogBoxParamW(
-        resources, MAKEINTRESOURCEW(kConvertProgressDialog), owner,
-        ConvertProgressProc, reinterpret_cast<LPARAM>(&progress));
-    if (converted != IDOK) return std::nullopt;
-    std::vector<std::filesystem::path> outputs;
-    for (size_t index{}; index < progress.results.size(); ++index) {
-        if (progress.results[index].result == S_OK)
-            outputs.push_back(progress.destinations[index]);
-    }
-    return outputs;
+bool TranslatePlaylistConverterMessage(MSG& message) {
+    return g_convert_dialog && IsWindow(g_convert_dialog) &&
+        (message.hwnd==g_convert_dialog || IsChild(g_convert_dialog,message.hwnd)) &&
+        IsDialogMessageW(g_convert_dialog,&message);
+}
+
+void ClosePlaylistConverter(HWND owner) {
+    if (g_convert_dialog && IsWindow(g_convert_dialog) &&
+        GetWindow(g_convert_dialog,GW_OWNER)==owner)
+        SendMessageW(g_convert_dialog,WM_CLOSE,0,0);
 }
 
 bool ShowPlaylistReplayGainScanner(

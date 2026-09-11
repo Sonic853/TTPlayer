@@ -25,6 +25,7 @@ add_library(ttplayer_core
   src/audio/audio_engine.cpp
   src/audio/builtin_file_info.cpp
   src/audio/cue_sheet.cpp
+  src/audio/file_encoder.cpp
   src/audio/kernel_streaming_sink.cpp
   src/audio/mp3pro_source.cpp
   src/audio/native_output_contract.cpp
@@ -33,6 +34,7 @@ add_library(ttplayer_core
   src/audio/winamp_dsp.cpp
   src/core/text.cpp
   src/integrations/discord_presence.cpp
+  src/integrations/discord_track_presence.cpp
   src/lyrics/lrc_parser.cpp
   src/playlist/playlist.cpp
   src/playlist/playlist_store.cpp
@@ -85,6 +87,7 @@ target_compile_definitions(ttpcomm_api PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_M
 
 add_executable(ttplayer_rebuild WIN32
   src/app/application.cpp
+  src/app/legacy_exports.cpp
   src/app/main.cpp
   src/app/resources.rc
   src/app/runtime.cpp
@@ -94,6 +97,34 @@ add_executable(ttplayer_rebuild WIN32
 target_compile_definitions(ttplayer_rebuild PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(ttplayer_rebuild PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_rebuild PRIVATE ttplayer_core ttpcomm_api comctl32 comdlg32 shell32)
+
+# Pre-ATL-8 AddIns generate window thunks in ordinary heap memory
+# (ttp_ape!60101C36, also ttp_enc). /NXCOMPAT opts out of Windows' ATL
+# emulation, faulting before WM_INITDIALOG finishes. wWinMain instead
+# enables DEP explicitly, with the system's legacy ATL compatibility.
+target_link_options(ttplayer_rebuild PRIVATE /NXCOMPAT:NO)
+
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  set(TTPLAYER_LAME_ARCH x64)
+else()
+  set(TTPLAYER_LAME_ARCH x86)
+endif()
+function(ttplayer_stage_lame target)
+  set(lame_archive "${CMAKE_CURRENT_SOURCE_DIR}/../lame-4.0-${TTPLAYER_LAME_ARCH}.zip")
+  set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/stage_lame.cmake")
+  if(EXISTS "${lame_archive}")
+    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${lame_archive}")
+  endif()
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND "${CMAKE_COMMAND}"
+      "-DARCHIVE=${CMAKE_CURRENT_SOURCE_DIR}/../lame-4.0-${TTPLAYER_LAME_ARCH}.zip"
+      "-DSTAGING=${CMAKE_CURRENT_BINARY_DIR}/lame/${TTPLAYER_LAME_ARCH}"
+      "-DDESTINATION=$<TARGET_FILE_DIR:${target}>"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/stage_lame.cmake"
+    VERBATIM)
+endfunction()
+ttplayer_stage_lame(ttplayer_rebuild)
 
 # Standalone development/test front ends only. The shipped player embeds all
 # three workers and relaunches itself in private modes for fault isolation;
@@ -279,6 +310,12 @@ target_link_libraries(ttp_mock_stalling PRIVATE ole32)
 set_property(TARGET ttp_mock_stalling PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
 
 add_executable(audio_recovery_tests tests/audio_recovery_tests.cpp)
+add_executable(conversion_recovery_tests tests/conversion_recovery_tests.cpp
+  src/app/legacy_exports.cpp)
+target_compile_definitions(conversion_recovery_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(conversion_recovery_tests PRIVATE /W4 /permissive- /EHsc /utf-8 /UNDEBUG)
+target_link_libraries(conversion_recovery_tests PRIVATE ttplayer_core)
+ttplayer_stage_lame(conversion_recovery_tests)
 target_compile_definitions(audio_recovery_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(audio_recovery_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(audio_recovery_tests PRIVATE ttplayer_core)
@@ -343,6 +380,12 @@ target_compile_definitions(discord_presence_tests PRIVATE
 target_compile_options(discord_presence_tests PRIVATE
   /W4 /permissive- /EHsc /utf-8 /UNDEBUG)
 target_link_libraries(discord_presence_tests PRIVATE ttplayer_core)
+
+add_executable(discord_sync_tests tests/discord_sync_tests.cpp)
+target_compile_definitions(discord_sync_tests PRIVATE
+  UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(discord_sync_tests PRIVATE /W4 /permissive- /EHsc /utf-8 /UNDEBUG)
+target_link_libraries(discord_sync_tests PRIVATE ttplayer_core)
 
 add_executable(ttpcomm_api_test ../reverse/tests/test_ttpcomm_api.c)
 target_link_libraries(ttpcomm_api_test PRIVATE ttpcomm_api)
@@ -483,6 +526,9 @@ add_custom_command(TARGET ttplayer_rebuild POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
           "${CMAKE_CURRENT_SOURCE_DIR}/../TTPlayer.xml"
           "$<TARGET_FILE_DIR:ttplayer_rebuild>/TTPlayer.xml"
+  COMMAND "${CMAKE_COMMAND}"
+          "-DPRESET_FILE=$<TARGET_FILE_DIR:ttplayer_rebuild>/AddIn/ttp_clienc.xml"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/repair_cli_presets.cmake"
   VERBATIM
 )
 
@@ -521,6 +567,9 @@ add_test(NAME desktop_lyrics_tests COMMAND desktop_lyrics_tests
          "${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME audio_recovery_tests COMMAND audio_recovery_tests
          "${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_test(NAME conversion_recovery_tests COMMAND conversion_recovery_tests
+         "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(conversion_recovery_tests PROPERTIES TIMEOUT 60)
 add_test(NAME progress_seek_tests COMMAND progress_seek_tests
          "${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME taskbar_playback_tests COMMAND taskbar_playback_tests)
@@ -533,6 +582,8 @@ add_test(NAME pcm_output_transform_tests COMMAND pcm_output_transform_tests
 add_test(NAME equalizer_recovery_tests COMMAND equalizer_recovery_tests
          "${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME discord_presence_tests COMMAND discord_presence_tests)
+add_test(NAME discord_sync_tests COMMAND discord_sync_tests)
+set_tests_properties(discord_presence_tests discord_sync_tests PROPERTIES TIMEOUT 45)
 add_test(NAME ttpcomm_api_test COMMAND ttpcomm_api_test)
 add_test(NAME ttpcomm_compatibility_tests COMMAND ttpcomm_compatibility_tests
          "$<TARGET_FILE:ttpcomm_mock_revision>"

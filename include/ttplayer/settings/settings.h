@@ -23,6 +23,8 @@ struct GeneralSettings {
     // runtime now maps this switch to Discord Rich Presence rather than the
     // retired MSN/Baidu Hi window-message integrations.
     bool send_title_to_msn{true};
+    // Current timed LRC line in Rich Presence; subordinate to the master switch.
+    bool discord_sync_lyrics{true};
     // Discord requires every Rich Presence producer to use an application
     // registered in its developer portal.  This is a public identifier, not
     // a credential; private builds may replace it only in TTPlayer.xml.
@@ -289,6 +291,11 @@ struct ConvertSettings {
     int add_number{};
     int add_to_playlist{};
     int thread_priority{};
+    // Optional modern LAME DLL extension; existing legacy fields retain their
+    // original meanings and AddIn configuration remains owned by each DLL.
+    int lame_mode{};
+    int lame_bitrate{192};
+    int lame_quality{2};
 };
 struct DspPluginSettings {
     DspPluginSettings();

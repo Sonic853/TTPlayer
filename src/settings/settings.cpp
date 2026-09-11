@@ -877,6 +877,8 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         s.general.scroll_title=IntAttr(
             n,L"ScrollTitle",s.general.scroll_title ? 1 : 0)!=0;
         const auto discord_switch=Attribute(n,L"SendTitleToDiscord");
+        s.general.discord_sync_lyrics=IntAttr(
+            n,L"DiscordSyncLyrics",s.general.discord_sync_lyrics ? 1 : 0)!=0;
         s.general.send_title_to_msn=discord_switch.vt==VT_EMPTY
             ? IntAttr(n,L"SendTitleToMSN",
                       s.general.send_title_to_msn ? 1 : 0)!=0
@@ -1238,6 +1240,9 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         auto* const n=node.Get();
         auto& value=s.convert;
         value.writer_index=IntAttr(n,L"WriterIndex",value.writer_index);
+        value.lame_mode=std::clamp(IntAttr(n,L"LameMode",value.lame_mode),0,2);
+        value.lame_bitrate=std::clamp(IntAttr(n,L"LameBitrate",value.lame_bitrate),8,320);
+        value.lame_quality=std::clamp(IntAttr(n,L"LameQuality",value.lame_quality),0,9);
         value.output_bits=IntAttr(n,L"OutputBits",value.output_bits);
         value.resample_rate=IntAttr(n,L"ResampleRate",value.resample_rate);
         value.replay_gain=IntAttr(n,L"ReplayGain",value.replay_gain);
@@ -1604,6 +1609,8 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"ScrollTitle",settings.general.scroll_title ? 1 : 0);
         SetAttribute(element,L"SendTitleToDiscord",
                      settings.general.send_title_to_msn ? 1 : 0);
+        SetAttribute(element,L"DiscordSyncLyrics",
+                     settings.general.discord_sync_lyrics ? 1 : 0);
         // Retain the legacy attribute while old TTPlayer builds may still be
         // pointed at this file.  New builds always prefer the Discord name.
         SetAttribute(element,L"SendTitleToMSN",
@@ -1950,6 +1957,9 @@ void SaveWindowState(const std::filesystem::path& path,
         auto element_owner=AdoptCom(element);
         const auto& value=settings.convert;
         SetAttribute(element,L"WriterIndex",value.writer_index);
+        SetAttribute(element,L"LameMode",value.lame_mode);
+        SetAttribute(element,L"LameBitrate",value.lame_bitrate);
+        SetAttribute(element,L"LameQuality",value.lame_quality);
         SetAttribute(element,L"OutputBits",value.output_bits);
         SetAttribute(element,L"ResampleRate",value.resample_rate);
         SetAttribute(element,L"ReplayGain",value.replay_gain);

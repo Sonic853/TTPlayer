@@ -5,9 +5,14 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace ttplayer::playlist { struct Track; }
+namespace ttplayer::lyrics { struct Lyrics; }
+namespace ttplayer::testing { struct DiscordPresenceAccess; }
 
 namespace ttplayer::integrations {
 
@@ -17,6 +22,9 @@ enum class DiscordPlaybackState {
     paused,
 };
 
+// A URL alone does not establish that the source is a live radio station.
+enum class DiscordAudioKind { track, network_audio, radio };
+
 struct DiscordTrackPresence {
     std::wstring title;
     std::wstring artist;
@@ -24,10 +32,28 @@ struct DiscordTrackPresence {
     std::chrono::milliseconds position{};
     std::chrono::milliseconds duration{};
     DiscordPlaybackState playback{DiscordPlaybackState::stopped};
+    DiscordAudioKind audio_kind{DiscordAudioKind::track};
+    std::wstring station;
+    // Local-only identity/clock fields; no path or revision is serialized.
+    std::wstring track_identity;
+    std::uint64_t timeline_revision{};
+    bool seek_pending{};
+    std::wstring lyric;
+    std::chrono::milliseconds lyric_start{};
+    std::optional<std::chrono::milliseconds> lyric_end;
 
     friend bool operator==(const DiscordTrackPresence&,
                            const DiscordTrackPresence&) = default;
 };
+
+// Presentation-only adapter: consumes metadata already available to the player;
+// never opens the media, uploads artwork or performs an online metadata lookup.
+[[nodiscard]] DiscordTrackPresence BuildDiscordTrackPresence(
+    const playlist::Track& track, std::chrono::milliseconds position,
+    std::chrono::milliseconds duration, DiscordPlaybackState playback,
+    bool network_source);
+// Uses the same parsed timestamps/offset as the player's lyric window.
+void ApplyDiscordLyric(DiscordTrackPresence& presence, const lyrics::Lyrics& lyrics);
 
 // A non-blocking client for Discord's documented local RPC transport.  Calls
 // from the player window only update the desired state; pipe discovery,
@@ -43,10 +69,15 @@ public:
     // kDefaultDiscordApplicationId. Discord only needs this registered public
     // ID--no client secret or user authentication.
     void Configure(bool enabled, std::wstring application_id = {});
-    void Update(DiscordTrackPresence presence);
+    void Update(DiscordTrackPresence presence,
+                std::chrono::steady_clock::time_point observed_at =
+                    std::chrono::steady_clock::now());
     void Clear();
 
 private:
+    friend struct ttplayer::testing::DiscordPresenceAccess;
+    // Tests use a private pipe, never a real user's Discord IPC slot.
+    explicit DiscordPresence(std::wstring test_pipe_name);
     class Impl;
     std::unique_ptr<Impl> impl_;
 };
@@ -57,6 +88,8 @@ namespace discord_presence_detail {
 // A non-empty XML value overrides the built-in application identity.
 [[nodiscard]] std::wstring SelectApplicationId(std::wstring_view configured);
 [[nodiscard]] std::string BuildHandshakeJson(std::string_view application_id);
+[[nodiscard]] std::chrono::milliseconds ProjectPresencePosition(
+    const DiscordTrackPresence& presence, std::chrono::milliseconds elapsed);
 [[nodiscard]] std::string BuildSetActivityJson(
     const DiscordTrackPresence* presence, std::uint32_t process_id,
     std::string_view nonce, std::int64_t unix_time_seconds);

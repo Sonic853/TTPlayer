@@ -20,6 +20,9 @@ struct PcmOutputTransformOptions {
     int resample_rate{};
     int ssrc_mode{1};
     int dither{};
+    // CConvertDlg sends normalized IEEE float64 to AddIn encoders; only its
+    // built-in Wave writer quantizes to the selected integer bit depth.
+    bool floating_point{};
 };
 
 class PcmOutputTransform {

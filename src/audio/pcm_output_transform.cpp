@@ -378,6 +378,17 @@ struct PcmOutputTransform::Impl {
             return false;
         }
         bytes.resize(samples.size() * sample_bytes);
+        if (output.wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+            for (size_t index = 0; index < samples.size(); ++index) {
+                // Internal SSRC samples use half scale; the public IEEE
+                // format uses full scale, just like DecodeSample's input.
+                const double value = std::isfinite(samples[index])
+                    ? samples[index] * 2.0 : 0.0;
+                std::memcpy(bytes.data() + index * sizeof(value),
+                            &value, sizeof(value));
+            }
+            return true;
+        }
         auto* destination = reinterpret_cast<std::uint8_t*>(bytes.data());
         const double scale = std::ldexp(1.0, output.wBitsPerSample);
         for (size_t index = 0; index < samples.size(); ++index) {
@@ -439,7 +450,8 @@ bool PcmOutputTransform::Open(const WAVEFORMATEX& input,
     impl_->input_valid_bits = encoding.valid_bits;
     impl_->input_channel_mask = encoding.channel_mask;
     const int requested_bits = options.output_bits;
-    const WORD bits = requested_bits == 8 || requested_bits == 16 ||
+    const WORD bits = options.floating_point ? 64 :
+        requested_bits == 8 || requested_bits == 16 ||
                       requested_bits == 24 || requested_bits == 32
         ? static_cast<WORD>(requested_bits) : 16;
     const DWORD rate = options.resample_rate > 0
@@ -448,7 +460,8 @@ bool PcmOutputTransform::Open(const WAVEFORMATEX& input,
         impl_->error = L"The configured output sample rate is invalid";
         return false;
     }
-    impl_->output.wFormatTag = WAVE_FORMAT_PCM;
+    impl_->output.wFormatTag = options.floating_point
+        ? WAVE_FORMAT_IEEE_FLOAT : WAVE_FORMAT_PCM;
     impl_->output.nChannels = input.nChannels;
     impl_->output.nSamplesPerSec = rate;
     impl_->output.wBitsPerSample = bits;

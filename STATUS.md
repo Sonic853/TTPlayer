@@ -1,5 +1,88 @@
 # Reconstruction status
 
+2026-09-11: supplied all ten previously missing CLI encoder executables in the
+local Release/Encoders directory, including Apple dependencies for QAAC and the
+original Nero download recovered from Wayback (historical SHA-256 matches).
+Restored the host CreateStreamOnFile export (004C51D3, ordinal 3): ttp_clienc
+6020147F otherwise rejects every %s temporary-WAV preset before child creation.
+Corrected six Nero -ignorelenth typos, preserving preset selection and settings.
+All 29 current CLI presets finish real host-window conversions with a generated
+3-second tone; all 30 Release CTest cases pass (36.37 s). Independent decoders
+validate all eight outputs that the generic PCM probe could not read correctly;
+those separate probe/decoder-path anomalies remain, not claimed fixed here.
+No system installs or registry/PATH changes. Explicit hash-pinned deployment
+script and redistribution limitations: EXTERNAL_ENCODERS.md.
+
+2026-09-11: fixed Nero conversion loading and output sharing violations.
+Resolve NeroIPP/aacenc32/Aac by absolute AddIn paths before original creator
+calls; retain dependencies across background library snapshots. Replace the
+empty output placeholder with a reserved directory/absent media file, matching
+00412575 -> 004CD30C: Nero's failed existing-MP4 parser otherwise leaks a read
+handle even though Finalize closes the writer. No forced handle closure or DLL
+patching. Nero now passes real encoding/PCM/tag/exclusive-handle, overwrite,
+cancel, Unicode, 48 kHz and batch-import tests. Wave/APE/native MP3/WMA and all
+five supplied CLI LAME presets pass original/rebuilt host window conversions;
+Wave/APE/native MP3 fixture files are byte-identical. Stage optional CLI LAME
+from the supplied ZIP into Encoders without replacing existing executables;
+no player startup/playback/DLL conversion EXE dependency. The other 24 CLI
+presets still lack ten external programs. Nero >48 kHz remains unsupported as
+in the original. Details and explicit boundaries: CONVERSION_RECOVERY.md.
+Final Release regression: all 30 CTest cases pass (32.43 s); all six encoder
+configuration dialogs pass close/OK/cancel (18 opens), with DEP enabled.
+Restored all 30 pre-test runtime configuration files and verified their hashes;
+all temporary host player processes exited.
+
+2026-09-11: fixed conversion encoder configuration dialogs faulting before
+becoming visible. Original 0047D9A4 -> 004CD21E uses creator slot 7 with the
+conversion dialog as owner; that synchronous modal ABI remains unchanged.
+Actual host tracing identified legacy ATL heap-thunk execute faults (C0000005,
+access 8, PAGE_READWRITE), followed by C000041D/Windows Error Reporting waits.
+Pair /NXCOMPAT:NO with early SetProcessDEPPolicy(PROCESS_DEP_ENABLE), retaining
+DEP and ASLR while enabling Windows' legacy ATL emulation. No DLL patching,
+executable heap changes or registry mitigation changes. Host UI tests pass all
+six configurable encoders through close/OK/cancel (18 opens); Wave stays
+disabled, parent ownership/re-enabling and clean exit pass. Runtime DEP flags=1,
+permanent=TRUE. All 30 Release CTest cases pass (37.67 s). Nero's separate
+dependency loading/output-commit issues remain; see CONVERSION_RECOVERY.md.
+
+2026-09-11: restored the playlist conversion pipeline against 0047D682,
+004122CD/00412723 and 00412B48/00412E61: Wave-first encoder catalogue,
+creator configuration, instance extension, double-PCM/resample/effects chain,
+conditional metadata copying, modeless singleton progress, pause/cancel,
+per-track completion import and overwrite policies. Added an explicitly separate
+optional LAME DLL encoder from the supplied x86 ZIP (including libmpg123; no EXE
+dependency). Wave/APE PCM integrity, native MP3/WMA and LAME CBR/VBR/ABR,
+CUE, Unicode paths, cancellation and overwrite protection are host-tested.
+Original/rebuilt host UI checks cover catalogue/capabilities and batch numbering
+with completion import. Nero AAC and missing external CLI presets remain
+unvalidated; cooperative pause and transactional replacement are intentional
+safety differences. See [CONVERSION_RECOVERY.md](CONVERSION_RECOVERY.md).
+Final Release build and all 30 host CTest cases pass (32.42 s); 30 pre-existing
+runtime configuration files were restored and SHA-256 verified after staging/tests.
+
+2026-09-11: completed Discord reconnect/seek and current-line lyric synchronization.
+The sender retains every latest audio sample and re-reads state after blocking
+READY handshakes; timeline revisions bypass distance-based seek filtering.
+Pending seeks do not extrapolate before decoder acknowledgement. Timed LRC lines
+share the player's offset/seek logic even with hidden lyric windows; ordinary
+line changes coalesce at two-second intervals, while seeks, pause and clear take
+priority. General/@DiscordSyncLyrics defaults on under the Discord master switch;
+artwork remains deferred. Release and all 29 host CTest cases pass (30.21 s),
+including actual private-pipe reconnection, delayed handshakes, one-millisecond
+seeks and lyric coalescing. No real Discord account was used for rendering tests.
+See [DISCORD_PRESENCE.md](DISCORD_PRESENCE.md).
+
+2026-09-11: expanded Discord's music presentation: member-list song/program
+titles, fixed paused positions, start-only unknown-duration/listening clocks,
+station-aware radio labels, and bounded artist/album text layout. Metadata
+comes from the playing item; URL-only titles are not published. Album artwork
+is explicitly deferred. The sender now projects stale snapshots at reconnect;
+native PCM clocks no longer clamp unknown durations to zero, and unknown-length
+audio no longer triggers end-of-track fade. Release and all 28 host CTest cases
+pass (23.13 s), including isolated Discord IPC and clock/fade regressions.
+Real Discord profile rendering and live-reader metadata delivery are not
+established by these tests. See [DISCORD_PRESENCE.md](DISCORD_PRESENCE.md).
+
 2026-09-11: restored the optional mp3PRO Winamp input bridge following
 004E6CBD/004E6FB6, including enhanced-rate selection, bounded PCM buffering,
 single-reader ownership, pause/resume, asynchronous seek flushing and stop.

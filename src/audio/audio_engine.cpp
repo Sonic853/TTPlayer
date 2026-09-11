@@ -1,4 +1,5 @@
 #include "ttplayer/audio/audio_engine.h"
+#include "ttplayer/audio/playback_clock.h"
 #include "ttplayer/audio/archive_member.h"
 #include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/audio/native_output_contract.h"
@@ -2471,10 +2472,11 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 if (!fill_segment()) { usable = false; break; }
             }
             if (!usable) break;
-            position_ms_ = std::min(
-                duration_ms_.load(), position_base_ms +
+            position_ms_ = BoundPlaybackClock(
+                position_base_ms +
                     static_cast<int64_t>(played_bytes * 1000 /
-                                         wave_format.nAvgBytesPerSec));
+                                         wave_format.nAvgBytesPerSec),
+                duration_ms_.load());
             UpdateTrackFade(position_ms_.load());
 
             if (state_.load() == PlaybackState::playing &&
@@ -2493,7 +2495,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 last_visual_byte = played_bytes;
             }
             if (final_stream_byte && played_bytes >= *final_stream_byte) {
-                position_ms_ = duration_ms_.load();
+                if (const auto duration = duration_ms_.load(); duration > 0)
+                    position_ms_ = duration;
                 state_ = PlaybackState::stopped;
                 natural_replay_gain_end = true;
                 break;
@@ -2913,13 +2916,14 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 played_bytes = static_cast<uint64_t>(position.u.ms) *
                                wave_format.nAvgBytesPerSec / 1000;
             }
-            position_ms_ = std::min(duration_ms_.load(), position_base_ms + relative);
+            position_ms_ = BoundPlaybackClock(position_base_ms + relative, duration_ms_.load());
             UpdateTrackFade(position_ms_.load());
             if (state_.load() == PlaybackState::playing)
                 publish_at(played_bytes, false);
         }
         if (decoder_eof && decoded_offset == decoded.size() && queued == 0) {
-            position_ms_ = duration_ms_.load();
+            if (const auto duration = duration_ms_.load(); duration > 0)
+                position_ms_ = duration;
             state_ = PlaybackState::stopped;
             natural_replay_gain_end = true;
             break;
@@ -3177,6 +3181,15 @@ void AudioEngine::Resume() {
 
 void AudioEngine::Seek(std::chrono::milliseconds position) {
     SeekImpl(position, true);
+}
+
+PlaybackClockSnapshot AudioEngine::ClockSnapshot() const {
+    std::scoped_lock lock(mutex_);
+    const auto pending = pending_seek_position_ms_.load();
+    return {state_.load(),
+            std::chrono::milliseconds(pending >= 0 ? pending : position_ms_.load()),
+            std::chrono::milliseconds(duration_ms_.load()), seek_revision_, pending >= 0,
+            std::chrono::steady_clock::now()};
 }
 
 void AudioEngine::SeekWithoutFade(std::chrono::milliseconds position) {
@@ -3475,6 +3488,7 @@ void AudioEngine::UpdateTrackFade(int64_t position_ms) {
     float gain = 1.0F;
     if ((options_.sound_fade_mode & 0x10) != 0 &&
         options_.track_fade_duration > 0 &&
+        duration_ms_.load() > 0 &&
         state_.load() == PlaybackState::playing) {
         const int64_t remaining = duration_ms_.load() - position_ms;
         if (remaining <= options_.track_fade_duration) {

@@ -487,7 +487,10 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
                 // The reconstruction lacks that queue object and previously
                 // over-applied the fade to every lyric release; preserve the
                 // observed original direct-seek behavior here.
-                if (target) audio_.SeekWithoutFade(*target);
+                if (target) {
+                    audio_.SeekWithoutFade(*target);
+                    UpdateDiscordPresence();
+                }
                 // ReleaseCapture synchronously sends WM_CAPTURECHANGED.
                 // Publish the target before that handler invalidates/paints.
                 if (GetCapture() == control) ReleaseCapture();
@@ -3682,6 +3685,7 @@ void PlayerWindow::SeekLyricLine(std::ptrdiff_t delta) {
     // the same observed no-transition result as drag release.
     audio_.SeekWithoutFade(
         lyrics_.lines[static_cast<size_t>(next)].time + lyrics_.offset);
+    UpdateDiscordPresence();
     if (lyric_control_) InvalidateRect(lyric_control_, nullptr, FALSE);
 }
 
