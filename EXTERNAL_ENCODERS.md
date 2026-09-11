@@ -1,7 +1,72 @@
 # 外部命令行编码器
 
 这些程序只供“转换格式 → 命令行编码器”使用，不是播放器启动、播放或原生 DLL
-编码器的依赖。部署位置是运行中的 EXE 旁的 `Encoders`，不是工作目录或全局 PATH。
+编码器的依赖。原有预设使用运行中的 EXE 旁的 `Encoders`；新增 FFmpeg 预设使用
+用户提供的 `ffmpeg.exe`，通过播放器继承的 PATH 查找（例如 Scoop shims）。
+
+## 用户自备 FFmpeg 预设
+
+`../AddIn/ttp_clienc.xml` 末尾追加以下 13 项，原有 29 项及 `current` 不变。
+Debug/Release 的同名配置也已同步追加；常规构建继续从根安装目录复制该配置。
+不下载、复制 FFmpeg，不写入用户名、Scoop 版本目录或绝对路径，不修改系统 PATH。
+
+在“转换格式 → 命令行编码器 → 配置”的预设列表中选择以 `FFmpeg` 开头的项目。
+所有新预设的 `encoder` 均为 `ffmpeg.exe`。可先在启动播放器的终端验证：
+
+```powershell
+where.exe ffmpeg.exe
+ffmpeg.exe -hide_banner -encoders
+```
+
+若安装后播放器尚未退出，须从继承了新 PATH 的环境重新启动。`ffmpeg.exe` 不等同于
+`Encoders\ffmpeg.exe`：后者是显式相对路径，不会在缺失时自动改为 PATH 搜索。
+播放器目录/当前目录中的同名程序可能优先于 PATH 中的程序。
+
+| 预设 | 输出 | 编码参数 |
+| --- | --- | --- |
+| FFmpeg AAC-LC 128K / 256K | `.m4a` | `aac`，LC，128 / 256 kbit/s |
+| FFmpeg MP3 VBR V0 / CBR 320K | `.mp3` | `libmp3lame`，`-q:a 0` / `-b:a 320k` |
+| FFmpeg Opus VBR 128K / 192K | `.opus` | `libopus`，audio，VBR，48 kHz |
+| FFmpeg Vorbis Q5 | `.ogg` | `libvorbis`，`-q:a 5` |
+| FFmpeg FLAC 16-bit / 24-bit | `.flac` | `flac`，压缩级别 8，明确输出位深 |
+| FFmpeg ALAC 24-bit | `.m4a` | `alac`，24-bit |
+| FFmpeg WavPack 24-bit | `.wv` | `wavpack`，24-bit，无损 |
+| FFmpeg WAV PCM 16-bit / 24-bit | `.wav` | `pcm_s16le` / `pcm_s24le`，RF64 auto |
+
+调用链仍是播放器解码 → CLI 插件提供 WAV/PCM → FFmpeg 编码，不是把原始文件交给
+FFmpeg；不会自动扩大播放器支持的输入格式，也不提供压缩码流直接复制。除 Opus
+明确转换至 48 kHz 外，未强制统一采样率/声道；实际输出还受转换窗口设置与编码器限制影响。
+无损预设只保证对收到的 PCM 无损编码；预设位深、转换窗口重采样等仍可能改变输入。
+
+公共参数是 `-hide_banner -loglevel error -nostdin -y -f wav -ignore_length 1 -i pipe:0
+-map 0:a:0`。WAV 输入的 `-ignore_length 1` 必须放在 `-i` 前，适配旧插件流式 WAV
+长度头；`-nostdin` 禁止交互命令，不禁止读取媒体 stdin。`%d` 保留引号，指向现有
+转换事务的临时输出，成功后才提交；`-y` 不绕过播放器对最终目标的覆盖处理。
+参考 [FFmpeg 格式文档](https://ffmpeg.org/ffmpeg-formats.html#wav)、
+[编码器文档](https://ffmpeg.org/ffmpeg-codecs.html) 和
+[命令行文档](https://ffmpeg.org/ffmpeg.html)。
+
+新预设统一 `tagtype="0"`，不调用尚未完整恢复的旧插件自动标签写入；不声称保留
+原标题/艺术家等标签或封面。AAC 使用 FFmpeg 原生 AAC-LC，不冒充 Nero HE-AAC、
+QAAC 或 `libfdk_aac`。如果用户换用精简 FFmpeg 构建，须检查对应编码器是否存在。
+
+2026-09-11 宿主机验证：使用 Scoop shims 中的 FFmpeg 9.0.1 full build，不向测试
+播放器目录复制 FFmpeg。13/13 新预设均通过真实 Release 转换窗口完成生成的
+3 秒、44.1 kHz、16-bit 立体声 440 Hz 音频转换，所有测试播放器正常退出。
+ffprobe 检查编码格式、声道、采样率和无损输出位深均符合预设；全部输出再用 FFmpeg
+解码为 44.1 kHz PCM，长度均为 3.000 秒，RMS 0.258384–0.260921，峰值小于 0.390。
+六个无损/PCM 预设解码回 16-bit 后与该输入 PCM 逐样本完全相同。此短样本不代表
+全部采样率、多声道、长文件或播放器回放路径已覆盖，也不代表测试了原生 24-bit 源精度。
+测试命令（在根安装目录）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File rebuild/tools/probe_conversion_window.ps1 -Encoder 3 -CliPreset 29 -Convert -Complete -Seconds 3 -SampleRate 0 -Tone
+```
+
+依次将 `-CliPreset` 改为 29–41。日志和 PCM 校验汇总保存在
+`build/external-encoders/ffmpeg-presets/`。根配置、Debug、Release 的原有 29 项节点均
+与修改前一致；各自 `current` 仍为 20、0、28。只修改预设和文档，没有重编译 EXE、
+改动用户音乐或运行目录的其它设置；未将先前的 CTest 结果当作本次重跑结果。
 
 ## 本地安装
 

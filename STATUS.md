@@ -1,5 +1,16 @@
 # Reconstruction status
 
+2026-09-11: appended 13 optional PATH-based FFmpeg CLI presets to the root,
+Debug and Release ttp_clienc.xml: AAC-LC, MP3, Opus, Vorbis, FLAC, ALAC,
+WavPack and PCM WAV. Existing 29 presets and each current selection remain
+unchanged. Uses the user's Scoop ffmpeg.exe, without copying/installing an
+executable, hard-coding an absolute path or changing PATH. All 13 pass real
+Release host-window tone conversions and independent ffprobe/PCM checks;
+six lossless/PCM presets reproduce the 16-bit fixture exactly after decoding.
+Tagtype 0 intentionally does not claim original metadata/cover preservation.
+No EXE rebuild or new full CTest run needed for this configuration-only change.
+Details, commands and verification scope: EXTERNAL_ENCODERS.md.
+
 2026-09-11: supplied all ten previously missing CLI encoder executables in the
 local Release/Encoders directory, including Apple dependencies for QAAC and the
 original Nero download recovered from Wayback (historical SHA-256 matches).
