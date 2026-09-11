@@ -55,6 +55,7 @@ constexpr int kPageAssociation = 14;
 constexpr int kOptionsNavigation = 0xe910;
 constexpr int kOptionsHeader = 0xe911;
 constexpr int kOptionsRelated = 0xe912;
+constexpr int kOptionsDiscordLyrics = 0xe913;
 constexpr int kPropertySheetApply = 0x3021;
 constexpr UINT kSaveAllOptions = 0x04d2;
 constexpr UINT kResetAllOptions = 0x04d3;
@@ -3225,6 +3226,26 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         // wording.  DiscordApplicationId is intentionally XML-only.
         SetDlgItemTextW(dialog, 2188,
                         L"向 Discord 发送播放的歌曲信息");
+        // Community-only option: keep the original ttpres dialog usable.
+        // The free right-hand cell beside the shutdown time is inside its
+        // Options group. Dialog units/font follow the loaded template/DPI.
+        if (!GetDlgItem(dialog, kOptionsDiscordLyrics)) {
+            RECT bounds{159, 109, 267, 119};
+            MapDialogRect(dialog, &bounds);
+            const HWND checkbox = CreateWindowExW(
+                0, WC_BUTTONW, L"向 Discord 发送歌词",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                bounds.left, bounds.top, bounds.right - bounds.left,
+                bounds.bottom - bounds.top, dialog,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOptionsDiscordLyrics)),
+                instance_, nullptr);
+            if (checkbox) {
+                SendMessageW(checkbox, WM_SETFONT,
+                    SendMessageW(dialog, WM_GETFONT, 0, 0), FALSE);
+                SetWindowPos(checkbox, GetDlgItem(dialog, 2183), 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
         SetChecked(dialog, 2088, value.startup_minimize);
         SetChecked(dialog, 2085, value.tray_icon);
         SetChecked(dialog, 2127, value.show_hotkey_in_tips);
@@ -3233,6 +3254,9 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetChecked(dialog, 2153, value.menu_bar_playlist);
         SetChecked(dialog, 2189, value.scroll_title);
         SetChecked(dialog, 2188, value.send_title_to_msn);
+        SetChecked(dialog, kOptionsDiscordLyrics, value.discord_sync_lyrics);
+        EnableWindow(GetDlgItem(dialog, kOptionsDiscordLyrics),
+                     value.send_title_to_msn);
         SetChecked(dialog, 1075, value.fade_windows);
         SetChecked(dialog, 1076, (value.snap_windows & 0x10000) != 0);
         SetInteger(dialog, 1077, value.snap_windows & 0xffff);
@@ -4027,6 +4051,8 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         value.menu_bar_playlist = IsChecked(dialog, 2153);
         value.scroll_title = IsChecked(dialog, 2189);
         value.send_title_to_msn = IsChecked(dialog, 2188);
+        if (GetDlgItem(dialog, kOptionsDiscordLyrics))
+            value.discord_sync_lyrics = IsChecked(dialog, kOptionsDiscordLyrics);
         value.fade_windows = IsChecked(dialog, 1075);
         value.snap_windows = (IsChecked(dialog, 1076) ? 0x10000 : 0) |
             GetInteger(dialog, 1077, value.snap_windows & 0xffff, 1, 100);
@@ -4323,6 +4349,9 @@ bool PlayerWindow::CommitOptionsControl(
         case 2153: value.menu_bar_playlist = IsChecked(dialog, 2153); break;
         case 2189: value.scroll_title = IsChecked(dialog, 2189); break;
         case 2188: value.send_title_to_msn = IsChecked(dialog, 2188); break;
+        case kOptionsDiscordLyrics:
+            value.discord_sync_lyrics = IsChecked(dialog, kOptionsDiscordLyrics);
+            break;
         case 1075: value.fade_windows = IsChecked(dialog, 1075); break;
         case 1076:
             value.snap_windows = (value.snap_windows & 0xffff) |
@@ -5397,7 +5426,10 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
             }
         }
         if (template_id == 250) {
-            if (control == 1076)
+            if (control == 2188)
+                EnableWindow(GetDlgItem(dialog, kOptionsDiscordLyrics),
+                             IsChecked(dialog, 2188));
+            else if (control == 1076)
                 EnableWindow(GetDlgItem(dialog, 1077), IsChecked(dialog, 1076));
             else if (control == 1083)
                 EnableWindow(GetDlgItem(dialog, 1084), IsChecked(dialog, 1083));

@@ -133,7 +133,7 @@ std::wstring ActivityStateText(const DiscordTrackPresence& presence) {
     }
 
     std::vector<std::wstring> parts;
-    const bool have_lyric = !presence.lyric.empty() &&
+    const bool have_lyric = presence.lyrics_enabled && !presence.lyric.empty() &&
         presence.position >= presence.lyric_start &&
         (!presence.lyric_end || presence.position < *presence.lyric_end);
     if (have_lyric) parts.push_back(L"♪ " + presence.lyric);
@@ -333,7 +333,8 @@ bool SameStableActivity(const DiscordTrackPresence& left,
            left.audio_kind == right.audio_kind && left.station == right.station &&
            left.track_identity == right.track_identity &&
            left.timeline_revision == right.timeline_revision &&
-           left.seek_pending == right.seek_pending;
+           left.seek_pending == right.seek_pending &&
+           left.lyrics_enabled == right.lyrics_enabled;
 }
 
 } // namespace

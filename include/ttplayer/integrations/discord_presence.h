@@ -38,6 +38,9 @@ struct DiscordTrackPresence {
     std::wstring track_identity;
     std::uint64_t timeline_revision{};
     bool seek_pending{};
+    // Local sharing policy, not an RPC field. A user toggle is urgent, unlike
+    // an ordinary timed lyric-line change which is coalesced by the worker.
+    bool lyrics_enabled{true};
     std::wstring lyric;
     std::chrono::milliseconds lyric_start{};
     std::optional<std::chrono::milliseconds> lyric_end;

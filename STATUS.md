@@ -1,5 +1,15 @@
 # Reconstruction status
 
+2026-09-11: General options now exposes "向 Discord 发送歌词", bound to the
+existing General/@DiscordSyncLyrics setting (default unchanged). The master
+song-presence checkbox disables this child option without losing its check state;
+the application ID stays XML-only. Explicit lyric-policy changes bypass ordinary
+line coalescing, suppress pending/stale lyric text and preserve song/pause fields.
+Release build and both Discord regression targets pass; private IPC toggle tests
+and host General-page save/close/reopen/restart tests pass without real Discord
+publication. Existing 30 Release configs restored byte-for-byte after building.
+Implementation/verification details: DISCORD_PRESENCE.md.
+
 2026-09-11: appended 13 optional PATH-based FFmpeg CLI presets to the root,
 Debug and Release ttp_clienc.xml: AAC-LC, MP3, Opus, Vorbis, FLAC, ALAC,
 WavPack and PCM WAV. Existing 29 presets and each current selection remain

@@ -100,7 +100,8 @@ void ApplyDiscordLyric(DiscordTrackPresence& presence, const lyrics::Lyrics& lyr
     presence.lyric.clear();
     presence.lyric_start = {};
     presence.lyric_end.reset();
-    if (presence.playback == DiscordPlaybackState::stopped) return;
+    if (!presence.lyrics_enabled ||
+        presence.playback == DiscordPlaybackState::stopped) return;
     const auto index = lyrics.LineAt(presence.position);
     if (!index || *index >= lyrics.lines.size()) return;
     const auto& line = lyrics.lines[*index];

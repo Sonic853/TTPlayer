@@ -83,8 +83,22 @@ until a positive endpoint exists. This does not add seeking to unseekable stream
 ## Synchronized lyric lines
 
 `General/@DiscordSyncLyrics` defaults to `1` and is saved in `TTPlayer.xml`.
-Set it to `0` to disable lyric sharing without disabling song presence. It remains
-subordinate to `SendTitleToDiscord`; the Application ID is still XML-only.
+The General options page exposes it as **向 Discord 发送歌词**. Uncheck it (or set
+the XML attribute to `0`) to disable lyric sharing without disabling song presence.
+It remains subordinate to `SendTitleToDiscord`: when the song-presence master
+switch is off, this checkbox is disabled but its preference is retained. Changes
+apply immediately and follow the existing Save/Close/exit settings lifecycle.
+The Application ID is still XML-only; the default for older XML files is unchanged.
+
+The checkbox is added dynamically to original dialog 250, using its dialog units
+and font, without requiring a modified ttpres.dll. Both per-control notifications
+and page commits write the existing `general.discord_sync_lyrics` field.
+The local-only presence flag `lyrics_enabled` distinguishes a user toggle from
+an ordinary lyric-line transition. It bypasses the two-second lyric coalescing
+delay and replaces pending lyric content with ordinary music fields, including
+while paused. Disabling also clears the adapter's lyric text/validity interval,
+and serialization suppresses retained text when the flag is false. This does not
+retract an IPC frame already sent or control Discord's own display/cache delay.
 
 The integration shares only the current line from the player's loaded `Lyrics`
 object, not the entire LRC file or its pathname. `Lyrics::LineAt` supplies the same
@@ -113,6 +127,18 @@ or synchronized listening sessions are introduced.
 The existing RPC error-response parser is outside this change.
 
 ## Verification
+
+2026-09-11 General checkbox follow-up: Release player and both Discord test
+targets rebuilt successfully; `discord_presence_tests` and `discord_sync_tests`
+pass (7.09 s). New private-pipe coverage verifies disable/re-enable during the
+lyric cooldown, discarding pending lyrics while retaining paused song information;
+settings tests cover saving both lyric-switch values independently of the master.
+Host `tools/probe_discord_lyrics_option.ps1` verifies the real General page label,
+enabled/disabled linkage, retained check state, save, title-bar close/reopen and
+two application restarts. The UI fixture uses a deliberately invalid XML-only
+Application ID, so it cannot connect to real Discord; IPC tests use private pipes.
+All 30 existing Release configuration files were restored byte-for-byte after
+the build; tests use temporary player copies and do not edit the user's music.
 
 Host Release build and all 29 CTest cases passed on 2026-09-11 (30.21 s),
 including the new `discord_sync_tests`.

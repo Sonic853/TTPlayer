@@ -5434,8 +5434,8 @@ void PlayerWindow::UpdateDiscordPresence() {
         audio::AudioEngine::IsNetworkMediaLocation(track->path));
     presence.timeline_revision = clock.timeline_revision;
     presence.seek_pending = clock.seek_pending;
-    if (settings_.general.discord_sync_lyrics)
-        integrations::ApplyDiscordLyric(presence, lyrics_);
+    presence.lyrics_enabled = settings_.general.discord_sync_lyrics;
+    integrations::ApplyDiscordLyric(presence, lyrics_);
     discord_presence_.Update(std::move(presence), clock.observed_at);
 }
 
