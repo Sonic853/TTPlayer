@@ -2353,6 +2353,17 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         return 0;
     }
     switch (message) {
+    case WM_WINDOWPOSCHANGED:
+        // Mini mode uses ShowWindow(SW_HIDE); fullscreen uses
+        // SetWindowPos(SWP_HIDEWINDOW). Both remove the taskbar entry without
+        // destroying our HWND. A later TaskbarButtonCreated must install a
+        // fresh toolbar, not update the old shell registration (which may
+        // misleadingly return success even though its buttons are gone).
+        if (lparam &&
+            (reinterpret_cast<const WINDOWPOS*>(lparam)->flags & SWP_HIDEWINDOW))
+            taskbar_playback_.Reset();
+        // DefWindowProc must still generate WM_SIZE/WM_MOVE for skin layout.
+        break;
     case WM_CREATE:
         audio_.SetDspParentWindow(window_);
         CreateControls();
@@ -2399,19 +2410,21 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         }
         return 0;
     case WM_ACTIVATEAPP:
-        // FUN_004657DF exits a normal full-screen surface when this process
-        // loses activation.  The lyric-only, color-keyed desktop/work-area
-        // mode is the sole exception and intentionally stays behind windows.
-        if (!wparam &&
-            (fullscreen_visual_detached_ || fullscreen_lyric_detached_) &&
-            !fullscreen_lyric_desktop_mode_ &&
-            GetCurrentThreadId() != static_cast<DWORD>(lparam)) {
-            // FUN_004657DF calls CPlayerWnd_ExitFullscreenBeforeMenu, whose
-            // WM_COMMAND send is synchronous.  Delaying this with PostMessage
-            // leaves the detached surface alive while the newly activated
-            // process is already receiving input.
-            SendMessageW(window_, WM_COMMAND, kCmdFullscreenExit, 0);
+        // Multi-monitor extension: unlike FUN_004657DF, switching to another
+        // application does not tear down fullscreen. Escape/menu still exit.
+        return 0;
+    case WM_DISPLAYCHANGE:
+        // Query the monitor topology again; lParam describes only the primary
+        // resolution and cannot locate a secondary or negative-origin screen.
+        if (fullscreen_mode_ != 0) {
+            UpdateFullScreenLayout();
+            UpdateVisualWindowLayout();
+            UpdateVisualFrame();
         }
+        return 0;
+    case WM_SETTINGCHANGE:
+        if (wparam == SPI_SETWORKAREA && fullscreen_mode_ != 0)
+            UpdateFullScreenLayout();
         return 0;
     case WM_HOTKEY:
         if (static_cast<int>(wparam) == kFullscreenEscapeHotkey &&
@@ -3789,8 +3802,7 @@ void PlayerWindow::ContinueSkinBackgroundDrag(HWND source, POINT point) {
         }
         const int minimum_width = std::max(10L, native.cx);
         const int minimum_height = std::max(10L, native.cy);
-        RECT work_area{};
-        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0);
+        const RECT work_area = DragWorkAreaForRect(proposed);
         const int maximum_width = std::max<int>(minimum_width,
             static_cast<int>(work_area.right - work_area.left));
         const int maximum_height = std::max<int>(minimum_height,
@@ -3885,8 +3897,7 @@ void PlayerWindow::ContinueSkinBackgroundDrag(HWND source, POINT point) {
         GetWindowRect(candidate, &bounds);
         stationary_rects.push_back(bounds);
     }
-    RECT work_area{};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0);
+    const RECT work_area = DragWorkAreaForRect(proposed_rects.front());
     // FUN_0048AC21 constructs every skinned top-level window with
     // FUN_0044F3CF, which stores 10 in the movable block before either
     // FUN_0046EAAC or FUN_0044F670 handles WM_LBUTTONDOWN.  The threshold
@@ -4627,18 +4638,20 @@ void PlayerWindow::PrepareContextMenu(HMENU menu) {
     }
 }
 
-void PlayerWindow::ShowContextMenu(POINT screen_point) {
+void PlayerWindow::ShowContextMenu(POINT screen_point, HWND origin) {
     // DAT_00547858 in 0045DFBA prevents nested popup construction.  A popup
     // runs its own modal message loop, so this guard is observable under
     // accessibility tools and synthetic input as well as normal mouse use.
     if (context_menu_open_ || !IsWindowEnabled(window_)) return;
     context_menu_open_ = true;
+    main_context_menu_origin_ = origin && IsWindow(origin) ? origin : window_;
     // Compatibility improvement over 00461BAE: overlap ZIP/XML catalog work
     // with the time spent navigating the already visible root popup.
     StartSkinMenuCatalogLoad();
     HMENU menu = BuildContextMenu();
     if (!menu) {
         context_menu_open_ = false;
+        main_context_menu_origin_ = nullptr;
         return;
     }
     SetForegroundWindow(window_);
@@ -4648,11 +4661,16 @@ void PlayerWindow::ShowContextMenu(POINT screen_point) {
         SPI_GETMENUSHOWDELAY, 0, &previous_show_delay, 0);
     if (have_show_delay)
         SystemParametersInfoW(SPI_SETMENUSHOWDELAY, 400, nullptr, 0);
-    // FUN_0046A27D calls TrackPopupMenuEx without TPM_RETURNCMD or
-    // TPM_NONOTIFY.  Selection is therefore delivered synchronously through
-    // the main window's WM_COMMAND handler while the popup loop is active.
-    TrackPopupMenuEx(menu, TPM_RIGHTBUTTON,
+    // Preserve FUN_0046A27D's notification route for the main window. For a
+    // forwarded lyric-chrome menu, obtain the command explicitly: User32 can
+    // queue WM_COMMAND until after TrackPopupMenuEx returns, losing the
+    // otherwise scoped origin before the fullscreen dispatcher sees it.
+    const bool forwarded = main_context_menu_origin_ != window_;
+    const UINT selected = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON |
+        (forwarded ? TPM_RETURNCMD | TPM_NONOTIFY : 0),
         screen_point.x, screen_point.y, window_, nullptr);
+    if (forwarded && selected)
+        SendMessageW(window_, WM_COMMAND, MAKEWPARAM(selected, 0), 0);
     if (have_show_delay)
         SystemParametersInfoW(SPI_SETMENUSHOWDELAY, previous_show_delay,
                               nullptr, 0);
@@ -4660,10 +4678,14 @@ void PlayerWindow::ShowContextMenu(POINT screen_point) {
     EndPopupMenuStyle();
     DestroyMenu(menu);
     context_menu_open_ = false;
+    main_context_menu_origin_ = nullptr;
     PostMessageW(window_, WM_NULL, 0, 0);
 }
 
-bool PlayerWindow::HandleContextCommand(UINT command) {
+bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
+    if (HandleFullScreenCommand(command, fullscreen_origin ? fullscreen_origin :
+            (context_menu_open_ && main_context_menu_origin_
+                ? main_context_menu_origin_ : window_))) return true;
     if (command >= kCmdFirstTrack && command < kCmdFirstTrack + ActivePlaylist().Tracks().size()) {
         SelectTrack(command - kCmdFirstTrack, true);
         return true;
@@ -4689,16 +4711,6 @@ bool PlayerWindow::HandleContextCommand(UINT command) {
         // FUN_00465726 stores command-0x8085 and immediately rebuilds the
         // active visual surface.
         SetVisualType(static_cast<int>(command - kCmdVisualFirst));
-        return true;
-    }
-    if (command >= kCmdFullscreenToggle && command <= kCmdFullscreenAll) {
-        if (command == kCmdFullscreenToggle)
-            SetFullScreenMode(fullscreen_mode_ == 0 ? 3 : 0);
-        else if (command == kCmdFullscreenExit)
-            SetFullScreenMode(0);
-        else
-            SetFullScreenMode(static_cast<int>(
-                command - kCmdFullscreenLyrics + 1));
         return true;
     }
     if (command == kCmdDefaultSkin) {

@@ -555,19 +555,18 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
             }
         }
         break;
-    case WM_ACTIVATE:
-        if (fullscreen_lyric_detached_ && LOWORD(wparam) == WA_INACTIVE)
-            HandleFullScreenDeactivate(reinterpret_cast<HWND>(lparam));
-        break;
     case WM_CONTEXTMENU:
         if (fullscreen_lyric_detached_ && text_control) {
             POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-            // FUN_0043E9C7 treats both mouse and keyboard coordinates as
-            // LyricCtrl client coordinates before FUN_004427B1 opens the
-            // native full-screen menu.  Keep that signed conversion even for
-            // the keyboard sentinel (-1,-1); TrackPopupMenu performs the
-            // same monitor-edge placement as the original afterwards.
-            ClientToScreen(control, &point);
+            // WM_CONTEXTMENU already carries screen coordinates. Applying
+            // the host offset again moves a secondary-screen popup away
+            // from the mouse (the old primary-origin case hid this error).
+            if (point.x == -1 && point.y == -1) {
+                RECT bounds{};
+                GetWindowRect(control, &bounds);
+                point = {(bounds.left + bounds.right) / 2,
+                         (bounds.top + bounds.bottom) / 2};
+            }
             ShowFullScreenLyricContextMenu(point);
             return 0;
         }
@@ -735,10 +734,10 @@ LRESULT PlayerWindow::HandleLyricMessage(UINT message, WPARAM wparam,
         RECT text_bounds{};
         if (active_text && GetWindowRect(active_text, &text_bounds) &&
             !PtInRect(&text_bounds, point)) {
-            return SendMessageW(window_, WM_CONTEXTMENU,
-                reinterpret_cast<WPARAM>(window_),
-                MAKELPARAM(static_cast<short>(point.x),
-                           static_cast<short>(point.y)));
+            // Keep the main-menu contents/command owner, but fullscreen must
+            // still start on the lyric host's monitor when its chrome is hit.
+            ShowContextMenu(point, lyric_window_);
+            return 0;
         }
         ShowLyricContextMenu(point);
         return 0;
@@ -3142,7 +3141,7 @@ void PlayerWindow::ShowLyricContextMenu(POINT screen_point) {
     DestroyMenu(menu);
     context_menu_open_ = false;
     if (command && !HandleLyricCommand(command))
-        HandleContextCommand(command);
+        HandleContextCommand(command, owner);
     PostMessageW(owner, WM_NULL, 0, 0);
 }
 
@@ -3153,6 +3152,7 @@ void PlayerWindow::ShowFullScreenLyricContextMenu(POINT screen_point) {
         ResourceModule(), MAKEINTRESOURCEW(kMenuLyricDisplay)));
     if (!menu) return;
     PrepareFullScreenLyricMenu(menu);
+    PopulateFullScreenMonitorMenu(menu);
 
     // FUN_004427B1 deliberately bypasses TTPlayer's owner-drawn popup skin.
     // It activates the detached lyric surface, but sends the selected command

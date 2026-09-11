@@ -1,4 +1,13 @@
 #include <windows.h>
+#include "resource_ids.h"
+#pragma code_page(65001)
+
+STRINGTABLE
+BEGIN
+    IDS_FULLSCREEN_MONITOR "屏幕选择"
+    IDS_FULLSCREEN_DISPLAY "显示器"
+    IDS_FULLSCREEN_PRIMARY "主显示器"
+END
 
 // TTPlayer.exe loads this exact group-icon identifier in FUN_0045FAD8 before
 // associating the resulting 16x16 HICON with command 0xE140.

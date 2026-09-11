@@ -1,5 +1,6 @@
 #include "ttplayer/ui/desktop_lyrics.h"
 #include "ttplayer/ui/desktop_lyric_layout.h"
+#include "ttplayer/ui/window_drag.h"
 
 #include "ttplayer/core/text.h"
 #include "ttplayer/lyrics/lrc_parser.h"
@@ -62,8 +63,8 @@ constexpr unsigned int kDragBottom = 0x20;
 constexpr unsigned int kDragLeft = 0x40;
 constexpr unsigned int kDragTop = 0x80;
 
-constexpr int kMinimumWidth = 300;
-constexpr int kMaximumWidth = 1000;
+constexpr int kMinimumWidth = 400;
+constexpr int kMaximumWidth = 10000;
 constexpr int kMinimumLineHeight = 24;
 constexpr int kMaximumLineHeight = 150;
 
@@ -116,12 +117,6 @@ bool ValidRect(const RECT& value) noexcept {
 int Width(const RECT& value) noexcept { return value.right - value.left; }
 int Height(const RECT& value) noexcept { return value.bottom - value.top; }
 
-RECT DesktopWorkArea() {
-    RECT work{};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    return work;
-}
-
 bool IntervalsMeet(int first_begin, int first_end, int second_begin,
                    int second_end, int margin) noexcept {
     return first_begin <= second_end + margin &&
@@ -134,13 +129,15 @@ int NearestSnapOffset(int first, int second, int distance) noexcept {
 }
 
 // FUN_004196D5 offsets first and then magnetically joins a moving rectangle
-// to the SPI_GETWORKAREA edges.  The projection checks keep an unrelated axis
+// to work-area edges. Resolve the proposed rectangle's monitor so crossing
+// a screen boundary does not keep snapping/clamping against the primary.
+// The projection checks keep an unrelated axis
 // from snapping when the rectangle is wholly beyond that side of the work
 // area; the actual magnetic range is ten pixels.
 void MoveAndSnapToWorkArea(RECT& target, int delta_x, int delta_y) {
     OffsetRect(&target, delta_x, delta_y);
     constexpr int kSnapDistance = 10;
-    const RECT work = DesktopWorkArea();
+    const RECT work = DragWorkAreaForRect(target);
     int snap_x{};
     int snap_y{};
     if (IntervalsMeet(target.top, target.bottom, work.top, work.bottom,
@@ -1456,13 +1453,13 @@ private:
         if (!control_ || !IsWindow(control_)) return;
         target.right = target.left + std::clamp(Width(target),
             kMinimumWidth, kMaximumWidth);
-        const RECT work = DesktopWorkArea();
+        const RECT work = DragWorkAreaForRect(target);
         RECT bar_rect{};
         if (bar_ && IsWindow(bar_)) GetWindowRect(bar_, &bar_rect);
         const int bar_width = std::max(1, Width(bar_rect));
         const int bar_height = std::max(1, Height(bar_rect));
-        constexpr int desktop_left = 0;
-        constexpr int desktop_top = 0;
+        const int desktop_left = work.left;
+        const int desktop_top = work.top;
 
         // FUN_00419983 keeps the whole lyric vertically visible, but only
         // requires one toolbar-width strip to remain reachable horizontally.

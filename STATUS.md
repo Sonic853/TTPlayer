@@ -1,5 +1,39 @@
 # Reconstruction status
 
+2026-09-12: multi-monitor fullscreen now stays active across process focus
+changes. Resolve entry from the main/lyric host (including lyric chrome's
+forwarded main menu); keep mode changes on the active display. Add screen
+selection ONLY to detached lyric/visual right-click menus, not ordinary
+fullscreen submenus. Preserve surface HWNDs while moving/resizing, fix lyric
+popup coordinate double-offset, and refresh display/visual buffer dimensions.
+Release build and taskbar_playback_tests pass. Two host runs passed 24 cases
+across both displays, three modes, split/overlay/transparent layouts, actual
+menu selections and foreign-window clicks, Esc/menu exit and HWND reuse.
+Release runtime configuration restored by hash. See FULLSCREEN_RECOVERY.md.
+
+2026-09-12: desktop lyrics can move between monitors. Replace primary-only
+work-area queries and zero left/top clamps in snap/PositionWindows with the
+proposed rectangle's monitor work area. Keep control/paint/bar synchronized
+and restore saved secondary-screen positions. Preserve staged 400..10000 width
+limits; update old UI scroll-test dimensions accordingly. Release build and
+desktop_lyrics_tests pass; physical host tests pass 16 two-screen edge cases
+and primary/secondary/primary lyric drags. See WINDOW_DRAG.md.
+
+2026-09-12: skin-window move/resize snapping now resolves the proposed
+rectangle's monitor work area instead of always using the primary screen.
+Attached groups retain a common translation and the existing Snap_Windows
+enable/distance setting. Release build and ttplayer_tests pass; host physical
+drag probes pass 16 edge/threshold cases across both displays. Negative and
+vertically offset layouts are covered by geometry tests. See WINDOW_DRAG.md.
+
+2026-09-12: restore thumbnail playback controls after mini/fullscreen returns.
+Main-window SWP_HIDEWINDOW now resets the cached shell toolbar registration;
+the next TaskbarButtonCreated reinstalls buttons even when the HWND is reused.
+Minimization, tool-window visibility rules and playback dispatch are unchanged.
+Release build/taskbar_playback_tests pass; host default-skin tests pass two
+mini and two combined-fullscreen round trips with real thumbnail pause/resume
+clicks. Existing Release configs restored by hash. See TASKBAR_PLAYBACK.md.
+
 2026-09-11: fixed playlist Add/Delete/List/Sort/Find/Edit/Mode hover loss.
 Child mouse forwarding had armed leave tracking on the playlist parent,
 immediately clearing the already-loaded skin hot image. Track the real input

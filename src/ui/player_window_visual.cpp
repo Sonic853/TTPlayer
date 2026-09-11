@@ -1,4 +1,5 @@
 #include "player_window_internal.h"
+#include "../app/resource_ids.h"
 
 #include <algorithm>
 #include <array>
@@ -33,6 +34,31 @@ bool LayeredWindowsAvailable() noexcept {
             user32, "SetLayeredWindowAttributes") != nullptr;
     }();
     return available;
+}
+
+BOOL CALLBACK CollectFullScreenMonitor(HMONITOR handle, HDC, LPRECT, LPARAM data) {
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (GetMonitorInfoW(handle, &info))
+        reinterpret_cast<std::vector<MONITORINFOEXW>*>(data)->push_back(info);
+    return TRUE;
+}
+
+std::vector<MONITORINFOEXW> FullScreenMonitors() {
+    std::vector<MONITORINFOEXW> monitors;
+    EnumDisplayMonitors(nullptr, nullptr, CollectFullScreenMonitor,
+                        reinterpret_cast<LPARAM>(&monitors));
+    std::sort(monitors.begin(), monitors.end(), [](const auto& a, const auto& b) {
+        return StrCmpLogicalW(a.szDevice, b.szDevice) < 0;
+    });
+    return monitors;
+}
+
+std::wstring FullScreenMenuText(UINT id) {
+    wchar_t text[128]{};
+    const int length = LoadStringW(GetModuleHandleW(nullptr), id, text,
+                                  static_cast<int>(std::size(text)));
+    return std::wstring(text, static_cast<size_t>(length));
 }
 
 RECT WindowRectForClientTarget(HWND window, RECT target) noexcept {
@@ -1360,14 +1386,14 @@ LRESULT PlayerWindow::HandleVisualMessage(
             return 0;
         }
         break;
-    case WM_ACTIVATE:
-        if (fullscreen_mode_ != 0 && LOWORD(wparam) == WA_INACTIVE)
-            HandleFullScreenDeactivate(reinterpret_cast<HWND>(lparam));
-        break;
     case WM_CONTEXTMENU: {
         POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-        // FUN_00458020 and the embedded parent route forward the signed
-        // lParam coordinates unchanged, including keyboard (-1,-1).
+        if (point.x == -1 && point.y == -1) {
+            RECT bounds{};
+            GetWindowRect(visual_window_, &bounds);
+            point = {(bounds.left + bounds.right) / 2,
+                     (bounds.top + bounds.bottom) / 2};
+        }
         ShowVisualContextMenu(point);
         return 0;
     }
@@ -1717,12 +1743,93 @@ void PlayerWindow::RestoreLyricControl() {
     UpdateLyricScrollTimer();
 }
 
+MONITORINFOEXW PlayerWindow::FullScreenMonitorInfo(HWND origin) const {
+    // Device names, not HMONITOR values, identify a selection across topology
+    // changes. Every new entry follows its source window; mode changes and
+    // fullscreen menu selections retain the current session's screen.
+    if (!origin && fullscreen_mode_ != 0) {
+        for (const auto& monitor : FullScreenMonitors())
+            if (_wcsicmp(monitor.szDevice, fullscreen_monitor_device_.c_str()) == 0) return monitor;
+    }
+    const HMONITOR handle = !origin && fullscreen_mode_ != 0 &&
+            !IsRectEmpty(&fullscreen_monitor_rect_)
+        ? MonitorFromRect(&fullscreen_monitor_rect_, MONITOR_DEFAULTTONEAREST)
+        : MonitorFromWindow(origin && IsWindow(origin) ? origin : window_,
+                            MONITOR_DEFAULTTONEAREST);
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(handle, &info)) {
+        info.rcMonitor = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+        info.rcWork = info.rcMonitor;
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &info.rcWork, 0);
+    }
+    return info;
+}
+
+void PlayerWindow::PopulateFullScreenMonitorMenu(HMENU menu) {
+    if (!menu || fullscreen_mode_ == 0) return;
+    fullscreen_menu_monitors_ = FullScreenMonitors();
+    const auto active = FullScreenMonitorInfo();
+    HMENU screens = CreatePopupMenu();
+    if (!screens) return;
+    for (size_t i = 0; i < fullscreen_menu_monitors_.size() &&
+            i <= kCmdFullscreenMonitorLast - kCmdFullscreenMonitorFirst; ++i) {
+        const auto& monitor = fullscreen_menu_monitors_[i];
+        const std::wstring device = monitor.szDevice;
+        const auto number = device.starts_with(L"\\\\.\\DISPLAY") ? device.substr(11) : device;
+        auto label = FullScreenMenuText(IDS_FULLSCREEN_DISPLAY) + L" " + number;
+        if (monitor.dwFlags & MONITORINFOF_PRIMARY)
+            label += L" (" + FullScreenMenuText(IDS_FULLSCREEN_PRIMARY) + L")";
+        label += L" — " + std::to_wstring(monitor.rcMonitor.right - monitor.rcMonitor.left) +
+            L" × " + std::to_wstring(monitor.rcMonitor.bottom - monitor.rcMonitor.top);
+        AppendMenuW(screens, MF_STRING |
+            (_wcsicmp(active.szDevice, monitor.szDevice) == 0 ? MF_CHECKED : 0),
+            kCmdFullscreenMonitorFirst + static_cast<UINT>(i), label.c_str());
+    }
+    // This extension belongs to the detached surfaces' context menus, not the
+    // ordinary windows' "Full screen" submenus.
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    auto label = FullScreenMenuText(IDS_FULLSCREEN_MONITOR);
+    MENUITEMINFOW item{sizeof(item)};
+    item.fMask = MIIM_ID | MIIM_STRING | MIIM_SUBMENU;
+    item.wID = kMenuFullscreenMonitor;
+    item.dwTypeData = label.data();
+    item.hSubMenu = screens;
+    if (!InsertMenuItemW(menu, GetMenuItemCount(menu), TRUE, &item)) DestroyMenu(screens);
+}
+
+bool PlayerWindow::HandleFullScreenCommand(UINT command, HWND origin) {
+    if (command >= kCmdFullscreenToggle && command <= kCmdFullscreenAll) {
+        if (command == kCmdFullscreenToggle)
+            SetFullScreenMode(fullscreen_mode_ == 0 ? 3 : 0, origin);
+        else if (command == kCmdFullscreenExit)
+            SetFullScreenMode(0);
+        else
+            SetFullScreenMode(static_cast<int>(command - kCmdFullscreenLyrics + 1), origin);
+        return true;
+    }
+    if (command < kCmdFullscreenMonitorFirst || command > kCmdFullscreenMonitorLast) return false;
+    const size_t index = command - kCmdFullscreenMonitorFirst;
+    if (fullscreen_mode_ != 0 && index < fullscreen_menu_monitors_.size()) {
+        const auto& monitor = fullscreen_menu_monitors_[index];
+        fullscreen_monitor_device_ = monitor.szDevice;
+        fullscreen_monitor_rect_ = monitor.rcMonitor;
+        // Reposition the existing surfaces; never restore/recreate the hosts.
+        UpdateFullScreenLayout();
+        UpdateVisualWindowLayout();
+        UpdateVisualFrame();
+    }
+    return true;
+}
+
 void PlayerWindow::UpdateFullScreenLayout() {
     if (fullscreen_mode_ == 0) return;
     fullscreen_lyric_desktop_mode_ = false;
-    const int screen_width = GetSystemMetrics(SM_CXSCREEN);
-    const int screen_height = GetSystemMetrics(SM_CYSCREEN);
-    const RECT screen{0, 0, screen_width, screen_height};
+    const auto monitor = FullScreenMonitorInfo();
+    const RECT screen = monitor.rcMonitor;
+    fullscreen_monitor_rect_ = screen;
+    fullscreen_monitor_device_ = monitor.szDevice;
+    const int screen_height = screen.bottom - screen.top;
 
     if (fullscreen_mode_ == 1) {
         RestoreVisualWindow();
@@ -1731,9 +1838,7 @@ void PlayerWindow::UpdateFullScreenLayout() {
         if (settings_.lyric.fullscreen_transparent &&
             LayeredWindowsAvailable()) {
             fullscreen_lyric_desktop_mode_ = true;
-            RECT work_area = screen;
-            SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0);
-            DetachLyricControl(work_area, HWND_BOTTOM);
+            DetachLyricControl(monitor.rcWork, HWND_BOTTOM);
             RedrawWindow(GetDesktopWindow(), nullptr, nullptr,
                 RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
         } else {
@@ -1759,20 +1864,21 @@ void PlayerWindow::UpdateFullScreenLayout() {
     // MulDiv rounds to nearest and is one pixel higher for some screen sizes.
     const int boundary =
         ((10 - lyric_tenths) * screen_height * 10) / 100;
-    const RECT lyric{0, boundary, screen_width, screen_height};
+    const RECT lyric{screen.left, screen.top + boundary, screen.right, screen.bottom};
     if (lyric_tenths == 10 && relation == 0) {
         settings_.lyric.fullscreen_transparent = false;
+        RestoreVisualWindow();
     } else {
         const bool overlay = relation == 1 && LayeredWindowsAvailable();
         settings_.lyric.fullscreen_transparent = overlay;
         const RECT visual = overlay
-            ? screen : RECT{0, 0, screen_width, boundary};
+            ? screen : RECT{screen.left, screen.top, screen.right, screen.top + boundary};
         DetachVisualWindow(visual);
     }
     DetachLyricControl(lyric, HWND_TOPMOST);
 }
 
-void PlayerWindow::SetFullScreenMode(int mode) {
+void PlayerWindow::SetFullScreenMode(int mode, HWND origin) {
     mode = std::clamp(mode, 0, 3);
     if (mode == 0) {
         LeaveFullScreen();
@@ -1782,6 +1888,11 @@ void PlayerWindow::SetFullScreenMode(int mode) {
     if (entering &&
         audio_.State() != audio::PlaybackState::playing) return;
     if (entering) {
+        // Capture before hiding/minimizing either host. A lyric menu uses its
+        // own host, while the main/embedded-visual menu uses the main window.
+        const auto monitor = FullScreenMonitorInfo(origin && IsWindow(origin) ? origin : window_);
+        fullscreen_monitor_device_ = monitor.szDevice;
+        fullscreen_monitor_rect_ = monitor.rcMonitor;
         fullscreen_saved_visual_type_ = settings_.visual.type;
         fullscreen_saved_lyric_transparent_ =
             settings_.lyric.fullscreen_transparent;
@@ -1860,15 +1971,6 @@ void PlayerWindow::LeaveFullScreen() {
     UnregisterHotKey(window_, kFullscreenEscapeHotkey);
 }
 
-void PlayerWindow::HandleFullScreenDeactivate(HWND activated_window) {
-    if (fullscreen_mode_ == 0 || !activated_window) return;
-    if (fullscreen_lyric_desktop_mode_) return;
-    const DWORD active_thread = GetWindowThreadProcessId(activated_window,
-                                                         nullptr);
-    if (active_thread != GetCurrentThreadId())
-        SendMessageW(window_, WM_COMMAND, kCmdFullscreenExit, 0);
-}
-
 void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
     if (context_menu_open_ || !visual_window_ ||
         !IsWindowEnabled(window_)) return;
@@ -1904,6 +2006,7 @@ void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
         DeleteMenu(popup, kCmdVisualOptions, MF_BYCOMMAND);
         const int last = GetMenuItemCount(popup) - 1;
         if (last >= 0) DeleteMenu(popup, last, MF_BYPOSITION);
+        PopulateFullScreenMonitorMenu(popup);
         CheckMenuItem(popup,
             static_cast<UINT>(kCmdVisualFirst + settings_.visual.type),
             MF_BYCOMMAND | MF_CHECKED);

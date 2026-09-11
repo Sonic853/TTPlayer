@@ -29,6 +29,20 @@ int Closest(const std::vector<int>& candidates, int threshold) noexcept {
 }
 } // namespace
 
+RECT DragWorkAreaForRect(const RECT& proposed) noexcept {
+    MONITORINFO info{sizeof(info)};
+    if (GetMonitorInfoW(MonitorFromRect(&proposed, MONITOR_DEFAULTTONEAREST), &info))
+        return info.rcWork;
+    RECT work{};
+    if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) return work;
+    // Retain a usable desktop boundary if monitor/work-area queries fail.
+    work.left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    work.top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    work.right = work.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    work.bottom = work.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    return work;
+}
+
 bool AreDragWindowsAttached(const RECT& first, const RECT& second) noexcept {
     const bool vertical_overlap = IntervalsOverlapInclusive(
         first.top, first.bottom, second.top, second.bottom);

@@ -222,14 +222,16 @@ private:
     void InvokeVisualAction(POINT point);
     void ShowVisualContextMenu(POINT screen_point);
     [[nodiscard]] bool VisualFallbackHit(POINT point) const;
-    void SetFullScreenMode(int mode);
+    void SetFullScreenMode(int mode, HWND origin = nullptr);
+    [[nodiscard]] MONITORINFOEXW FullScreenMonitorInfo(HWND origin = nullptr) const;
+    void PopulateFullScreenMonitorMenu(HMENU menu);
+    bool HandleFullScreenCommand(UINT command, HWND origin);
     void UpdateFullScreenLayout();
     void DetachVisualWindow(const RECT& target);
     void RestoreVisualWindow();
     void DetachLyricControl(const RECT& target, HWND insert_after);
     void RestoreLyricControl();
     void LeaveFullScreen();
-    void HandleFullScreenDeactivate(HWND activated_window);
     void ToggleMiniMode();
     void BeginSkinBackgroundDrag(HWND source, POINT point, unsigned int hit = 1);
     void ContinueSkinBackgroundDrag(HWND source, POINT point);
@@ -237,7 +239,7 @@ private:
     [[nodiscard]] unsigned int PlaylistDragHitTest(POINT point) const;
     [[nodiscard]] std::vector<HWND> RegisteredDragWindows() const;
     void BuildAttachedDragGroup();
-    void ShowContextMenu(POINT screen_point);
+    void ShowContextMenu(POINT screen_point, HWND origin = nullptr);
     [[nodiscard]] HMENU BuildContextMenu();
     static std::vector<SkinMenuEntry> LoadSkinMenuCatalog(
         const std::filesystem::path& skin_directory,
@@ -262,7 +264,7 @@ private:
     void QueueSkinMenuToolTip(UINT command, HMENU menu);
     void ShowQueuedSkinMenuToolTip();
     void HideSkinMenuToolTip();
-    bool HandleContextCommand(UINT command);
+    bool HandleContextCommand(UINT command, HWND fullscreen_origin = nullptr);
     [[nodiscard]] HMODULE ResourceModule() const noexcept;
     [[nodiscard]] std::wstring ResourceText(UINT identifier) const;
     bool ApplyLoadedSkin(bool apply_visual_settings = true, bool saved_bounds = false);
@@ -694,6 +696,9 @@ private:
     std::atomic_uint visual_interval_ms_{50};
     std::atomic_bool visual_worker_enabled_{};
     int fullscreen_mode_{}; // 0 normal, 1 lyric, 2 visual, 3 lyric+visual
+    std::wstring fullscreen_monitor_device_; // active display, survives mode changes
+    RECT fullscreen_monitor_rect_{}; // nearest-display fallback after unplugging
+    std::vector<MONITORINFOEXW> fullscreen_menu_monitors_;
     int fullscreen_saved_visual_type_{};
     bool fullscreen_main_was_iconic_{};
     bool fullscreen_main_was_visible_{};
@@ -780,6 +785,7 @@ private:
     DWORD last_command_line_tick_{};
     UINT_PTR auto_shutdown_timer_{};
     bool context_menu_open_{};
+    HWND main_context_menu_origin_{};
     bool window_state_saved_{};
     int volume_before_mute_{100};
     int transparency_percent_{};
