@@ -1548,6 +1548,13 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
     const auto forward_point = [&](UINT forwarded) {
         POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         MapWindowPoints(control, parent, &point, 1);
+        if (forwarded == WM_MOUSEMOVE) {
+            // Preserve the receiving HWND: TrackMouseEvent on the parent
+            // immediately reports LEAVE while the pointer is over this child.
+            return HandlePlaylistMessage(forwarded, wparam,
+                MAKELPARAM(static_cast<short>(point.x),
+                           static_cast<short>(point.y)), control);
+        }
         return SendMessageW(parent, forwarded, wparam,
             MAKELPARAM(static_cast<short>(point.x),
                        static_cast<short>(point.y)));
@@ -1843,7 +1850,7 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
             }
             return forward_point(message);
         }
-        TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE | TME_HOVER,
+        TRACKMOUSEEVENT tracking{sizeof(tracking), TME_HOVER,
                                  control, HOVER_DEFAULT};
         TrackMouseEvent(&tracking);
         return forward_point(message);
@@ -1888,6 +1895,7 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
         if (list_control) return SendMessageW(parent, message, wparam, lparam);
         break;
     case WM_MOUSELEAVE:
+        return HandlePlaylistMessage(message, wparam, lparam, control);
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
         return SendMessageW(parent, message, wparam, lparam);
@@ -1901,7 +1909,8 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
     return DefWindowProcW(control, message, wparam, lparam);
 }
 
-LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam, LPARAM lparam) {
+LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
+                                           LPARAM lparam, HWND mouse_source) {
     const auto geometry = [this]() {
         RECT client{};
         if (playlist_window_) GetClientRect(playlist_window_, &client);
@@ -2123,8 +2132,19 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam, LPARAM 
     }
     case WM_MOUSEMOVE: {
         const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        if (playlist_toolbar_menu_return_point_ &&
+            (point.x != playlist_toolbar_menu_return_point_->x ||
+             point.y != playlist_toolbar_menu_return_point_->y))
+            playlist_toolbar_menu_return_point_.reset();
+        if (playlist_mouse_tracking_window_ != mouse_source &&
+            IsWindow(playlist_mouse_tracking_window_)) {
+            TRACKMOUSEEVENT cancel{sizeof(cancel), TME_CANCEL | TME_LEAVE,
+                                   playlist_mouse_tracking_window_, 0};
+            TrackMouseEvent(&cancel);
+        }
+        playlist_mouse_tracking_window_ = mouse_source;
         TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE,
-                                 playlist_window_, 0};
+                                 mouse_source, 0};
         TrackMouseEvent(&tracking);
         if (playlist_rating_gesture_.Active()) {
             const bool still_valid = (wparam & MK_LBUTTON) != 0 &&
@@ -2296,13 +2316,23 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam, LPARAM 
         return 0;
     }
     case WM_MOUSELEAVE:
+        // A parent/previous button's queued LEAVE must not clear the hot
+        // frame after a different child has already received MOUSEMOVE.
+        if (mouse_source != playlist_mouse_tracking_window_) return 0;
+        playlist_mouse_tracking_window_ = nullptr;
         if (playlist_rating_gesture_.Active()) {
             playlist_rating_gesture_.Cancel();
             if (GetCapture() == playlist_window_) ReleaseCapture();
         }
         playlist_hover_.reset();
         playlist_list_hover_.reset();
-        playlist_toolbar_hover_.reset();
+        // The common-control toolbar retains the hot item when Escape is
+        // followed by leaving without another move within the toolbar.
+        // Menu teardown can synthesize an unchanged-position MOUSEMOVE;
+        // that must not turn the pending leave into a real hot-item change.
+        if (!playlist_toolbar_menu_return_point_)
+            playlist_toolbar_hover_.reset();
+        playlist_toolbar_menu_return_point_.reset();
         playlist_scrollbar_hover_ = PlaylistScrollbarPart::none;
         playlist_close_hover_ = false;
         InvalidateRect(playlist_window_, nullptr, FALSE);
@@ -2327,6 +2357,13 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam, LPARAM 
             // TBN_DROPDOWN notification opens the resource submenu on button
             // down; it does not wait for a captured button-up.  This also
             // removes the hot frame while the popup owns mouse input.
+            if (IsWindow(playlist_mouse_tracking_window_)) {
+                TRACKMOUSEEVENT cancel{sizeof(cancel), TME_CANCEL | TME_LEAVE,
+                                       playlist_mouse_tracking_window_, 0};
+                TrackMouseEvent(&cancel);
+            }
+            playlist_mouse_tracking_window_ = nullptr;
+            playlist_toolbar_menu_return_point_.reset();
             playlist_toolbar_hover_.reset();
             InvalidateRect(playlist_window_, &metrics.toolbar, FALSE);
             UpdateWindow(playlist_window_);
@@ -2337,6 +2374,27 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam, LPARAM 
                 metrics.toolbar.bottom};
             ClientToScreen(playlist_window_, &screen);
             InvokePlaylistToolbar(*button, screen);
+            if (IsWindow(playlist_mouse_tracking_window_)) {
+                TRACKMOUSEEVENT cancel{sizeof(cancel), TME_CANCEL | TME_LEAVE,
+                                       playlist_mouse_tracking_window_, 0};
+                TrackMouseEvent(&cancel);
+            }
+            playlist_mouse_tracking_window_ = nullptr;
+            // The native toolbar restores its hot item on return from
+            // TBN_DROPDOWN (notably Escape), and rearms leave tracking on
+            // the next MOUSEMOVE. Do not keep a pre-menu LEAVE subscription.
+            POINT cursor{};
+            if (IsWindow(playlist_window_) && GetCursorPos(&cursor)) {
+                const HWND under_cursor = WindowFromPoint(cursor);
+                if (under_cursor == playlist_window_ ||
+                    IsChild(playlist_window_, under_cursor)) {
+                    ScreenToClient(playlist_window_, &cursor);
+                    playlist_toolbar_hover_ = PlaylistToolbarButtonAt(cursor);
+                    if (playlist_toolbar_hover_)
+                        playlist_toolbar_menu_return_point_ = cursor;
+                    InvalidateRect(playlist_window_, nullptr, FALSE);
+                }
+            }
             return 0;
         }
         if (metrics.splitter.right > metrics.splitter.left &&
@@ -2767,6 +2825,8 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam, LPARAM 
         }
         break;
     case WM_DESTROY:
+        playlist_mouse_tracking_window_ = nullptr;
+        playlist_toolbar_menu_return_point_.reset();
         CancelPlaylistScrollbarInteraction(false);
         RevokeFileDropTarget(playlist_window_);
         FinishPlaylistListEdit(false);
@@ -4141,7 +4201,7 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
     }
 
     if (layout.toolbar.image) {
-        // FUN_0048B5AB installs the skin bitmap on the native toolbar, whose
+        // FUN_0047E6FC/0047AB54 install the skin bitmap on the toolbar, whose
         // custom-draw path treats the package transparent color as a mask.
         // SRCCOPY exposes the common #ff00ff key as a purple rectangle.
         DrawPlaylistToolbarBitmap(canvas, layout.toolbar, metrics.toolbar,
@@ -6030,7 +6090,7 @@ LRESULT CALLBACK PlayerWindow::PlaylistWindowProc(HWND window, UINT message,
         self->playlist_window_ = window;
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
     }
-    return self ? self->HandlePlaylistMessage(message, wparam, lparam)
+    return self ? self->HandlePlaylistMessage(message, wparam, lparam, window)
                 : DefWindowProcW(window, message, wparam, lparam);
 }
 

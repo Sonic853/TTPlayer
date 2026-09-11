@@ -1,5 +1,18 @@
 # Reconstruction status
 
+2026-09-11: fixed playlist Add/Delete/List/Sort/Find/Edit/Mode hover loss.
+Child mouse forwarding had armed leave tracking on the playlist parent,
+immediately clearing the already-loaded skin hot image. Track the real input
+HWND, cancel obsolete tracking, and reject stale parent/child leaves. Match
+the native drop-down normal/hot transition and Escape hot-item retention;
+keep skin bitmaps, color keys, resource labels and geometry unchanged.
+Compared against 004A9937/0047E6FC/0047AB54/00482BAF and host original-player
+captures for default, LX-iPlay, TT2012, Let's Vista and Media Player 10.
+222 common-region toolbar frames and 35 popup mappings match. Release build
+and ttplayer_tests pass; original 30 Release configs preserved by hash checks.
+This is scoped toolbar compatibility, not an all-skins/binary-identity claim.
+Details and reproducible local probes: PLAYLIST_MENU_INPUT.md.
+
 2026-09-11: General options now exposes "向 Discord 发送歌词", bound to the
 existing General/@DiscordSyncLyrics setting (default unchanged). The master
 song-presence checkbox disables this child option without losing its check state;

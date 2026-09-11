@@ -108,6 +108,64 @@ therefore opens the corresponding `0x8B` popup at that point instead of
 holding a synthetic pressed state until button-up. Media Player 10 base,
 hover and popup-open button crops are each pixel-identical to the original.
 
+## 2026-09-11: toolbar hover regression
+
+The Add/Delete/List/Sort/Find/Edit/Mode buttons already had the correct skin
+images, but their child `SkinButton` windows forwarded `WM_MOUSEMOVE` to the
+playlist parent, which registered `TME_LEAVE` against itself. A cursor over a
+child is outside that parent's own input surface: the resulting leave cleared
+`playlist_toolbar_hover_` immediately. A previous child's queued leave could
+also clear the next child's hot item. On LX-iPlay, all seven rebuilt buttons
+therefore produced zero changed pixels before this fix, while the original
+produced 186/169/220/175/170/156/190 respectively.
+
+Original-code checkpoints:
+
+- `004A9937` parses `hot_image` separately from the normal toolbar image.
+- `0047E6FC` passes the normal image, optional hot image and package color key
+  to `0047AB54`; the latter divides image/cell widths by `TB_BUTTONCOUNT`.
+- `00482BAF` creates the native drop-down toolbar, control ID `0xE802`, and
+  binds the seven categories in resource menu `0x8B` through `0048AA1F`.
+  The original HWND class in this installation is `ATL:00541288`, so probes
+  locate it by ID/count rather than assuming `ToolbarWindow32`.
+
+The rebuilt dispatcher now preserves the receiving HWND for move/leave,
+cancels the preceding leave subscription when the receiver changes, and
+ignores queued leaves from an obsolete receiver. No mouse capture is added to
+toolbar hovering. Normal/hot bitmap rendering, transparency, text resources
+and toolbar geometry are unchanged. The native popup state is also retained:
+normal frame during the popup, restored hot item after Escape, including the
+original's retained hot item when leaving directly after Escape without a
+new position inside the toolbar. An unchanged-position mouse move synthesized
+by menu teardown does not count as that new position.
+
+Host regression tools (local `tools/` fixtures):
+
+```powershell
+powershell -NoProfile -File rebuild/tools/probe_playlist_toolbar_hover.ps1 -Skin LX-iPlay.skn -Original -RequireHot -CheckMenus
+powershell -NoProfile -File rebuild/tools/probe_playlist_toolbar_hover.ps1 -Skin LX-iPlay.skn -RequireHot -CheckMenus
+powershell -NoProfile -File rebuild/tools/compare_playlist_hover_captures.ps1 -Original <original-fixture> -Rebuild <rebuilt-fixture>
+```
+
+These use isolated temporary program/config copies on the host, actual cursor
+input, seven stationary/held/leave/adjacent hover cases and seven popup cases.
+Menu counts and first command IDs are compared as well as toolbar pixels.
+The default-resource test must explicitly use `<Default_Skin>` and verify
+playlist visibility after initialization: an empty package name can cause the
+original fallback path to hide the playlist, yielding invalid black captures.
+Both PrintWindow and screen captures confirm the Escape behavior in LX-iPlay.
+
+The regression comparison covers default, LX-iPlay, TT2012, Let's Vista
+(浅蓝+蓝灰) and Media Player 10 (浅蓝+黑绿), not every installed skin. Vista's
+native seven cells occupy 280 pixels while the rebuilt XML hit rectangle is
+282 pixels; pixel comparisons cover their common toolbar region. This change
+does not claim binary identity or change the previously recovered geometry.
+Final Release runs compare 222 toolbar frames with zero differing pixels in
+those common regions (50 LX-iPlay frames and 43 for each other skin), including
+the post-Escape leave case. All 35 popup count/first-ID comparisons pass.
+`ttplayer_tests` passes (3.32 s); the 30 pre-build Release XML/INI/playlist
+configs were restored and verified by file hashes. No Windows Sandbox was used.
+
 ## Left catalogue control and selection
 
 `FUN_00482BAF` does not paint the left catalogue as labels owned by the popup.

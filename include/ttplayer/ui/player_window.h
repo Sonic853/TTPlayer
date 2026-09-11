@@ -145,7 +145,7 @@ private:
     static LRESULT CALLBACK PlaylistEditProc(HWND, UINT, WPARAM, LPARAM,
                                               UINT_PTR, DWORD_PTR);
     LRESULT HandleMessage(UINT, WPARAM, LPARAM);
-    LRESULT HandlePlaylistMessage(UINT, WPARAM, LPARAM);
+    LRESULT HandlePlaylistMessage(UINT, WPARAM, LPARAM, HWND mouse_source);
     LRESULT HandleLyricMessage(UINT, WPARAM, LPARAM);
     LRESULT HandleLyricControlMessage(HWND, UINT, WPARAM, LPARAM);
     LRESULT HandlePlaylistControlMessage(HWND, UINT, WPARAM, LPARAM);
@@ -813,6 +813,8 @@ private:
     std::optional<size_t> playlist_hover_;
     std::optional<size_t> playlist_list_hover_;
     std::optional<size_t> playlist_toolbar_hover_;
+    HWND playlist_mouse_tracking_window_{};
+    std::optional<POINT> playlist_toolbar_menu_return_point_;
     bool playlist_close_hover_{};
     bool playlist_close_pressed_{};
     int equalizer_hover_{};
