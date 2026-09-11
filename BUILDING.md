@@ -15,9 +15,21 @@
 工作流必须先存在于默认分支，手动运行入口才会显示，见
 [GitHub 手动运行工作流说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。
 
-使用 `windows-2025`、Visual Studio 2022、Win32/x86；不构建 x64，
+使用 `windows-2025-vs2026`、Visual Studio 2026、Win32/x86；不构建 x64，
 因为现有 DLL/AddIn ABI 为 32 位。工作流只有 `contents: read` 权限，
 官方 checkout/upload-artifact 动作固定到提交 SHA，不需要额外 secrets。
+
+`windows-2025` 已迁移到 VS 2026 镜像，因此不能再配合写死的
+`Visual Studio 17 2022` 生成器。工作流明确选择 VS 2026 镜像和
+`Visual Studio 18 2026` 生成器，并使用 `vswhere` 查找带 x86/x64 C++ 工具的
+18.x 安装实例，显式传给 CMake。配置前检查 CMake 的生成器支持，
+避免版本或 PATH 不匹配时仅出现笼统的找不到 Visual Studio 报错。
+VS 2026 生成器要求 CMake 4.2 或更新版本，Runner 已提供相应工具。
+参见 [GitHub 镜像迁移公告](https://github.com/actions/runner-images/issues/14017)
+及 [CMake VS 2026 生成器说明](https://cmake.org/cmake/help/latest/generator/Visual%20Studio%2018%202026.html)。
+
+修改工作流后，请提交并在 **Run workflow** 中选择含修复的分支发起新运行；
+直接 **Re-run jobs** 重跑旧失败记录仍使用旧提交中的工作流。
 
 产物包含 EXE、许可证、本说明、SHA-256 校验值、提交信息，以及生成时的 PDB。
 **这不是包含原版运行依赖的安装包**：请把 `ttplayer_rebuild.exe` 放入已有
@@ -35,11 +47,13 @@ TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一�
 在此仓库根目录（本地即 `rebuild`）执行：
 
 ```powershell
-cmake -S . -B out/ci -A Win32 -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF
+cmake -S . -B out/ci -G "Visual Studio 18 2026" -A Win32 -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF
 cmake --build out/ci --config Release --target ttplayer_rebuild --parallel 4
 ```
 
 使用独立输出目录，不覆盖已有播放器运行目录。
+本地同样需要 VS 2026 的 C++ 工具和 CMake 4.2+。如果某个构建目录曾用
+VS 2022 配置，请改用新的空构建目录，不要复用旧的生成器缓存。
 
 - `BUILD_TESTING=OFF`：跳过未提交的 `tests/`、`tools/` 及外部反编译测试输入；
   这不关闭播放器内嵌的隔离工作进程功能。
