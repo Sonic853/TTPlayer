@@ -3,6 +3,7 @@
 #include "output_devices.h"
 #include "modern_file_dialog.h"
 #include "ttplayer/app/worker_process.h"
+#include "ttplayer/build_date.h"
 #include "ttplayer/settings/file_association.h"
 #include "ttplayer/ui/player_runtime_policy.h"
 
@@ -3207,7 +3208,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         version += L" (Unicode)";
         SetDlgItemTextW(dialog, 1011, version.c_str());
         SetDlgItemTextW(dialog, 1005, L"nanling与社区");
-        SetDlgItemTextW(dialog, 1040, L"2026-9-7");
+        SetDlgItemTextW(dialog, 1040, build::kCompletionDate);
         SetDlgItemTextW(dialog, 1009, ResourceText(0x80).c_str());
         SetDlgItemTextW(dialog, 1020, L"社区版");
         // The resource placeholders are intentionally hidden.  AboutPage's

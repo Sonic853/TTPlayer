@@ -19,6 +19,20 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Re-evaluate at build time, not just when CMake configures. The generator
+# updates the header only if the Beijing calendar date changes, so same-day
+# incremental builds do not recompile the options window unnecessarily.
+find_program(TTPLAYER_POWERSHELL NAMES powershell pwsh REQUIRED)
+set(TTPLAYER_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+add_custom_target(ttplayer_build_date
+  COMMAND "${TTPLAYER_POWERSHELL}" -NoProfile -NonInteractive -ExecutionPolicy Bypass
+          -File "${CMAKE_CURRENT_SOURCE_DIR}/cmake/write_build_date.ps1"
+          -OutputPath "${TTPLAYER_GENERATED_INCLUDE_DIR}/ttplayer/build_date.h"
+  BYPRODUCTS "${TTPLAYER_GENERATED_INCLUDE_DIR}/ttplayer/build_date.h"
+  COMMENT "Updating Beijing build date"
+  VERBATIM
+)
+
 add_library(ttplayer_core
   src/app/dsp_worker.cpp
   src/app/file_info_worker.cpp
@@ -74,7 +88,9 @@ add_library(ttplayer_core
 )
 target_include_directories(ttplayer_core
   PUBLIC include
+  PRIVATE "${TTPLAYER_GENERATED_INCLUDE_DIR}"
 )
+add_dependencies(ttplayer_core ttplayer_build_date)
 target_compile_definitions(ttplayer_core PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(ttplayer_core PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_core PUBLIC
@@ -549,6 +565,9 @@ endif()
 endif()
 
 if(BUILD_TESTING)
+add_test(NAME build_date_tests
+  COMMAND "${TTPLAYER_POWERSHELL}" -NoProfile -NonInteractive -ExecutionPolicy Bypass
+          -File "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_build_date.ps1")
 add_library(mp3pro_input_mock SHARED tests/mock_winamp_input.cpp tests/mock_winamp_input.def)
 target_compile_definitions(mp3pro_input_mock PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(mp3pro_input_mock PRIVATE /W4 /EHsc /utf-8)
