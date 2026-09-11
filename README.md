@@ -95,7 +95,15 @@ Current milestone (0.1):
 - recovered resource-only `ttpres.dll` targets for both the application root
   and `AddIn`, preserving every original resource payload and language ID.
 
-Build from a Visual Studio developer shell:
+## Build
+
+Manual GitHub Actions builds are available through **Actions → Manual Windows
+Build → Run workflow** after the workflow reaches the default branch. The
+workflow produces an x86 player EXE without bundling original DLLs or private
+configuration. See [BUILDING.md](BUILDING.md) for inputs, artifacts and clean
+checkout builds.
+
+Build the complete local recovery workspace from a Visual Studio developer shell:
 
 ```powershell
 cmake -S rebuild -B rebuild/build -A Win32

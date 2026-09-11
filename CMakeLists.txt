@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 project(TTPlayerRebuild VERSION 0.1.0 LANGUAGES C CXX)
 
+include(CTest)
+option(TTPLAYER_STAGE_RUNTIME "Rebuild/copy local original DLLs, skins and configuration beside the EXE" ON)
+
 if(NOT WIN32)
   message(FATAL_ERROR "TTPlayerRebuild currently targets Windows")
 endif()
@@ -71,7 +74,6 @@ add_library(ttplayer_core
 )
 target_include_directories(ttplayer_core
   PUBLIC include
-  PRIVATE ../reverse/include
 )
 target_compile_definitions(ttplayer_core PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(ttplayer_core PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -81,8 +83,8 @@ target_link_libraries(ttplayer_core PUBLIC
   mfplat mfreadwrite mfuuid propsys
 )
 
-add_library(ttpcomm_api STATIC ../reverse/src/ttpcomm_api.c)
-target_include_directories(ttpcomm_api PUBLIC ../reverse/include)
+add_library(ttpcomm_api STATIC src/app/ttpcomm_api.c)
+target_include_directories(ttpcomm_api PUBLIC include)
 target_compile_definitions(ttpcomm_api PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 
 add_executable(ttplayer_rebuild WIN32
@@ -124,11 +126,14 @@ function(ttplayer_stage_lame target)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/stage_lame.cmake"
     VERBATIM)
 endfunction()
-ttplayer_stage_lame(ttplayer_rebuild)
+if(TTPLAYER_STAGE_RUNTIME)
+  ttplayer_stage_lame(ttplayer_rebuild)
+endif()
 
 # Standalone development/test front ends only. The shipped player embeds all
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
+if(BUILD_TESTING)
 add_executable(ttplayer_dsp_probe EXCLUDE_FROM_ALL
   tools/dsp_plugin_probe.cpp src/app/dsp_worker.cpp)
 target_include_directories(ttplayer_dsp_probe PRIVATE include)
@@ -452,10 +457,12 @@ target_compile_definitions(ole_drop_source PRIVATE
 target_compile_options(ole_drop_source PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ole_drop_source PRIVATE ole32 shell32 user32)
 set_property(TARGET ole_drop_source PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
+endif()
 
 # The two legacy ttpres.dll files contain resources only: no code, entry point,
 # imports, or exports.  Their recovered .res files are linked as /NOENTRY DLLs
 # so resource type/name/language identities remain byte-for-byte compatible.
+if(TTPLAYER_STAGE_RUNTIME)
 set(TTPRES_RECOVERY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../reverse/ttpres")
 set(TTPRES_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/resources")
 
@@ -532,7 +539,16 @@ add_custom_command(TARGET ttplayer_rebuild POST_BUILD
   VERBATIM
 )
 
-enable_testing()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../mp3PRO.dll")
+  add_custom_command(TARGET ttplayer_rebuild POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/../mp3PRO.dll"
+            "$<TARGET_FILE_DIR:ttplayer_rebuild>/mp3PRO.dll"
+    VERBATIM)
+endif()
+endif()
+
+if(BUILD_TESTING)
 add_library(mp3pro_input_mock SHARED tests/mock_winamp_input.cpp tests/mock_winamp_input.def)
 target_compile_definitions(mp3pro_input_mock PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(mp3pro_input_mock PRIVATE /W4 /EHsc /utf-8)
@@ -544,13 +560,6 @@ add_dependencies(mp3pro_source_tests mp3pro_input_mock)
 add_test(NAME mp3pro_source_tests COMMAND mp3pro_source_tests
     "$<TARGET_FILE:mp3pro_input_mock>" "${CMAKE_CURRENT_SOURCE_DIR}/../mp3PRO.dll")
 set_tests_properties(mp3pro_source_tests PROPERTIES TIMEOUT 60)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../mp3PRO.dll")
-  add_custom_command(TARGET ttplayer_rebuild POST_BUILD
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/../mp3PRO.dll"
-            "$<TARGET_FILE_DIR:ttplayer_rebuild>/mp3PRO.dll"
-    VERBATIM)
-endif()
 add_test(NAME ttplayer_tests COMMAND ttplayer_tests)
 add_test(NAME shell_send_to_tests COMMAND shell_send_to_tests)
 add_test(NAME playlist_network_commands_tests
@@ -616,3 +625,4 @@ add_test(NAME winamp_dsp_runtime_tests COMMAND winamp_dsp_runtime_tests
 set_tests_properties(ttplayer_ui_smoke PROPERTIES
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
 )
+endif()

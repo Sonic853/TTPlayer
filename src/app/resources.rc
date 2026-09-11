@@ -11,7 +11,7 @@ END
 
 // TTPlayer.exe loads this exact group-icon identifier in FUN_0045FAD8 before
 // associating the resulting 16x16 HICON with command 0xE140.
-128 ICON "../../../Icons/TTPlayer.ico"
+128 ICON "assets/TTPlayer.ico"
 
 // New optional LAME DLL configuration; legacy AddIns keep their own dialogs.
 4090 DIALOGEX 0, 0, 202, 99

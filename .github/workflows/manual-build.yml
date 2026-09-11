@@ -1,0 +1,87 @@
+name: Manual Windows Build
+run-name: Windows x86 ${{ inputs.configuration }} - ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Build configuration
+        type: choice
+        required: true
+        default: Release
+        options:
+          - Release
+          - RelWithDebInfo
+          - Debug
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build player (Windows x86)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      BUILD_CONFIGURATION: ${{ inputs.configuration }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      # This repository is the local rebuild/ directory. Private reverse/
+      # inputs, tests, runtime DLLs and personal settings are not in the checkout.
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
+          -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF
+
+      - name: Build
+        run: cmake --build build --config "$env:BUILD_CONFIGURATION" --target ttplayer_rebuild --parallel 4
+
+      - name: Prepare artifact
+        run: |
+          $output = Join-Path 'build' $env:BUILD_CONFIGURATION
+          $executable = Join-Path $output 'ttplayer_rebuild.exe'
+          if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+            throw 'The player executable was not produced.'
+          }
+          New-Item -ItemType Directory -Path artifact | Out-Null
+          Copy-Item -LiteralPath $executable -Destination artifact
+          Copy-Item -LiteralPath LICENSE -Destination artifact
+          Copy-Item -LiteralPath BUILDING.md -Destination artifact
+          $symbols = Join-Path $output 'ttplayer_rebuild.pdb'
+          if (Test-Path -LiteralPath $symbols) {
+            Copy-Item -LiteralPath $symbols -Destination artifact
+          }
+          $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  ttplayer_rebuild.exe" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
+          [ordered]@{
+            commit = $env:GITHUB_SHA
+            ref = $env:GITHUB_REF
+            configuration = $env:BUILD_CONFIGURATION
+            architecture = 'x86'
+            run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          } | ConvertTo-Json | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
+
+      - name: Upload player
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: TTPlayer-Windows-x86-${{ inputs.configuration }}-${{ github.run_number }}
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload configure diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: TTPlayer-configure-log-${{ github.run_number }}
+          path: build/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+          retention-days: 7
