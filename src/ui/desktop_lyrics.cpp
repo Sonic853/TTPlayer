@@ -872,6 +872,9 @@ private:
         case WM_COMMAND:
             HandleCommand(LOWORD(wparam));
             return 0;
+        case WM_NOTIFY:
+            if (HandleToolTipNotification(lparam)) return 0;
+            break;
         case WM_DRAWITEM:
         case WM_MEASUREITEM:
         case WM_INITMENUPOPUP:
@@ -924,29 +927,21 @@ private:
 
     void CreateTooltips() {
         if (!bar_) return;
-        tooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
-            WS_POPUP, CW_USEDEFAULT,
+        // 00418B74 -> 0040EE16 passes zero styles and activates the stock
+        // tooltip. No custom wrapping width, always-tip or prefix override.
+        tooltip_ = CreateWindowExW(0, TOOLTIPS_CLASSW, nullptr,
+            0, CW_USEDEFAULT,
             CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, bar_, nullptr,
             instance_, nullptr);
         if (!tooltip_) return;
-        SetWindowPos(tooltip_, HWND_TOPMOST, 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        SendMessageW(tooltip_, TTM_SETMAXTIPWIDTH, 0, 360);
+        SendMessageW(tooltip_, TTM_ACTIVATE, TRUE, 0);
 
-        constexpr std::array<UINT, 12> commands{
-            kCommandIcon, kCommandPlay, kCommandPrevious, kCommandNext,
-            kCommandList, kCommandLines, kCommandKaraoke, kCommandSettings,
-            kCommandLock, kCommandTopmost, kCommandReturn, kCommandClose};
         std::array<HWND, 12> windows{};
         windows[0] = icon_;
         for (size_t index = 0; index < buttons_.size(); ++index)
             windows[index + 1] = buttons_[index].window;
-        for (size_t index = 0; index < commands.size(); ++index) {
-            tooltip_text_[index] = ResourceCommandText(resource_module_,
-                                                        commands[index]);
-            if (tooltip_text_[index].empty())
-                tooltip_text_[index] = L"TTPlayer";
-            if (!windows[index]) continue;
+        for (const HWND control : windows) {
+            if (!control) continue;
             TOOLINFOW tool{};
             // The resource-only regression executable intentionally has no
             // comctl v6 manifest.  V1 contains every field used here and is
@@ -958,12 +953,65 @@ private:
             // second time is both unnecessary and rejected by comctl32 v5.
             tool.uFlags = TTF_IDISHWND;
             tool.hwnd = bar_;
-            tool.uId = reinterpret_cast<UINT_PTR>(windows[index]);
+            tool.uId = reinterpret_cast<UINT_PTR>(control);
             tool.hinst = instance_;
-            tool.lpszText = tooltip_text_[index].data();
+            // 00418B74 registers -1, not a one-time copy of the resource.
+            // 00418958 chooses the current action each time a tip is queried.
+            tool.lpszText = LPSTR_TEXTCALLBACKW;
             SendMessageW(tooltip_, TTM_ADDTOOLW, 0,
                          reinterpret_cast<LPARAM>(&tool));
         }
+    }
+
+    std::wstring ToolTipText(HWND control) const {
+        if (!control || GetParent(control) != bar_) return {};
+        const UINT command = static_cast<UINT>(GetDlgCtrlID(control));
+        auto text = ResourceText(resource_module_,
+            command == kCommandPlay && playing_ ? kCommandPause : command);
+        const auto choose = [&](wchar_t separator, bool second) {
+            const size_t split = text.find(separator);
+            if (split == std::wstring::npos) return;
+            if (second) text.erase(0, split + 1);
+            else text.erase(split);
+        };
+        // 00418958 calls 004C1B58 with exactly these separators/indices.
+        // Lines and karaoke advertise the next action, not the current mode.
+        if (settings_) {
+            if (command == kCommandLines) choose(L'|', settings_->lines == 1);
+            else if (command == kCommandKaraoke) choose(L'|', settings_->karaoke_mode);
+            else if (command == kCommandTopmost) choose(L'\n', settings_->topmost);
+        }
+        // Conventional "description\nshort label" fallback. Unlike main
+        // window tips, 00418958 does not append a keyboard shortcut.
+        if (const size_t split = text.find(L'\n'); split != std::wstring::npos)
+            text.erase(0, split + 1);
+        return text;
+    }
+
+    bool HandleToolTipNotification(LPARAM notification) const {
+        if (!notification) return false;
+        const auto* header = reinterpret_cast<const NMHDR*>(notification);
+        if (header->hwndFrom != tooltip_ ||
+            (header->code != TTN_GETDISPINFOW && header->code != TTN_GETDISPINFOA))
+            return false;
+        const auto text = ToolTipText(reinterpret_cast<HWND>(header->idFrom));
+        // The shared notification handler copies into the 80-character
+        // NMTTDISPINFO buffer. Leave missing resources empty, not "TTPlayer".
+        if (header->code == TTN_GETDISPINFOW) {
+            auto* display = reinterpret_cast<NMTTDISPINFOW*>(notification);
+            wcsncpy_s(display->szText, text.c_str(), _TRUNCATE);
+            display->lpszText = display->szText;
+        } else {
+            auto* display = reinterpret_cast<NMTTDISPINFOA*>(notification);
+            const int length = WideCharToMultiByte(CP_ACP, 0, text.c_str(), -1,
+                                                   nullptr, 0, nullptr, nullptr);
+            std::string encoded(static_cast<size_t>(std::max(1, length)), '\0');
+            if (length > 0) WideCharToMultiByte(CP_ACP, 0, text.c_str(), -1,
+                encoded.data(), length, nullptr, nullptr);
+            strncpy_s(display->szText, encoded.c_str(), _TRUNCATE);
+            display->lpszText = display->szText;
+        }
+        return true;
     }
 
     const skin::SkinElement* ButtonElement(UINT command) const {
@@ -1184,8 +1232,10 @@ private:
         } reset{menu_tracking_};
         if (popup_tracker_) return popup_tracker_(menu, point, bar_);
         SetForegroundWindow(bar_);
+        // 0041914F uses TPM_RETURNCMD (0x100). TPM_NONOTIFY suppresses
+        // the root WM_INITMENUPOPUP needed to replace resource 0x7ef4.
         const UINT selected = TrackPopupMenuEx(menu,
-            TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+            TPM_RIGHTBUTTON | TPM_RETURNCMD,
             point.x, point.y, bar_, nullptr);
         PostMessageW(bar_, WM_NULL, 0, 0);
         return selected;
@@ -1927,7 +1977,6 @@ private:
     HWND tooltip_{};
     HWND icon_{};
     std::array<Button, 11> buttons_{};
-    std::array<std::wstring, 12> tooltip_text_{};
     HFONT font_{};
     LOGFONTW last_font_{};
     int applied_lines_{};

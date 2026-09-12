@@ -1024,8 +1024,11 @@ bool PlayerWindow::CreateDesktopLyrics() {
         context_menu_open_ = true;
         SetForegroundWindow(owner);
         BeginPopupMenuStyle(menu, true);
+        // DeskLrcBar's track popup must receive WM_INITMENUPOPUP and forward
+        // it to 00461BAE. RETURNCMD already prevents WM_COMMAND dispatch;
+        // adding NONOTIFY leaves the root track resource uninitialised.
         const UINT command = TrackPopupMenuEx(
-            menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+            menu, TPM_RIGHTBUTTON | TPM_RETURNCMD,
             point.x, point.y, owner, nullptr);
         EndPopupMenuStyle();
         context_menu_open_ = false;

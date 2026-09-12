@@ -267,6 +267,7 @@ private:
     [[nodiscard]] bool PublishReadySkinMenuCatalog(DWORD wait_milliseconds = 0);
     void InvalidateSkinMenuCatalog() noexcept;
     void PopulateSkinMenu(HMENU menu);
+    void PopulateTrackMenu(HMENU menu);
     void PrepareContextMenu(HMENU menu);
     void BeginPopupMenuStyle(HMENU menu, bool hide_keyboard_cues = false);
     void ApplyPopupMenuStyle(HMENU menu);

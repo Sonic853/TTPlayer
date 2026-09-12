@@ -1,5 +1,15 @@
 # Reconstruction status
 
+2026-09-12: restore desktop-lyric track popups and state-dependent control
+tips from 5.7.9. Share 00461BAE -> 004813C1 track-menu initialization with
+the main window; remove NONOTIFY from desktop tracking so the root popup
+actually receives WM_INITMENUPOPUP. Restore resource callback tips for all
+12 toolbar controls, including play/pause, next line mode, karaoke and
+topmost actions; retain native tooltip styles and no forced wrap width.
+Release and eight host regressions pass, including the real production
+popup callback, generated playlist commands and live tooltip text queries.
+User configurations unchanged. See DESKTOP_LYRIC_MENU.md for evidence/scope.
+
 2026-09-12: default General/DiscordSyncLyrics to off for new settings, missing
 XML attributes and Reset All. Preserve explicitly saved on/off preferences;
 the master Discord song-presence switch is unchanged. See DISCORD_PRESENCE.md.

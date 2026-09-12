@@ -2621,7 +2621,13 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         // submenu by its first command (0x7919).  The rebuild starts its scan
         // as soon as the root popup opens; this point waits for any unfinished
         // asynchronous tail and publishes the complete result into the HMENU.
-        if (popup && GetMenuItemID(popup, 0) == kCmdDefaultSkin) {
+        if (popup && (GetMenuItemID(popup, 0) == kCmdFirstTrack ||
+                      GetMenuItemID(popup, 0) == 0x7ef4)) {
+            // 00461BAE -> 004813C1. DeskLrcBar forwards this notification
+            // (0041907F), so both entry points populate the same track menu.
+            PopulateTrackMenu(popup);
+            ApplyPopupMenuStyle(popup);
+        } else if (popup && GetMenuItemID(popup, 0) == kCmdDefaultSkin) {
             PopulateSkinMenu(popup);
             ApplyPopupMenuStyle(popup);
         } else if (popup && GetMenuItemID(popup, 0) == kCmdVisualDream) {
@@ -4060,6 +4066,49 @@ void PlayerWindow::ToggleMiniMode() {
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
+void PlayerWindow::PopulateTrackMenu(HMENU menu) {
+    if (!menu) return;
+    while (GetMenuItemCount(menu) > 0) DeleteMenu(menu, 0, MF_BYPOSITION);
+    const auto& tracks = ActivePlaylist().Tracks();
+    if (tracks.empty()) {
+        const auto empty = ResourceText(0x7ef4);
+        AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, 0x7ef4, empty.c_str());
+        return;
+    }
+    // 004813C1 reserves commands 10000..29998, uses the playlist's display
+    // formatter, pads number prefixes and appends only known durations.
+    const size_t count = std::min<size_t>(tracks.size(), 19'999);
+    const size_t prefix_width = std::to_wstring(count).size() + 2;
+    int column_rows = 20;
+    if (settings_.general.menu_bar_playlist) {
+        RECT work{};
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0))
+            column_rows = std::max(20L, (work.bottom - work.top) / 22);
+    }
+    for (size_t index = 0; index < count; ++index) {
+        std::wstring label;
+        if (settings_.playlist.title_number) {
+            label = std::to_wstring(index + 1) + L".";
+            label.resize(prefix_width, L' ');
+        }
+        label += PlaylistDisplayText(tracks[index]);
+        if (tracks[index].duration_ms >= 0) {
+            const int seconds = tracks[index].duration_ms / 1000;
+            label += L"\t[" + std::to_wstring(seconds / 60) + L":";
+            if (seconds % 60 < 10) label += L"0";
+            label += std::to_wstring(seconds % 60) + L"]";
+        }
+        UINT flags = MF_STRING;
+        if (!media_library_playback_active_ && playing_playlist_index_ &&
+            *playing_playlist_index_ == playlists_.ActiveIndex() && current_ == index)
+            flags |= MF_CHECKED | MF_USECHECKBITMAPS;
+        if (settings_.general.menu_bar_playlist &&
+            index % static_cast<size_t>(column_rows) == 0)
+            flags |= MF_MENUBARBREAK;
+        AppendMenuW(menu, flags, kCmdFirstTrack + static_cast<UINT>(index), label.c_str());
+    }
+}
+
 HMENU PlayerWindow::BuildContextMenu() {
     const HMODULE resources = ResourceModule();
     if (!resources) return nullptr;
@@ -4093,24 +4142,6 @@ HMENU PlayerWindow::BuildContextMenu() {
             for (int remove = 0; remove < 4 &&
                  GetMenuItemCount(child) > 6; ++remove)
                 DeleteMenu(child, 6, MF_BYPOSITION);
-        } else if (resource_id == kMenuPlayList) {
-            while (GetMenuItemCount(child) > 0) DeleteMenu(child, 0, MF_BYPOSITION);
-            if (ActivePlaylist().Tracks().empty()) {
-                const auto empty = ResourceText(0x7ef4);
-                AppendMenuW(child, MF_STRING | MF_GRAYED, 0x7ef4, empty.c_str());
-            } else {
-                const size_t count = std::min<size_t>(ActivePlaylist().Tracks().size(), 20'000);
-                for (size_t track = 0; track < count; ++track) {
-                    auto label = DisplayName(ActivePlaylist().Tracks()[track]);
-                    if (ActivePlaylist().Tracks()[track].duration_ms >= 0) {
-                        const int seconds = ActivePlaylist().Tracks()[track].duration_ms / 1000;
-                        label += L"\t[" + std::to_wstring(seconds / 60) + L":";
-                        if (seconds % 60 < 10) label += L"0";
-                        label += std::to_wstring(seconds % 60) + L"]";
-                    }
-                    AppendMenuW(child, MF_STRING, kCmdFirstTrack + static_cast<UINT>(track), label.c_str());
-                }
-            }
         } else if (resource_id == kMenuTransparency) {
             // 0045E996 inserts the missing 10..90 percent entries dynamically.
             for (int percent = 10; percent <= 90; percent += 10) {
@@ -4663,9 +4694,11 @@ void PlayerWindow::ShowContextMenu(POINT screen_point, HWND origin) {
     // forwarded lyric-chrome menu, obtain the command explicitly: User32 can
     // queue WM_COMMAND until after TrackPopupMenuEx returns, losing the
     // otherwise scoped origin before the fullscreen dispatcher sees it.
+    // RETURNCMD is sufficient; keep initialization notifications for the
+    // shared dynamic track submenu even when this menu is forwarded.
     const bool forwarded = main_context_menu_origin_ != window_;
     const UINT selected = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON |
-        (forwarded ? TPM_RETURNCMD | TPM_NONOTIFY : 0),
+        (forwarded ? TPM_RETURNCMD : 0),
         screen_point.x, screen_point.y, window_, nullptr);
     if (forwarded && selected)
         SendMessageW(window_, WM_COMMAND, MAKEWPARAM(selected, 0), 0);
@@ -4685,7 +4718,8 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
     if (HandleFullScreenCommand(command, fullscreen_origin ? fullscreen_origin :
             (context_menu_open_ && main_context_menu_origin_
                 ? main_context_menu_origin_ : window_))) return true;
-    if (command >= kCmdFirstTrack && command < kCmdFirstTrack + ActivePlaylist().Tracks().size()) {
+    if (command >= kCmdFirstTrack && command < kCmdFirstTrack + 19'999 &&
+        command < kCmdFirstTrack + ActivePlaylist().Tracks().size()) {
         SelectTrack(command - kCmdFirstTrack, true);
         return true;
     }
