@@ -486,6 +486,27 @@ private:
             InvalidateRect(bar_, nullptr, FALSE);
     }
 
+    void SetButtonInteraction(UINT hover, UINT pressed) noexcept {
+        // 0040A5E3 returns without invalidating when the visual state is
+        // unchanged. Mouse movement within one button is not a new frame.
+        if (hover_button_ == hover && pressed_button_ == pressed) return;
+        const std::array<UINT,4> changed{hover_button_, hover, pressed_button_, pressed};
+        hover_button_ = hover;
+        pressed_button_ = pressed;
+        // Native SkinButton invalidates its own HWND. The rebuilt toolbar
+        // composites PNG children centrally, so restrict the parent's update
+        // region to the affected children instead of erasing the entire bar.
+        for (const UINT command : changed) {
+            if (!command || !bar_ || !IsWindow(bar_)) continue;
+            const HWND child = GetDlgItem(bar_, static_cast<int>(command));
+            RECT bounds{};
+            if (child && GetWindowRect(child, &bounds)) {
+                MapWindowPoints(nullptr, bar_, reinterpret_cast<POINT*>(&bounds), 2);
+                InvalidateRect(bar_, &bounds, FALSE);
+            }
+        }
+    }
+
     [[nodiscard]] BYTE ConfiguredControlAlpha() const noexcept {
         return settings_
             ? static_cast<BYTE>(std::max(1, settings_->background_alpha))
@@ -669,22 +690,28 @@ private:
             return 0;
         }
         case WM_MOUSEMOVE: {
-            TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
-            TrackMouseEvent(&tracking);
-            self->hover_button_ = command;
-            self->InvalidateBar();
+            RECT client{};
+            GetClientRect(window, &client);
+            const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            const bool inside = IsWindowEnabled(window) && PtInRect(&client, point);
+            if (inside && self->hover_button_ != command) {
+                TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+                TrackMouseEvent(&tracking);
+            }
+            const UINT hover = inside ? command
+                : self->hover_button_ == command ? 0 : self->hover_button_;
+            self->SetButtonInteraction(hover, self->pressed_button_);
             return 0;
         }
         case WM_MOUSELEAVE:
-            if (self->hover_button_ == command) self->hover_button_ = 0;
-            self->InvalidateBar();
+            if (self->hover_button_ == command)
+                self->SetButtonInteraction(0, self->pressed_button_);
             return 0;
         case WM_LBUTTONDOWN:
+            if (!IsWindowEnabled(window)) return 0;
             SetFocus(window);
             SetCapture(window);
-            self->pressed_button_ = command;
-            self->hover_button_ = command;
-            self->InvalidateBar();
+            self->SetButtonInteraction(command, command);
             return 0;
         case WM_LBUTTONUP: {
             POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -692,15 +719,26 @@ private:
             GetClientRect(window, &client);
             const bool invoke = self->pressed_button_ == command &&
                                 PtInRect(&client, point) != FALSE;
+            const UINT hover = PtInRect(&client, point) ? command
+                : self->hover_button_ == command ? 0 : self->hover_button_;
+            // Publish the release once, before synchronous CAPTURECHANGED.
+            self->SetButtonInteraction(hover, 0);
             if (GetCapture() == window) ReleaseCapture();
-            self->pressed_button_ = 0;
-            self->InvalidateBar();
             if (invoke) self->HandleCommand(command);
             return 0;
         }
         case WM_CAPTURECHANGED:
         case WM_CANCELMODE:
-            if (self->pressed_button_ == command) self->pressed_button_ = 0;
+            if (self->pressed_button_ == command)
+                self->SetButtonInteraction(self->hover_button_, 0);
+            if (message == WM_CANCELMODE && GetCapture() == window) ReleaseCapture();
+            return 0;
+        case WM_ENABLE:
+            if (!wparam) {
+                self->SetButtonInteraction(self->hover_button_ == command ? 0 : self->hover_button_,
+                    self->pressed_button_ == command ? 0 : self->pressed_button_);
+                if (GetCapture() == window) ReleaseCapture();
+            }
             self->InvalidateBar();
             return 0;
         case WM_CONTEXTMENU: {
@@ -1098,8 +1136,30 @@ private:
     }
 
     void PaintBar(HDC dc) const {
+        if (!dc || !bar_) return;
         RECT client{};
         GetClientRect(bar_, &client);
+        const int width = Width(client), height = Height(client);
+        if (width <= 0 || height <= 0) return;
+        const HDC canvas = CreateCompatibleDC(dc);
+        const HBITMAP buffer = CreateCompatibleBitmap(dc, width, height);
+        if (!canvas || !buffer) {
+            if (buffer) DeleteObject(buffer);
+            if (canvas) DeleteDC(canvas);
+            return; // Keep the last frame rather than clearing the live bar.
+        }
+        const HGDIOBJ previous = SelectObject(canvas, buffer);
+        PaintBarContents(canvas, client);
+        // Clearing the visible colour-keyed window before drawing each PNG
+        // exposed incomplete/transparent frames during hover. Compose every
+        // layer offscreen and publish exactly one complete frame instead.
+        BitBlt(dc, 0, 0, width, height, canvas, 0, 0, SRCCOPY);
+        SelectObject(canvas, previous);
+        DeleteObject(buffer);
+        DeleteDC(canvas);
+    }
+
+    void PaintBarContents(HDC dc, const RECT& client) const {
         const auto* layout = skin_ ? &skin_->DesktopLyricBar() : nullptr;
         const COLORREF transparent = layout
             ? layout->transparent_color : RGB(255, 0, 255);
@@ -1143,7 +1203,7 @@ private:
             (button.command == kCommandLock && settings_ && settings_->lock) ||
             (button.command == kCommandTopmost && settings_ && settings_->topmost);
         if (!IsWindowEnabled(button.window)) frame = 3;
-        else if (pressed_button_ == button.command) frame = 2;
+        else if (pressed_button_ == button.command && hover_button_ == button.command) frame = 2;
         else if (hover_button_ == button.command) frame = 1;
         else if (checked) frame = 2;
         const int frame_width = element->frames > 1

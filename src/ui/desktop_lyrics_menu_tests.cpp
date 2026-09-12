@@ -35,6 +35,86 @@ struct Menu {
     HMENU value{};
     ~Menu() { if (value) DestroyMenu(value); }
 };
+void VerifySingleBarPresentation(HWND bar) {
+    // Record drawing directed at the destination DC. Background clearing and
+    // per-button PNG drawing must happen offscreen, leaving only the final
+    // SRCCOPY in this metafile, not a series of partially composed frames.
+    const HDC dc = CreateEnhMetaFileW(nullptr,nullptr,nullptr,nullptr);
+    Require(dc != nullptr,"cannot record toolbar presentation");
+    SendMessageW(bar,WM_PRINTCLIENT,reinterpret_cast<WPARAM>(dc),PRF_CLIENT);
+    const HENHMETAFILE metafile = CloseEnhMetaFile(dc);
+    Require(metafile != nullptr,"cannot finish toolbar presentation recording");
+    struct Recording { int copies{}, intermediate{}; } recording;
+    const BOOL enumerated = EnumEnhMetaFile(nullptr,metafile,
+        [](HDC,HANDLETABLE*,const ENHMETARECORD* record,int,LPARAM data)->int {
+            auto& result = *reinterpret_cast<Recording*>(data);
+            switch (record->iType) {
+            case EMR_BITBLT:
+                if (reinterpret_cast<const EMRBITBLT*>(record)->dwRop == SRCCOPY) ++result.copies;
+                else ++result.intermediate;
+                break;
+            case EMR_RECTANGLE: case EMR_STRETCHBLT: case EMR_STRETCHDIBITS:
+            case EMR_ALPHABLEND: case EMR_TRANSPARENTBLT: case EMR_GDICOMMENT:
+                ++result.intermediate; break;
+            default: break;
+            }
+            return 1;
+        },reinterpret_cast<LPVOID>(&recording),nullptr);
+    DeleteEnhMetaFile(metafile);
+    Require(enumerated && recording.copies == 1 && recording.intermediate == 0,
+            "toolbar exposes background/per-button drawing instead of one complete frame");
+}
+void NativeHoverTests(ui::DesktopLyricsWindow& desktop) {
+    Require(!(GetAsyncKeyState(VK_LBUTTON)&0x8000) && !(GetAsyncKeyState(VK_RBUTTON)&0x8000),
+            "mouse is in use; retry the native hover test when idle");
+    struct HostState {
+        POINT cursor{};
+        HWND foreground=GetForegroundWindow(), bar{};
+        ~HostState() {
+            if (bar && IsWindow(bar)) RemoveWindowSubclass(bar,CountPaint,83);
+            SetCursorPos(cursor.x,cursor.y);
+            if (IsWindow(foreground)) SetForegroundWindow(foreground);
+        }
+        static LRESULT CALLBACK CountPaint(HWND window,UINT message,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR data) {
+            if (message==WM_PAINT) ++*reinterpret_cast<int*>(data);
+            return DefSubclassProc(window,message,wp,lp);
+        }
+    } host;
+    GetCursorPos(&host.cursor);
+    const auto pump=[] {
+        MSG msg{};
+        while (PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+        MsgWaitForMultipleObjects(0,nullptr,FALSE,3,QS_ALLINPUT);
+        while (PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    };
+    desktop.Show(true);
+    const HWND bar=desktop.BarHandle(), control=desktop.ControlHandle();
+    RECT bounds{}; GetWindowRect(control,&bounds);
+    SetCursorPos(bounds.left+40,bounds.top+20);
+    SendMessageW(control,WM_SETCURSOR,reinterpret_cast<WPARAM>(control),MAKELPARAM(HTCLIENT,WM_MOUSEMOVE));
+    int paints{}, visited{};
+    Require(SetWindowSubclass(bar,HostState::CountPaint,83,reinterpret_cast<DWORD_PTR>(&paints))!=FALSE,
+            "cannot count native toolbar paints");
+    host.bar=bar;
+    for (HWND child=GetWindow(bar,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT)) {
+        if (!IsWindowVisible(child)) continue;
+        RECT rect{}; GetWindowRect(child,&rect);
+        if (rect.right-rect.left<3 || rect.bottom-rect.top<3) continue;
+        const POINT point{(rect.left+rect.right)/2,(rect.top+rect.bottom)/2};
+        SetCursorPos(point.x,point.y); pump(); UpdateWindow(bar); pump();
+        Require(WindowFromPoint(point)==child,"native hover point does not reach the desktop button");
+        const int initial=paints;
+        for (int i=0;i<20;++i) {
+            SetCursorPos(point.x-(i%2),point.y); pump(); UpdateWindow(bar);
+        }
+        Require(paints==initial,"native movement inside one button repeatedly repaints the toolbar");
+        Require(IsWindowVisible(bar)!=FALSE,"toolbar disappeared while hovering a button");
+        ++visited;
+    }
+    Require(visited>=3,"native hover test did not exercise enough buttons");
+    desktop.Show(false);
+    std::cout << "native hover: " << visited << " controls, no repeated paints within a control\n";
+}
 struct ToolSearch { HWND bar{}, tooltip{}; };
 BOOL CALLBACK FindTip(HWND window, LPARAM data) {
     auto& search = *reinterpret_cast<ToolSearch*>(data);
@@ -94,8 +174,9 @@ void ToolbarTests(HMODULE resources) {
     Gdiplus::Bitmap sprite(16, 4, PixelFormat32bppARGB);
     for (int y=0; y<4; ++y) for (int x=0; x<16; ++x) {
         const int frame=x/4;
-        sprite.SetPixel(x, y, x%4<2 ? Gdiplus::Color(0,0,0,0) :
-            Gdiplus::Color(128, frame==1 ? 0 : 255,255,frame==1 ? 0 : 255));
+        const std::array<Gdiplus::Color,4> states{Gdiplus::Color(128,255,255,255),
+            Gdiplus::Color(128,0,255,0),Gdiplus::Color(128,255,0,0),Gdiplus::Color(128,0,0,255)};
+        sprite.SetPixel(x, y, x%4<2 ? Gdiplus::Color(0,0,0,0) : states[frame]);
     }
     Require(sprite.Save((directory/L"sprite.png").c_str(), &png) == Gdiplus::Ok, "cannot write toolbar sprite");
     {
@@ -122,6 +203,7 @@ void ToolbarTests(HMODULE resources) {
         }), "cannot create toolbar test");
     desktop.SetSkin(&skin);
     const HWND bar = desktop.BarHandle();
+    ShowWindow(bar,SW_SHOWNOACTIVATE);
     const HWND plus = GetDlgItem(bar, IDC_DESKTOP_LYRIC_ZOOM_IN);
     const auto visible = [](HWND w) { return (GetWindowLongPtrW(w,GWL_STYLE)&WS_VISIBLE)!=0; };
     Require(visible(plus) && !visible(GetDlgItem(bar,0x803e)), "omitted toolbar control left a ghost hit target");
@@ -144,16 +226,63 @@ void ToolbarTests(HMODULE resources) {
         ~Surface() { SelectObject(dc,old); DeleteObject(bitmap); DeleteDC(dc); }
     } surface;
     const auto paint = [&] { SendMessageW(bar,WM_PRINTCLIENT,reinterpret_cast<WPARAM>(surface.dc),PRF_CLIENT); GdiFlush(); };
+    VerifySingleBarPresentation(bar);
     paint();
     Require(GetPixel(surface.dc,20,5)==RGB(50,63,108), "transparent PNG painted black instead of background");
     const COLORREF normal=GetPixel(surface.dc,22,5);
     Require(GetRValue(normal)>140 && GetRValue(normal)<170 && GetBValue(normal)>170,
             "half-transparent PNG did not composite over toolbar");
     SendMessageW(plus,WM_MOUSEMOVE,0,MAKELPARAM(1,1)); paint();
+    const COLORREF hot = GetPixel(surface.dc,22,5);
     Require(GetPixel(surface.dc,22,5)!=normal && GetPixel(surface.dc,20,5)==RGB(50,63,108),
             "hover frame/alpha was lost");
+    RedrawWindow(bar,nullptr,nullptr,RDW_VALIDATE | RDW_ALLCHILDREN | RDW_NOERASE | RDW_NOINTERNALPAINT);
+    Require(!GetUpdateRect(bar,nullptr,FALSE),"toolbar update rectangle was not validated");
+    for (int i=0;i<100;++i) SendMessageW(plus,WM_MOUSEMOVE,0,MAKELPARAM(1+(i%2),1));
+    Require(!GetUpdateRect(bar,nullptr,FALSE),"unchanged hover repeatedly invalidated the desktop toolbar");
     SendMessageW(plus,WM_MOUSELEAVE,0,0); paint();
     Require(GetPixel(surface.dc,22,5)==normal,"hover repaint accumulated alpha");
+    ValidateRect(bar,nullptr);
+    SendMessageW(plus,WM_MOUSELEAVE,0,0);
+    Require(!GetUpdateRect(bar,nullptr,FALSE),"redundant mouse leave repainted the toolbar");
+    SendMessageW(plus,WM_MOUSEMOVE,0,MAKELPARAM(1,1));
+    RECT dirty{}; GetUpdateRect(bar,&dirty,FALSE);
+    const RECT expected_dirty{20,5,24,9};
+    Require(EqualRect(&dirty,&expected_dirty),"one button hover invalidated more than its rectangle");
+    SendMessageW(plus,WM_MOUSELEAVE,0,0);
+    const HWND minus = GetDlgItem(bar,IDC_DESKTOP_LYRIC_ZOOM_OUT);
+    SendMessageW(minus,WM_MOUSEMOVE,0,MAKELPARAM(1,1));
+    ValidateRect(bar,nullptr);
+    SendMessageW(plus,WM_MOUSELEAVE,0,0); paint();
+    Require(!GetUpdateRect(bar,nullptr,FALSE) && GetPixel(surface.dc,32,5)==hot,
+            "late leave of previous button cleared or repainted the new hover");
+    SendMessageW(minus,WM_MOUSELEAVE,0,0);
+    SendMessageW(plus,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(1,1)); paint();
+    const COLORREF pressed = GetPixel(surface.dc,22,5);
+    Require(pressed != hot && pressed != normal,"pressed button frame missing");
+    SendMessageW(plus,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(8,1)); paint();
+    Require(GetCapture()==plus && GetPixel(surface.dc,22,5)==normal,
+            "captured button stayed pressed outside its bounds");
+    SendMessageW(plus,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(1,1)); paint();
+    Require(GetPixel(surface.dc,22,5)==pressed,"captured button did not restore pressed frame on reentry");
+    SendMessageW(plus,WM_CANCELMODE,0,0); paint();
+    Require(GetCapture()!=plus && GetPixel(surface.dc,22,5)==hot,
+            "cancelled button retained capture/pressed frame");
+    SendMessageW(plus,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(1,1));
+    SendMessageW(plus,WM_LBUTTONUP,0,MAKELPARAM(8,1)); paint();
+    Require(settings.font.lfHeight==-40 && GetPixel(surface.dc,22,5)==normal,
+            "release outside invoked zoom or left a hover frame");
+    EnableWindow(plus,FALSE); paint();
+    Require(GetPixel(surface.dc,22,5)!=normal,"disabled frame not repainted");
+    EnableWindow(plus,TRUE); paint();
+    Require(GetPixel(surface.dc,22,5)==normal,"enabled button retained disabled frame");
+    for (int i=0;i<100;++i) {
+        SendMessageW(plus,WM_MOUSEMOVE,0,MAKELPARAM(1,1)); paint();
+        Require(GetPixel(surface.dc,22,5)==hot,"repeated hover accumulated PNG alpha");
+        SendMessageW(plus,WM_MOUSELEAVE,0,0); paint();
+        Require(GetPixel(surface.dc,22,5)==normal,"repeated leave lost background pixels");
+    }
+    NativeHoverTests(desktop);
     SendMessageW(bar,WM_COMMAND,IDC_DESKTOP_LYRIC_ZOOM_IN,0);
     Require(settings.font.lfHeight==-42 && settings.font_valid,"A+ did not change persistent font");
     SendMessageW(bar,WM_COMMAND,IDC_DESKTOP_LYRIC_ZOOM_OUT,0);
@@ -401,6 +530,19 @@ int wmain(int argc, wchar_t** argv) {
         Require(resources.value != nullptr, "cannot load resource-only DLL");
         testing::SkinRebindAccess::Run(resources.value);
         ToolbarTests(resources.value);
+        {
+            // Also verify the native 5.7.9-era BMP toolbar, not just PNG fixtures.
+            auto skin=skin::LegacySkin::Load(fs::path(argv[1])/L"reverse/semantic/TT2012.extracted");
+            Window owner{CreateWindowExW(WS_EX_TOOLWINDOW,L"STATIC",L"BMP toolbar fixture",WS_POPUP,
+                0,0,231,25,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr)};
+            settings::DesktopLyricSettings options; RECT bounds{100,100,700,166};
+            ui::DesktopLyricsWindow desktop;
+            Require(desktop.Create(GetModuleHandleW(nullptr),owner.value,nullptr,resources.value,&options,&bounds),
+                    "BMP toolbar fixture creation failed");
+            desktop.SetSkin(&skin);
+            VerifySingleBarPresentation(desktop.BarHandle());
+            NativeHoverTests(desktop);
+        }
         OleUninitialize();
         return 0;
     } catch (const std::exception& error) {

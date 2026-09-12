@@ -1,5 +1,16 @@
 # Reconstruction status
 
+2026-09-13: fix desktop lyric toolbar hover flicker. Trace 5.7.9's
+0040A5E3 state-change-only invalidation, 00426434 no-op erase and
+0040FC78/0040A35B single-button sprite paint, distinct from the toolbar's
+0041AB1F background path. Stop invalidating the entire rebuilt bar for every
+mouse move; invalidate affected child rectangles only and present one
+offscreen-composited BMP/PNG frame. Cover capture/outside/reentry/cancel and
+enable transitions. Native host hover tests visit 12 BMP and 4 PNG controls;
+metafile recording verifies no intermediate destination clears/draws.
+Release builds successfully and eight targeted host regressions pass.
+See DESKTOP_LYRIC_HOVER_PAINT.md for evidence and the implementation boundary.
+
 2026-09-13: add optional per-item playlist toolbar rectangles for the approved
 BaiduMusic8209 layout. Keep legacy seven-cell/two-row behavior when absent.
 Use a 70px My Music header and equally divided Add/Sort/Delete/Lists/Edit/Mode
