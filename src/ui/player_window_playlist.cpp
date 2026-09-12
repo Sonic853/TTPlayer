@@ -3294,6 +3294,7 @@ void PlayerWindow::UpdateMainToolRects() {
 
     std::set<UINT_PTR> registered;
     for (const auto& element : ActiveSkinElements()) {
+        if (IsSuppressedSkinControl(element.name)) continue;
         UINT_PTR identifier{};
         if (element.name == L"pause" && FindActiveSkinElement(L"play")) continue;
         if (element.name == L"play" || element.name == L"pause") identifier = kCmdPlay;
@@ -3306,6 +3307,14 @@ void PlayerWindow::UpdateMainToolRects() {
         else if (element.name == L"equalizer") identifier = kCmdShowEqualizer;
         else if (element.name == L"playlist") identifier = kCmdShowPlaylist;
         else if (element.name == L"browser") identifier = kCmdShowBrowser;
+        else if (element.name == L"set") identifier = kCmdOptions;
+        else if (element.name.starts_with(L"mode_")) {
+            constexpr std::wstring_view modes[] = {L"mode_single", L"mode_loop",
+                L"mode_slider", L"mode_circle", L"mode_random"};
+            const int mode = std::clamp(settings_.player.play_mode, 0, 4);
+            if (element.name != modes[mode]) continue;
+            identifier = kCmdPlayModeFirst + mode;
+        }
         else if (element.name == L"exit") identifier = 8;
         else if (element.name == L"minimize") identifier = 0x7dd3;
         else if (element.name == L"minimode") identifier = kCmdMiniMode;
@@ -4029,7 +4038,7 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
             COLORREF color = index == playlists_.ActiveIndex()
                 ? settings_.playlist.highlight_color : settings_.playlist.text_color;
             if (selected) {
-                color = GetSysColor(COLOR_HIGHLIGHTTEXT);
+                color = layout.selected_text_color.value_or(GetSysColor(COLOR_HIGHLIGHTTEXT));
                 if (color == settings_.playlist.selected_color)
                     color = settings_.playlist.highlight_color;
             }
@@ -4117,7 +4126,7 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
             const auto& track = *visible_track;
             const bool playing = VisiblePlaylistPlayingRow() ==
                 std::optional<size_t>{index};
-            COLORREF selected_text = GetSysColor(COLOR_HIGHLIGHTTEXT);
+            COLORREF selected_text = layout.selected_text_color.value_or(GetSysColor(COLOR_HIGHLIGHTTEXT));
             if (selected_text == settings_.playlist.selected_color)
                 selected_text = settings_.playlist.highlight_color;
             const COLORREF number_color = selected ? selected_text :
@@ -4207,7 +4216,18 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
         DrawPlaylistToolbarBitmap(canvas, layout.toolbar, metrics.toolbar,
                                   skin_->TransparentColor());
         const auto hot = playlist_toolbar_hover_;
-        if (hot && layout.toolbar_hot.image && layout.toolbar_hot.size.cx > 0) {
+        if (layout.toolbar.image.IsGdiPlus() && layout.toolbar_hot.image.IsGdiPlus() &&
+            layout.toolbar_animation.Enabled()) {
+            // 004AD31C/004AD423: each of seven toolbar cells has its own
+            // reversible hot counter, not a four-state sprite strip.
+            for (size_t index = 0; index < 7; ++index) {
+                const auto& fade = SkinHoverState(playlist_window_,
+                    L"toolbar" + std::to_wstring(index), metrics.toolbar,
+                    hot && *hot == index ? 1 : 0, layout.toolbar_animation);
+                DrawPlaylistToolbarBitmap(canvas, layout.toolbar_hot, metrics.toolbar,
+                    skin_->TransparentColor(), index, fade.HotOpacity(layout.toolbar_animation));
+            }
+        } else if (hot && layout.toolbar_hot.image && layout.toolbar_hot.size.cx > 0) {
             DrawPlaylistToolbarBitmap(canvas, layout.toolbar_hot, metrics.toolbar,
                                       skin_->TransparentColor(), *hot);
         }
@@ -4267,7 +4287,7 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
     if (layout.close.image) {
         const int state = playlist_close_pressed_ && playlist_close_hover_
             ? 2 : (playlist_close_hover_ ? 1 : 0);
-        DrawElementFrame(canvas, layout.close, metrics.close, state, skin_->TransparentColor());
+        DrawAnimatedSkinFrame(canvas, layout.close, metrics.close, state, playlist_window_);
     }
     BitBlt(dc, 0, 0, width, height, canvas, 0, 0, SRCCOPY);
     SelectObject(canvas, old_buffer);

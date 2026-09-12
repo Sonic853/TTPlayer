@@ -1,5 +1,6 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
+#include "project_links.h"
 
 #include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/core/text.h"
@@ -576,14 +577,12 @@ bool IsPlaylistFile(const std::filesystem::path& path) {
 
 void DrawPlaylistToolbarBitmap(HDC target, const skin::SkinBitmap& bitmap,
                                RECT bounds, COLORREF transparent,
-                               std::optional<size_t> only_button) {
+                               std::optional<size_t> only_button, BYTE opacity) {
     if (!bitmap.image || bitmap.size.cx <= 0 || bitmap.size.cy <= 0) return;
     constexpr int button_count = 7;
     const int control_width = bounds.right - bounds.left;
     const int control_height = bounds.bottom - bounds.top;
     if (control_width <= 0 || control_height <= 0) return;
-    const HDC source = CreateCompatibleDC(target);
-    const HGDIOBJ old = SelectObject(source, bitmap.image);
     // Several legacy packages provide one already-composed toolbar strip
     // whose width differs from the XML control by only the native toolbar's
     // one/two-pixel padding.  The original keeps that strip intact and clips
@@ -598,10 +597,8 @@ void DrawPlaylistToolbarBitmap(HDC target, const skin::SkinBitmap& bitmap,
         const int destination_y = bounds.top +
             std::max<int>(0, (control_height - bitmap.size.cy) / 2);
         if (!only_button) {
-            TransparentBlt(target, bounds.left, destination_y, draw_width, draw_height,
-                           source, 0, source_y, draw_width, draw_height, transparent);
-            SelectObject(source, old);
-            DeleteDC(source);
+            bitmap.image.Draw(target, bounds.left, destination_y, draw_width, draw_height,
+                              0, source_y, draw_width, draw_height, transparent, opacity);
             return;
         }
     }
@@ -640,11 +637,9 @@ void DrawPlaylistToolbarBitmap(HDC target, const skin::SkinBitmap& bitmap,
         const int source_y = (bitmap.size.cy - draw_height) / 2;
         const int destination_x = slot_left + (slot_width - draw_width) / 2;
         const int destination_y = bounds.top + (control_height - draw_height) / 2;
-        TransparentBlt(target, destination_x, destination_y, draw_width, draw_height,
-                       source, source_x, source_y, draw_width, draw_height, transparent);
+        bitmap.image.Draw(target, destination_x, destination_y, draw_width, draw_height,
+                          source_x, source_y, draw_width, draw_height, transparent, opacity);
     }
-    SelectObject(source, old);
-    DeleteDC(source);
 }
 
 void TileBitmap(HDC target, const skin::SkinBitmap& bitmap, const RECT& bounds) {
@@ -652,15 +647,12 @@ void TileBitmap(HDC target, const skin::SkinBitmap& bitmap, const RECT& bounds) 
         bounds.right <= bounds.left || bounds.bottom <= bounds.top) return;
     const int saved = SaveDC(target);
     IntersectClipRect(target, bounds.left, bounds.top, bounds.right, bounds.bottom);
-    const HDC source = CreateCompatibleDC(target);
-    const HGDIOBJ old = SelectObject(source, bitmap.image);
     for (int y = bounds.top; y < bounds.bottom; y += bitmap.size.cy) {
         for (int x = bounds.left; x < bounds.right; x += bitmap.size.cx) {
-            BitBlt(target, x, y, bitmap.size.cx, bitmap.size.cy, source, 0, 0, SRCCOPY);
+            bitmap.image.Draw(target, x, y, bitmap.size.cx, bitmap.size.cy,
+                              0, 0, bitmap.size.cx, bitmap.size.cy);
         }
     }
-    SelectObject(source, old);
-    DeleteDC(source);
     RestoreDC(target, saved);
 }
 
@@ -716,7 +708,7 @@ void DrawSolidFrame(HDC target, const RECT& bounds, COLORREF color) {
     DeleteObject(brush);
 }
 
-void DrawBitmapPatch(HDC target, HDC source, const RECT& destination,
+void DrawBitmapPatch(HDC target, const skin::SkinImage& source, const RECT& destination,
                      const RECT& source_rect, bool tile) {
     const int destination_width = destination.right - destination.left;
     const int destination_height = destination.bottom - destination.top;
@@ -725,10 +717,9 @@ void DrawBitmapPatch(HDC target, HDC source, const RECT& destination,
     if (destination_width <= 0 || destination_height <= 0 ||
         source_width <= 0 || source_height <= 0) return;
     if (!tile) {
-        StretchBlt(target, destination.left, destination.top,
-                   destination_width, destination_height, source,
-                   source_rect.left, source_rect.top, source_width, source_height,
-                   SRCCOPY);
+        source.Draw(target, destination.left, destination.top,
+                    destination_width, destination_height,
+                    source_rect.left, source_rect.top, source_width, source_height);
         return;
     }
     const int saved = SaveDC(target);
@@ -736,8 +727,8 @@ void DrawBitmapPatch(HDC target, HDC source, const RECT& destination,
                       destination.right, destination.bottom);
     for (int y = destination.top; y < destination.bottom; y += source_height) {
         for (int x = destination.left; x < destination.right; x += source_width) {
-            BitBlt(target, x, y, source_width, source_height, source,
-                   source_rect.left, source_rect.top, SRCCOPY);
+            source.Draw(target, x, y, source_width, source_height,
+                        source_rect.left, source_rect.top, source_width, source_height);
         }
     }
     RestoreDC(target, saved);
@@ -750,12 +741,8 @@ void DrawResizableSkinBitmap(HDC target, const skin::SkinBitmap& bitmap,
     if (resize_rect.right <= resize_rect.left ||
         resize_rect.bottom <= resize_rect.top ||
         width < bitmap.size.cx || height < bitmap.size.cy) {
-        const HDC source = CreateCompatibleDC(target);
-        const HGDIOBJ old = SelectObject(source, bitmap.image);
-        StretchBlt(target, 0, 0, width, height, source, 0, 0,
-                   bitmap.size.cx, bitmap.size.cy, SRCCOPY);
-        SelectObject(source, old);
-        DeleteDC(source);
+        bitmap.image.Draw(target, 0, 0, width, height, 0, 0,
+                          bitmap.size.cx, bitmap.size.cy);
         return;
     }
 
@@ -772,20 +759,16 @@ void DrawResizableSkinBitmap(HDC target, const skin::SkinBitmap& bitmap,
     const int destination_x[] = {0, resize_rect.left, destination_right, width};
     const int destination_y[] = {0, resize_rect.top, destination_bottom, height};
 
-    const HDC source = CreateCompatibleDC(target);
-    const HGDIOBJ old = SelectObject(source, bitmap.image);
     for (int row = 0; row < 3; ++row) {
         for (int column = 0; column < 3; ++column) {
             const RECT source_patch{source_x[column], source_y[row],
                                     source_x[column + 1], source_y[row + 1]};
             const RECT destination_patch{destination_x[column], destination_y[row],
                                          destination_x[column + 1], destination_y[row + 1]};
-            DrawBitmapPatch(target, source, destination_patch, source_patch,
+            DrawBitmapPatch(target, bitmap.image, destination_patch, source_patch,
                             tile && (row == 1 || column == 1));
         }
     }
-    SelectObject(source, old);
-    DeleteDC(source);
 }
 
 HRGN CreateColorKeyRegion(HBITMAP bitmap, int width, int height,
@@ -832,23 +815,27 @@ HRGN CreateColorKeyRegion(HBITMAP bitmap, int width, int height,
 }
 
 RECT ResolveAlignedRect(RECT bounds, unsigned int alignment, SIZE native,
-                        int width, int height) {
-    const int item_width = bounds.right - bounds.left;
-    const int item_height = bounds.bottom - bounds.top;
+                        int width, int height, SIZE image_size) {
+    const int item_width = image_size.cx > 0 ? image_size.cx : bounds.right - bounds.left;
+    const int item_height = image_size.cy > 0 ? image_size.cy : bounds.bottom - bounds.top;
+    // FUN_0047A9C5 centers the current item, not its XML origin plus half
+    // the window's resize delta. It suppresses alignment separately on each
+    // axis when the client is smaller than the native skin background.
+    // FUN_0042912E supplies bitmap/frame dimensions for image-backed titles.
+    if (width < native.cx) alignment &= 0xf0U;
+    if (height < native.cy) alignment &= 0x0fU;
     if ((alignment & 0x0fU) == 2U) {
-        bounds.left += (width - native.cx) / 2;
-        bounds.right = bounds.left + item_width;
+        bounds.left = (width - item_width) / 2;
     } else if ((alignment & 0x0fU) == 3U) {
-        bounds.left += width - native.cx;
-        bounds.right = bounds.left + item_width;
+        bounds.left = bounds.right - item_width + width - native.cx;
     }
     if ((alignment & 0xf0U) == 0x20U) {
-        bounds.top += (height - native.cy) / 2;
-        bounds.bottom = bounds.top + item_height;
+        bounds.top = (height - item_height) / 2;
     } else if ((alignment & 0xf0U) == 0x30U) {
-        bounds.top += height - native.cy;
-        bounds.bottom = bounds.top + item_height;
+        bounds.top = bounds.bottom - item_height + height - native.cy;
     }
+    bounds.right = bounds.left + item_width;
+    bounds.bottom = bounds.top + item_height;
     return bounds;
 }
 
@@ -860,19 +847,15 @@ void DrawElementFrame(HDC target, const skin::SkinElement& element, RECT bounds,
     state = std::clamp(state, 0, frames - 1);
     // FUN_0040A35B copies a SkinButton frame at its native dimensions from
     // client origin (0,0); it does not stretch the frame to an XML rectangle
-    // that contains one or two pixels of padding. Single-frame title images
-    // retain the existing destination-rectangle behavior.
+    // that contains one or two pixels of padding. Title bounds are resolved
+    // at their native image dimensions by ResolveAlignedRect.
     const int destination_width = frames > 1 ? frame_width
                                               : bounds.right - bounds.left;
     const int destination_height = frames > 1 ? element.image_size.cy
                                                : bounds.bottom - bounds.top;
-    const HDC source = CreateCompatibleDC(target);
-    const HGDIOBJ old = SelectObject(source, element.image);
-    TransparentBlt(target, bounds.left, bounds.top, destination_width,
-                   destination_height, source, state * frame_width, 0,
-                   frame_width, element.image_size.cy, transparent);
-    SelectObject(source, old);
-    DeleteDC(source);
+    element.image.Draw(target, bounds.left, bounds.top, destination_width,
+                       destination_height, state * frame_width, 0,
+                       frame_width, element.image_size.cy, transparent);
 }
 
 PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
@@ -918,7 +901,8 @@ PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
     result.close = ResolveAlignedRect(layout.close.bounds, layout.close.alignment,
                                       layout.background.size, width, height);
     result.title = ResolveAlignedRect(layout.title.bounds, layout.title.alignment,
-                                      layout.background.size, width, height);
+                                      layout.background.size, width, height,
+                                      layout.title.image_size);
     return result;
 }
 
@@ -952,15 +936,27 @@ void SetControlFont(HWND control, HFONT font) {
     SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 }
 
+bool IsSuppressedSkinControl(std::wstring_view name) {
+    return name == L"login" || name == L"login_name" || name == L"browser";
+}
+
 bool IsSkinButton(std::wstring_view name) {
+    if (IsSuppressedSkinControl(name)) return false;
     constexpr std::wstring_view names[] = {
         L"icon",
         L"play", L"pause", L"prev", L"next", L"mute",
         L"stop", L"open", L"lyric", L"equalizer", L"playlist",
         L"browser", L"minimize", L"minimode", L"exit",
-        L"progress", L"volume", L"led"
+        L"progress", L"volume", L"led", L"set", L"mode_single", L"mode_loop",
+        L"mode_slider", L"mode_circle", L"mode_random"
     };
     return std::find(std::begin(names), std::end(names), name) != std::end(names);
+}
+
+bool IsPlayModeSkinVisible(std::wstring_view name, int mode) {
+    constexpr std::wstring_view modes[] = {L"mode_single", L"mode_loop",
+        L"mode_slider", L"mode_circle", L"mode_random"};
+    return !name.starts_with(L"mode_") || modes[std::clamp(mode, 0, 4)] == name;
 }
 
 HFONT CreateSkinFont(const skin::SkinElement& element) {
@@ -1548,17 +1544,22 @@ void PlayerWindow::EnsurePopupMenuImages() {
         // is blended by the 32-bit image list.
         const HBITMAP bitmap = LoadBitmapW(resources, MAKEINTRESOURCEW(identifier));
         if (!bitmap) continue;
-        const int first_image = ImageList_AddMasked(
-            popup_menu_images_, bitmap, RGB(192, 192, 192));
         BITMAP description{};
         const int frame_count = GetObjectW(bitmap, sizeof(description), &description) ==
                 sizeof(description)
             ? description.bmWidth / 16 : 0;
+        // ImageList_AddMasked may replace the colour-key pixels in its input
+        // bitmap. Capture transparency first, before that destructive step.
+        std::vector<PopupMenuImageMask> masks;
+        for (int frame = 0; frame < frame_count; ++frame)
+            masks.push_back(ReadPopupMenuBitmapMask(bitmap, frame));
+        const int first_image = ImageList_AddMasked(
+            popup_menu_images_, bitmap, RGB(192, 192, 192));
         if (first_image >= 0 && frame_count > 0) {
             popup_menu_image_masks_.resize(static_cast<size_t>(first_image + frame_count));
             for (int frame = 0; frame < frame_count; ++frame) {
                 popup_menu_image_masks_[static_cast<size_t>(first_image + frame)] =
-                    ReadPopupMenuBitmapMask(bitmap, frame);
+                    masks[static_cast<size_t>(frame)];
             }
         }
         DeleteObject(bitmap);
@@ -1611,6 +1612,10 @@ void PlayerWindow::EnsurePopupMenuImages() {
             std::pair{0xe124U, 0x7f39U}}) {
         alias(source, destination);
     }
+    // New commands need explicit aliases: their IDs are not present in the
+    // original RT_TOOLBAR table. Reuse the native web-link and edit images.
+    for (const auto& link : kProjectLinks)
+        alias(link.image_command, link.command);
 }
 
 void PlayerWindow::BeginPopupMenuStyle(HMENU menu, bool hide_keyboard_cues) {
@@ -1811,21 +1816,16 @@ bool PlayerWindow::DrawPopupMenuItem(const DRAWITEMSTRUCT& item) const {
                 // FUN_0046D5E7: a focused, enabled, unchecked image is raised.
                 // First stamp a monochrome grey copy at (+1,+1), then move the
                 // coloured image to (-1,-1) before ImageList_Draw(..., ILD_TRANSPARENT).
-                // Resource submenus and the legacy playlist play/properties
-                // aliases expose no monochrome focus stamp in the original
-                // command bar, although the coloured image still receives
-                // the -1 offset.
-                if (visual->command == 0x7efdU &&
-                    static_cast<size_t>(visual->image) < popup_menu_image_masks_.size()) {
-                    // Current comctl32 exposes the transparent cells of this
-                    // legacy alias as opaque to DSS_MONO, so retain the source
-                    // 24-bit strip's color-key mask instead.
+                // The native branch tests enabled/selected/checked, not the
+                // presence of a submenu or a particular command ID. Retain
+                // the source mask for every toolbar image: comctl32 may lose
+                // it when exporting a 32-bit image-list cell to DSS_MONO.
+                if (static_cast<size_t>(visual->image) < popup_menu_image_masks_.size()) {
                     DrawPopupMenuBitmapMask(
                         item.hDC,
                         popup_menu_image_masks_[static_cast<size_t>(visual->image)],
                         x + 1, y + 1, RGB(128, 128, 128));
-                } else if (!visual->submenu && visual->command != kPlaylistPlay &&
-                           visual->command != kPlaylistProperties) {
+                } else {
                     const HICON icon = ImageList_GetIcon(
                         popup_menu_images_, visual->image, ILD_NORMAL);
                     if (icon) {
@@ -1978,6 +1978,7 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
     // after the replacement has passed ApplyLoadedSkin's region validation.
     desktop_lyrics_.SetSkin(nullptr);
     auto previous = std::move(skin_);
+    ResetSkinControlAnimations();
     skin_.emplace(std::move(next));
     // Load the target configuration before presenting it. The old menu path
     // applied the package, repainted/recreated its controls, then loaded the
@@ -2810,6 +2811,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                 auto_shutdown_timer_ = 0;
                 ShowAutoShutdownDialog();
             }
+        } else if (wparam == kSkinControlAnimationTimer) {
+            AdvanceSkinControlAnimations();
         } else if (wparam == kSkinWindowFadeTimer) {
             AdvanceSkinWindowFade();
         } else if (wparam == kCloseAudioFadeTimer) {
@@ -3189,17 +3192,15 @@ void PlayerWindow::PaintSkin(HDC dc) const {
     const HDC canvas = CreateCompatibleDC(dc);
     const HBITMAP buffer = CreateCompatibleBitmap(dc, size.cx, size.cy);
     const HGDIOBJ old_buffer = SelectObject(canvas, buffer);
-    const HDC source = CreateCompatibleDC(dc);
-    const HGDIOBJ old_source = SelectObject(source, ActiveSkinBackground());
-    BitBlt(canvas, 0, 0, size.cx, size.cy, source, 0, 0, SRCCOPY);
-    SelectObject(source, old_source);
-    DeleteDC(source);
+    ActiveSkinBackground().Draw(canvas, 0, 0, size.cx, size.cy, 0, 0, size.cx, size.cy);
 
     const auto playback = audio_.State();
     const bool active = playback == audio::PlaybackState::opening ||
                         playback == audio::PlaybackState::playing;
     for (const auto& element : ActiveSkinElements()) {
         if (!element.image || !element.four_state) continue;
+        if (IsSuppressedSkinControl(element.name)) continue;
+        if (!IsPlayModeSkinVisible(element.name, settings_.player.play_mode)) continue;
         if (element.name == L"play" && active) continue;
         if (element.name == L"pause" && !active) continue;
         skin::SkinElement displayed = element;
@@ -3254,19 +3255,13 @@ void PlayerWindow::PaintSkin(HDC dc) const {
                                    vertical_span, safe_duration)
                           : vertical_span);
         if (progress->bar_image && progress->bar_size.cx > 0 && progress->bar_size.cy > 0) {
-            const HDC image_dc = CreateCompatibleDC(canvas);
-            const HGDIOBJ old = SelectObject(image_dc, progress->bar_image);
             const int x = progress->bounds.left + (control_width - progress->bar_size.cx) / 2;
             const int y = progress->bounds.top + (control_height - progress->bar_size.cy) / 2;
-            BitBlt(canvas, x, y, progress->bar_size.cx, progress->bar_size.cy,
-                   image_dc, 0, 0, SRCCOPY);
-            SelectObject(image_dc, old);
-            DeleteDC(image_dc);
+            progress->bar_image.Draw(canvas, x, y, progress->bar_size.cx,
+                progress->bar_size.cy, 0, 0, progress->bar_size.cx, progress->bar_size.cy);
         }
         if (duration > 0 && progress->fill_image &&
             progress->fill_size.cx > 0 && progress->fill_size.cy > 0) {
-            const HDC image_dc = CreateCompatibleDC(canvas);
-            const HGDIOBJ old = SelectObject(image_dc, progress->fill_image);
             const int saved_dc = SaveDC(canvas);
             if (saved_dc != 0) {
                 IntersectClipRect(canvas, progress->bounds.left, progress->bounds.top,
@@ -3284,8 +3279,8 @@ void PlayerWindow::PaintSkin(HDC dc) const {
                                                 static_cast<int>(progress->fill_size.cy));
                 const int filled = progress->fill_size.cy - source_y;
                 if (filled > 0) {
-                    TransparentBlt(canvas, fill_left, fill_start,
-                        progress->fill_size.cx, filled, image_dc, 0, source_y,
+                    progress->fill_image.Draw(canvas, fill_left, fill_start,
+                        progress->fill_size.cx, filled, 0, source_y,
                         progress->fill_size.cx, filled, skin_->TransparentColor());
                 }
             } else {
@@ -3293,14 +3288,12 @@ void PlayerWindow::PaintSkin(HDC dc) const {
                 const int filled = std::clamp(fill_end - fill_left, 0,
                                               static_cast<int>(progress->fill_size.cx));
                 if (filled > 0) {
-                    TransparentBlt(canvas, fill_left, fill_top, filled,
-                        progress->fill_size.cy, image_dc, 0, 0, filled,
+                    progress->fill_image.Draw(canvas, fill_left, fill_top, filled,
+                        progress->fill_size.cy, 0, 0, filled,
                         progress->fill_size.cy, skin_->TransparentColor());
                 }
             }
             if (saved_dc != 0) RestoreDC(canvas, saved_dc);
-            SelectObject(image_dc, old);
-            DeleteDC(image_dc);
         }
         skin::SkinElement thumb = *progress;
         thumb.image = progress->thumb_image;
@@ -3320,7 +3313,8 @@ void PlayerWindow::PaintSkin(HDC dc) const {
         const int state = IsSkinElementEnabled(L"progress") &&
             pressed_skin_element_ == L"progress" ? 2 :
             (IsSkinElementEnabled(L"progress") && hover_skin_element_ == L"progress" ? 1 : 0);
-        DrawSkinElement(canvas, thumb, state);
+        DrawSkinSliderThumb(canvas, thumb, state,
+            playback == audio::PlaybackState::playing && duration > 0, progress->bounds);
     }
     if (const auto* volume = FindActiveSkinElement(L"volume")) {
         const int control_width = volume->bounds.right - volume->bounds.left;
@@ -3344,8 +3338,6 @@ void PlayerWindow::PaintSkin(HDC dc) const {
             MulDiv(vertical_span, 100 - value, 100);
         if (volume->fill_image && volume->fill_size.cx > 0 &&
             volume->fill_size.cy > 0 && control_width > 0 && control_height > 0) {
-            const HDC image_dc = CreateCompatibleDC(canvas);
-            const HGDIOBJ old = SelectObject(image_dc, volume->fill_image);
             const int saved_dc = SaveDC(canvas);
             if (saved_dc != 0) {
                 IntersectClipRect(canvas, volume->bounds.left, volume->bounds.top,
@@ -3361,8 +3353,8 @@ void PlayerWindow::PaintSkin(HDC dc) const {
                                                 static_cast<int>(volume->fill_size.cy));
                 const int filled = volume->fill_size.cy - source_y;
                 if (filled > 0) {
-                    TransparentBlt(canvas, fill_left, fill_start,
-                        volume->fill_size.cx, filled, image_dc, 0, source_y,
+                    volume->fill_image.Draw(canvas, fill_left, fill_start,
+                        volume->fill_size.cx, filled, 0, source_y,
                         volume->fill_size.cx, filled, skin_->TransparentColor());
                 }
             } else {
@@ -3378,14 +3370,11 @@ void PlayerWindow::PaintSkin(HDC dc) const {
                     // when the slider color key is not 0xffffffff.  The latter
                     // is TTPlayer's TransparentBlt wrapper; using SRCCOPY here
                     // exposed the legacy #ff00ff mask as a purple rectangle.
-                    TransparentBlt(canvas, fill_left, y, filled, volume->fill_size.cy,
-                        image_dc, 0, 0, filled, volume->fill_size.cy,
-                        skin_->TransparentColor());
+                    volume->fill_image.Draw(canvas, fill_left, y, filled, volume->fill_size.cy,
+                        0, 0, filled, volume->fill_size.cy, skin_->TransparentColor());
                 }
             }
             if (saved_dc != 0) RestoreDC(canvas, saved_dc);
-            SelectObject(image_dc, old);
-            DeleteDC(image_dc);
         }
         if (volume->thumb_image && thumb_width > 0 && thumb_height > 0) {
             skin::SkinElement thumb = *volume;
@@ -3438,18 +3427,14 @@ void PlayerWindow::PaintSkin(HDC dc) const {
         const int display_width = target_width * static_cast<int>(value.size());
         int x = led->bounds.right - display_width;
         if ((led->alignment & 0x0fU) == 1) x = led->bounds.left;
-        const HDC number_dc = CreateCompatibleDC(canvas);
-        const HGDIOBJ old = SelectObject(number_dc, led->image);
         for (const wchar_t ch : value) {
             const int glyph = ch == L':' ? 10 : ch == L'-' ? 11
                                                             : static_cast<int>(ch - L'0');
-            TransparentBlt(canvas, x, led->bounds.top, target_width, target_height,
-                number_dc, glyph * source_width, 0, source_width, source_height,
+            led->image.Draw(canvas, x, led->bounds.top, target_width, target_height,
+                glyph * source_width, 0, source_width, source_height,
                 skin_->TransparentColor());
             x += target_width;
         }
-        SelectObject(number_dc, old);
-        DeleteDC(number_dc);
     }
 
     const HICON skin_icon = settings_.general.app_icon_file.empty() &&
@@ -3506,6 +3491,7 @@ const playlist::Track* PlayerWindow::PlaybackTrackForUi() const noexcept {
 }
 
 bool PlayerWindow::IsSkinElementEnabled(std::wstring_view name) const {
+    if (IsSuppressedSkinControl(name)) return false;
     const auto state = audio_.State();
     const bool have_track = PlaybackTrackForUi() != nullptr;
     const bool active = state == audio::PlaybackState::opening ||
@@ -3568,16 +3554,14 @@ void PlayerWindow::DrawSkinElement(HDC dc, const skin::SkinElement& element, int
                                          : element.image_size.cx;
     const int height = element.image_size.cy;
     if (width <= 0 || height <= 0) return;
-    const int frame = std::clamp(state, 0, std::max(0, element.frames - 1));
-    const HDC source = CreateCompatibleDC(dc);
-    const HGDIOBJ old = SelectObject(source, element.image);
-    TransparentBlt(dc, element.bounds.left, element.bounds.top, width, height,
-                   source, frame * width, 0, width, height, skin_->TransparentColor());
-    SelectObject(source, old);
-    DeleteDC(source);
+    const RECT bounds{element.bounds.left, element.bounds.top,
+        element.bounds.left + width, element.bounds.top + height};
+    if (element.name == L"progress" || element.name == L"volume")
+        DrawElementFrame(dc, element, bounds, state, skin_->TransparentColor());
+    else DrawAnimatedSkinFrame(dc, element, bounds, state, window_);
 }
 
-HBITMAP PlayerWindow::ActiveSkinBackground() const noexcept {
+skin::SkinImage PlayerWindow::ActiveSkinBackground() const noexcept {
     if (!skin_) return nullptr;
     return mini_mode_ && skin_->SupportsMiniMode()
         ? skin_->MiniBackground() : skin_->Background();
@@ -3610,6 +3594,7 @@ std::wstring PlayerWindow::HitTestSkin(POINT point) const {
     const auto& elements = ActiveSkinElements();
     for (auto item = elements.rbegin(); item != elements.rend(); ++item) {
         if (!IsSkinButton(item->name)) continue;
+        if (!IsPlayModeSkinVisible(item->name, settings_.player.play_mode)) continue;
         if (item->name == L"play" && active) continue;
         if (item->name == L"pause" && !active) continue;
         if (!IsSkinElementEnabled(item->name)) continue;
@@ -3628,6 +3613,7 @@ std::wstring PlayerWindow::HitTestSkin(POINT point) const {
 }
 
 void PlayerWindow::InvokeSkinAction(std::wstring_view action) {
+    if (IsSuppressedSkinControl(action)) return;
     if (action == L"icon") {
         // The legacy icon child uses command 0x7DD8.  FUN_00464FBF anchors the
         // complete main popup at the skin icon rectangle's left/bottom edge;
@@ -3647,12 +3633,15 @@ void PlayerWindow::InvokeSkinAction(std::wstring_view action) {
     else if (action == L"stop") Stop();
     else if (action == L"open") ChooseFiles();
     else if (action == L"browser") HandleContextCommand(kCmdShowBrowser);
+    else if (action == L"set") ShowOptions();
     else if (action == L"play") {
         if (audio_.State() == audio::PlaybackState::paused) audio_.Resume();
         else PlayCurrent();
     }
     else if (action.starts_with(L"mode_")) {
         settings_.player.play_mode = (settings_.player.play_mode + 1) % 5;
+        ResetSkinControlAnimations();
+        UpdateMainToolRects();
     }
     else if (action == L"pause") {
         if (audio_.State() == audio::PlaybackState::playing) audio_.Pause();
@@ -3990,6 +3979,7 @@ void PlayerWindow::ToggleMiniMode() {
 
     EndSkinMouseCapture();
     hover_skin_element_.clear();
+    ResetSkinControlAnimations();
     pressed_skin_element_.clear();
 
     RECT current{};
@@ -4085,11 +4075,16 @@ HMENU PlayerWindow::BuildContextMenu() {
     for (int index = GetMenuItemCount(popup) - 1; index >= 0; --index) {
         const UINT resource_id = GetMenuItemID(popup, index);
         if (resource_id == static_cast<UINT>(-1) || resource_id == 0) continue;
-        HMENU child = DetachFirstPopup(
-            LoadMenuW(resources, MAKEINTRESOURCEW(resource_id)));
+        // Supply community links even when the resource DLL has no link
+        // submenu. Keep its parent caption/icon and the usual popup styling.
+        HMENU child = resource_id == kMenuRelatedLinks ? CreatePopupMenu() :
+            DetachFirstPopup(LoadMenuW(resources, MAKEINTRESOURCEW(resource_id)));
         if (!child) continue;
 
-        if (resource_id == kMenuVisual) {
+        if (resource_id == kMenuRelatedLinks) {
+            for (const auto& link : kProjectLinks)
+                AppendMenuW(child, MF_STRING, link.command, link.label);
+        } else if (resource_id == kMenuVisual) {
             // CPlayerWnd_ShowMainContextMenu (0045E126..0045E1E3) removes
             // the embedded/full-screen-only block by deleting position 6
             // four times.  Cover, None and the final Options entry remain.
@@ -4126,7 +4121,7 @@ HMENU PlayerWindow::BuildContextMenu() {
         MENUITEMINFOW item{sizeof(item)};
         item.fMask = MIIM_SUBMENU;
         item.hSubMenu = child;
-        SetMenuItemInfoW(popup, resource_id, FALSE, &item);
+        if (!SetMenuItemInfoW(popup, resource_id, FALSE, &item)) DestroyMenu(child);
     }
     PrepareContextMenu(popup);
 
@@ -4427,6 +4422,7 @@ std::wstring PlayerWindow::ToolTipWithHotKey(
 
 std::wstring PlayerWindow::MenuToolTipText(UINT command) const {
     if (!settings_.general.menu_tips) return {};
+    if (const auto* link = FindProjectLink(command)) return link->url;
     auto text = SkinMenuToolTipText(command);
     if (text.empty()) text = CommandTipDescription(ResourceText(command));
     return ToolTipWithHotKey(command, std::move(text));
@@ -4683,6 +4679,7 @@ void PlayerWindow::ShowContextMenu(POINT screen_point, HWND origin) {
 }
 
 bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
+    if (OpenProjectLink(window_, command)) return true;
     if (HandleFullScreenCommand(command, fullscreen_origin ? fullscreen_origin :
             (context_menu_open_ && main_context_menu_origin_
                 ? main_context_menu_origin_ : window_))) return true;
@@ -4692,6 +4689,8 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
     }
     if (command >= kCmdPlayModeFirst && command <= kCmdPlayModeLast) {
         settings_.player.play_mode = static_cast<int>(command - kCmdPlayModeFirst);
+        ResetSkinControlAnimations();
+        UpdateMainToolRects();
         InvalidateRect(window_, nullptr, FALSE);
         return true;
     }

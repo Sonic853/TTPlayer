@@ -157,11 +157,29 @@ private:
     void Paint(HDC dc) const;
     void PaintSkin(HDC dc) const;
     void DrawSkinElement(HDC dc, const skin::SkinElement& element, int state) const;
+    void DrawAnimatedSkinFrame(HDC dc, const skin::SkinElement& element,
+                               RECT bounds, int state, HWND owner) const;
+    void DrawSkinSliderThumb(HDC dc, const skin::SkinElement& thumb, int state,
+                             bool playing, RECT control_bounds) const;
+    skin::SkinHoverAnimation& SkinHoverState(HWND owner, std::wstring_view key,
+        RECT bounds, int state, const skin::SkinAnimation& definition) const;
+    void AdvanceSkinControlAnimations();
+    void ResetSkinControlAnimations();
+    struct SkinControlAnimation {
+        HWND owner{};
+        std::wstring key;
+        RECT bounds{};
+        skin::SkinAnimation definition;
+        skin::SkinHoverAnimation hover;
+        std::optional<skin::SkinPulseAnimation> pulse;
+    };
+    mutable std::list<SkinControlAnimation> skin_control_animations_;
+    mutable bool skin_control_animation_timer_{};
     [[nodiscard]] bool IsSkinElementEnabled(std::wstring_view name) const;
     [[nodiscard]] bool IsSkinElementChecked(std::wstring_view name) const noexcept;
     [[nodiscard]] std::wstring PlaybackStatusText() const;
     [[nodiscard]] std::wstring ChannelText() const;
-    [[nodiscard]] HBITMAP ActiveSkinBackground() const noexcept;
+    [[nodiscard]] skin::SkinImage ActiveSkinBackground() const noexcept;
     [[nodiscard]] SIZE ActiveSkinSize() const noexcept;
     [[nodiscard]] const std::vector<skin::SkinElement>& ActiveSkinElements() const noexcept;
     [[nodiscard]] const skin::SkinElement* FindActiveSkinElement(std::wstring_view name) const;

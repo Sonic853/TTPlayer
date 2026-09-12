@@ -59,11 +59,13 @@ add_library(ttplayer_core
   src/settings/file_association.cpp
   src/settings/settings.cpp
   src/skin/skin.cpp
+  src/skin/skin_image.cpp
   src/skin/skin_package.cpp
   src/ui/desktop_lyrics.cpp
   src/ui/directory_change_monitor.cpp
   src/ui/file_info_probe_client.cpp
   src/ui/player_window.cpp
+  src/ui/player_window_skin_animation.cpp
   src/ui/player_window_taskbar.cpp
   src/ui/taskbar_playback.cpp
   src/ui/player_window_equalizer.cpp
@@ -95,7 +97,7 @@ target_compile_definitions(ttplayer_core PRIVATE UNICODE _UNICODE NOMINMAX WIN32
 target_compile_options(ttplayer_core PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_core PUBLIC
   winmm ole32 oleaut32 comsuppw uuid msimg32 shell32 shlwapi comctl32 comdlg32
-  windowscodecs dsound setupapi
+  windowscodecs gdiplus dsound setupapi
   mfplat mfreadwrite mfuuid propsys
 )
 
@@ -150,6 +152,25 @@ endif()
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
 if(BUILD_TESTING)
+add_executable(skin_alignment_tests src/skin/skin_alignment_tests.cpp)
+target_compile_definitions(skin_alignment_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(skin_alignment_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(skin_alignment_tests PRIVATE ttplayer_core)
+add_test(NAME skin_alignment_tests COMMAND skin_alignment_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
+add_executable(project_links_tests src/ui/project_links_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(project_links_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(project_links_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(project_links_tests PRIVATE ttplayer_core)
+add_test(NAME project_links_tests COMMAND project_links_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
+add_executable(skin_png_tests src/skin/skin_png_tests.cpp)
+target_compile_definitions(skin_png_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(skin_png_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(skin_png_tests PRIVATE ttplayer_core)
+add_test(NAME skin_png_tests COMMAND skin_png_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
 add_executable(ttplayer_dsp_probe EXCLUDE_FROM_ALL
   tools/dsp_plugin_probe.cpp src/app/dsp_worker.cpp)
 target_include_directories(ttplayer_dsp_probe PRIVATE include)

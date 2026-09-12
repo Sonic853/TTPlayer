@@ -27,6 +27,9 @@ Current milestone (0.1):
   original file-backed branch for external `.skn` packages, tolerant GBK/UTF-8
   `Skin.xml` parsing, bitmap state strips, color-key window regions and
   XML-positioned controls;
+- 6.1.2 mixed BMP/PNG skins: GDI+ per-pixel alpha, four-state buttons,
+  hover transitions, playback thumb pulses and PNG playlist toolbars;
+  see [SKIN_PNG_RECOVERY.md](SKIN_PNG_RECOVERY.md) for evidence and limits;
 - file picker/drag-and-drop, playlist selection, previous/play-pause/next/stop,
   volume/balance control, playback status, and command-line audio/playlist opening;
 - Windows-native taskbar thumbnail previous/play-pause/next controls with live

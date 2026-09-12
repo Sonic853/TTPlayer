@@ -205,11 +205,12 @@ bool IsFourStateButton(std::wstring_view name) {
     // CSkinParser_ParsePlayerWindow (004A8536).  Ghidra rendered the literal
     // at VA 0051C438 as an empty string, but the PE bytes at file offset
     // 0011F3C8 are "browser\0".  It is therefore one of the native buttons;
-    // only newer/foreign nodes such as set and mode_* are ignored.
+    // 6.1.2 (00520101) additionally accepts set and the five mode_* buttons.
     constexpr std::wstring_view names[] = {
         L"play", L"pause", L"stop", L"prev", L"next", L"mute", L"open",
         L"lyric", L"equalizer", L"playlist", L"browser", L"exit",
-        L"minimize", L"minimode"
+        L"minimize", L"minimode", L"set", L"login", L"mode_single", L"mode_loop",
+        L"mode_slider", L"mode_circle", L"mode_random"
     };
     return std::find(std::begin(names), std::end(names), name) != std::end(names);
 }
@@ -277,10 +278,6 @@ std::optional<SkinMetadata> ParseLegacySkinMetadata(
 }
 
 LegacySkin::~LegacySkin() {
-    for (const auto& [name, bitmap] : bitmaps_) {
-        static_cast<void>(name);
-        if (bitmap) DeleteObject(bitmap);
-    }
     if (icon_) DestroyIcon(icon_);
 }
 
@@ -290,14 +287,9 @@ LegacySkin::LegacySkin(LegacySkin&& other) noexcept {
 
 LegacySkin& LegacySkin::operator=(LegacySkin&& other) noexcept {
     if (this == &other) return *this;
-    for (const auto& [name, bitmap] : bitmaps_) {
-        static_cast<void>(name);
-        if (bitmap) DeleteObject(bitmap);
-    }
     if (icon_) DestroyIcon(icon_);
     bitmaps_ = std::move(other.bitmaps_);
-    // The standard only promises a valid moved-from container.  Its raw GDI
-    // values must not remain visible to our ownership-releasing destructor.
+    // Layouts/cache share RAII images. Clear moved-from references as well.
     other.bitmaps_.clear();
     background_ = std::exchange(other.background_, nullptr);
     icon_ = std::exchange(other.icon_, nullptr);
@@ -320,17 +312,39 @@ LegacySkin& LegacySkin::operator=(LegacySkin&& other) noexcept {
     return *this;
 }
 
-HBITMAP LegacySkin::LoadBitmap(const std::filesystem::path& path) {
-    const auto key = path.filename().wstring();
+SkinImage LegacySkin::LoadBitmap(const std::filesystem::path& path) {
+    auto key = path.lexically_normal().wstring();
+    std::transform(key.begin(), key.end(), key.begin(), towlower);
     if (const auto found = bitmaps_.find(key); found != bitmaps_.end()) return found->second;
-    const auto bitmap = static_cast<HBITMAP>(LoadImageW(nullptr, path.c_str(), IMAGE_BITMAP, 0, 0,
-                                                        LR_LOADFROMFILE | LR_CREATEDIBSECTION));
+    const auto bitmap = SkinImage::Load(path);
     if (!bitmap) return nullptr;
     bitmaps_.emplace(key, bitmap);
     return bitmap;
 }
 
 namespace {
+SkinAnimation LoadAnimation(IXMLDOMNode* node, int default_mode) {
+    SkinAnimation result;
+    result.mode = ParseInt(Attribute(node, L"flash_mode"), default_mode);
+    result.frame_count = ParseInt(Attribute(node, L"frame_count"), 10);
+    result.frame_interval = ParseInt(Attribute(node, L"frame_interval"), 100);
+    // 00419637 disables invalid animation parameters, not the image/control.
+    if (result.mode < 0 || result.mode > 3 || result.frame_count <= 0 ||
+        result.frame_interval <= 0) result.mode = 0;
+    return result;
+}
+
+void LoadElementAnimation(LegacySkin& skin, const std::filesystem::path& directory,
+                          IXMLDOMNode* node, SkinElement& element) {
+    element.animation = LoadAnimation(node, element.four_state ? 1 : 0);
+    if (element.four_state && element.animation.mode > 2) element.animation.mode = 0;
+    const auto flash = Attribute(node, L"flash_image");
+    if (!flash.empty()) {
+        element.flash_image = skin.LoadBitmap(directory / flash);
+        element.flash_size = element.flash_image.Size();
+    }
+}
+
 SkinBitmap LoadSkinBitmap(LegacySkin& skin, const std::filesystem::path& directory,
                           IXMLDOMNode* node, const wchar_t* attribute) {
     SkinBitmap result;
@@ -358,7 +372,7 @@ SkinElement LoadEqualizerElement(LegacySkin& skin,
     element.vertical = force_vertical || _wcsicmp(vertical.c_str(), L"true") == 0 ||
                        vertical == L"1";
     element.four_state = button;
-    const auto load = [&](const wchar_t* attribute, HBITMAP& bitmap, SIZE& size) {
+    const auto load = [&](const wchar_t* attribute, SkinImage& bitmap, SIZE& size) {
         const auto file = Attribute(node, attribute);
         if (file.empty()) return;
         bitmap = skin.LoadBitmap(directory / file);
@@ -372,6 +386,7 @@ SkinElement LoadEqualizerElement(LegacySkin& skin,
     load(L"fill_image", element.fill_image, element.fill_size);
     load(L"fill_image2", element.fill_image2, element.fill_size2);
     load(L"thumb_image", element.thumb_image, element.thumb_size);
+    LoadElementAnimation(skin, directory, node, element);
     if (button && element.image) {
         element.frames = 4;
         // FUN_0042955B applies the XML position after FUN_00452FFF installs
@@ -408,6 +423,7 @@ SkinElement LoadPlaylistImageElement(LegacySkin& skin,
             }
         }
     }
+    LoadElementAnimation(skin, directory, node, element);
     return element;
 }
 
@@ -592,6 +608,11 @@ void LoadPlaylistColors(const std::filesystem::path& directory, PlaylistSkin& pl
             playlist.number_color = ParseColor(Attribute(node, L"Color_Number"), playlist.number_color);
             playlist.duration_color = ParseColor(Attribute(node, L"Color_Duration"), playlist.duration_color);
             playlist.selected_color = ParseColor(Attribute(node, L"Color_Select"), playlist.selected_color);
+            const auto selected_text = Attribute(node, L"Color_SelText");
+            if (!selected_text.empty()) {
+                const auto color = ParseColor(selected_text, CLR_INVALID);
+                if (color != CLR_INVALID) playlist.selected_text_color = color;
+            }
             playlist.alternate_background_color = ParseColor(
                 Attribute(node, L"Color_Bkgnd2"), playlist.alternate_background_color);
             node->Release();
@@ -824,6 +845,7 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory) {
                 element.thumb_size = {info.bmWidth, info.bmHeight};
             }
         }
+        LoadElementAnimation(skin, directory, node, element);
         skin.elements_.push_back(std::move(element));
         node->Release();
     }
@@ -922,6 +944,7 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory) {
                         element.thumb_size = {info.bmWidth, info.bmHeight};
                     }
                 }
+                LoadElementAnimation(skin, directory, node, element);
                 skin.mini_.elements.push_back(std::move(element));
                 node->Release();
             }
@@ -1154,6 +1177,7 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory) {
                 playlist.toolbar_alignment = ParseAlignment(Attribute(node, L"align"));
                 playlist.toolbar = LoadSkinBitmap(skin, directory, node, L"image");
                 playlist.toolbar_hot = LoadSkinBitmap(skin, directory, node, L"hot_image");
+                playlist.toolbar_animation = LoadAnimation(node, 1);
             } else if (_wcsicmp(name.c_str(), L"scrollbar") == 0) {
                 playlist.scrollbar_buttons = LoadSkinBitmap(skin, directory, node, L"buttons_image");
                 playlist.scrollbar_thumb = LoadSkinBitmap(skin, directory, node, L"thumb_image");

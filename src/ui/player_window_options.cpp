@@ -1,5 +1,6 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
+#include "project_links.h"
 #include "output_devices.h"
 #include "modern_file_dialog.h"
 #include "ttplayer/app/worker_process.h"
@@ -180,11 +181,6 @@ std::optional<size_t> SelectedOutputDeviceEntry(HWND dialog,
 }
 
 constexpr UINT kLinkFirst = 3000;
-constexpr std::array<const wchar_t*, 2> kLinkLabels{
-    L"Github仓库", L"提交反馈"};
-constexpr std::array<const wchar_t*, 2> kLinkTargets{
-    L"https://github.com/Sonic853/TTPlayer",
-    L"https://github.com/Sonic853/TTPlayer/issues"};
 constexpr wchar_t kSkinDownloadTarget[] =
     L"http://ttplayer.qianqian.com/skin.htm";
 
@@ -2057,30 +2053,28 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source) {
     }
     ReleaseDC(nullptr, screen);
     for (const auto& element : source.Elements()) {
+        if (IsSuppressedSkinControl(element.name)) continue;
         if (element.name == L"pause") continue;
+        if (element.name.starts_with(L"mode_") && element.name != L"mode_single") continue;
         if (element.image && element.image_size.cx > 0 &&
             element.image_size.cy > 0) {
             const int frames = std::max(1, element.frames);
             const int width = element.image_size.cx / frames;
-            const HGDIOBJ old_image = SelectObject(image, element.image);
-            TransparentBlt(target, element.bounds.left, element.bounds.top,
-                width, element.image_size.cy, image, 0, 0, width,
+            element.image.Draw(target, element.bounds.left, element.bounds.top,
+                width, element.image_size.cy, 0, 0, width,
                 element.image_size.cy, source.TransparentColor());
-            SelectObject(image, old_image);
         }
         if (element.bar_image && element.bar_size.cx > 0 &&
             element.bar_size.cy > 0) {
-            const HGDIOBJ old_image = SelectObject(image, element.bar_image);
             const int x = element.bounds.left +
                 (element.bounds.right - element.bounds.left -
                  element.bar_size.cx) / 2;
             const int y = element.bounds.top +
                 (element.bounds.bottom - element.bounds.top -
                  element.bar_size.cy) / 2;
-            TransparentBlt(target, x, y, element.bar_size.cx,
-                element.bar_size.cy, image, 0, 0, element.bar_size.cx,
+            element.bar_image.Draw(target, x, y, element.bar_size.cx,
+                element.bar_size.cy, 0, 0, element.bar_size.cx,
                 element.bar_size.cy, source.TransparentColor());
-            SelectObject(image, old_image);
         }
         if (element.thumb_image && element.thumb_size.cx >= 4 &&
             element.thumb_size.cy > 0) {
@@ -2092,11 +2086,9 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source) {
             const int y = element.bounds.top +
                 (element.bounds.bottom - element.bounds.top -
                  element.thumb_size.cy) / 2;
-            const HGDIOBJ old_image = SelectObject(image, element.thumb_image);
-            TransparentBlt(target, x, y, width, element.thumb_size.cy,
-                image, 0, 0, width, element.thumb_size.cy,
+            element.thumb_image.Draw(target, x, y, width, element.thumb_size.cy,
+                0, 0, width, element.thumb_size.cy,
                 source.TransparentColor());
-            SelectObject(image, old_image);
         }
     }
 
@@ -2790,7 +2782,7 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
         const HWND control = reinterpret_cast<HWND>(lparam);
         const UINT identifier = control ? GetDlgCtrlID(control) : 0;
         if (identifier >= kLinkFirst &&
-            identifier < kLinkFirst + kLinkTargets.size()) {
+            identifier < kLinkFirst + kProjectLinks.size()) {
             const HDC dc = reinterpret_cast<HDC>(wparam);
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, RGB(0, 0, 255));
@@ -2803,7 +2795,7 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
         const HWND control = reinterpret_cast<HWND>(wparam);
         const UINT identifier = control ? GetDlgCtrlID(control) : 0;
         if (identifier >= kLinkFirst &&
-            identifier < kLinkFirst + kLinkTargets.size()) {
+            identifier < kLinkFirst + kProjectLinks.size()) {
             SetCursor(LoadCursorW(nullptr, IDC_HAND));
             return TRUE;
         }
@@ -2818,10 +2810,9 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
                 static_cast<int>(selected));
             return 0;
         }
-        if (control >= kLinkFirst && control < kLinkFirst + kLinkTargets.size() &&
+        if (control >= kLinkFirst && control < kLinkFirst + kProjectLinks.size() &&
             HIWORD(wparam) == STN_CLICKED) {
-            ShellExecuteW(sheet, L"open", kLinkTargets[control - kLinkFirst],
-                          nullptr, nullptr, SW_SHOWNORMAL);
+            OpenProjectLink(sheet, kProjectLinks[control - kLinkFirst].command);
             return 0;
         }
         if (control == kSaveAllOptions) {
@@ -3077,11 +3068,11 @@ void PlayerWindow::InitializeOptionsShell() {
     if (related_label && font) SendMessageW(related_label, WM_SETFONT,
         reinterpret_cast<WPARAM>(font), TRUE);
     int link_x = 58;
-    for (size_t index = 0; index < kLinkLabels.size(); ++index) {
-        const std::wstring_view label{kLinkLabels[index]};
+    for (size_t index = 0; index < kProjectLinks.size(); ++index) {
+        const std::wstring_view label{kProjectLinks[index].label};
         const int width = static_cast<int>(label.size()) * 12;
         const HWND link = CreateWindowExW(
-            0, WC_STATICW, kLinkLabels[index],
+            0, WC_STATICW, kProjectLinks[index].label,
             WS_CHILD | WS_VISIBLE | SS_NOTIFY,
             scale(link_x), scale(394), scale(width), scale(18), options_window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLinkFirst + index)),

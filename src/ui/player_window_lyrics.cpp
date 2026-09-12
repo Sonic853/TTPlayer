@@ -1342,7 +1342,8 @@ RECT PlayerWindow::LyricElementBounds(const skin::SkinElement& element) const {
     if (lyric_window_) GetClientRect(lyric_window_, &client);
     const SIZE native = skin_ ? skin_->Lyric().background.size : SIZE{};
     return ResolveAlignedRect(element.bounds, element.alignment, native,
-                              client.right, client.bottom);
+                              client.right, client.bottom,
+                              element.name == L"title" ? element.image_size : SIZE{});
 }
 
 RECT PlayerWindow::LyricTextBounds() const {
@@ -1583,8 +1584,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc) const {
             if (command == static_cast<int>(kCmdLyricTopMost) &&
                 ActiveLyricTopMost()) state = 2;
             const RECT local{0, 0, width, height};
-            DrawElementFrame(canvas, *element, local, state,
-                             skin_->TransparentColor());
+            DrawAnimatedSkinFrame(canvas, *element, local, state, control);
         }
     } else {
         const COLORREF text_color = ActiveLyricTextColor();

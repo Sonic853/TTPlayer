@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ttplayer/skin/skin_image.h"
+
 #include <filesystem>
 #include <array>
 #include <optional>
@@ -33,19 +35,22 @@ struct SkinMetadata {
 struct SkinElement {
     std::wstring name;
     RECT bounds{};
-    HBITMAP image{};
+    SkinImage image{};
     SIZE image_size{};
     int frames{1};
     bool four_state{};
     bool vertical{};
-    HBITMAP bar_image{};
+    SkinImage bar_image{};
     SIZE bar_size{};
-    HBITMAP fill_image{};
+    SkinImage fill_image{};
     SIZE fill_size{};
-    HBITMAP fill_image2{};
+    SkinImage fill_image2{};
     SIZE fill_size2{};
-    HBITMAP thumb_image{};
+    SkinImage thumb_image{};
     SIZE thumb_size{};
+    SkinImage flash_image{};
+    SIZE flash_size{};
+    SkinAnimation animation;
     COLORREF color{RGB(255, 255, 255)};
     COLORREF background{0xff000000};
     unsigned int alignment{};
@@ -54,7 +59,7 @@ struct SkinElement {
 };
 
 struct SkinBitmap {
-    HBITMAP image{};
+    SkinImage image{};
     SIZE size{};
 };
 
@@ -62,7 +67,7 @@ struct SkinBitmap {
 // in the same package object.  They use the same element grammar but have
 // independent backgrounds, native sizes and control coordinates.
 struct PlayerSkinLayout {
-    HBITMAP background{};
+    SkinImage background{};
     SIZE window_size{};
     std::vector<SkinElement> elements;
 };
@@ -82,6 +87,7 @@ struct PlaylistSkin {
     unsigned int toolbar_alignment{};
     SkinBitmap toolbar;
     SkinBitmap toolbar_hot;
+    SkinAnimation toolbar_animation;
     RECT list_bounds{};
     SkinBitmap selected;
     SkinBitmap splitter_bar;
@@ -101,6 +107,7 @@ struct PlaylistSkin {
     COLORREF number_color{RGB(180, 180, 180)};
     COLORREF duration_color{RGB(180, 180, 180)};
     COLORREF selected_color{RGB(255, 255, 255)};
+    std::optional<COLORREF> selected_text_color; // 6.1.2 Playlist.xml Color_SelText
     COLORREF alternate_background_color{RGB(44, 47, 51)};
 };
 
@@ -197,7 +204,7 @@ public:
     LegacySkin& operator=(LegacySkin&& other) noexcept;
 
     [[nodiscard]] bool Valid() const noexcept { return background_ != nullptr; }
-    [[nodiscard]] HBITMAP Background() const noexcept { return background_; }
+    [[nodiscard]] const SkinImage& Background() const noexcept { return background_; }
     [[nodiscard]] HICON Icon() const noexcept { return icon_; }
     [[nodiscard]] SIZE WindowSize() const noexcept { return window_size_; }
     [[nodiscard]] COLORREF TransparentColor() const noexcept { return transparent_color_; }
@@ -209,7 +216,7 @@ public:
         return mini_.background != nullptr;
     }
     [[nodiscard]] bool MiniValid() const noexcept { return SupportsMiniMode(); }
-    [[nodiscard]] HBITMAP MiniBackground() const noexcept { return mini_.background; }
+    [[nodiscard]] const SkinImage& MiniBackground() const noexcept { return mini_.background; }
     [[nodiscard]] SIZE MiniWindowSize() const noexcept { return mini_.window_size; }
     [[nodiscard]] const std::vector<SkinElement>& MiniElements() const noexcept {
         return mini_.elements;
@@ -225,13 +232,12 @@ public:
     [[nodiscard]] const SkinElement* FindMini(std::wstring_view name) const;
     [[nodiscard]] HRGN CreateWindowRegion(bool mini = false) const;
 
-    // Public for the parser helpers in the implementation; ownership still
-    // remains internal and callers receive only borrowed bitmap handles.
-    HBITMAP LoadBitmap(const std::filesystem::path& path);
+    // Cache and layouts share image ownership, including across rebinds.
+    SkinImage LoadBitmap(const std::filesystem::path& path);
 
 private:
-    std::unordered_map<std::wstring, HBITMAP> bitmaps_;
-    HBITMAP background_{};
+    std::unordered_map<std::wstring, SkinImage> bitmaps_;
+    SkinImage background_{};
     HICON icon_{};
     SIZE window_size_{};
     COLORREF transparent_color_{RGB(255, 0, 255)};

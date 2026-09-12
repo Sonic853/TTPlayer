@@ -119,18 +119,36 @@ unchecked command image the original first obtains an `HICON` with
 flags `0x83` (`DST_ICON | DSS_MONO`) at `(x + 1, y + 1)`, then moves the colored
 image to `(x - 1, y - 1)` and draws it with `ILD_TRANSPARENT`. Checked images
 retain the inset blue frame; disabled images continue through
-`DST_ICON | DSS_DISABLED`. Resource-submenu headers and the legacy playlist
-play/properties aliases retain the observed no-stamp result while keeping the
-one-pixel raised color-image offset.
+`DST_ICON | DSS_DISABLED`. The branch does not exclude submenu headers or
+playlist play/properties aliases: selection, enablement and check state decide
+whether the icon is raised and shadowed.
 
-The old `0x8023 -> 0x7EFD` playlist alias needs the toolbar bitmap's original
-`RGB(192,192,192)` color-key mask. Current `comctl32` can expose that image as
-an all-opaque `HICON` to `DSS_MONO`; the rebuild therefore preserves the
-one-bit mask while loading the 24-bit strip and applies the same gray stamp
-through that mask.
+All toolbar images retain the original `RGB(192,192,192)` color-key mask.
+Capture this **before** `ImageList_AddMasked`, which can replace transparent
+pixels in the input bitmap. Current `comctl32` can export an inappropriate
+mask for `DSS_MONO`; apply the gray silhouette through the preserved source
+mask instead. The separately appended application icon keeps the native
+`ImageList_GetIcon` / `DrawStateW` path.
 
-Same-session captures now give zero changed pixels in the complete 24x20 icon
-region for focused `千千选项` and `显示桌面歌词` rows. The focused `播放控制`
-submenu header differs only in the already-known 28 low-order color-rounding
-pixels (total RGB delta 49, maximum per-pixel delta 3); no gray rectangle or
-incorrect focus stamp remains.
+The earlier no-stamp exceptions inferred from individual captures were removed
+on 2026-09-12. They suppressed the related-links header shadow as soon as it
+became a submenu and did not represent the pseudo-code's state conditions.
+
+## Community links and icon regression (2026-09-12)
+
+The new `Github仓库` / `提交反馈` commands are not in the native toolbar table;
+explicitly alias them to its web-link (`0x009D`) and edit (`0x802C`) images.
+Keep the parent menu ID and resource caption unchanged. Both commands go
+through the same normal, selected, checked and disabled image drawing as the
+existing menu items.
+
+Menu behavior and resources use the 5.7.9 reference only: main/playlist/editor
+strips remain `0x82` / `0x83` / `0x94`. TTPlayer6120 is a skin-only reference;
+its menu resources are not used for this recovery.
+
+Host `project_links_tests` now includes the executable icon and Common Controls
+6 manifest. It compares each root icon and both link icons in five states,
+using an independently loaded source bitmap for the expected transparency and
+shadow pixels. Tests cover the original 5.7.9 resource DLL and its staged
+Release copy, repeated popup construction, link dispatch and tooltip settings.
+These are rendering-contract tests, not a claim of binary identity.

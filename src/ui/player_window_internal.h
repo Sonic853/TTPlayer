@@ -425,21 +425,23 @@ std::wstring ArtistName(const playlist::Track& track, std::wstring fallback);
 bool IsPlaylistFile(const std::filesystem::path& path);
 void DrawPlaylistToolbarBitmap(
     HDC target, const skin::SkinBitmap& bitmap, RECT bounds,
-    COLORREF transparent, std::optional<size_t> only_button = std::nullopt);
+    COLORREF transparent, std::optional<size_t> only_button = std::nullopt,
+    BYTE opacity = 255);
+inline constexpr UINT_PTR kSkinControlAnimationTimer = 0x6120;
 void TileBitmap(HDC target, const skin::SkinBitmap& bitmap, const RECT& bounds);
 COLORREF InterpolateColor(COLORREF first, COLORREF second,
                           int numerator, int denominator);
 void DrawHorizontalGradient(HDC target, const RECT& bounds,
                             COLORREF first, COLORREF second);
 void DrawSolidFrame(HDC target, const RECT& bounds, COLORREF color);
-void DrawBitmapPatch(HDC target, HDC source, const RECT& destination,
+void DrawBitmapPatch(HDC target, const skin::SkinImage& source, const RECT& destination,
                      const RECT& source_rect, bool tile);
 void DrawResizableSkinBitmap(HDC target, const skin::SkinBitmap& bitmap,
                              RECT resize_rect, int width, int height, bool tile);
 HRGN CreateColorKeyRegion(HBITMAP bitmap, int width, int height,
                           COLORREF transparent);
 RECT ResolveAlignedRect(RECT bounds, unsigned int alignment, SIZE native,
-                        int width, int height);
+                        int width, int height, SIZE image_size = {});
 void DrawElementFrame(HDC target, const skin::SkinElement& element, RECT bounds,
                       int state, COLORREF transparent);
 PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
@@ -450,6 +452,8 @@ void ApplyPlaylistSkinDefaults(const skin::PlaylistSkin& source,
 void ApplyLyricSkinDefaults(const skin::LyricSkin& source,
                             settings::LyricSettings& target);
 void SetControlFont(HWND control, HFONT font);
+// Keep these nodes in the parsed skin, but hide their UI by user request.
+bool IsSuppressedSkinControl(std::wstring_view name);
 bool IsSkinButton(std::wstring_view name);
 HFONT CreateSkinFont(const skin::SkinElement& element);
 void DrawSkinText(HDC dc, const skin::SkinElement& element,

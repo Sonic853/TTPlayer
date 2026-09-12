@@ -1,5 +1,44 @@
 # Reconstruction status
 
+2026-09-12: fix Classic.skn playlist/lyric title offsets using 5.7.9's
+0042912E -> 0047A9C5 alignment rules. Center within the current client using
+the title image dimensions; keep right/bottom insets and per-axis undersize
+guards. Preserve the parsed XML and use the shared rule for auxiliary titles.
+Release build and four regressions pass, including real Classic caption pixels
+at widths 268, 269, 400, 401 and back to 268. See SKIN_ALIGNMENT.md.
+
+2026-09-12: fix community-link icons and main-popup icon shadows. Bind new
+link IDs to native web/edit images, remove the non-native submenu/command
+shadow exclusions, and capture colour-key masks before ImageList_AddMasked
+mutates the bitmap. Use only the original 5.7.9 menu/toolbar reference;
+TTPlayer6120 remains a skin-only reference. Extend project_links_tests with
+the real EXE icon/manifest, all main icons and five-state pixel checks against independent source masks
+for the original 5.7.9 DLL and the staged Release resource DLL.
+Release build, project_links_tests and both skin regressions pass.
+See MENU_STYLE.md for the corrected focus-shadow behavior.
+
+2026-09-12: populate the main context menu's resource 0x9D related-links
+placeholder with Github仓库 and 提交反馈. Share labels, HTTPS targets and
+browser dispatch with Options; preserve resource parent/icon and owner-draw
+popup styling. Host project_links_tests verifies both resource DLL generations,
+repeat menu construction, labels/commands, tooltip preference and shell arguments
+without opening a browser. Release build and both skin regressions pass.
+
+2026-09-12: hide parsed login/login_name and music-browser skin controls by
+request. Share the suppression policy across painting, hit testing, tooltips,
+action dispatch and skin previews; retain their XML/image data in the parser.
+Release build and both skin regressions pass, including hidden-region pixels,
+mouse hit testing and absence of the music-browser tooltip.
+
+2026-09-12: add 6.1.2 mixed BMP/PNG skin support. Keep BMP colour keys;
+decode other encoded images through an owned GDI+ stream/image path and
+draw with the recovered alpha/sampling settings. Parse flash attributes,
+animate buttons/toolbars and playback progress thumb, bind set/mode_* and
+read Color_SelText. Host pixel checks cover 36 PNG + 75 BMP assets; all
+179 local skin packages load. Resource/external PNG skins, mini round trips
+and legacy HWND-preserving rebind regression pass. Cloud/mobile/browser
+business windows are not recovered by this change. See SKIN_PNG_RECOVERY.md.
+
 2026-09-12: multi-monitor fullscreen now stays active across process focus
 changes. Resolve entry from the main/lyric host (including lyric chrome's
 forwarded main menu); keep mode changes on the active display. Add screen

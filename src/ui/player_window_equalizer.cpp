@@ -600,7 +600,8 @@ RECT PlayerWindow::EqualizerElementBounds(const skin::SkinElement& element) cons
     if (!skin_) return element.bounds;
     const SIZE native = skin_->Equalizer().background.size;
     return ResolveAlignedRect(element.bounds, element.alignment, native,
-                              native.cx, native.cy);
+                              native.cx, native.cy,
+                              element.name == L"title" ? element.image_size : SIZE{});
 }
 
 int PlayerWindow::EqualizerSliderValue(int slider) const {
@@ -723,10 +724,7 @@ void PlayerWindow::PaintEqualizer(HDC dc) const {
     const HDC canvas = CreateCompatibleDC(dc);
     const HBITMAP buffer = CreateCompatibleBitmap(dc, size.cx, size.cy);
     const HGDIOBJ old_buffer = SelectObject(canvas, buffer);
-    const HDC source = CreateCompatibleDC(dc);
-    HGDIOBJ old_source = SelectObject(source, layout.background.image);
-    BitBlt(canvas, 0, 0, size.cx, size.cy, source, 0, 0, SRCCOPY);
-    SelectObject(source, old_source);
+    layout.background.image.Draw(canvas, 0, 0, size.cx, size.cy, 0, 0, size.cx, size.cy);
 
     const auto button_state = [this](int hit, bool checked = false) {
         if (equalizer_pressed_ == hit && equalizer_hover_ == hit &&
@@ -736,33 +734,30 @@ void PlayerWindow::PaintEqualizer(HDC dc) const {
     };
     DrawElementFrame(canvas, layout.title, EqualizerElementBounds(layout.title),
                      0, skin_->TransparentColor());
-    DrawElementFrame(canvas, layout.close, EqualizerElementBounds(layout.close),
-                     button_state(kEqHitClose), skin_->TransparentColor());
-    DrawElementFrame(canvas, layout.enabled, EqualizerElementBounds(layout.enabled),
+    DrawAnimatedSkinFrame(canvas, layout.close, EqualizerElementBounds(layout.close),
+                     button_state(kEqHitClose), equalizer_window_);
+    DrawAnimatedSkinFrame(canvas, layout.enabled, EqualizerElementBounds(layout.enabled),
                      button_state(kEqHitEnabled, settings_.equalizer.profile != -2),
-                     skin_->TransparentColor());
-    DrawElementFrame(canvas, layout.profile, EqualizerElementBounds(layout.profile),
-                     button_state(kEqHitProfile), skin_->TransparentColor());
-    DrawElementFrame(canvas, layout.reset, EqualizerElementBounds(layout.reset),
-                     button_state(kEqHitReset), skin_->TransparentColor());
+                     equalizer_window_);
+    DrawAnimatedSkinFrame(canvas, layout.profile, EqualizerElementBounds(layout.profile),
+                     button_state(kEqHitProfile), equalizer_window_);
+    DrawAnimatedSkinFrame(canvas, layout.reset, EqualizerElementBounds(layout.reset),
+                     button_state(kEqHitReset), equalizer_window_);
 
     const auto draw_slider = [&](int slider, const skin::SkinElement& element) {
         const RECT bounds = EqualizerElementBounds(element);
         const bool disabled = settings_.equalizer.profile == -2 &&
                               slider >= kEqSliderPreamp;
         if (element.bar_image) {
-            old_source = SelectObject(source, element.bar_image);
             // FUN_00451E07 copies the bar as the complete slider client
             // background with SRCCOPY; it is not a color-keyed centered
             // ornament.
-            BitBlt(canvas, bounds.left, bounds.top,
+            element.bar_image.Draw(canvas, bounds.left, bounds.top,
                 bounds.right - bounds.left, bounds.bottom - bounds.top,
-                source, 0, 0, SRCCOPY);
-            SelectObject(source, old_source);
+                0, 0, bounds.right - bounds.left, bounds.bottom - bounds.top);
         }
         const RECT thumb = EqualizerSliderThumbRect(slider);
         if (element.fill_image) {
-            old_source = SelectObject(source, element.fill_image);
             const int fill_x = bounds.left +
                 (bounds.right - bounds.left - element.fill_size.cx) / 2;
             const int fill_y = bounds.top +
@@ -774,9 +769,9 @@ void PlayerWindow::PaintEqualizer(HDC dc) const {
                 const int source_y = std::clamp(centre - fill_y, 0,
                     static_cast<int>(element.fill_size.cy));
                 const int height = element.fill_size.cy - source_y;
-                if (height > 0) TransparentBlt(canvas, fill_x,
+                if (height > 0) element.fill_image.Draw(canvas, fill_x,
                     fill_y + source_y, element.fill_size.cx, height,
-                    source, 0, source_y, element.fill_size.cx, height,
+                    0, source_y, element.fill_size.cx, height,
                     skin_->TransparentColor());
             } else {
                 // The horizontal fill is likewise kept at bitmap height and
@@ -784,22 +779,19 @@ void PlayerWindow::PaintEqualizer(HDC dc) const {
                 const int centre = (thumb.left + thumb.right) / 2;
                 const int width = std::clamp(centre - fill_x, 0,
                     static_cast<int>(element.fill_size.cx));
-                if (width > 0) TransparentBlt(canvas, fill_x, fill_y,
-                    width, element.fill_size.cy, source, 0, 0, width,
+                if (width > 0) element.fill_image.Draw(canvas, fill_x, fill_y,
+                    width, element.fill_size.cy, 0, 0, width,
                     element.fill_size.cy, skin_->TransparentColor());
             }
-            SelectObject(source, old_source);
         }
         if (element.thumb_image && thumb.right > thumb.left && thumb.bottom > thumb.top) {
             const int frame_width = std::max(1L, element.thumb_size.cx / 4);
             int frame = disabled ? 3 : equalizer_active_slider_ == slider ? 2 :
                         equalizer_hover_ == slider ? 1 : 0;
-            old_source = SelectObject(source, element.thumb_image);
-            TransparentBlt(canvas, thumb.left, thumb.top,
+            element.thumb_image.Draw(canvas, thumb.left, thumb.top,
                 thumb.right - thumb.left, thumb.bottom - thumb.top,
-                source, frame * frame_width, 0, frame_width,
+                frame * frame_width, 0, frame_width,
                 element.thumb_size.cy, skin_->TransparentColor());
-            SelectObject(source, old_source);
         }
     };
     draw_slider(kEqSliderBalance, layout.balance);
@@ -807,7 +799,6 @@ void PlayerWindow::PaintEqualizer(HDC dc) const {
     draw_slider(kEqSliderPreamp, layout.preamp);
     for (size_t index = 0; index < layout.bands.size(); ++index)
         draw_slider(kEqSliderFirstBand + static_cast<int>(index), layout.bands[index]);
-    DeleteDC(source);
     BitBlt(dc, 0, 0, size.cx, size.cy, canvas, 0, 0, SRCCOPY);
     SelectObject(canvas, old_buffer);
     DeleteObject(buffer);
