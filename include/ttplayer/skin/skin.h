@@ -171,6 +171,9 @@ struct DesktopLyricBarSkin {
     SkinElement lines;
     SkinElement lock;
     SkinElement ontop;
+    // Optional compatibility extensions used by the Baidu 8.2 toolbar.
+    SkinElement zoom_in;
+    SkinElement zoom_out;
     SkinElement return_to_window;
     SkinElement close;
 };

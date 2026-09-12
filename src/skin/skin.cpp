@@ -1066,6 +1066,10 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory) {
                     bar.lock = std::move(element);
                 else if (_wcsicmp(name.c_str(), L"ontop") == 0)
                     bar.ontop = std::move(element);
+                else if (_wcsicmp(name.c_str(), L"zoomin") == 0)
+                    bar.zoom_in = std::move(element);
+                else if (_wcsicmp(name.c_str(), L"zoomout") == 0)
+                    bar.zoom_out = std::move(element);
                 else if (_wcsicmp(name.c_str(), L"return") == 0)
                     bar.return_to_window = std::move(element);
                 else if (_wcsicmp(name.c_str(), L"close") == 0)

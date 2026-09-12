@@ -1,6 +1,9 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
+#include "../app/resource_ids.h"
 
+#include <gdiplus.h>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
@@ -62,6 +65,111 @@ HMENU TrackSubmenu(HMENU menu) {
         if (HMENU child = GetSubMenu(menu, index))
             if (HMENU found = TrackSubmenu(child)) return found;
     return nullptr;
+}
+
+void ToolbarTests(HMODULE resources) {
+    const fs::path directory = fs::temp_directory_path() /
+        (L"TTPlayer-Desktop-Toolbar-" + std::to_wstring(GetCurrentProcessId()) +
+         L"-" + std::to_wstring(GetTickCount64()));
+    fs::create_directories(directory);
+    ULONG_PTR token{};
+    Gdiplus::GdiplusStartupInput startup;
+    Require(Gdiplus::GdiplusStartup(&token, &startup, nullptr) == Gdiplus::Ok,
+            "toolbar GDI+ startup failed");
+    struct Runtime { ULONG_PTR token; ~Runtime() { Gdiplus::GdiplusShutdown(token); } } runtime{token};
+    UINT count{}, length{};
+    Gdiplus::GetImageEncodersSize(&count, &length);
+    std::vector<unsigned char> codecs(length);
+    auto* encoders = reinterpret_cast<Gdiplus::ImageCodecInfo*>(codecs.data());
+    Gdiplus::GetImageEncoders(count, length, encoders);
+    CLSID png{};
+    bool found{};
+    for (UINT i = 0; i < count; ++i) if (wcscmp(encoders[i].MimeType, L"image/png") == 0) {
+        png = encoders[i].Clsid; found = true; break;
+    }
+    Require(found, "toolbar PNG encoder missing");
+    Gdiplus::Bitmap background(330, 32, PixelFormat32bppARGB);
+    { Gdiplus::Graphics graphics(&background); graphics.Clear(Gdiplus::Color(255, 50, 63, 108)); }
+    Require(background.Save((directory/L"background.png").c_str(), &png) == Gdiplus::Ok, "cannot write toolbar background");
+    Gdiplus::Bitmap sprite(16, 4, PixelFormat32bppARGB);
+    for (int y=0; y<4; ++y) for (int x=0; x<16; ++x) {
+        const int frame=x/4;
+        sprite.SetPixel(x, y, x%4<2 ? Gdiplus::Color(0,0,0,0) :
+            Gdiplus::Color(128, frame==1 ? 0 : 255,255,frame==1 ? 0 : 255));
+    }
+    Require(sprite.Save((directory/L"sprite.png").c_str(), &png) == Gdiplus::Ok, "cannot write toolbar sprite");
+    {
+        std::ofstream xml(directory/L"Skin.xml", std::ios::binary);
+        xml << R"(<skin version="2" name="Toolbar fixture"><player_window image="background.png"/>
+<desklrc_bar image="background.png"><settings position="80,5,84,9" image="sprite.png"/>
+<zoomin position="20,5,24,9" image="sprite.png"/><zoomout position="30,5,34,9" image="sprite.png"/>
+</desklrc_bar></skin>)";
+    }
+    auto skin = skin::LegacySkin::Load(directory);
+    Require(skin.DesktopLyricBar().zoom_in.image.IsGdiPlus() &&
+            skin.DesktopLyricBar().zoom_out.bounds.left == 30, "optional toolbar XML not parsed");
+    settings::DesktopLyricSettings settings;
+    settings.font.lfHeight = -40;
+    RECT persisted{100,100,700,166};
+    Window owner{CreateWindowExW(WS_EX_TOOLWINDOW,L"STATIC",L"Toolbar fixture",
+        WS_POPUP,0,0,330,32,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr)};
+    Require(owner.value != nullptr,"cannot create toolbar owner");
+    ui::DesktopLyricsWindow desktop;
+    bool profile{};
+    Require(desktop.Create(GetModuleHandleW(nullptr), owner.value, nullptr, resources,
+        &settings, &persisted, [&](HMENU menu, POINT, HWND) {
+            profile = GetMenuItemID(menu,0) == 0x80a2; return UINT(0);
+        }), "cannot create toolbar test");
+    desktop.SetSkin(&skin);
+    const HWND bar = desktop.BarHandle();
+    const HWND plus = GetDlgItem(bar, IDC_DESKTOP_LYRIC_ZOOM_IN);
+    const auto visible = [](HWND w) { return (GetWindowLongPtrW(w,GWL_STYLE)&WS_VISIBLE)!=0; };
+    Require(visible(plus) && !visible(GetDlgItem(bar,0x803e)), "omitted toolbar control left a ghost hit target");
+    ToolSearch tip{bar};
+    EnumThreadWindows(GetCurrentThreadId(),FindTip,reinterpret_cast<LPARAM>(&tip));
+    Require(tip.tooltip && SendMessageW(tip.tooltip,TTM_GETTOOLCOUNT,0,0)==4,
+            "toolbar should register only icon and three visible controls");
+    Require(QueryTip(tip.tooltip,bar,IDC_DESKTOP_LYRIC_ZOOM_IN)==L"放大歌词" &&
+            QueryTip(tip.tooltip,bar,IDC_DESKTOP_LYRIC_ZOOM_OUT)==L"缩小歌词", "zoom tooltip mismatch");
+
+    struct Surface {
+        HDC dc=CreateCompatibleDC(nullptr); HBITMAP bitmap{}; HGDIOBJ old{};
+        Surface() {
+            BITMAPINFO info{}; info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+            info.bmiHeader.biWidth=330; info.bmiHeader.biHeight=-32;
+            info.bmiHeader.biPlanes=1; info.bmiHeader.biBitCount=32; void* pixels{};
+            bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&pixels,nullptr,0);
+            Require(dc&&bitmap,"toolbar surface allocation failed"); old=SelectObject(dc,bitmap);
+        }
+        ~Surface() { SelectObject(dc,old); DeleteObject(bitmap); DeleteDC(dc); }
+    } surface;
+    const auto paint = [&] { SendMessageW(bar,WM_PRINTCLIENT,reinterpret_cast<WPARAM>(surface.dc),PRF_CLIENT); GdiFlush(); };
+    paint();
+    Require(GetPixel(surface.dc,20,5)==RGB(50,63,108), "transparent PNG painted black instead of background");
+    const COLORREF normal=GetPixel(surface.dc,22,5);
+    Require(GetRValue(normal)>140 && GetRValue(normal)<170 && GetBValue(normal)>170,
+            "half-transparent PNG did not composite over toolbar");
+    SendMessageW(plus,WM_MOUSEMOVE,0,MAKELPARAM(1,1)); paint();
+    Require(GetPixel(surface.dc,22,5)!=normal && GetPixel(surface.dc,20,5)==RGB(50,63,108),
+            "hover frame/alpha was lost");
+    SendMessageW(plus,WM_MOUSELEAVE,0,0); paint();
+    Require(GetPixel(surface.dc,22,5)==normal,"hover repaint accumulated alpha");
+    SendMessageW(bar,WM_COMMAND,IDC_DESKTOP_LYRIC_ZOOM_IN,0);
+    Require(settings.font.lfHeight==-42 && settings.font_valid,"A+ did not change persistent font");
+    SendMessageW(bar,WM_COMMAND,IDC_DESKTOP_LYRIC_ZOOM_OUT,0);
+    Require(settings.font.lfHeight==-40,"A- did not restore font size");
+    for(int i=0;i<50;i++) SendMessageW(bar,WM_COMMAND,IDC_DESKTOP_LYRIC_ZOOM_IN,0);
+    Require(settings.font.lfHeight==-96,"zoom upper limit missing");
+    for(int i=0;i<60;i++) SendMessageW(bar,WM_COMMAND,IDC_DESKTOP_LYRIC_ZOOM_OUT,0);
+    Require(settings.font.lfHeight==-12,"zoom lower limit missing");
+    SendMessageW(bar,WM_COMMAND,0x803f,0);
+    Require(profile,"grid button did not open preset profiles");
+    desktop.SetSkin(nullptr);
+    Require(!visible(plus) && visible(GetDlgItem(bar,0x803e)) &&
+            SendMessageW(tip.tooltip,TTM_GETTOOLCOUNT,0,0)==12,"legacy toolbar fallback changed");
+    desktop.SetSkin(&skin);
+    Require(visible(plus) && !visible(GetDlgItem(bar,0x803e)),"toolbar rebind visibility failed");
+    std::cout << "desktop toolbar PNG alpha/hover, optional controls, preset mapping and font zoom passed\n";
 }
 } // namespace
 
@@ -292,6 +400,7 @@ int wmain(int argc, wchar_t** argv) {
             LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE)};
         Require(resources.value != nullptr, "cannot load resource-only DLL");
         testing::SkinRebindAccess::Run(resources.value);
+        ToolbarTests(resources.value);
         OleUninitialize();
         return 0;
     } catch (const std::exception& error) {

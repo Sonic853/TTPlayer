@@ -16,6 +16,8 @@ BEGIN
     IDS_FULLSCREEN_ALBUM_PICKER "选择无专辑封面时使用的备用图片"
     IDS_FULLSCREEN_ALBUM_FILTER "图片文件"
     IDS_FULLSCREEN_LYRIC_DRAG "允许拖拽歌词"
+    IDS_DESKTOP_LYRIC_ZOOM_IN "放大歌词"
+    IDS_DESKTOP_LYRIC_ZOOM_OUT "缩小歌词"
 END
 
 // TTPlayer.exe loads this exact group-icon identifier in FUN_0045FAD8 before

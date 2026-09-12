@@ -6,6 +6,7 @@
 #include "ttplayer/lyrics/lrc_parser.h"
 #include "ttplayer/settings/settings.h"
 #include "ttplayer/skin/skin.h"
+#include "../app/resource_ids.h"
 
 #include <algorithm>
 #include <array>
@@ -56,6 +57,8 @@ constexpr UINT kCommandProfileFirst = 0x80a2;
 constexpr UINT kCommandProfileLast = 0x80a4;
 constexpr UINT kCommandOneLine = 0x80b0;
 constexpr UINT kCommandTwoLines = 0x80b1;
+constexpr UINT kCommandZoomIn = IDC_DESKTOP_LYRIC_ZOOM_IN;
+constexpr UINT kCommandZoomOut = IDC_DESKTOP_LYRIC_ZOOM_OUT;
 
 constexpr unsigned int kDragInterior = 1;
 constexpr unsigned int kDragRight = 0x10;
@@ -831,6 +834,9 @@ private:
     LRESULT HandleBarMessage(HWND window, UINT message, WPARAM wparam,
                              LPARAM lparam) {
         switch (message) {
+        case WM_PRINTCLIENT:
+            PaintBar(reinterpret_cast<HDC>(wparam));
+            return 0;
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: {
             PAINTSTRUCT paint{};
@@ -903,10 +909,11 @@ private:
         if (icon_) SetWindowSubclass(icon_, ButtonSubclassProc, 1,
                                      reinterpret_cast<DWORD_PTR>(this));
 
-        constexpr std::array<UINT, 11> commands{
+        constexpr std::array<UINT, 13> commands{
             kCommandPlay, kCommandPrevious, kCommandNext, kCommandList,
             kCommandLines, kCommandKaraoke, kCommandSettings, kCommandLock,
-            kCommandTopmost, kCommandReturn, kCommandClose};
+            kCommandTopmost, kCommandReturn, kCommandClose,
+            kCommandZoomIn, kCommandZoomOut};
         for (size_t index = 0; index < buttons_.size(); ++index) {
             buttons_[index].command = commands[index];
             const RECT bounds = DefaultBarRect(commands[index]);
@@ -936,7 +943,7 @@ private:
         if (!tooltip_) return;
         SendMessageW(tooltip_, TTM_ACTIVATE, TRUE, 0);
 
-        std::array<HWND, 12> windows{};
+        std::array<HWND, 14> windows{};
         windows[0] = icon_;
         for (size_t index = 0; index < buttons_.size(); ++index)
             windows[index + 1] = buttons_[index].window;
@@ -966,6 +973,10 @@ private:
     std::wstring ToolTipText(HWND control) const {
         if (!control || GetParent(control) != bar_) return {};
         const UINT command = static_cast<UINT>(GetDlgCtrlID(control));
+        // These optional actions do not exist in the 5.7.9 resource DLL.
+        if (command == kCommandZoomIn || command == kCommandZoomOut)
+            return ResourceText(GetModuleHandleW(nullptr), command == kCommandZoomIn
+                ? IDS_DESKTOP_LYRIC_ZOOM_IN : IDS_DESKTOP_LYRIC_ZOOM_OUT);
         auto text = ResourceText(resource_module_,
             command == kCommandPlay && playing_ ? kCommandPause : command);
         const auto choose = [&](wchar_t separator, bool second) {
@@ -1027,6 +1038,8 @@ private:
         case kCommandLines: return &bar.lines;
         case kCommandLock: return &bar.lock;
         case kCommandTopmost: return &bar.ontop;
+        case kCommandZoomIn: return &bar.zoom_in;
+        case kCommandZoomOut: return &bar.zoom_out;
         case kCommandReturn: return &bar.return_to_window;
         case kCommandClose: return &bar.close;
         default: return nullptr;
@@ -1052,10 +1065,31 @@ private:
             Width(icon_bounds), Height(icon_bounds), FALSE);
         for (auto& button : buttons_) {
             RECT bounds = DefaultBarRect(button.command);
-            if (const auto* element = ButtonElement(button.command);
-                element && ValidRect(element->bounds)) bounds = element->bounds;
-            if (button.window) MoveWindow(button.window, bounds.left, bounds.top,
+            const auto* element = ButtonElement(button.command);
+            const bool present = layout && layout->valid
+                ? element && element->image && ValidRect(element->bounds)
+                : ValidRect(bounds);
+            if (element && ValidRect(element->bounds)) bounds = element->bounds;
+            if (!button.window) continue;
+            // Omitted controls must not leave an invisible default hit target
+            // over a differently arranged toolbar. Optional A+/A- stay absent
+            // in all existing skins until explicitly declared by their XML.
+            ShowWindow(button.window, present ? SW_SHOWNA : SW_HIDE);
+            if (present) MoveWindow(button.window, bounds.left, bounds.top,
                 Width(bounds), Height(bounds), FALSE);
+            if (tooltip_) {
+                TOOLINFOW tool{};
+                tool.cbSize = TTTOOLINFO_V1_SIZE;
+                tool.hwnd = bar_;
+                tool.uId = reinterpret_cast<UINT_PTR>(button.window);
+                SendMessageW(tooltip_, TTM_DELTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+                if (present) {
+                    tool.uFlags = TTF_IDISHWND;
+                    tool.hinst = instance_;
+                    tool.lpszText = LPSTR_TEXTCALLBACKW;
+                    SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+                }
+            }
         }
         RECT control_bounds{};
         GetWindowRect(control_, &control_bounds);
@@ -1074,12 +1108,9 @@ private:
         DeleteObject(clear);
 
         if (layout && layout->valid && layout->background.image) {
-            HDC source = CreateCompatibleDC(dc);
-            const HGDIOBJ old = SelectObject(source, layout->background.image);
-            BitBlt(dc, 0, 0, layout->background.size.cx,
-                   layout->background.size.cy, source, 0, 0, SRCCOPY);
-            SelectObject(source, old);
-            DeleteDC(source);
+            layout->background.image.Draw(dc, 0, 0, layout->background.size.cx,
+                layout->background.size.cy, 0, 0, layout->background.size.cx,
+                layout->background.size.cy);
         }
         if (icon_) {
             RECT bounds{};
@@ -1098,7 +1129,8 @@ private:
 
     void DrawBarButton(HDC dc, const Button& button) const {
         const auto* element = ButtonElement(button.command);
-        if (!element || !element->image || !button.window) return;
+        if (!element || !element->image || !button.window ||
+            !(GetWindowLongPtrW(button.window, GWL_STYLE) & WS_VISIBLE)) return;
         RECT bounds{};
         GetWindowRect(button.window, &bounds);
         MapWindowPoints(nullptr, bar_, reinterpret_cast<POINT*>(&bounds), 2);
@@ -1118,13 +1150,11 @@ private:
             ? element->image_size.cx / element->frames
             : element->image_size.cx;
         if (frame_width <= 0 || element->image_size.cy <= 0) return;
-        HDC source = CreateCompatibleDC(dc);
-        const HGDIOBJ old = SelectObject(source, element->image);
-        StretchBlt(dc, bounds.left, bounds.top, Width(bounds), Height(bounds),
-            source, frame_width * frame, 0, frame_width,
-            element->image_size.cy, SRCCOPY);
-        SelectObject(source, old);
-        DeleteDC(source);
+        // The PNG's HBITMAP is only a compatibility view; SRCCOPY of that
+        // view discards alpha and paints black behind transparent sprites.
+        // Draw preserves GDI+ source-over for PNG and old SRCCOPY for BMP.
+        element->image.Draw(dc, bounds.left, bounds.top, Width(bounds), Height(bounds),
+            frame_width * frame, 0, frame_width, element->image_size.cy);
     }
 
     void HandleCommand(UINT command) {
@@ -1190,6 +1220,20 @@ private:
                 settings_->topmost = !settings_->topmost;
                 ApplyTopmost();
                 break;
+            case kCommandZoomIn:
+            case kCommandZoomOut: {
+                // Local skin extension, not an undocumented 5.7.9 command.
+                // Use the same persistent LOGFONT and layout refresh as the
+                // desktop-lyric options page and vertical resize operation.
+                const auto raw = static_cast<int64_t>(settings_->font.lfHeight);
+                const int current = static_cast<int>(std::clamp<int64_t>(
+                    raw == 0 ? 40 : raw < 0 ? -raw : raw, 12, 96));
+                settings_->font.lfHeight = -std::clamp(current +
+                    (command == kCommandZoomIn ? 2 : -2), 12, 96);
+                settings_->font_valid = true;
+                ApplySettings();
+                break;
+            }
             case kCommandReturn:
                 DispatchMain(kCommandReturn, 0);
                 break;
@@ -1976,7 +2020,7 @@ private:
     HWND bar_{};
     HWND tooltip_{};
     HWND icon_{};
-    std::array<Button, 11> buttons_{};
+    std::array<Button, 13> buttons_{};
     HFONT font_{};
     LOGFONTW last_font_{};
     int applied_lines_{};
