@@ -137,6 +137,7 @@ private:
         HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK PlaylistWindowProc(HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK LyricWindowProc(HWND, UINT, WPARAM, LPARAM);
+    static LRESULT CALLBACK FullScreenLyricInputProc(HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK LyricEditorProc(HWND, UINT, WPARAM, LPARAM,
                                              UINT_PTR, DWORD_PTR);
     static LRESULT CALLBACK EqualizerWindowProc(HWND, UINT, WPARAM, LPARAM);
@@ -413,6 +414,8 @@ private:
     void UpdateLyricWindowSkin(bool saved_bounds = false);
     void RebuildLyricFont(bool repaint = true);
     void ApplyFullScreenLyricTransparency();
+    void UpdateFullScreenLyricInput();
+    void DestroyFullScreenLyricInput();
     void UpdateLyricWindowRegion();
     void LayoutLyricControls();
     void UpdateLyricToolRects();
@@ -424,6 +427,7 @@ private:
     [[nodiscard]] bool ActiveLyricTopMost() const noexcept;
     [[nodiscard]] int& ActiveLyricScrollMode() noexcept;
     [[nodiscard]] int ActiveLyricScrollMode() const noexcept;
+    [[nodiscard]] bool ActiveLyricDragAllowed() const noexcept;
     [[nodiscard]] int ActiveLyricTextAlign() const noexcept;
     [[nodiscard]] int ActiveLyricRowInterval() const noexcept;
     [[nodiscard]] int ActiveLyricFadeIndex() const noexcept;
@@ -727,6 +731,8 @@ private:
     LONG_PTR fullscreen_visual_saved_exstyle_{};
     bool fullscreen_visual_was_empty_{};
     bool fullscreen_lyric_detached_{};
+    HWND fullscreen_lyric_input_{};
+    bool fullscreen_lyric_input_updating_{};
     bool fullscreen_lyric_window_was_visible_{};
     bool fullscreen_saved_lyric_transparent_{};
     bool fullscreen_lyric_desktop_mode_{};

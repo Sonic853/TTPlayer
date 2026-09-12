@@ -1,4 +1,6 @@
 #include "player_window_internal.h"
+#include "album_background.h"
+#include "ttplayer/app/worker_process.h"
 #include "../app/resource_ids.h"
 
 #include <algorithm>
@@ -579,6 +581,8 @@ public:
         width_ = next_width;
         height_ = next_height;
         full_screen_ = full_screen;
+        album_background_mode_ = false;
+        album_frame_dirty_ = true;
         // FUN_0045775A reinitializes the active renderer on every call, even
         // when mode and dimensions are unchanged (for example, same-sized
         // skin changes while paused).  Old bars, scope trails or dream bits
@@ -615,6 +619,22 @@ public:
             cover_->Release();
             cover_ = nullptr;
         }
+    }
+
+    void ConfigureAlbum(const settings::VisualSettings& visual, SIZE size,
+                        const settings::FullScreenSettings& album,
+                        COLORREF background, const std::filesystem::path& source,
+                        const audio::AudioMetadata& metadata) {
+        // Configure and publish the current track in one renderer transaction.
+        // The paint worker must never see an intermediate fallback-only frame
+        // while resizing/switching into an album that already has artwork.
+        std::scoped_lock lock(mutex_);
+        Configure(visual, size, true);
+        album_background_mode_ = settings_.type == 4;
+        album_settings_ = album;
+        album_background_color_ = background;
+        SetSource(source, {}, metadata);
+        LoadAlbumFallback(); // also handles stopped/no-track entry
     }
 
     void SetSource(const std::filesystem::path& source,
@@ -676,6 +696,8 @@ public:
             cover_->Release();
             cover_ = nullptr;
         }
+        album_frame_dirty_ = true;
+        LoadAlbumFallback();
     }
 
     void Update(const audio::VisualizationSamples& samples) {
@@ -734,7 +756,8 @@ public:
         std::scoped_lock lock(mutex_);
         if (!dc || bounds.right <= bounds.left || bounds.bottom <= bounds.top)
             return;
-        PaintCachedBackground(dc, bounds);
+        if (album_background_mode_) PaintCover(dc, bounds);
+        else PaintCachedBackground(dc, bounds);
     }
 
     [[nodiscard]] bool FallbackHit(POINT point) const noexcept {
@@ -1135,6 +1158,17 @@ private:
 
     void PaintCover(HDC dc, const RECT& bounds) {
         fallback_bounds_ = {};
+        if (album_background_mode_) {
+            if (!surface_dc_ || !surface_bits_) return;
+            if (album_frame_dirty_) {
+                PaintAlbumBackground(surface_dc_, {0, 0, width_, height_},
+                    album_background_color_, album_settings_.album_transparency_percent,
+                    cover_bitmap_, cover_bitmap_size_, cover_);
+                album_frame_dirty_ = false;
+            }
+            BlitSurface(dc, bounds);
+            return;
+        }
         // FUN_00457B11 keeps update and paint inside CVisualCtrl's critical
         // section, and FUN_00457E2D presents one completed visual frame.  The
         // reconstruction previously copied the skin background to the window
@@ -1247,6 +1281,7 @@ private:
     }
 
     void LoadCover() {
+        album_frame_dirty_ = true;
         if (cover_bitmap_) {
             DeleteObject(cover_bitmap_);
             cover_bitmap_ = nullptr;
@@ -1258,7 +1293,10 @@ private:
         }
         cover_payload_present_ = false;
         fallback_bounds_ = {};
-        if (source_.empty()) return;
+        if (source_.empty()) {
+            LoadAlbumFallback();
+            return;
+        }
         // CPlayerWnd_Run obtains the byte blob from the active reader's
         // embedded-picture metadata and decodes exactly that blob. Shell
         // thumbnails may silently substitute Folder.jpg or generic artwork,
@@ -1288,6 +1326,31 @@ private:
         } catch (const std::exception&) {
             cover_ = nullptr;
         }
+        LoadAlbumFallback();
+    }
+
+    void LoadAlbumFallback() {
+        // A corrupt/unsupported embedded picture is also a missing cover.
+        // No shell thumbnail/Folder.jpg/network lookup is introduced here.
+        if (!album_background_mode_ || cover_bitmap_ || cover_ ||
+            album_settings_.album_fallback_image.empty()) return;
+        try {
+            auto path = std::filesystem::path(album_settings_.album_fallback_image);
+            if (path.is_relative()) path = app::CurrentExecutablePath().parent_path() / path;
+            std::ifstream input(path, std::ios::binary | std::ios::ate);
+            const auto length = input.tellg();
+            if (!input || length <= 0 || length > kMaximumPictureBytes) return;
+            std::vector<unsigned char> bytes(static_cast<size_t>(length));
+            input.seekg(0);
+            if (!ReadExact(input, bytes.data(), bytes.size())) return;
+            const auto decoded = DecodePictureWithWic(bytes);
+            cover_bitmap_ = decoded.bitmap;
+            cover_bitmap_size_ = {static_cast<LONG>(decoded.width), static_cast<LONG>(decoded.height)};
+            if (!cover_bitmap_) cover_ = DecodePictureWithOle(bytes);
+        } catch (const std::exception&) {
+            // Keep the opaque configured background when the path is missing
+            // or cannot be read; never retain the preceding track's cover.
+        }
     }
 
     HMODULE module_{};
@@ -1311,6 +1374,10 @@ private:
     int output_width_{};
     int output_height_{};
     bool full_screen_{};
+    bool album_background_mode_{};
+    bool album_frame_dirty_{true};
+    settings::FullScreenSettings album_settings_{};
+    COLORREF album_background_color_{};
     mutable std::recursive_mutex mutex_;
     // CVisualCtrl+0x94c: one persistent 0xC00-byte analysis work block.
     std::array<int16_t, kAnalysisSamples * 3> analysis_work_{};
@@ -1495,8 +1562,19 @@ void PlayerWindow::UpdateVisualWindowLayout() {
         GetClientRect(visual_window_, &client);
         const int width = std::max<LONG>(0, client.right - client.left);
         const int height = std::max<LONG>(0, client.bottom - client.top);
-        visual_runtime_->Configure(settings_.visual, {width, height}, true,
-                                   nullptr, nullptr);
+        if (fullscreen_mode_ == 3 && settings_.visual.type == 4) {
+            std::filesystem::path source;
+            audio::AudioMetadata metadata;
+            const auto state = audio_.State();
+            if (state == audio::PlaybackState::playing || state == audio::PlaybackState::paused) {
+                if (const auto* track = PlaybackTrackForUi()) source = track->path;
+                metadata = audio_.Metadata();
+            }
+            visual_runtime_->ConfigureAlbum(settings_.visual, {width, height}, settings_.fullscreen,
+                settings_.lyric.fullscreen_background_color, source, metadata);
+        } else {
+            visual_runtime_->Configure(settings_.visual, {width, height}, true);
+        }
         const UINT interval = settings_.visual.frames_per_second > 0
             ? std::max(1, 1000 / settings_.visual.frames_per_second) : 50;
         visual_interval_ms_.store(interval, std::memory_order_relaxed);
@@ -1534,7 +1612,9 @@ void PlayerWindow::UpdateVisualWindowLayout() {
 void PlayerWindow::UpdateVisualFrame() {
     if (!visual_runtime_ || !visual_window_) return;
     const auto state = audio_.State();
-    if (state == audio::PlaybackState::playing) {
+    if (state == audio::PlaybackState::playing ||
+        (state == audio::PlaybackState::paused && fullscreen_mode_ == 3 &&
+         settings_.visual.type == 4)) {
         std::filesystem::path source;
         if (const auto* track = PlaybackTrackForUi()) source = track->path;
         visual_runtime_->SetSource(source, ResourceText(0x821b),
@@ -1571,8 +1651,10 @@ void PlayerWindow::PaintVisualControl(HDC dc) const {
     RECT client{};
     GetClientRect(visual_window_, &client);
     if (fullscreen_visual_detached_) {
-        FillRect(dc, &client, static_cast<HBRUSH>(
-            GetStockObject(BLACK_BRUSH)));
+        // Album backgrounds already publish a complete composited frame.
+        // Erasing the visible DC first would reintroduce cover flicker.
+        if (!visual_runtime_ || fullscreen_mode_ != 3 || settings_.visual.type != 4)
+            FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
         if (visual_runtime_) visual_runtime_->Paint(dc, client);
         return;
     }
@@ -1590,8 +1672,18 @@ void PlayerWindow::PaintVisualControl(HDC dc) const {
 }
 
 void PlayerWindow::SetVisualType(int type) {
+    if (fullscreen_mode_ == 1 && type >= 1 && type <= 4) {
+        // Choosing an effect in the fullscreen lyric menu must display it,
+        // not change a hidden visual or clamp album art back to dream.
+        // Publish the requested type before layout/render reconfiguration;
+        // this is an in-session mode change, preserving monitor/restore state.
+        settings_.visual.type = type;
+        SetFullScreenMode(3, lyric_control_);
+        return;
+    }
     settings_.visual.type = fullscreen_mode_ != 0
-        ? ((type == 0 || type == 4) ? 1 : std::clamp(type, 1, 3))
+        ? ((type == 0 || (type == 4 && fullscreen_mode_ != 3)) ? 1
+            : std::clamp(type, 1, fullscreen_mode_ == 3 ? 4 : 3))
         : std::clamp(type, 0, 4);
     if (fullscreen_mode_ == 3) UpdateFullScreenLayout();
     UpdateVisualWindowLayout();
@@ -1713,6 +1805,7 @@ void PlayerWindow::DetachLyricControl(const RECT& target,
 }
 
 void PlayerWindow::RestoreLyricControl() {
+    DestroyFullScreenLyricInput();
     if (!fullscreen_lyric_detached_ || !lyric_control_) return;
     // FUN_0044ABFC reverses POPUP/CHILD before invoking the generic restore.
     LONG_PTR style = GetWindowLongPtrW(lyric_control_, GWL_STYLE);
@@ -1854,7 +1947,7 @@ void PlayerWindow::UpdateFullScreenLayout() {
 
     int profile = settings_.fullscreen.visual_type != 0
         ? settings_.visual.type : 0;
-    profile = std::clamp(profile, 0, 3);
+    profile = std::clamp(profile, 0, 4);
     const int lyric_tenths = std::clamp(
         settings_.fullscreen.lyric_size[static_cast<size_t>(profile)], 0, 10);
     const int relation = std::clamp(
@@ -1908,7 +2001,7 @@ void PlayerWindow::SetFullScreenMode(int mode, HWND origin) {
         if (lyric_window_) ShowWindow(lyric_window_, SW_HIDE);
     }
     if ((mode == 2 || mode == 3) &&
-        (settings_.visual.type == 0 || settings_.visual.type == 4))
+        (settings_.visual.type == 0 || (mode == 2 && settings_.visual.type == 4)))
         settings_.visual.type = 1;
     fullscreen_mode_ = mode;
     if (entering) {
@@ -2001,7 +2094,13 @@ void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
         // command deletions produce the compact seven-item menu and it uses
         // the saved main window directly as TrackPopupMenu's command owner.
         DeleteMenu(popup, 3, MF_BYPOSITION);
-        DeleteMenu(popup, kCmdVisualCover, MF_BYCOMMAND);
+        if (fullscreen_mode_ == 3) {
+            const auto label = FullScreenMenuText(IDS_FULLSCREEN_ALBUM);
+            ModifyMenuW(popup, kCmdVisualCover, MF_BYCOMMAND | MF_STRING,
+                        kCmdVisualCover, label.c_str());
+        } else {
+            DeleteMenu(popup, kCmdVisualCover, MF_BYCOMMAND);
+        }
         DeleteMenu(popup, kCmdVisualNone, MF_BYCOMMAND);
         DeleteMenu(popup, kCmdVisualOptions, MF_BYCOMMAND);
         const int last = GetMenuItemCount(popup) - 1;

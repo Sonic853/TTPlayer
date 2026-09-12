@@ -1,6 +1,7 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
+#include "../app/resource_ids.h"
 
 #include "ttplayer/core/text.h"
 #include "ttplayer/ui/lyric_runtime_policy.h"
@@ -380,6 +381,21 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
     const bool text_control = control == lyric_control_ ||
         identifier == kLyricControlId;
     switch (message) {
+    case WM_WINDOWPOSCHANGED:
+    case WM_STYLECHANGED:
+    case WM_DWMCOMPOSITIONCHANGED:
+        if (text_control) UpdateFullScreenLyricInput();
+        break;
+    case WM_SHOWWINDOW:
+    case WM_ENABLE:
+        if (text_control) {
+            if (!wparam) DestroyFullScreenLyricInput();
+            else UpdateFullScreenLyricInput();
+        }
+        break;
+    case WM_NCDESTROY:
+        if (text_control) DestroyFullScreenLyricInput();
+        break;
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT: {
@@ -405,6 +421,8 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
         return text_control ? DLGC_WANTARROWS | DLGC_WANTCHARS : DLGC_BUTTON;
     case WM_MOUSEMOVE:
         if (text_control) {
+            if (lyric_line_dragging_ && !ActiveLyricDragAllowed())
+                return HandleLyricControlMessage(control, WM_CANCELMODE, 0, 0);
             if (lyric_line_dragging_ && GetCapture() == control) {
                 lyric_line_drag_offset_ = ActiveLyricScrollMode() != 0
                     ? GET_X_LPARAM(lparam) - lyric_line_drag_origin_.x
@@ -444,16 +462,19 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
     case WM_LBUTTONDOWN:
         if (text_control) {
             const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-            // FUN_004425F7 enters drag tracking only when FUN_00442360's
-            // lyric-text hit test returns -1.  Clicking a rendered line is a
-            // lyric/link activation path and must not capture the mouse.
-            if (settings_.lyric.drag_lyric && lyrics_.lines.size() > 1 &&
-                !LyricTextHitTest(control, point)) {
+            // 00442360 -> 00441FEF tests the separate prompt/link entries at
+            // +0x110/+0x114 and +0x130/+0x134, NOT the timed lyric rows.
+            // Treating every rendered row as a link wrongly excluded text
+            // from 004425F7's capture path. Timed text and blank space share
+            // the same drag behaviour in normal, mini and fullscreen mode.
+            if (ActiveLyricDragAllowed() && lyrics_.lines.size() > 1) {
                 lyric_line_dragging_ = true;
                 lyric_line_drag_origin_ = point;
                 lyric_line_drag_offset_ = 0;
                 SetCapture(control);
                 SetFocus(control);
+                SetCursor(LoadCursorW(nullptr,
+                    ActiveLyricScrollMode() != 0 ? IDC_SIZEWE : IDC_SIZENS));
             }
         } else {
             if (GetCapture() != control) SetCapture(control);
@@ -469,7 +490,7 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
                     ? GET_X_LPARAM(lparam) - lyric_line_drag_origin_.x
                     : GET_Y_LPARAM(lparam) - lyric_line_drag_origin_.y;
                 std::optional<std::chrono::milliseconds> target;
-                if (!lyrics_.lines.empty() && drag != 0) {
+                if (ActiveLyricDragAllowed() && !lyrics_.lines.empty() && drag != 0) {
                     const HDC dc = GetDC(control);
                     if (dc) {
                         const HGDIOBJ old_font = SelectObject(dc,
@@ -514,6 +535,8 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
         if (text_control) {
             lyric_line_dragging_ = false;
             lyric_line_drag_offset_ = 0;
+            if (message == WM_CANCELMODE && GetCapture() == control)
+                ReleaseCapture();
         } else if (lyric_pressed_command_ == identifier) {
             lyric_pressed_command_ = 0;
         }
@@ -574,12 +597,10 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
             reinterpret_cast<WPARAM>(lyric_window_), lparam);
     case WM_SETCURSOR:
         if (text_control) {
-            POINT point{};
-            GetCursorPos(&point);
-            ScreenToClient(control, &point);
+            // 00442C5A's hand cursor belongs to prompt links, not lyric rows.
             const LPCWSTR cursor = lyric_line_dragging_
                 ? (ActiveLyricScrollMode() != 0 ? IDC_SIZEWE : IDC_SIZENS)
-                : LyricTextHitTest(control, point) ? IDC_HAND : IDC_ARROW;
+                : IDC_ARROW;
             SetCursor(LoadCursorW(nullptr, cursor));
         } else {
             SetCursor(LoadCursorW(nullptr, IDC_ARROW));
@@ -817,6 +838,11 @@ int PlayerWindow::ActiveLyricScrollMode() const noexcept {
         return settings_.lyric.fullscreen_scroll_mode;
     return mini_mode_ ? settings_.lyric.mini_scroll_mode
                       : settings_.lyric.scroll_mode;
+}
+
+bool PlayerWindow::ActiveLyricDragAllowed() const noexcept {
+    return fullscreen_lyric_detached_
+        ? settings_.lyric.fullscreen_drag_lyric : settings_.lyric.drag_lyric;
 }
 
 int PlayerWindow::ActiveLyricTextAlign() const noexcept {
@@ -1240,9 +1266,11 @@ void PlayerWindow::ApplyFullScreenLyricTransparency() {
         SWP_FRAMECHANGED);
     RedrawWindow(lyric_control_, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+    UpdateFullScreenLyricInput();
 }
 
 void PlayerWindow::DestroyLyricControls() {
+    DestroyFullScreenLyricInput();
     if (lyric_window_) RemoveToolTipTools(lyric_window_);
     DestroyLyricEditor();
     if (lyric_control_)
@@ -1926,6 +1954,8 @@ std::optional<std::chrono::milliseconds> PlayerWindow::LyricDragTime(
 }
 
 bool PlayerWindow::LyricTextHitTest(HWND control, POINT point) const {
+    // Rendered-row geometry (also used by input regression tests). This does
+    // not identify 00442360's separate actionable prompt/link entries.
     if (!control || lyrics_.lines.empty() || !skin_ || !skin_->Lyric().valid)
         return false;
     RECT client{};
@@ -3254,6 +3284,22 @@ void PlayerWindow::PrepareFullScreenLyricMenu(HMENU menu) const {
             kCmdDesktopLyrics}) {
         DeleteMenu(menu, command, MF_BYCOMMAND);
     }
+
+    // Community fullscreen extension. Insert only after the original
+    // positional deletions, so normal lyric commands keep their layout.
+    // Reuse resource 2232's effect labels and the EXE's album label; the
+    // existing 0x8086..0x8089 WM_COMMAND route applies the selected effect.
+    for (UINT index = 0; index < 4; ++index) {
+        const auto label = index == 3
+            ? LoadResourceText(GetModuleHandleW(nullptr), IDS_FULLSCREEN_ALBUM)
+            : ResourceListItem(ResourceModule(), 2232, index);
+        const bool selected = fullscreen_mode_ == 3 &&
+            settings_.visual.type == static_cast<int>(index + 1);
+        InsertMenuW(menu, index, MF_BYPOSITION | MF_STRING |
+                    (selected ? MF_CHECKED : MF_UNCHECKED),
+                    kCmdVisualDream + index, label.c_str());
+    }
+    InsertMenuW(menu, 4, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
 }
 
 void PlayerWindow::PrepareLyricEditorMenu(HMENU menu) const {

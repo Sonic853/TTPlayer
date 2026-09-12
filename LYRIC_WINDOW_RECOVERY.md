@@ -74,6 +74,13 @@ localized strings are reused.
   dragging.  Release converts the dragged pixel phase to an interpolated
   timestamp between the selected line and its successor; the last line uses
   the original synthetic `+60000 ms` endpoint.  Escape/capture loss cancels.
+- Corrected text hit testing (2026-09-12): `00442360 -> 00441FEF` tests
+  separate prompt/link entries (`+0x110/+0x114`, `+0x130/+0x134`), not every
+  timed lyric row. `00442671` routes a hit link to `0x7F9`/open. The rebuild
+  previously excluded all lyric text from dragging and displayed a false
+  hand cursor. Normal/mini timed text now shares the blank-area capture/seek
+  path, still gated by `DragLyric`; fullscreen uses independent `DragLyricFS`.
+  Actual host mouse input tests cover both windowed modes and scroll axes.
 - Arrow keys seek to the previous/next timed line.
 - `00442A97 -> 0043E92C -> 0043D7D0` makes the wheel adjust every lyric
   timestamp by 500 ms when `MouseWheelAdjust` is enabled.  It does **not** seek

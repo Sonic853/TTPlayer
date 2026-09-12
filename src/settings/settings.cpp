@@ -973,13 +973,16 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
     if (auto node=SelectOwned(doc,L"/ttplayer/FullScreen")) {
         auto* const n=node.Get();
         s.fullscreen.visual_type=std::clamp(
-            IntAttr(n,L"VisualType",s.fullscreen.visual_type),0,3);
-        constexpr std::array<const wchar_t*,4> relation_names{
+            IntAttr(n,L"VisualType",s.fullscreen.visual_type),0,4);
+        s.fullscreen.album_fallback_image=StringAttr(n,L"AlbumFallbackImage");
+        s.fullscreen.album_transparency_percent=std::clamp(IntAttr(
+            n,L"AlbumTransparency",s.fullscreen.album_transparency_percent),0,100);
+        constexpr std::array<const wchar_t*,5> relation_names{
             L"PosRelationAll",L"PosRelationGoom",
-            L"PosRelationSpectrum",L"PosRelationBlurScope"};
-        constexpr std::array<const wchar_t*,4> size_names{
+            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum"};
+        constexpr std::array<const wchar_t*,5> size_names{
             L"LrcSizeAll",L"LrcSizeGoom",
-            L"LrcSizeSpectrum",L"LrcSizeBlurScope"};
+            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum"};
         for(size_t index=0;index<relation_names.size();++index) {
             // CSettings preserves the raw profile integers in TTPlayer.xml.
             // Full-screen layout normalizes them only when it consumes the
@@ -1149,6 +1152,10 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         s.lyric.auto_width_only_vertical=IntAttr(
             n,L"AutoWidthOnlyVert",s.lyric.auto_width_only_vertical ? 1 : 0)!=0;
         s.lyric.drag_lyric=IntAttr(n,L"DragLyric",1)!=0;
+        // Older configurations used DragLyric for every mode. Migrate that
+        // preference only when the new independent fullscreen flag is absent.
+        s.lyric.fullscreen_drag_lyric=IntAttr(
+            n,L"DragLyricFS",s.lyric.drag_lyric ? 1 : 0)!=0;
         s.lyric.mouse_wheel_adjust=IntAttr(n,L"MouseWheelAdjust",0)!=0;
         s.lyric.save_compress=IntAttr(
             n,L"SaveCompress",s.lyric.save_compress ? 1 : 0)!=0;
@@ -1736,13 +1743,16 @@ void SaveWindowState(const std::filesystem::path& path,
     if(auto* element=EnsureElement(document,L"FullScreen")) {
         auto element_owner=AdoptCom(element);
         SetAttribute(element,L"VisualType",
-                     std::clamp(settings.fullscreen.visual_type,0,3));
-        constexpr std::array<const wchar_t*,4> relation_names{
+                     std::clamp(settings.fullscreen.visual_type,0,4));
+        SetAttribute(element,L"AlbumFallbackImage",settings.fullscreen.album_fallback_image);
+        SetAttribute(element,L"AlbumTransparency",
+                     std::clamp(settings.fullscreen.album_transparency_percent,0,100));
+        constexpr std::array<const wchar_t*,5> relation_names{
             L"PosRelationAll",L"PosRelationGoom",
-            L"PosRelationSpectrum",L"PosRelationBlurScope"};
-        constexpr std::array<const wchar_t*,4> size_names{
+            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum"};
+        constexpr std::array<const wchar_t*,5> size_names{
             L"LrcSizeAll",L"LrcSizeGoom",
-            L"LrcSizeSpectrum",L"LrcSizeBlurScope"};
+            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum"};
         for(size_t index=0;index<relation_names.size();++index) {
             SetAttribute(element,relation_names[index],
                          settings.fullscreen.position_relation[index]);
@@ -1856,6 +1866,7 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"AutoWidthOnlyVert",
                      settings.lyric.auto_width_only_vertical ? 1 : 0);
         SetAttribute(element,L"DragLyric",settings.lyric.drag_lyric ? 1 : 0);
+        SetAttribute(element,L"DragLyricFS",settings.lyric.fullscreen_drag_lyric ? 1 : 0);
         SetAttribute(element,L"MouseWheelAdjust",
                      settings.lyric.mouse_wheel_adjust ? 1 : 0);
         SetAttribute(element,L"SaveCompress",

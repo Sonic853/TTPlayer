@@ -3,6 +3,7 @@
 #include "project_links.h"
 #include "output_devices.h"
 #include "modern_file_dialog.h"
+#include "../app/resource_ids.h"
 #include "ttplayer/app/worker_process.h"
 #include "ttplayer/build_date.h"
 #include "ttplayer/settings/file_association.h"
@@ -58,6 +59,49 @@ constexpr int kOptionsNavigation = 0xe910;
 constexpr int kOptionsHeader = 0xe911;
 constexpr int kOptionsRelated = 0xe912;
 constexpr int kOptionsDiscordLyrics = 0xe913;
+
+std::wstring AlbumOptionText(UINT id) {
+    wchar_t text[256]{};
+    const int length = LoadStringW(GetModuleHandleW(nullptr), id, text,
+                                   static_cast<int>(std::size(text)));
+    return {text, static_cast<size_t>(length)};
+}
+
+void PopulateAlbumBackgroundOptions(HWND dialog, HINSTANCE instance,
+                                    const settings::FullScreenSettings& settings) {
+    if (!GetDlgItem(dialog, IDC_FULLSCREEN_ALBUM_PATH)) {
+        // Resource 263 has an unused lower 53-DLU strip. Keep its original
+        // two groups (including the shared lyric background colour) intact.
+        const auto add = [&](LPCWSTR window_class, UINT label, int id,
+                             DWORD style, RECT rect, DWORD exstyle = 0) {
+            MapDialogRect(dialog, &rect);
+            const auto caption = label ? AlbumOptionText(label) : std::wstring{};
+            const HWND control = CreateWindowExW(exstyle, window_class, caption.c_str(),
+                WS_CHILD | WS_VISIBLE | style, rect.left, rect.top,
+                rect.right - rect.left, rect.bottom - rect.top, dialog,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
+            SendMessageW(control, WM_SETFONT, SendMessageW(dialog, WM_GETFONT, 0, 0), FALSE);
+        };
+        add(WC_BUTTONW, IDS_FULLSCREEN_ALBUM_GROUP, -1, BS_GROUPBOX, {7,162,273,213});
+        add(WC_STATICW, IDS_FULLSCREEN_ALBUM_FALLBACK, -1, 0, {13,176,54,189});
+        add(WC_EDITW, 0, IDC_FULLSCREEN_ALBUM_PATH, WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL,
+            {55,174,194,188}, WS_EX_CLIENTEDGE);
+        add(WC_BUTTONW, IDS_FULLSCREEN_ALBUM_BROWSE, IDC_FULLSCREEN_ALBUM_BROWSE,
+            WS_TABSTOP | BS_PUSHBUTTON, {198,174,230,188});
+        add(WC_BUTTONW, IDS_FULLSCREEN_ALBUM_CLEAR, IDC_FULLSCREEN_ALBUM_CLEAR,
+            WS_TABSTOP | BS_PUSHBUTTON, {233,174,267,188});
+        add(WC_STATICW, IDS_FULLSCREEN_ALBUM_TRANSPARENCY, -1, 0, {13,195,55,208});
+        add(TRACKBAR_CLASSW, 0, IDC_FULLSCREEN_ALBUM_TRANSPARENCY,
+            WS_TABSTOP | TBS_HORZ | TBS_NOTICKS, {55,192,229,210});
+        add(WC_STATICW, 0, IDC_FULLSCREEN_ALBUM_PERCENT, 0, {235,195,267,208});
+    }
+    SetDlgItemTextW(dialog, IDC_FULLSCREEN_ALBUM_PATH, settings.album_fallback_image.c_str());
+    SendDlgItemMessageW(dialog, IDC_FULLSCREEN_ALBUM_TRANSPARENCY, TBM_SETRANGE, FALSE, MAKELPARAM(0,100));
+    const int percent = std::clamp(settings.album_transparency_percent, 0, 100);
+    SendDlgItemMessageW(dialog, IDC_FULLSCREEN_ALBUM_TRANSPARENCY, TBM_SETPOS, TRUE, percent);
+    SetDlgItemTextW(dialog, IDC_FULLSCREEN_ALBUM_PERCENT, (std::to_wstring(percent) + L"%").c_str());
+}
+
 constexpr int kPropertySheetApply = 0x3021;
 constexpr UINT kSaveAllOptions = 0x04d2;
 constexpr UINT kResetAllOptions = 0x04d3;
@@ -3758,6 +3802,10 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         if (!unified) settings_.fullscreen.visual_type = 1;
         PopulateResourceCombo(dialog, 2232, resources, 3,
                               unified ? -1 : 0);
+        const auto album_label = AlbumOptionText(IDS_FULLSCREEN_ALBUM);
+        SendDlgItemMessageW(dialog, 2232, CB_ADDSTRING, 0,
+                            reinterpret_cast<LPARAM>(album_label.c_str()));
+        PopulateAlbumBackgroundOptions(dialog, instance_, settings_.fullscreen);
         SetChecked(dialog, 2233, unified);
         PopulateResourceCombo(dialog, 2230, resources, 2, -1);
         const bool layered = LayeredWindowsAvailableForOptions();
@@ -3781,6 +3829,22 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetChecked(dialog, 2150, settings_.lyric.fullscreen_karaoke_mode);
         SetChecked(dialog, 2151, settings_.lyric.fullscreen_transparent);
         SetChecked(dialog, 2022, settings_.lyric.fullscreen_auto_font);
+        if (!GetDlgItem(dialog, IDC_FULLSCREEN_LYRIC_DRAG)) {
+            // Resource 263: the spare cell beside the font picker remains
+            // inside "lyrics fullscreen", above the album-background group.
+            RECT bounds{213, 139, 271, 149};
+            MapDialogRect(dialog, &bounds);
+            const auto label = AlbumOptionText(IDS_FULLSCREEN_LYRIC_DRAG);
+            const HWND checkbox = CreateWindowExW(0, WC_BUTTONW, label.c_str(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
+                dialog, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_FULLSCREEN_LYRIC_DRAG)),
+                instance_, nullptr);
+            SendMessageW(checkbox, WM_SETFONT, SendMessageW(dialog, WM_GETFONT, 0, 0), FALSE);
+            SetWindowPos(checkbox, GetDlgItem(dialog, 1036), 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        SetChecked(dialog, IDC_FULLSCREEN_LYRIC_DRAG, settings_.lyric.fullscreen_drag_lyric);
         for (const int control : {1155,1156,1158})
             MakeOwnerDrawButton(dialog, control);
         EnableWindow(GetDlgItem(dialog, 2232), !unified);
@@ -4878,9 +4942,9 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
     }
     if (all || template_id == 385) desktop_lyrics_.ApplySettings();
     if (all || template_id == 253 || template_id == 263) {
+        if (fullscreen_mode_ != 0) UpdateFullScreenLayout();
         UpdateVisualWindowLayout();
         UpdateVisualFrame();
-        if (fullscreen_mode_ != 0) UpdateFullScreenLayout();
     }
     if (all || template_id == 250 || template_id == 251 ||
         template_id == 260) RefreshPlaybackUi();
@@ -5397,6 +5461,14 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
     case WM_HSCROLL: {
         const HWND source = reinterpret_cast<HWND>(lparam);
         const UINT control = source ? static_cast<UINT>(GetDlgCtrlID(source)) : 0;
+        if (template_id == 263 && control == IDC_FULLSCREEN_ALBUM_TRANSPARENCY) {
+            settings_.fullscreen.album_transparency_percent = std::clamp(
+                static_cast<int>(SendMessageW(source, TBM_GETPOS, 0, 0)), 0, 100);
+            SetDlgItemTextW(dialog, IDC_FULLSCREEN_ALBUM_PERCENT,
+                (std::to_wstring(settings_.fullscreen.album_transparency_percent) + L"%").c_str());
+            ApplyOptionsPageRuntime(template_id);
+            return TRUE;
+        }
         if (!control || !CommitOptionsControl(dialog, template_id, control))
             CommitOptionsPage(dialog, template_id);
         options_deferred_apply_mask_ &= ~DeferredOptionsBit(template_id);
@@ -5957,6 +6029,34 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         }
         if (template_id == 263 &&
             GetPropW(dialog, kPageReadyProperty)) {
+            if (control == IDC_FULLSCREEN_LYRIC_DRAG && notification == BN_CLICKED) {
+                settings_.lyric.fullscreen_drag_lyric = IsChecked(dialog, IDC_FULLSCREEN_LYRIC_DRAG);
+                if (fullscreen_lyric_detached_ && lyric_control_ && lyric_line_dragging_ &&
+                    !settings_.lyric.fullscreen_drag_lyric)
+                    HandleLyricControlMessage(lyric_control_, WM_CANCELMODE, 0, 0);
+                UpdateFullScreenLyricInput();
+                return TRUE;
+            }
+            if ((control == IDC_FULLSCREEN_ALBUM_BROWSE ||
+                 control == IDC_FULLSCREEN_ALBUM_CLEAR) && notification == BN_CLICKED) {
+                if (control == IDC_FULLSCREEN_ALBUM_BROWSE) {
+                    ModernOpenFileOptions options;
+                    options.owner = dialog;
+                    options.title = AlbumOptionText(IDS_FULLSCREEN_ALBUM_PICKER);
+                    options.filters = {{AlbumOptionText(IDS_FULLSCREEN_ALBUM_FILTER),
+                                        L"*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff;*.ico"}};
+                    options.initial_path = settings_.fullscreen.album_fallback_image;
+                    const auto selected = ModernOpenFile(options);
+                    if (!selected) return TRUE;
+                    settings_.fullscreen.album_fallback_image = selected->wstring();
+                } else {
+                    settings_.fullscreen.album_fallback_image.clear();
+                }
+                SetDlgItemTextW(dialog, IDC_FULLSCREEN_ALBUM_PATH,
+                               settings_.fullscreen.album_fallback_image.c_str());
+                ApplyOptionsPageRuntime(template_id);
+                return TRUE;
+            }
             const auto selection = [dialog](UINT id) {
                 return SendDlgItemMessageW(dialog, static_cast<int>(id),
                                            CB_GETCURSEL, 0, 0);

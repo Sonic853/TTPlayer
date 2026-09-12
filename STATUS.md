@@ -1,5 +1,56 @@
 # Reconstruction status
 
+2026-09-12: add Dream/Spectrum/Scope/Album as the first four commands in
+the fullscreen lyric context menu, before a separator and the original
+lyric commands. Reuse DLL string-list 2232, the EXE album label and the
+existing 0x8086..0x8089 WM_COMMAND path. Check only the displayed combined
+effect; selecting an effect from lyrics-only fullscreen enters combined
+mode on the current monitor without restarting playback or losing restore
+state. Native popup tests cover all labels/IDs/checks, both fullscreen lyric
+modes and retained lyric/monitor menus; command tests cover all four effects
+while playing/paused. See FULLSCREEN_ALBUM_BACKGROUND.md.
+
+2026-09-12: fix normal/mini lyric text dragging. Earlier recovery mistakenly
+used every timed row's text rectangle as 00442360's clickable-link hit test.
+00441FEF instead tests separate prompt/link entries; 00442671 forwards their
+link to 0x7F9/open. Remove this false exclusion and hand cursor from timed
+rows; both text and blank space now capture and seek through the same path.
+Keep normal/mini DragLyric independent of fullscreen DragLyricFS. The new
+regression fails before the fix and passes afterwards; native child-window
+SendInput verifies text/blank dragging, both axes, paused/playing state,
+stationary clicks and cursors. See LYRIC_WINDOW_RECOVERY.md and
+FULLSCREEN_LYRIC_DRAG.md (which corrects the previous text-hit interpretation).
+
+2026-09-12: fix fullscreen lyric dragging from transparent blank areas, not
+only glyphs. Colour-keyed pixels bypass the lyric HWND entirely. Add an
+input-only no-redirection popup covering the lyric client rectangle, with
+coordinate forwarding to the existing capture/direct-seek handler and lyric
+context menu. Preserve the underlying image pixels and follow monitor,
+size, visibility and z-order changes; destroy the proxy when no longer needed.
+Native host SendInput tests cover text/blank dragging in both fullscreen
+modes/scroll directions, paused/playing seeks, blank-area menus, unchanged
+background pixels, both attached monitors and proxy lifecycle cleanup.
+See FULLSCREEN_LYRIC_DRAG.md for the Windows 8+/DWM compatibility boundary.
+
+2026-09-12: add "允许拖拽歌词" to Options / Fullscreen / Lyrics fullscreen.
+Persist Lyric/DragLyricFS independently, migrating absent values from the
+old shared DragLyric preference. Allow fullscreen text glyphs to initiate
+capture (colour-keyed background pixels cannot), while retaining normal/
+mini hit-test behaviour. Reuse direct seeking and its clock handoff; cancel
+on disable, Escape, capture loss or WM_CANCELMODE without seeking. Release
+and six host regressions pass. See FULLSCREEN_LYRIC_DRAG.md.
+
+2026-09-12: add the community album-image background to combined fullscreen.
+Keep 5.7.9's lyric layout/scrolling and add an independent fourth effect
+profile (or share All); preserve the visual-only fullscreen modes. Album
+art takes precedence over a user-picked fallback image, center-cropped with
+cover fill and an image-only transparency slider. Reuse Lyric/BkgndColorFS
+instead of introducing another background colour. Decode WIC first, OLE
+second, cache complete frames, and publish reconfiguration/cover state under
+one render lock. Original resource-263 options and fullscreen context menus
+are extended without altering resource DLLs or existing user configuration.
+See FULLSCREEN_ALBUM_BACKGROUND.md for persistence, scope and host tests.
+
 2026-09-12: restore desktop-lyric track popups and state-dependent control
 tips from 5.7.9. Share 00461BAE -> 004813C1 track-menu initialization with
 the main window; remove NONOTIFY from desktop tracking so the root popup

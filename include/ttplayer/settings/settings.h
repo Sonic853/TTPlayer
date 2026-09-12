@@ -155,10 +155,14 @@ struct VisualSettings {
 };
 // CSettings +0x788..+0x7A8.  VisualType 0 uses the shared "All" profile;
 // values 1..3 select the independent Goom/Spectrum/BlurScope profile.
+// Community extension: profile 4 is the combined fullscreen album background.
 struct FullScreenSettings {
     int visual_type{1};
-    std::array<int, 4> position_relation{0, 1, 0, 1};
-    std::array<int, 4> lyric_size{2, 2, 2, 2};
+    std::array<int, 5> position_relation{0, 1, 0, 1, 1};
+    std::array<int, 5> lyric_size{2, 2, 2, 2, 2};
+    std::wstring album_fallback_image;
+    int album_transparency_percent{}; // 0 = opaque, 100 = no image
+    // Background colour is LyricSettings::fullscreen_background_color.
 };
 struct DesktopLyricColorProfile {
     std::wstring name;
@@ -341,6 +345,7 @@ struct LyricSettings {
     bool fullscreen_karaoke_mode{};
     bool fullscreen_transparent{};
     bool fullscreen_auto_font{true};
+    bool fullscreen_drag_lyric{true};
     LOGFONTW fullscreen_font{};
     bool fullscreen_font_valid{};
     COLORREF fullscreen_text_color{RGB(0,128,192)};

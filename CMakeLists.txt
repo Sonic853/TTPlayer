@@ -74,6 +74,7 @@ add_library(ttplayer_core
   src/ui/modern_file_dialog.cpp
   src/ui/player_control_packet.cpp
   src/ui/player_window_lyrics.cpp
+  src/ui/player_window_lyric_input.cpp
   src/ui/player_window_library.cpp
   src/ui/player_window_options.cpp
   src/ui/player_window_playlist.cpp
@@ -84,6 +85,7 @@ add_library(ttplayer_core
   src/ui/playlist_network_commands.cpp
   src/ui/playlist_transforms.cpp
   src/ui/player_window_visual.cpp
+  src/ui/album_background.cpp
   src/ui/player_window_visual_options.cpp
   src/ui/shell_send_to.cpp
   src/ui/window_drag.cpp
@@ -97,7 +99,7 @@ target_compile_definitions(ttplayer_core PRIVATE UNICODE _UNICODE NOMINMAX WIN32
 target_compile_options(ttplayer_core PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_core PUBLIC
   winmm ole32 oleaut32 comsuppw uuid msimg32 shell32 shlwapi comctl32 comdlg32
-  windowscodecs gdiplus dsound setupapi
+  windowscodecs gdiplus dsound setupapi dwmapi
   mfplat mfreadwrite mfuuid propsys
 )
 
@@ -152,6 +154,22 @@ endif()
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
 if(BUILD_TESTING)
+add_executable(fullscreen_lyric_drag_tests src/ui/fullscreen_lyric_drag_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(fullscreen_lyric_drag_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(fullscreen_lyric_drag_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(fullscreen_lyric_drag_tests PRIVATE ttplayer_core)
+add_test(NAME fullscreen_lyric_drag_tests COMMAND fullscreen_lyric_drag_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(fullscreen_lyric_drag_tests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+
+add_executable(fullscreen_album_tests src/ui/fullscreen_album_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(fullscreen_album_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(fullscreen_album_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(fullscreen_album_tests PRIVATE ttplayer_core)
+add_test(NAME fullscreen_album_tests COMMAND fullscreen_album_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(fullscreen_album_tests PROPERTIES TIMEOUT 45)
+
 add_executable(desktop_lyrics_menu_tests src/ui/desktop_lyrics_menu_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(desktop_lyrics_menu_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

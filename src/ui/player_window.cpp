@@ -1265,6 +1265,7 @@ PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(se
 }
 
 PlayerWindow::~PlayerWindow() {
+    DestroyFullScreenLyricInput();
     ShutdownMediaLibrary();
     ShutdownPlaylistInfoLoading();
     if (playlist_metadata_cancel_)
@@ -2635,9 +2636,12 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             // flags 0x208 here.  CheckMenuRadioItem would mutate the menu
             // item type to MFT_RADIOCHECK and draw a round bullet, whereas
             // the original visual menu keeps the ordinary tick glyph.
-            CheckMenuItem(popup,
-                kCmdVisualFirst + static_cast<UINT>(settings_.visual.type),
-                MF_BYCOMMAND | MF_CHECKED);
+            // The fullscreen lyric menu now starts with these same four
+            // commands. Lyrics-only mode has no displayed visual to check.
+            if (fullscreen_mode_ != 1)
+                CheckMenuItem(popup,
+                    kCmdVisualFirst + static_cast<UINT>(settings_.visual.type),
+                    MF_BYCOMMAND | MF_CHECKED);
         }
         break;
     }
@@ -2760,7 +2764,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                 HandlePlaylistCommand(kPlaylistProperties);
             } else {
                 SetVisualType(fullscreen_mode_ != 0
-                    ? (settings_.visual.type >= 3
+                    ? (settings_.visual.type >= (fullscreen_mode_ == 3 ? 4 : 3)
                         ? 1 : settings_.visual.type + 1)
                     : (settings_.visual.type + 1) % 5);
             }
