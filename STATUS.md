@@ -1,5 +1,27 @@
 # Reconstruction status
 
+2026-09-13: fix DEFAULT_SKIN__6120 LED/progress overlap. Follow
+0045127C/004512E8's glyph-sized, left/right-anchored LED child extent for
+both painting and mouse hit testing, instead of retaining the full XML
+anchor as an invisible click target. Preview renders 00:00 rather than the
+entire twelve-glyph strip. Cover the actual package's elapsed/remaining and
+playing/paused progress drags, native-height/left-alignment rules and preview
+pixels. Release builds and six targeted host regressions pass, including
+clicking the visible time to toggle elapsed/remaining. No skin package or
+user configuration changes.
+
+2026-09-13: complete PNG drawing for existing skin bitmap slots. Replace the
+remaining raw playlist background/splitter/scrollbar blits with SkinImage,
+retain sprite/cap/tile geometry, composite visual backing and lyric button
+backing before use, and flatten preview BMP keys before PNG children.
+Use PNG alpha coverage for native/resized window regions with matching PNG
+sampling; leave BMP colour keys unchanged. Synthetic tests exercise 532 XML
+image references, three-state scrollbars and mixed BMP/PNG preview pixels;
+36 PNG/75 BMP reference images and 182 local skin packages pass. Release
+build and ten targeted host regressions pass; native hover passes eight
+consecutive runs after waiting for actual mouse-message delivery.
+See SKIN_PNG_RECOVERY.md for scope and rendering boundaries.
+
 2026-09-13: fix desktop lyric toolbar hover flicker. Trace 5.7.9's
 0040A5E3 state-change-only invalidation, 00426434 no-op erase and
 0040FC78/0040A35B single-button sprite paint, distinct from the toolbar's

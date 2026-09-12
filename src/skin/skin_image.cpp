@@ -119,6 +119,43 @@ SIZE SkinImage::Size() const noexcept {
     if (borrowed_) GetObjectW(borrowed_, sizeof(bitmap), &bitmap);
     return {bitmap.bmWidth, bitmap.bmHeight};
 }
+
+SkinImage SkinImage::CoverageMask() const {
+    SkinImage result;
+    if (!IsGdiPlus()) return result;
+    // The PNG compatibility DIB contains straight BGRA copied by LockBits.
+    // GetDIBits may discard its alpha, so read the owned DIB pixels directly.
+    DIBSECTION source{};
+    if (!GetObjectW(storage_->dib, sizeof(source), &source) ||
+        !source.dsBm.bmBits || source.dsBm.bmBitsPixel != 32) return result;
+    auto data = std::make_shared<Storage>();
+    data->size = storage_->size;
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = data->size.cx;
+    info.bmiHeader.biHeight = -data->size.cy;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    void* pixels{};
+    data->dib = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+    if (!data->dib || !pixels) return result;
+    auto* target = static_cast<DWORD*>(pixels);
+    const auto* bytes = static_cast<const unsigned char*>(source.dsBm.bmBits);
+    for (LONG y = 0; y < data->size.cy; ++y) {
+        const auto* row = bytes + static_cast<size_t>(y) * source.dsBm.bmWidthBytes;
+        for (LONG x = 0; x < data->size.cx; ++x)
+            *target++ = row[x * 4 + 3] ? 0xffffffff : 0xff000000;
+    }
+    // A resized PNG mask must use the same nearest/half-pixel sampling as
+    // the image, not StretchBlt's device-dependent downsampling mode.
+    data->runtime = storage_->runtime;
+    data->image = std::make_unique<Gdiplus::Bitmap>(data->size.cx, data->size.cy,
+        data->size.cx * 4, PixelFormat32bppARGB, static_cast<BYTE*>(pixels));
+    if (data->image->GetLastStatus() != Gdiplus::Ok) return result;
+    result.storage_ = std::move(data);
+    return result;
+}
+
 bool SkinImage::Draw(HDC dc, int x, int y, int width, int height,
     int sx, int sy, int sw, int sh, COLORREF transparent, BYTE opacity) const {
     if (!dc || !static_cast<HBITMAP>(*this) || width <= 0 || height <= 0 ||

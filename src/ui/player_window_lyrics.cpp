@@ -1475,26 +1475,8 @@ void PlayerWindow::UpdateLyricWindowRegion() {
     const int height = client.bottom;
     if (width <= 0 || height <= 0) return;
     const auto& layout = skin_->Lyric();
-    HRGN region{};
-    if (width == layout.background.size.cx && height == layout.background.size.cy) {
-        region = CreateColorKeyRegion(layout.background.image, width, height,
-                                      skin_->TransparentColor());
-    } else {
-        const HDC screen = GetDC(nullptr);
-        const HDC canvas = CreateCompatibleDC(screen);
-        const HBITMAP rendered = CreateCompatibleBitmap(screen, width, height);
-        ReleaseDC(nullptr, screen);
-        if (canvas && rendered) {
-            const HGDIOBJ old = SelectObject(canvas, rendered);
-            DrawResizableSkinBitmap(canvas, layout.background, layout.resize_rect,
-                                    width, height, layout.resize_tile);
-            SelectObject(canvas, old);
-            region = CreateColorKeyRegion(rendered, width, height,
-                                          skin_->TransparentColor());
-        }
-        if (rendered) DeleteObject(rendered);
-        if (canvas) DeleteDC(canvas);
-    }
+    HRGN region = CreateSkinWindowRegion(layout.background, layout.resize_rect,
+        width, height, layout.resize_tile, skin_->TransparentColor());
     RECT bounds{};
     if (!region || GetRgnBox(region, &bounds) == NULLREGION ||
         !SetWindowRgn(lyric_window_, region, TRUE)) {
@@ -1601,6 +1583,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc) const {
             dc, std::max<LONG>(1, parent_client.right),
             std::max<LONG>(1, parent_client.bottom));
         const HGDIOBJ old_parent = SelectObject(parent_dc, parent_bitmap);
+        FillRect(parent_dc, &parent_client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
         DrawResizableSkinBitmap(parent_dc, layout.background, layout.resize_rect,
             parent_client.right, parent_client.bottom, layout.resize_tile);
         DrawElementFrame(parent_dc, layout.title, LyricElementBounds(layout.title),

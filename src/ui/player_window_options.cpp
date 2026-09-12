@@ -2069,8 +2069,10 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source) {
     // Reading the DIB bits does not require selecting that bitmap into a
     // second DC and is the same operation used by CreateWindowRegion.  Keep a
     // BitBlt fallback for device-dependent bitmaps supplied by old packages.
-    const int copied = GetDIBits(screen, source.Background(), 0,
-        static_cast<UINT>(height), pixels, &bitmap_info, DIB_RGB_COLORS);
+    const bool alpha_background = source.Background().IsGdiPlus();
+    const int copied = alpha_background ? height : GetDIBits(screen,
+        source.Background(), 0, static_cast<UINT>(height), pixels,
+        &bitmap_info, DIB_RGB_COLORS);
     const HGDIOBJ old_target = SelectObject(target, bitmap);
     if (!old_target || old_target == HGDI_ERROR) {
         DeleteDC(image);
@@ -2079,7 +2081,12 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source) {
         ReleaseDC(nullptr, screen);
         return nullptr;
     }
-    if (copied != height) {
+    if (alpha_background) {
+        const RECT bounds{0, 0, background.bmWidth, height};
+        FillRect(target, &bounds, GetSysColorBrush(COLOR_WINDOW));
+        source.Background().Draw(target, 0, 0, background.bmWidth, height,
+                                  0, 0, background.bmWidth, height);
+    } else if (copied != height) {
         const HGDIOBJ old_background = SelectObject(image, source.Background());
         const bool copied_by_blt = old_background && old_background != HGDI_ERROR &&
             BitBlt(target, 0, 0, background.bmWidth, height,
@@ -2096,10 +2103,37 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source) {
         }
     }
     ReleaseDC(nullptr, screen);
+    // Flatten the BMP backing before PNG children are composited. A final
+    // colour-key pass would remove opaque magenta PNG pixels and blend
+    // translucent edges against magenta rather than the preview matte.
+    GdiFlush();
+    if (!alpha_background) {
+        const COLORREF transparent = source.TransparentColor();
+        const COLORREF window_color = GetSysColor(COLOR_WINDOW);
+        auto* bytes = static_cast<unsigned char*>(pixels);
+        const size_t pixel_count = static_cast<size_t>(background.bmWidth) * height;
+        for (size_t index = 0; index < pixel_count; ++index) {
+            unsigned char* pixel = bytes + index * 4;
+            if (pixel[0] == GetBValue(transparent) &&
+                pixel[1] == GetGValue(transparent) &&
+                pixel[2] == GetRValue(transparent)) {
+                pixel[0] = GetBValue(window_color);
+                pixel[1] = GetGValue(window_color);
+                pixel[2] = GetRValue(window_color);
+                pixel[3] = 0xff;
+            }
+        }
+    }
     for (const auto& element : source.Elements()) {
         if (IsSuppressedSkinControl(element.name)) continue;
         if (element.name == L"pause") continue;
         if (element.name.starts_with(L"mode_") && element.name != L"mode_single") continue;
+        if (element.name == L"led") {
+            // The strip contains twelve glyphs, not one static decoration.
+            DrawSkinLed(target, element, FormatLedTime(std::chrono::milliseconds(0)),
+                        source.TransparentColor());
+            continue;
+        }
         if (element.image && element.image_size.cx > 0 &&
             element.image_size.cy > 0) {
             const int frames = std::max(1, element.frames);
@@ -2136,27 +2170,6 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source) {
         }
     }
 
-    // FUN_0049A6EF passes the rendered preview, the package transparent
-    // colour, and GetSysColor(COLOR_WINDOW) to FUN_00445709 before the page
-    // ever scales it.  Flatten the key here as well.  Besides matching the
-    // native white preview background this avoids relying on TransparentBlt
-    // when the options page is painted through WM_PRINTCLIENT.
-    const COLORREF transparent = source.TransparentColor();
-    const COLORREF window_color = GetSysColor(COLOR_WINDOW);
-    auto* bytes = static_cast<unsigned char*>(pixels);
-    const size_t pixel_count = static_cast<size_t>(background.bmWidth) *
-                               static_cast<size_t>(height);
-    for (size_t index = 0; index < pixel_count; ++index) {
-        unsigned char* pixel = bytes + index * 4;
-        if (pixel[0] == GetBValue(transparent) &&
-            pixel[1] == GetGValue(transparent) &&
-            pixel[2] == GetRValue(transparent)) {
-            pixel[0] = GetBValue(window_color);
-            pixel[1] = GetGValue(window_color);
-            pixel[2] = GetRValue(window_color);
-            pixel[3] = 0xff;
-        }
-    }
     SelectObject(target, old_target);
     DeleteDC(image);
     DeleteDC(target);
@@ -2246,6 +2259,10 @@ LRESULT CALLBACK OptionsSkinPreviewSubclassProc(
 }
 
 } // namespace
+
+HBITMAP detail::RenderSkinPreview(const skin::LegacySkin& source) {
+    return RenderLegacySkinPreview(source);
+}
 
 bool detail::ShowLegacyPresetColor(
     HWND owner, HWND button, HMODULE resources, COLORREF initial,
@@ -5237,7 +5254,7 @@ void PlayerWindow::UpdateOptionsSkinDetails(HWND dialog) {
             package.ExtractTo(cache, ttpcomm_module_);
             auto preview = skin::LegacySkin::Load(cache);
             if (preview.Valid()) {
-                options_skin_preview_ = RenderLegacySkinPreview(preview);
+                options_skin_preview_ = RenderSkinPreview(preview);
             }
         } catch (const std::exception&) {
             options_skin_preview_ = nullptr;

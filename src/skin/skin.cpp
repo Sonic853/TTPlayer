@@ -1264,7 +1264,10 @@ const SkinElement* LegacySkin::FindMini(std::wstring_view name) const {
 }
 
 HRGN LegacySkin::CreateWindowRegion(bool mini) const {
-    const HBITMAP background = mini ? mini_.background : background_;
+    const auto& image = mini ? mini_.background : background_;
+    const auto mask = image.IsGdiPlus() ? image.CoverageMask() : image;
+    const HBITMAP background = mask;
+    const COLORREF transparent = image.IsGdiPlus() ? RGB(0, 0, 0) : transparent_color_;
     if (!background) return nullptr;
     BITMAP info{};
     GetObjectW(background, sizeof(info), &info);
@@ -1288,7 +1291,7 @@ HRGN LegacySkin::CreateWindowRegion(bool mini) const {
             if (x < info.bmWidth) {
                 const size_t offset = (static_cast<size_t>(y) * info.bmWidth + x) * 4;
                 const COLORREF color = RGB(pixels[offset + 2], pixels[offset + 1], pixels[offset]);
-                opaque = color != transparent_color_;
+                opaque = color != transparent;
             }
             if (opaque && run < 0) run = x;
             if (!opaque && run >= 0) {

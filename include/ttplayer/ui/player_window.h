@@ -180,6 +180,7 @@ private:
     [[nodiscard]] bool IsSkinElementChecked(std::wstring_view name) const noexcept;
     [[nodiscard]] std::wstring PlaybackStatusText() const;
     [[nodiscard]] std::wstring ChannelText() const;
+    [[nodiscard]] std::wstring CurrentLedText() const;
     [[nodiscard]] skin::SkinImage ActiveSkinBackground() const noexcept;
     [[nodiscard]] SIZE ActiveSkinSize() const noexcept;
     [[nodiscard]] const std::vector<skin::SkinElement>& ActiveSkinElements() const noexcept;

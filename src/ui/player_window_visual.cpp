@@ -542,7 +542,7 @@ public:
     }
 
     void Configure(const settings::VisualSettings& settings, SIZE size,
-                   bool full_screen = false, HBITMAP background = nullptr,
+                   bool full_screen = false, const skin::SkinImage& background = {},
                    const RECT* background_bounds = nullptr) {
         std::scoped_lock lock(mutex_);
         output_width_ = std::max(0, static_cast<int>(size.cx));
@@ -807,33 +807,19 @@ private:
         surface_bits_ = static_cast<uint32_t*>(pixels);
     }
 
-    void CacheBackground(HBITMAP bitmap, const RECT* source_bounds) {
+    void CacheBackground(const skin::SkinImage& bitmap, const RECT* source_bounds) {
         if (!surface_dc_ || !surface_bits_ || width_ <= 0 || height_ <= 0)
             return;
         std::fill_n(surface_bits_, static_cast<size_t>(width_) * height_, 0U);
         if (bitmap && source_bounds) {
-            const HDC source = CreateCompatibleDC(surface_dc_);
-            if (source) {
-                const HGDIOBJ old = SelectObject(source, bitmap);
-                const int source_width = source_bounds->right -
-                                         source_bounds->left;
-                const int source_height = source_bounds->bottom -
-                                          source_bounds->top;
-                if (source_width == width_ && source_height == height_) {
-                    BitBlt(surface_dc_, 0, 0, width_, height_, source,
-                           source_bounds->left, source_bounds->top, SRCCOPY);
-                } else if (source_width > 0 && source_height > 0) {
-                    const int previous = SetStretchBltMode(surface_dc_,
-                                                           COLORONCOLOR);
-                    StretchBlt(surface_dc_, 0, 0, width_, height_, source,
-                               source_bounds->left, source_bounds->top,
-                               source_width, source_height, SRCCOPY);
-                    SetStretchBltMode(surface_dc_, previous);
-                }
-                SelectObject(source, old);
-                DeleteDC(source);
-            }
+            const int previous = SetStretchBltMode(surface_dc_, COLORONCOLOR);
+            bitmap.Draw(surface_dc_, 0, 0, width_, height_,
+                        source_bounds->left, source_bounds->top,
+                        source_bounds->right - source_bounds->left,
+                        source_bounds->bottom - source_bounds->top);
+            SetStretchBltMode(surface_dc_, previous);
         }
+        GdiFlush();
         background_pixels_.assign(
             surface_bits_, surface_bits_ + static_cast<size_t>(width_) * height_);
     }
@@ -1597,7 +1583,7 @@ void PlayerWindow::UpdateVisualWindowLayout() {
     SetWindowPos(visual_window_, nullptr, element->bounds.left,
                  element->bounds.top, width, height,
                  SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
-    const HBITMAP background = ActiveSkinBackground();
+    const auto background = ActiveSkinBackground();
     visual_runtime_->Configure(settings_.visual, {width, height}, false,
                                background, &element->bounds);
     const UINT interval = settings_.visual.frames_per_second > 0
@@ -1659,14 +1645,17 @@ void PlayerWindow::PaintVisualControl(HDC dc) const {
         return;
     }
     const auto* element = FindActiveSkinElement(L"visual");
-    const HBITMAP background = ActiveSkinBackground();
+    const auto background = ActiveSkinBackground();
     if (background && element) {
-        const HDC source = CreateCompatibleDC(dc);
-        const HGDIOBJ old = SelectObject(source, background);
-        BitBlt(dc, 0, 0, client.right, client.bottom, source,
-               element->bounds.left, element->bounds.top, SRCCOPY);
-        SelectObject(source, old);
-        DeleteDC(source);
+        // Use the already-composited backing, including PNG alpha. Do not
+        // reinterpret its DIB compatibility view as an opaque drawing source.
+        if (visual_runtime_) visual_runtime_->PaintBackgroundOnly(dc, client);
+        else {
+            FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            background.Draw(dc, 0, 0, client.right, client.bottom,
+                            element->bounds.left, element->bounds.top,
+                            client.right, client.bottom);
+        }
     }
     if (visual_runtime_) visual_runtime_->Paint(dc, client);
 }

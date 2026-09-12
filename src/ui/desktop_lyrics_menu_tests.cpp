@@ -67,6 +67,8 @@ void VerifySingleBarPresentation(HWND bar) {
 void NativeHoverTests(ui::DesktopLyricsWindow& desktop) {
     Require(!(GetAsyncKeyState(VK_LBUTTON)&0x8000) && !(GetAsyncKeyState(VK_RBUTTON)&0x8000),
             "mouse is in use; retry the native hover test when idle");
+    struct PaintCount { int count{}; RECT area{}; } paints;
+    struct MoveCount { int count{}; std::vector<std::pair<UINT,LPARAM>> log; };
     struct HostState {
         POINT cursor{};
         HWND foreground=GetForegroundWindow(), bar{};
@@ -76,8 +78,19 @@ void NativeHoverTests(ui::DesktopLyricsWindow& desktop) {
             if (IsWindow(foreground)) SetForegroundWindow(foreground);
         }
         static LRESULT CALLBACK CountPaint(HWND window,UINT message,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR data) {
-            if (message==WM_PAINT) ++*reinterpret_cast<int*>(data);
+            if (message==WM_PAINT) {
+                auto& paints=*reinterpret_cast<PaintCount*>(data);
+                ++paints.count;
+                GetUpdateRect(window,&paints.area,FALSE);
+            }
             return DefSubclassProc(window,message,wp,lp);
+        }
+        static LRESULT CALLBACK CountMove(HWND window,UINT message,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR data) {
+            const auto result=DefSubclassProc(window,message,wp,lp);
+            auto& moves=*reinterpret_cast<MoveCount*>(data);
+            if (message==WM_MOUSEMOVE) ++moves.count;
+            if (message==WM_MOUSEMOVE || message==WM_MOUSELEAVE) moves.log.emplace_back(message,lp);
+            return result;
         }
     } host;
     GetCursorPos(&host.cursor);
@@ -92,7 +105,7 @@ void NativeHoverTests(ui::DesktopLyricsWindow& desktop) {
     RECT bounds{}; GetWindowRect(control,&bounds);
     SetCursorPos(bounds.left+40,bounds.top+20);
     SendMessageW(control,WM_SETCURSOR,reinterpret_cast<WPARAM>(control),MAKELPARAM(HTCLIENT,WM_MOUSEMOVE));
-    int paints{}, visited{};
+    int visited{};
     Require(SetWindowSubclass(bar,HostState::CountPaint,83,reinterpret_cast<DWORD_PTR>(&paints))!=FALSE,
             "cannot count native toolbar paints");
     host.bar=bar;
@@ -101,13 +114,36 @@ void NativeHoverTests(ui::DesktopLyricsWindow& desktop) {
         RECT rect{}; GetWindowRect(child,&rect);
         if (rect.right-rect.left<3 || rect.bottom-rect.top<3) continue;
         const POINT point{(rect.left+rect.right)/2,(rect.top+rect.bottom)/2};
-        SetCursorPos(point.x,point.y); pump(); UpdateWindow(bar); pump();
+        MoveCount moves;
+        Require(SetWindowSubclass(child,HostState::CountMove,84,reinterpret_cast<DWORD_PTR>(&moves))!=FALSE,
+                "cannot observe native hover entry");
+        struct MoveProbe {
+            HWND child;
+            ~MoveProbe() { if (IsWindow(child)) RemoveWindowSubclass(child,HostState::CountMove,84); }
+        } probe{child};
+        SetCursorPos(point.x,point.y);
+        // SetCursorPos/WindowFromPoint do not imply WM_MOUSEMOVE has reached
+        // the child. Wait for the production handler before taking the paint
+        // baseline; otherwise the initial hot transition is counted as flicker.
+        const auto deadline=GetTickCount64()+1000;
+        while (!moves.count && GetTickCount64()<deadline) pump();
+        Require(moves.count>0,"native hover entry was not delivered");
+        UpdateWindow(bar); pump();
         Require(WindowFromPoint(point)==child,"native hover point does not reach the desktop button");
-        const int initial=paints;
+        const int initial=paints.count;
         for (int i=0;i<20;++i) {
             SetCursorPos(point.x-(i%2),point.y); pump(); UpdateWindow(bar);
         }
-        Require(paints==initial,"native movement inside one button repeatedly repaints the toolbar");
+        if (paints.count!=initial) {
+            POINT cursor{}; GetCursorPos(&cursor);
+            std::cerr<<"hover repaint: command="<<GetDlgCtrlID(child)<<" count="<<paints.count-initial
+                     <<" region="<<paints.area.left<<','<<paints.area.top<<','<<paints.area.right<<','<<paints.area.bottom
+                     <<" cursor="<<cursor.x<<','<<cursor.y<<" child="<<(WindowFromPoint(cursor)==child)<<'\n';
+            for (const auto& [message,lp]:moves.log)
+                std::cerr<<" msg="<<message<<" point="<<static_cast<short>(LOWORD(lp))<<','<<static_cast<short>(HIWORD(lp));
+            std::cerr<<'\n';
+        }
+        Require(paints.count==initial,"native movement inside one button repeatedly repaints the toolbar");
         Require(IsWindowVisible(bar)!=FALSE,"toolbar disappeared while hovering a button");
         ++visited;
     }

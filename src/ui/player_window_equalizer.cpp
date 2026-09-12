@@ -522,8 +522,8 @@ void PlayerWindow::UpdateEqualizerWindowSkin(bool saved_bounds) {
 void PlayerWindow::UpdateEqualizerWindowRegion() {
     if (!equalizer_window_ || !skin_ || !skin_->Equalizer().valid) return;
     const auto& background = skin_->Equalizer().background;
-    HRGN region = CreateColorKeyRegion(background.image,
-        background.size.cx, background.size.cy, skin_->TransparentColor());
+    HRGN region = CreateSkinWindowRegion(background, {},
+        background.size.cx, background.size.cy, false, skin_->TransparentColor());
     RECT bounds{};
     if (!region || GetRgnBox(region, &bounds) == NULLREGION ||
         !SetWindowRgn(equalizer_window_, region, TRUE)) {
@@ -724,6 +724,8 @@ void PlayerWindow::PaintEqualizer(HDC dc) const {
     const HDC canvas = CreateCompatibleDC(dc);
     const HBITMAP buffer = CreateCompatibleBitmap(dc, size.cx, size.cy);
     const HGDIOBJ old_buffer = SelectObject(canvas, buffer);
+    const RECT background_bounds{0, 0, size.cx, size.cy};
+    FillRect(canvas, &background_bounds, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
     layout.background.image.Draw(canvas, 0, 0, size.cx, size.cy, 0, 0, size.cx, size.cy);
 
     const auto button_state = [this](int hit, bool checked = false) {

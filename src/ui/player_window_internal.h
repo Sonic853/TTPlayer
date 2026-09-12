@@ -442,6 +442,9 @@ void DrawResizableSkinBitmap(HDC target, const skin::SkinBitmap& bitmap,
                              RECT resize_rect, int width, int height, bool tile);
 HRGN CreateColorKeyRegion(HBITMAP bitmap, int width, int height,
                           COLORREF transparent);
+HRGN CreateSkinWindowRegion(const skin::SkinBitmap& bitmap, RECT resize_rect,
+                           int width, int height, bool tile, COLORREF transparent);
+HBITMAP RenderSkinPreview(const skin::LegacySkin& source);
 RECT ResolveAlignedRect(RECT bounds, unsigned int alignment, SIZE native,
                         int width, int height, SIZE image_size = {});
 void DrawElementFrame(HDC target, const skin::SkinElement& element, RECT bounds,
@@ -467,6 +470,9 @@ void DrawScrollingSkinInfo(HDC dc, const skin::SkinElement& element,
 std::wstring FormatInfoDuration(std::chrono::milliseconds duration);
 std::wstring FormatAudioDescription(const audio::AudioFormat& format);
 std::wstring FormatLedTime(std::chrono::milliseconds position);
+RECT SkinLedBounds(const skin::SkinElement& led, std::wstring_view value);
+void DrawSkinLed(HDC dc, const skin::SkinElement& led, std::wstring_view value,
+                 COLORREF transparent);
 bool ReadEqualizerProfileFile(const std::filesystem::path& path,
                               std::array<int, 11>& values);
 bool WriteEqualizerProfileFile(const std::filesystem::path& path,

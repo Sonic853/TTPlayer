@@ -492,16 +492,12 @@ void DrawPlaylistScrollbarThumb(HDC target, const skin::SkinBitmap& bitmap,
     frame = std::clamp(frame, 0, 2);
     const int source_x = frame * frame_width;
     const int destination_height = static_cast<int>(bounds.bottom - bounds.top);
-    const HDC source = CreateCompatibleDC(target);
-    if (!source) return;
-    const HGDIOBJ old = SelectObject(source, bitmap.image);
-
     const int source_height = static_cast<int>(bitmap.size.cy);
     const int center = std::clamp(resize_center, 0, source_height);
     if (center <= 0 || destination_height < source_height) {
-        BitBlt(target, bounds.left, bounds.top, destination_width,
-               std::min(destination_height, source_height),
-               source, source_x, 0, SRCCOPY);
+        const int height = std::min(destination_height, source_height);
+        bitmap.image.Draw(target, bounds.left, bounds.top, destination_width,
+                          height, source_x, 0, destination_width, height);
     } else {
         // 00488463 splits thumb_image around thumb_resize_center.  The two
         // caps remain pixel-exact; only the center is stretched or tiled.
@@ -510,8 +506,8 @@ void DrawPlaylistScrollbarThumb(HDC target, const skin::SkinBitmap& bitmap,
         const int destination_center = std::max(
             0, destination_height - top_cap - bottom_cap);
         if (top_cap > 0) {
-            BitBlt(target, bounds.left, bounds.top, destination_width, top_cap,
-                   source, source_x, 0, SRCCOPY);
+            bitmap.image.Draw(target, bounds.left, bounds.top, destination_width,
+                              top_cap, source_x, 0, destination_width, top_cap);
         }
         const int center_top = bounds.top + top_cap;
         if (destination_center > 0) {
@@ -519,26 +515,23 @@ void DrawPlaylistScrollbarThumb(HDC target, const skin::SkinBitmap& bitmap,
                 for (int written = 0; written < destination_center;) {
                     const int chunk = std::min(center,
                         destination_center - written);
-                    BitBlt(target, bounds.left, center_top + written,
-                           destination_width, chunk, source, source_x, top_cap,
-                           SRCCOPY);
+                    bitmap.image.Draw(target, bounds.left, center_top + written,
+                        destination_width, chunk, source_x, top_cap,
+                        destination_width, chunk);
                     written += chunk;
                 }
             } else {
-                StretchBlt(target, bounds.left, center_top, destination_width,
-                           destination_center, source, source_x, top_cap,
-                           frame_width, center, SRCCOPY);
+                bitmap.image.Draw(target, bounds.left, center_top,
+                    destination_width, destination_center, source_x, top_cap,
+                    frame_width, center);
             }
         }
         if (bottom_cap > 0) {
-            BitBlt(target, bounds.left,
-                   bounds.bottom - bottom_cap,
-                   destination_width, bottom_cap, source, source_x,
-                   top_cap + center, SRCCOPY);
+            bitmap.image.Draw(target, bounds.left, bounds.bottom - bottom_cap,
+                destination_width, bottom_cap, source_x, top_cap + center,
+                destination_width, bottom_cap);
         }
     }
-    SelectObject(source, old);
-    DeleteDC(source);
 }
 
 bool PlaylistWideContains(std::wstring_view value,
@@ -2954,26 +2947,8 @@ void PlayerWindow::UpdatePlaylistWindowRegion() {
     const int height = client.bottom - client.top;
     if (width <= 0 || height <= 0) return;
     const auto& layout = skin_->Playlist();
-    HRGN region = nullptr;
-    if (width == layout.background.size.cx && height == layout.background.size.cy) {
-        region = CreateColorKeyRegion(layout.background.image, width, height,
-                                      skin_->TransparentColor());
-    } else {
-        const HDC screen = GetDC(nullptr);
-        const HDC canvas = CreateCompatibleDC(screen);
-        const HBITMAP rendered = CreateCompatibleBitmap(screen, width, height);
-        ReleaseDC(nullptr, screen);
-        if (canvas && rendered) {
-            const HGDIOBJ old = SelectObject(canvas, rendered);
-            DrawResizableSkinBitmap(canvas, layout.background, layout.resize_rect,
-                                    width, height, layout.resize_tile);
-            SelectObject(canvas, old);
-            region = CreateColorKeyRegion(rendered, width, height,
-                                          skin_->TransparentColor());
-        }
-        if (rendered) DeleteObject(rendered);
-        if (canvas) DeleteDC(canvas);
-    }
+    HRGN region = CreateSkinWindowRegion(layout.background, layout.resize_rect,
+        width, height, layout.resize_tile, skin_->TransparentColor());
     RECT bounds{};
     if (!region || GetRgnBox(region, &bounds) == NULLREGION ||
         !SetWindowRgn(playlist_window_, region, TRUE)) {
@@ -3971,11 +3946,8 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
     const auto& layout = skin_->Playlist();
     if (layout.background.image) {
         if (width == layout.background.size.cx && height == layout.background.size.cy) {
-            const HDC source = CreateCompatibleDC(canvas);
-            const HGDIOBJ old = SelectObject(source, layout.background.image);
-            BitBlt(canvas, 0, 0, width, height, source, 0, 0, SRCCOPY);
-            SelectObject(source, old);
-            DeleteDC(source);
+            layout.background.image.Draw(canvas, 0, 0, width, height,
+                                         0, 0, width, height);
         } else {
             DrawResizableSkinBitmap(canvas, layout.background, layout.resize_rect,
                                     width, height, layout.resize_tile);
@@ -4074,13 +4046,10 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
                 const int arrow_width = std::max(1L, layout.splitter_arrow.size.cx / 2);
                 const int arrow_y = metrics.list.top + std::max(0L, (metrics.list.bottom - metrics.list.top -
                                                              layout.splitter_arrow.size.cy) / 2);
-                const HDC arrow_dc = CreateCompatibleDC(canvas);
-                const HGDIOBJ old_arrow = SelectObject(arrow_dc, layout.splitter_arrow.image);
-                TransparentBlt(canvas, metrics.splitter.right - arrow_width, arrow_y,
-                    arrow_width, layout.splitter_arrow.size.cy, arrow_dc, 0, 0,
+                layout.splitter_arrow.image.Draw(canvas,
+                    metrics.splitter.right - arrow_width, arrow_y,
+                    arrow_width, layout.splitter_arrow.size.cy, 0, 0,
                     arrow_width, layout.splitter_arrow.size.cy, skin_->TransparentColor());
-                SelectObject(arrow_dc, old_arrow);
-                DeleteDC(arrow_dc);
             }
         } else {
             // Default SplitterCtrl paint: Color_Text fades toward
@@ -4250,24 +4219,22 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
                 source_frame_width, metrics.scrollbar_width);
             const int button_source_height = std::max(
                 1, static_cast<int>(layout.scrollbar_buttons.size.cy / 2));
-            const HDC source = CreateCompatibleDC(canvas);
-            const HGDIOBJ old = SelectObject(source, layout.scrollbar_buttons.image);
             const int up_frame = PlaylistScrollbarImageFrame(
                 PlaylistScrollbarPart::line_up, playlist_scrollbar_hover_,
                 playlist_scrollbar_pressed_);
             const int down_frame = PlaylistScrollbarImageFrame(
                 PlaylistScrollbarPart::line_down, playlist_scrollbar_hover_,
                 playlist_scrollbar_pressed_);
-            BitBlt(canvas, metrics.scrollbar.left, metrics.scrollbar.top,
-                   destination_width, state.button_extent, source,
-                   up_frame * source_frame_width, 0, SRCCOPY);
-            BitBlt(canvas, metrics.scrollbar.left,
+            layout.scrollbar_buttons.image.Draw(canvas,
+                   metrics.scrollbar.left, metrics.scrollbar.top,
+                   destination_width, state.button_extent,
+                   up_frame * source_frame_width, 0,
+                   destination_width, state.button_extent);
+            layout.scrollbar_buttons.image.Draw(canvas, metrics.scrollbar.left,
                    metrics.scrollbar.bottom - state.button_extent,
-                   destination_width, state.button_extent, source,
+                   destination_width, state.button_extent,
                    down_frame * source_frame_width, button_source_height,
-                   SRCCOPY);
-            SelectObject(source, old);
-            DeleteDC(source);
+                   destination_width, state.button_extent);
         }
         if (layout.scrollbar_thumb.image) {
             RECT thumb_bounds{metrics.scrollbar.left, state.thumb_top,

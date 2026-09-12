@@ -17,6 +17,10 @@ public:
     static SkinImage Load(const std::filesystem::path& path);
     [[nodiscard]] bool IsGdiPlus() const noexcept;
     [[nodiscard]] SIZE Size() const noexcept;
+    // PNG window-region source: black for alpha 0, white for alpha > 0.
+    // This binary mask is only for HWND shape/hit testing, never for painting.
+    // BMP callers retain their original RGB colour-key region path.
+    [[nodiscard]] SkinImage CoverageMask() const;
     // A DIB view for legacy size/region APIs, never the PNG drawing source.
     [[nodiscard]] operator HBITMAP() const noexcept;
     bool Draw(HDC dc, int x, int y, int width, int height,

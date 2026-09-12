@@ -847,6 +847,38 @@ HRGN CreateColorKeyRegion(HBITMAP bitmap, int width, int height,
     return result;
 }
 
+HRGN CreateSkinWindowRegion(const skin::SkinBitmap& bitmap, RECT resize_rect,
+                           int width, int height, bool tile, COLORREF transparent) {
+    // Resize the coverage mask with exactly the same nine-patch/tile mapping
+    // as the background. Opaque magenta in PNG is not a BMP colour key.
+    auto source = bitmap;
+    if (bitmap.image.IsGdiPlus()) {
+        source.image = bitmap.image.CoverageMask();
+        transparent = RGB(0, 0, 0);
+    }
+    if (!source.image || width <= 0 || height <= 0) return nullptr;
+    if (width == source.size.cx && height == source.size.cy)
+        return CreateColorKeyRegion(source.image, width, height, transparent);
+    const HDC screen = GetDC(nullptr);
+    const HDC canvas = CreateCompatibleDC(screen);
+    const HBITMAP rendered = CreateCompatibleBitmap(screen, width, height);
+    ReleaseDC(nullptr, screen);
+    HRGN region{};
+    if (canvas && rendered) {
+        const HGDIOBJ old = SelectObject(canvas, rendered);
+        const RECT bounds{0, 0, width, height};
+        const HBRUSH brush = CreateSolidBrush(transparent);
+        FillRect(canvas, &bounds, brush);
+        DeleteObject(brush);
+        DrawResizableSkinBitmap(canvas, source, resize_rect, width, height, tile);
+        SelectObject(canvas, old);
+        region = CreateColorKeyRegion(rendered, width, height, transparent);
+    }
+    if (rendered) DeleteObject(rendered);
+    if (canvas) DeleteDC(canvas);
+    return region;
+}
+
 RECT ResolveAlignedRect(RECT bounds, unsigned int alignment, SIZE native,
                         int width, int height, SIZE image_size) {
     const int item_width = image_size.cx > 0 ? image_size.cx : bounds.right - bounds.left;
@@ -1137,6 +1169,34 @@ std::wstring FormatLedTime(std::chrono::milliseconds position) {
                    total / 60, seconds);
     }
     return value;
+}
+
+RECT SkinLedBounds(const skin::SkinElement& led, std::wstring_view value) {
+    if (!led.image || led.image_size.cx < 12 || led.image_size.cy <= 0 || value.empty()) return {};
+    // 0045127C computes the number of displayed glyphs; 004512E8 then
+    // resizes the actual child HWND, keeping the configured left/right edge.
+    // The full XML rectangle is an anchor, not the mouse hit rectangle.
+    const int width = led.image_size.cx / 12 * static_cast<int>(value.size());
+    RECT bounds = led.bounds;
+    if ((led.alignment & 0x0fU) == 1) bounds.right = bounds.left + width;
+    else bounds.left = bounds.right - width;
+    bounds.bottom = bounds.top + led.image_size.cy;
+    return bounds;
+}
+
+void DrawSkinLed(HDC dc, const skin::SkinElement& led, std::wstring_view value,
+                 COLORREF transparent) {
+    const RECT bounds = SkinLedBounds(led, value);
+    if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) return;
+    const int glyph_width = led.image_size.cx / 12;
+    int x = bounds.left;
+    for (const wchar_t ch : value) {
+        const int glyph = ch == L':' ? 10 : ch == L'-' ? 11 : static_cast<int>(ch - L'0');
+        if (glyph >= 0 && glyph < 12)
+            led.image.Draw(dc, x, bounds.top, glyph_width, led.image_size.cy,
+                glyph * glyph_width, 0, glyph_width, led.image_size.cy, transparent);
+        x += glyph_width;
+    }
 }
 
 bool ReadEqualizerProfileFile(const std::filesystem::path& path,
@@ -3237,6 +3297,8 @@ void PlayerWindow::PaintSkin(HDC dc) const {
     const HDC canvas = CreateCompatibleDC(dc);
     const HBITMAP buffer = CreateCompatibleBitmap(dc, size.cx, size.cy);
     const HGDIOBJ old_buffer = SelectObject(canvas, buffer);
+    const RECT background_bounds{0, 0, size.cx, size.cy};
+    FillRect(canvas, &background_bounds, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
     ActiveSkinBackground().Draw(canvas, 0, 0, size.cx, size.cy, 0, 0, size.cx, size.cy);
 
     const auto playback = audio_.State();
@@ -3469,31 +3531,7 @@ void PlayerWindow::PaintSkin(HDC dc) const {
     }
 
     if (const auto* led = FindActiveSkinElement(L"led"); led && led->image) {
-        const auto displayed_position =
-            progress_tracking_position_.value_or(audio_.Position());
-        const auto value_time = settings_.player.show_elapsed_time
-            ? displayed_position
-            : displayed_position - audio_.Duration();
-        const std::wstring value = FormatLedTime(value_time);
-        constexpr int glyph_count = 12; // 0..9, ':', '-'
-        const int source_width = led->image_size.cx / glyph_count;
-        const int source_height = led->image_size.cy;
-        // FUN_004512E8 uses the number strip's native glyph size.  The XML
-        // rectangle positions the LED control but does not scale the strip;
-        // several bundled skins deliberately specify a one-pixel-short rect.
-        const int target_height = source_height;
-        const int target_width = source_width;
-        const int display_width = target_width * static_cast<int>(value.size());
-        int x = led->bounds.right - display_width;
-        if ((led->alignment & 0x0fU) == 1) x = led->bounds.left;
-        for (const wchar_t ch : value) {
-            const int glyph = ch == L':' ? 10 : ch == L'-' ? 11
-                                                            : static_cast<int>(ch - L'0');
-            led->image.Draw(canvas, x, led->bounds.top, target_width, target_height,
-                glyph * source_width, 0, source_width, source_height,
-                skin_->TransparentColor());
-            x += target_width;
-        }
+        DrawSkinLed(canvas, *led, CurrentLedText(), skin_->TransparentColor());
     }
 
     const HICON skin_icon = settings_.general.app_icon_file.empty() &&
@@ -3645,6 +3683,12 @@ const skin::SkinElement* PlayerWindow::FindActiveSkinElement(std::wstring_view n
         ? skin_->FindMini(name) : skin_->Find(name);
 }
 
+std::wstring PlayerWindow::CurrentLedText() const {
+    const auto position = progress_tracking_position_.value_or(audio_.Position());
+    return FormatLedTime(settings_.player.show_elapsed_time
+        ? position : position - audio_.Duration());
+}
+
 std::wstring PlayerWindow::HitTestSkin(POINT point) const {
     if (!skin_) return {};
     const auto playback = audio_.State();
@@ -3658,6 +3702,7 @@ std::wstring PlayerWindow::HitTestSkin(POINT point) const {
         if (item->name == L"pause" && !active) continue;
         if (!IsSkinElementEnabled(item->name)) continue;
         RECT bounds = item->bounds;
+        if (item->name == L"led") bounds = SkinLedBounds(*item, CurrentLedText());
         if (item->name == L"pause") {
             if (const auto* play = FindActiveSkinElement(L"play")) {
                 const int width = item->image_size.cx / 4;
