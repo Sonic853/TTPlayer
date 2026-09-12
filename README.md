@@ -1,6 +1,6 @@
 # TTPlayer clean reconstruction
 
-<img width="654" height="463" alt="PixPin_2026-09-11_04-50-19" src="https://github.com/user-attachments/assets/c38933c0-aa58-458b-a0b2-929593e1669e" />
+<img width="713" height="569" alt="image" src="https://github.com/user-attachments/assets/a14ee585-7f05-4000-bac7-3a3bf81d7d79" />
 
 This is a clean, buildable rewrite around the recovered behaviour and file/ABI
 boundaries. It intentionally does not compile Ghidra pseudo-C directly.
