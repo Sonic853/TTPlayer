@@ -23,8 +23,8 @@ struct GeneralSettings {
     // runtime now maps this switch to Discord Rich Presence rather than the
     // retired MSN/Baidu Hi window-message integrations.
     bool send_title_to_msn{true};
-    // Current timed LRC line in Rich Presence; subordinate to the master switch.
-    bool discord_sync_lyrics{true};
+    // Opt-in current timed LRC line in Rich Presence; subordinate to the master switch.
+    bool discord_sync_lyrics{false};
     // Discord requires every Rich Presence producer to use an application
     // registered in its developer portal.  This is a public identifier, not
     // a credential; private builds may replace it only in TTPlayer.xml.

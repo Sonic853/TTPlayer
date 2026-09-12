@@ -152,6 +152,13 @@ endif()
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
 if(BUILD_TESTING)
+add_executable(skin_profile_tests src/skin/skin_profile_tests.cpp)
+target_compile_definitions(skin_profile_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(skin_profile_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(skin_profile_tests PRIVATE ttplayer_core)
+add_test(NAME skin_profile_tests COMMAND skin_profile_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(skin_profile_tests PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+
 add_executable(skin_alignment_tests src/skin/skin_alignment_tests.cpp)
 target_compile_definitions(skin_alignment_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(skin_alignment_tests PRIVATE /W4 /permissive- /EHsc /utf-8)

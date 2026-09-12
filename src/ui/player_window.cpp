@@ -1987,6 +1987,12 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
     if (window_) {
         if (restore_profile) {
             ApplySkinVisualSettings();
+            // 0045D5FA binds the target package (0045DDEE / 0047E6FC)
+            // before 004B605A overlays its saved profile. An existing but
+            // partial .skn.xml must not bypass Lyric.xml/Playlist.xml and
+            // retain colours or fonts from the outgoing package.
+            ApplyPlaylistSkinDefaults(skin_->Playlist(), settings_.playlist);
+            ApplyLyricSkinDefaults(skin_->Lyric(), settings_.lyric);
             SetRectEmpty(&settings_.player.mini_lyric_window);
             // 0045D5FA defaults the auxiliary visibility flags to one before
             // reading a runtime target profile; availability is applied by
@@ -1997,10 +2003,6 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
             settings_.player.equalizer_visible = true;
             profile_loaded = settings::LoadSkinVisualProfile(profile, settings_.player,
                 settings_.playlist, settings_.lyric, settings_.visual);
-            if (!profile_loaded) {
-                ApplyPlaylistSkinDefaults(skin_->Playlist(), settings_.playlist);
-                ApplyLyricSkinDefaults(skin_->Lyric(), settings_.lyric);
-            }
         } else {
             // Options Reset All supplies its own freshly built settings.
             settings_.player = previous_player;

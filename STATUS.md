@@ -1,5 +1,20 @@
 # Reconstruction status
 
+2026-09-12: default General/DiscordSyncLyrics to off for new settings, missing
+XML attributes and Reset All. Preserve explicitly saved on/off preferences;
+the master Discord song-presence switch is unchanged. See DISCORD_PRESENCE.md.
+
+2026-09-12: fix sparse per-skin profile loading. Apply target package lyric/
+playlist defaults before its sidecar, then merge only specified attributes
+instead of copying generic defaults from a freshly constructed Settings.
+Follow 5.7.9's 0045D5FA / 004B605A ordering; retain independent Default.xml
+and external .skn.xml identities and leave user configurations unchanged.
+DEFAULT_SKIN_579.skn and the DLL ZIP have identical bytes (75 entries);
+their existing profile differences are intentional and are not erased.
+Host isolated profile/pixel regression and five existing regressions pass,
+including missing, empty, malformed and partial profiles. Release builds.
+See SKIN_PROFILE_LOADING.md for evidence and the verification boundary.
+
 2026-09-12: fix Classic.skn playlist/lyric title offsets using 5.7.9's
 0042912E -> 0047A9C5 alignment rules. Center within the current client using
 the title image dimensions; keep right/bottom insets and per-axis undersize

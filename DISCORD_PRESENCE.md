@@ -82,9 +82,11 @@ until a positive endpoint exists. This does not add seeking to unseekable stream
 
 ## Synchronized lyric lines
 
-`General/@DiscordSyncLyrics` defaults to `1` and is saved in `TTPlayer.xml`.
-The General options page exposes it as **向 Discord 发送歌词**. Uncheck it (or set
-the XML attribute to `0`) to disable lyric sharing without disabling song presence.
+`General/@DiscordSyncLyrics` defaults to `0` and is saved in `TTPlayer.xml`.
+The General options page exposes it as **向 Discord 发送歌词**. New settings and
+older XML files without this attribute leave lyric sharing off. Check it (or set
+the XML attribute to `1`) to enable lyric sharing. An explicitly saved preference
+is preserved; this default change does not disable song presence.
 It remains subordinate to `SendTitleToDiscord`: when the song-presence master
 switch is off, this checkbox is disabled but its preference is retained. Changes
 apply immediately and follow the existing Save/Close/exit settings lifecycle.

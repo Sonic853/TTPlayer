@@ -1422,41 +1422,73 @@ bool LoadSkinVisualProfile(const std::filesystem::path& path,
                            LyricSettings& lyric,
                            VisualSettings& visual) {
     try {
-        auto profile = LoadLegacyXml(path);
-        // The per-skin .skn.xml file is a window/visual snapshot. FUN_004BBxxx
-        // serializes Player, Lyric and PlayList in the same profile, but attributes
-        // such as ScrollMode/DragLyric are absent and therefore retain their
-        // global TTPlayer.xml values when a package is selected.
-        // Zero rectangles are meaningful: the original treats an empty
-        // PlayerWnd2/LyricWnd2 as "not materialised for this skin yet" and
-        // creates the mini pair from the normal position on first use. Do not
-        // retain the previous skin's coordinates merely because a target
-        // sidecar contains 0,0,0,0.
-        player.player_window=profile.player.player_window;
-        player.mini_player_window=profile.player.mini_player_window;
-        player.lyric_window=profile.player.lyric_window;
-        player.mini_lyric_window=profile.player.mini_lyric_window;
-        player.playlist_window=profile.player.playlist_window;
-        player.equalizer_window=profile.player.equalizer_window;
-        player.lyric_visible=profile.player.lyric_visible;
-        player.playlist_visible=profile.player.playlist_visible;
-        player.equalizer_visible=profile.player.equalizer_visible;
-        ApplyPlaylistProfile(profile.playlist,playlist);
-        if (profile.lyric.font_valid) {
-            lyric.font = profile.lyric.font;
-            lyric.font_valid = true;
+        ComInit com;
+        if(FAILED(com.hr) && com.hr!=RPC_E_CHANGED_MODE) return false;
+        ComPtr<IXMLDOMDocument> document;
+        if(FAILED(CoCreateInstance(__uuidof(DOMDocument60),nullptr,
+                CLSCTX_INPROC_SERVER,IID_PPV_ARGS(document.GetAddressOf())))) return false;
+        document->put_async(VARIANT_FALSE);
+        VARIANT_BOOL loaded{};
+        document->load(_variant_t(path.wstring().c_str()),&loaded);
+        if(loaded!=VARIANT_TRUE || !SelectOwned(document.Get(),L"/ttplayer")) return false;
+
+        // 004B605A merges into the existing CSettings, not a new instance.
+        // 0048DDB2/0048DE50 leave colours/fonts intact when an attribute is
+        // absent or malformed. A fresh LoadLegacyXml result injected generic
+        // playlist defaults here and discarded the target package's palette.
+        auto next_player=player;
+        auto next_playlist=playlist;
+        auto next_lyric=lyric;
+        auto next_visual=visual;
+        if(auto node=SelectOwned(document.Get(),L"/ttplayer/Player")) {
+            auto* n=node.Get();
+            const auto rectangle=[&](const wchar_t* name,RECT& target) {
+                // An explicit zero resets an unmaterialised mini pair;
+                // an absent attribute is not an explicit zero rectangle.
+                if(Attribute(n,name).vt!=VT_EMPTY) target=RectAttr(n,name);
+            };
+            rectangle(L"PlayerWnd",next_player.player_window);
+            rectangle(L"PlayerWnd2",next_player.mini_player_window);
+            rectangle(L"LyricWnd",next_player.lyric_window);
+            rectangle(L"LyricWnd2",next_player.mini_lyric_window);
+            rectangle(L"PlayListWnd",next_player.playlist_window);
+            rectangle(L"EqualizerWnd",next_player.equalizer_window);
+            next_player.lyric_visible=IntAttr(n,L"LyricVisible",next_player.lyric_visible)!=0;
+            next_player.playlist_visible=IntAttr(n,L"PlayListVisible",next_player.playlist_visible)!=0;
+            next_player.equalizer_visible=IntAttr(n,L"EqualizerVisible",next_player.equalizer_visible)!=0;
         }
-        if (profile.lyric.text_color != CLR_INVALID)
-            lyric.text_color = profile.lyric.text_color;
-        if (profile.lyric.highlight_color != CLR_INVALID)
-            lyric.highlight_color = profile.lyric.highlight_color;
-        if (profile.lyric.background_color != CLR_INVALID)
-            lyric.background_color = profile.lyric.background_color;
-        // CSettings_SerializeXml (004BBxxx) omits Type/FramesPerSec while
-        // DAT_00547744 selects the per-skin branch, but merges every other
-        // Visual attribute over the current global state.
-        static_cast<void>(MergeVisualDocument(path, visual, false));
+        if(auto node=SelectOwned(document.Get(),L"/ttplayer/PlayList")) {
+            auto* n=node.Get();
+            LOGFONTW font=PlaylistLogFont(next_playlist);
+            if(LogFontAttr(n,L"Font",font)) SetPlaylistLogFont(next_playlist,font);
+            next_playlist.text_color=ColorAttr(n,L"Color_Text",next_playlist.text_color);
+            next_playlist.highlight_color=ColorAttr(n,L"Color_Hilight",next_playlist.highlight_color);
+            next_playlist.background_color=ColorAttr(n,L"Color_Bkgnd",next_playlist.background_color);
+            next_playlist.number_color=ColorAttr(n,L"Color_Number",next_playlist.number_color);
+            next_playlist.duration_color=ColorAttr(n,L"Color_Duration",next_playlist.duration_color);
+            next_playlist.selected_color=ColorAttr(n,L"Color_Select",next_playlist.selected_color);
+            next_playlist.alternate_background_color=ColorAttr(n,L"Color_Bkgnd2",next_playlist.alternate_background_color);
+            next_playlist.legacy_playlist_generation=IntAttr(n,L"CreateNewVerPlayList",
+                next_playlist.legacy_playlist_generation)!=0;
+        }
+        if(auto node=SelectOwned(document.Get(),L"/ttplayer/Lyric")) {
+            auto* n=node.Get();
+            if(LogFontAttr(n,L"Font",next_lyric.font)) next_lyric.font_valid=true;
+            next_lyric.text_color=ColorAttr(n,L"TextColor",next_lyric.text_color);
+            next_lyric.highlight_color=ColorAttr(n,L"HilightColor",next_lyric.highlight_color);
+            next_lyric.background_color=ColorAttr(n,L"BkgndColor",next_lyric.background_color);
+        }
+        if(auto node=SelectOwned(document.Get(),L"/ttplayer/Visual"))
+            ApplyVisualAttributes(node.Get(),next_visual,false);
+        // Per-skin snapshots never change global ScrollMode, DragLyric,
+        // Type/FramesPerSec, playback or playlist behavior. Commit together.
+        player=std::move(next_player);
+        playlist=std::move(next_playlist);
+        lyric=std::move(next_lyric);
+        visual=std::move(next_visual);
         return true;
+    } catch (const _com_error&) {
+        return false;
     } catch (const std::exception&) {
         return false;
     }
