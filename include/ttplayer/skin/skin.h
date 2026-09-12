@@ -147,6 +147,14 @@ struct LyricSkin {
     RECT lyric_bounds{};
     COLORREF mini_border_left_top{0xff000000};
     COLORREF mini_border_right_bottom{0xff000000};
+    // Optional community mini_lyric node. Absent fields retain the 5.7.9
+    // shared style; these overrides never become normal-mode preferences.
+    LOGFONTW mini_font{};
+    bool mini_font_valid{};
+    COLORREF mini_text_color{CLR_INVALID};
+    COLORREF mini_highlight_color{CLR_INVALID};
+    COLORREF mini_background_color{CLR_INVALID};
+    RECT mini_padding{2, 2, 4, 2}; // left/top/right/bottom insets, not coordinates
     LOGFONTW font{};
     COLORREF text_color{RGB(255, 255, 255)};
     COLORREF highlight_color{RGB(154, 234, 255)};

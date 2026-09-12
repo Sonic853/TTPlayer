@@ -997,6 +997,24 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory) {
                     Attribute(node, L"left_top_color"), 0xff000000);
                 lyric.mini_border_right_bottom = ParseColor(
                     Attribute(node, L"right_bottom_color"), 0xff000000);
+            } else if (_wcsicmp(name.c_str(), L"mini_lyric") == 0) {
+                // Compatibility extension for converted dialog-based skins;
+                // not a node understood by the original 5.7.9 parser.
+                InitializeDefaultLogFont(lyric.mini_font);
+                lyric.mini_font_valid = ParseLogFont(
+                    Attribute(node, L"Font"), lyric.mini_font);
+                lyric.mini_text_color = ParseColor(Attribute(node, L"TextColor"), CLR_INVALID);
+                lyric.mini_highlight_color = ParseColor(Attribute(node, L"HilightColor"), CLR_INVALID);
+                lyric.mini_background_color = ParseColor(Attribute(node, L"BkgndColor"), CLR_INVALID);
+                RECT padding{};
+                const auto value = Attribute(node, L"padding");
+                if (swscanf_s(value.c_str(), L"%ld , %ld , %ld , %ld",
+                        &padding.left, &padding.top, &padding.right, &padding.bottom) == 4 &&
+                    padding.left >= 0 && padding.top >= 0 &&
+                    padding.right >= 0 && padding.bottom >= 0 &&
+                    padding.left <= 1024 && padding.top <= 1024 &&
+                    padding.right <= 1024 && padding.bottom <= 1024)
+                    lyric.mini_padding = padding;
             }
             node->Release();
         }

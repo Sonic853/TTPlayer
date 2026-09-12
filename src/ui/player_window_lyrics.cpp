@@ -896,6 +896,8 @@ bool PlayerWindow::ActiveLyricTransparent() const noexcept {
 COLORREF PlayerWindow::ActiveLyricTextColor() const noexcept {
     if (fullscreen_lyric_detached_)
         return settings_.lyric.fullscreen_text_color;
+    if (mini_mode_ && skin_ && skin_->Lyric().mini_text_color != CLR_INVALID)
+        return skin_->Lyric().mini_text_color;
     if (settings_.lyric.text_color != CLR_INVALID)
         return settings_.lyric.text_color;
     return skin_ && skin_->Lyric().valid
@@ -905,6 +907,8 @@ COLORREF PlayerWindow::ActiveLyricTextColor() const noexcept {
 COLORREF PlayerWindow::ActiveLyricHighlightColor() const noexcept {
     if (fullscreen_lyric_detached_)
         return settings_.lyric.fullscreen_highlight_color;
+    if (mini_mode_ && skin_ && skin_->Lyric().mini_highlight_color != CLR_INVALID)
+        return skin_->Lyric().mini_highlight_color;
     if (settings_.lyric.highlight_color != CLR_INVALID)
         return settings_.lyric.highlight_color;
     return skin_ && skin_->Lyric().valid
@@ -914,6 +918,8 @@ COLORREF PlayerWindow::ActiveLyricHighlightColor() const noexcept {
 COLORREF PlayerWindow::ActiveLyricBackgroundColor() const noexcept {
     if (fullscreen_lyric_detached_)
         return settings_.lyric.fullscreen_background_color;
+    if (mini_mode_ && skin_ && skin_->Lyric().mini_background_color != CLR_INVALID)
+        return skin_->Lyric().mini_background_color;
     if (settings_.lyric.background_color != CLR_INVALID)
         return settings_.lyric.background_color;
     return skin_ && skin_->Lyric().valid
@@ -984,6 +990,7 @@ void PlayerWindow::ApplyActiveLyricWindowState() {
         target.left, target.top, target.right - target.left,
         target.bottom - target.top, SWP_NOACTIVATE | SWP_FRAMECHANGED);
     LayoutLyricControls();
+    RebuildLyricFont(false);
     UpdateLyricWindowRegion();
     UpdateLyricToolRects();
     ShowWindow(lyric_window_, ActiveLyricVisible()
@@ -1165,6 +1172,8 @@ void PlayerWindow::RebuildLyricFont(bool repaint) {
         ? settings_.lyric.fullscreen_font
         : (settings_.lyric.font_valid
             ? settings_.lyric.font : skin_->Lyric().font);
+    if (!fullscreen_lyric_detached_ && mini_mode_ && skin_->Lyric().mini_font_valid)
+        font = skin_->Lyric().mini_font;
     // FUN_004499AD/FUN_0043F197 apply AutoFontFS only to the detached
     // vertical layout.  The first pass deliberately uses the control's
     // current font to choose one widest row.  Only when that raw extent does
@@ -1382,9 +1391,13 @@ RECT PlayerWindow::LyricTextBounds() const {
     if (mini_mode_) {
         RECT client{};
         if (lyric_window_) GetClientRect(lyric_window_, &client);
-        // FUN_004495C8: InflateRect(-2,-2), followed by right -= 2.
-        return {2, 2, std::max<LONG>(2, client.right - 4),
-                std::max<LONG>(2, client.bottom - 2)};
+        // Defaults reproduce FUN_004495C8: InflateRect(-2,-2), right -= 2.
+        // Converted dialog skins can supply their own mini-only padding.
+        const auto& padding = skin_->Lyric().mini_padding;
+        const LONG left = std::min(padding.left, client.right);
+        const LONG top = std::min(padding.top, client.bottom);
+        return {left, top, std::max(left, client.right - padding.right),
+                std::max(top, client.bottom - padding.bottom)};
     }
     RECT result = skin_->Lyric().lyric_bounds;
     RECT client{};
@@ -1501,9 +1514,7 @@ void PlayerWindow::PaintLyricWindow(HDC dc) const {
     FillRect(canvas, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
     if (skin_ && skin_->Lyric().valid) {
         const auto& layout = skin_->Lyric();
-        const COLORREF background_color =
-            settings_.lyric.background_color != CLR_INVALID
-                ? settings_.lyric.background_color : layout.background_color;
+        const COLORREF background_color = ActiveLyricBackgroundColor();
         const bool text_only = settings_.lyric.transparent &&
                                settings_.lyric.transparent_skin;
         if (text_only) {

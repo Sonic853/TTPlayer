@@ -4993,11 +4993,8 @@ void PlayerWindow::ApplySkinWindowAlpha(HWND target, BYTE alpha) {
     COLORREF color_key{};
     DWORD flags = LWA_ALPHA;
     if (target == lyric_window_ && settings_.lyric.transparent) {
-        if (settings_.lyric.background_color != CLR_INVALID) {
-            color_key = settings_.lyric.background_color;
-        } else if (skin_ && skin_->Lyric().valid) {
-            color_key = skin_->Lyric().background_color;
-        }
+        // Match the actual painter, including optional mini-only skin colours.
+        color_key = ActiveLyricBackgroundColor();
         flags |= LWA_COLORKEY;
     }
     SetLayeredWindowAttributes(target, color_key, alpha, flags);

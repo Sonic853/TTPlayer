@@ -164,6 +164,99 @@ void LayoutTests(const fs::path& directory) {
 
 namespace ttplayer::testing {
 struct SkinRebindAccess {
+    static void MiniLyricAppearance(const fs::path& output) {
+        const auto fixture = output / L"mini-style";
+        fs::create_directories(fixture);
+        Canvas background(200, 35);
+        background.Save(fixture / L"background.bmp");
+        settings::Settings settings;
+        settings.general.send_title_to_msn = false;
+        settings.general.tray_icon = false;
+        settings.lyric.auto_download = false;
+        settings.lyric.text_color = RGB(12, 34, 56);
+        settings.lyric.highlight_color = RGB(34, 56, 78);
+        settings.lyric.background_color = RGB(56, 78, 90);
+        settings.lyric.font_valid = true;
+        settings.lyric.font.lfHeight = -20;
+        settings.lyric.font.lfWeight = FW_NORMAL;
+        wcscpy_s(settings.lyric.font.lfFaceName, L"SimSun");
+        ui::PlayerWindow player(settings);
+        player.lyric_window_ = CreateWindowExW(0, L"STATIC", L"", WS_POPUP,
+            0, 0, 200, 35, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        Require(player.lyric_window_ != nullptr, "mini test parent creation failed");
+        try {
+            player.lyric_control_ = CreateWindowExW(0, L"STATIC", L"", WS_CHILD,
+                0, 0, 200, 35, player.lyric_window_, nullptr, GetModuleHandleW(nullptr), nullptr);
+            Require(player.lyric_control_ != nullptr, "mini test child creation failed");
+            const char* variants[] = {
+                "",
+                "<mini_lyric Font=\"-12,0,0,0,400,0,0,0,1,0,0,4,0,SimSun\" "
+                "TextColor=\"#646464\" HilightColor=\"#646464\" BkgndColor=\"#f5f5f7\" padding=\"6,6,6,6\"/>",
+                "<mini_lyric Font=\"invalid\" TextColor=\"invalid\" padding=\"-1,2,3,4\"/>"};
+            for (int variant = 0; variant < 3; ++variant) {
+                {
+                    std::ofstream xml(fixture / L"Skin.xml", std::ios::binary);
+                    xml << "<skin><player_window image=\"background.bmp\"/>"
+                           "<mini_window image=\"background.bmp\"/>"
+                           "<lyric_window image=\"background.bmp\"><lyric position=\"8,8,192,27\"/>"
+                           "<mini_border left_top_color=\"#323f6c\" right_bottom_color=\"#323f6c\"/>"
+                        << variants[variant] << "</lyric_window></skin>";
+                }
+                player.skin_.emplace(skin::LegacySkin::Load(fixture));
+                Require(player.skin_->Valid() && player.skin_->Lyric().valid,
+                        "mini style fixture failed to parse");
+                const bool custom = variant == 1;
+                for (bool mini : {false, true, false, true}) {
+                    player.mini_mode_ = mini;
+                    player.RebuildLyricFont(false);
+                    LOGFONTW font{};
+                    Require(GetObjectW(player.lyric_font_, sizeof(font), &font) != 0,
+                            "mini lyric font not rebuilt");
+                    Require(font.lfHeight == (mini && custom ? -12 : -20),
+                            "mini font leaked into normal mode or failed to apply");
+                    Require(player.ActiveLyricTextColor() == (mini && custom ? RGB(100,100,100) : settings.lyric.text_color) &&
+                            player.ActiveLyricHighlightColor() == (mini && custom ? RGB(100,100,100) : settings.lyric.highlight_color) &&
+                            player.ActiveLyricBackgroundColor() == (mini && custom ? RGB(245,245,247) : settings.lyric.background_color),
+                            "mini style override/fallback mismatch");
+                    if (mini) {
+                        const RECT expected = custom ? RECT{6,6,194,29} : RECT{2,2,196,33};
+                        const RECT actual = player.LyricTextBounds();
+                        Require(EqualRect(&actual, &expected), "mini padding changed legacy default");
+                        Canvas paint(200,35); player.PaintLyricWindow(paint.dc);
+                        Require(GetPixel(paint.dc, 1, 1) == player.ActiveLyricBackgroundColor() &&
+                                GetPixel(paint.dc, 0, 0) == RGB(50,63,108),
+                                "mini lyric frame/background mismatch");
+                        MoveWindow(player.lyric_window_, 0, 0, 3, 3, FALSE);
+                        const RECT tiny = player.LyricTextBounds();
+                        Require(tiny.left <= tiny.right && tiny.top <= tiny.bottom &&
+                                tiny.right <= 3 && tiny.bottom <= 3, "mini padding inverted small client");
+                        MoveWindow(player.lyric_window_, 0, 0, 200, 35, FALSE);
+                    }
+                }
+                player.fullscreen_lyric_detached_ = true;
+                Require(player.ActiveLyricBackgroundColor() == settings.lyric.fullscreen_background_color &&
+                        player.ActiveLyricTextColor() == settings.lyric.fullscreen_text_color,
+                        "mini style overrides full-screen preferences");
+                player.fullscreen_lyric_detached_ = false;
+                player.settings_.lyric.transparent = true;
+                player.ApplySkinWindowAlpha(player.lyric_window_, 255);
+                COLORREF key{}; BYTE alpha{}; DWORD flags{};
+                Require(GetLayeredWindowAttributes(player.lyric_window_, &key, &alpha, &flags) &&
+                        (flags & LWA_COLORKEY) && key == player.ActiveLyricBackgroundColor(),
+                        "mini lyric transparency key does not match its background");
+                player.settings_.lyric.transparent = false;
+                Require(player.settings_.lyric.font.lfHeight == -20 && player.settings_.lyric.background_color == RGB(56,78,90),
+                        "mini style overwrote user settings");
+            }
+            player.DestroyLyricControls();
+            DestroyWindow(player.lyric_window_); player.lyric_window_ = nullptr;
+        } catch (...) {
+            player.DestroyLyricControls();
+            DestroyWindow(player.lyric_window_); player.lyric_window_ = nullptr;
+            throw;
+        }
+        std::cout << "Mini lyric appearance: optional XML, legacy fallback, font/mode transitions, frame pixels passed\n";
+    }
     static void Render(const fs::path& directory, const fs::path& output,
                        HMODULE resources, HMODULE comm) {
         settings::Settings settings;
@@ -258,6 +351,7 @@ int wmain(int argc,wchar_t** argv) {
         const auto output=fs::temp_directory_path()/(L"TTPlayer-PNG-"+
             std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));
         fs::create_directories(output); SyntheticTests(output);
+        testing::SkinRebindAccess::MiniLyricAppearance(output);
         const fs::path root=argc>1?argv[1]:L".";
         const auto directory=root/L"TTPlayer6120/reverse/resources/ttpres.dll/ZIP__DEFAULT_SKIN__2052";
         if(fs::exists(directory/L"Skin.xml")) {
