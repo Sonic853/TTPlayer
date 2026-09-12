@@ -575,14 +575,47 @@ bool IsPlaylistFile(const std::filesystem::path& path) {
            extension == L".ttbl" || extension == L".ttpl";
 }
 
+RECT PlaylistToolbarItemBounds(const skin::PlaylistSkin& layout, RECT toolbar,
+                               size_t index) {
+    if (index >= 7 || IsRectEmpty(&toolbar)) return {};
+    if (layout.toolbar_items) {
+        RECT item = (*layout.toolbar_items)[index];
+        if (IsRectEmpty(&item)) return {};
+        OffsetRect(&item, toolbar.left, toolbar.top);
+        RECT clipped{};
+        IntersectRect(&clipped, &item, &toolbar);
+        return clipped;
+    }
+    const int width = toolbar.right - toolbar.left;
+    RECT item{toolbar.left + static_cast<int>(index) * width / 7, toolbar.top,
+        toolbar.left + static_cast<int>(index + 1) * width / 7, toolbar.bottom};
+    if (toolbar.bottom - toolbar.top > 0x1e) {
+        if (index == 4) item.top += 0x1e;
+        else item.bottom = item.top + 0x1e;
+    }
+    return item;
+}
+
 void DrawPlaylistToolbarBitmap(HDC target, const skin::SkinBitmap& bitmap,
                                RECT bounds, COLORREF transparent,
-                               std::optional<size_t> only_button, BYTE opacity) {
+                               std::optional<size_t> only_button, BYTE opacity,
+                               const skin::PlaylistSkin* layout) {
     if (!bitmap.image || bitmap.size.cx <= 0 || bitmap.size.cy <= 0) return;
     constexpr int button_count = 7;
     const int control_width = bounds.right - bounds.left;
     const int control_height = bounds.bottom - bounds.top;
     if (control_width <= 0 || control_height <= 0) return;
+    if (layout && layout->toolbar_items) {
+        const RECT clip = only_button ? PlaylistToolbarItemBounds(*layout, bounds, *only_button) : bounds;
+        if (IsRectEmpty(&clip)) return;
+        const int saved = SaveDC(target);
+        if (!saved) return;
+        IntersectClipRect(target, clip.left, clip.top, clip.right, clip.bottom);
+        bitmap.image.Draw(target, bounds.left, bounds.top, bitmap.size.cx, bitmap.size.cy,
+                          0, 0, bitmap.size.cx, bitmap.size.cy, transparent, opacity);
+        RestoreDC(target, saved);
+        return;
+    }
     // Several legacy packages provide one already-composed toolbar strip
     // whose width differs from the XML control by only the native toolbar's
     // one/two-pixel padding.  The original keeps that strip intact and clips
@@ -3348,6 +3381,20 @@ void PlayerWindow::PaintSkin(HDC dc) const {
             MulDiv(horizontal_span, value, 100);
         const int logical_thumb_top = volume->bounds.top + slider_inset +
             MulDiv(vertical_span, 100 - value, 100);
+        // FUN_00451E07 paints the slider background before the filled portion.
+        // Volume used to skip this layer entirely, leaving only fill + thumb.
+        if (volume->bar_image && volume->bar_size.cx > 0 && volume->bar_size.cy > 0) {
+            const int saved = SaveDC(canvas);
+            if (saved) {
+                IntersectClipRect(canvas, volume->bounds.left, volume->bounds.top,
+                                  volume->bounds.right, volume->bounds.bottom);
+                const int x = volume->bounds.left + (control_width - volume->bar_size.cx) / 2;
+                const int y = volume->bounds.top + (control_height - volume->bar_size.cy) / 2;
+                volume->bar_image.Draw(canvas, x, y, volume->bar_size.cx, volume->bar_size.cy,
+                    0, 0, volume->bar_size.cx, volume->bar_size.cy, skin_->TransparentColor());
+                RestoreDC(canvas, saved);
+            }
+        }
         if (volume->fill_image && volume->fill_size.cx > 0 &&
             volume->fill_size.cy > 0 && control_width > 0 && control_height > 0) {
             const int saved_dc = SaveDC(canvas);

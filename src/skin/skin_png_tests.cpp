@@ -164,6 +164,130 @@ void LayoutTests(const fs::path& directory) {
 
 namespace ttplayer::testing {
 struct SkinRebindAccess {
+    static void VolumeSlider(const fs::path& output) {
+        const auto fixture=output/L"volume-slider";
+        fs::create_directories(fixture);
+        Canvas background(368,160), bar(53,4), fill(53,4), thumb(72,18);
+        GdiFlush();
+        std::fill(bar.pixels,bar.pixels+53*4,0x00101020);
+        std::fill(fill.pixels,fill.pixels+53*4,0x00ff2020);
+        std::fill(thumb.pixels,thumb.pixels+72*18,0x00ffffff);
+        background.Save(fixture/L"background.bmp");bar.Save(fixture/L"bar.bmp");
+        fill.Save(fixture/L"fill.bmp");thumb.Save(fixture/L"thumb.bmp");
+        {
+            std::ofstream xml(fixture/L"Skin.xml",std::ios::binary);
+            xml << "<skin><player_window image=\"background.bmp\">"
+                   "<volume position=\"284,105,357,123\" bar_image=\"bar.bmp\" "
+                   "fill_image=\"fill.bmp\" thumb_image=\"thumb.bmp\"/>"
+                   "</player_window></skin>";
+        }
+        settings::Settings settings;
+        settings.general.send_title_to_msn=false;
+        settings.general.tray_icon=false;
+        ui::PlayerWindow player(settings);
+        player.skin_.emplace(skin::LegacySkin::Load(fixture));
+        player.window_=CreateWindowExW(0,L"STATIC",L"",WS_POPUP,
+            0,0,368,160,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        Require(player.window_!=nullptr,"volume test window failed");
+        try {
+            // Same one-pixel inset / thumb-centre mapping as FUN_00428F41.
+            for (const auto& sample : {std::pair{294,0},std::pair{320,49},
+                    std::pair{347,100},std::pair{370,100},std::pair{270,0}}) {
+                player.SetSkinVolumeFromPoint({sample.first,114});
+                Require(player.settings_.player.volume==sample.second,"volume endpoints not reachable");
+            }
+            Canvas paint(368,160);
+            player.PaintSkin(paint.dc);
+            Require(GetPixel(paint.dc,320,114)==RGB(16,16,32),"volume background layer missing at zero");
+            Require(GetPixel(paint.dc,294,114)==RGB(255,255,255),"zero-volume knob centre shifted");
+            Require(GetPixel(paint.dc,284,114)==GetPixel(background.dc,284,114),
+                    "zero-volume fill extends before knob travel");
+            player.SetSkinVolumeFromPoint({320,114});player.PaintSkin(paint.dc);
+            Require(GetPixel(paint.dc,305,114)==RGB(255,32,32) &&
+                    GetPixel(paint.dc,339,114)==RGB(16,16,32),"volume fill/background order mismatch");
+            player.SetSkinVolumeFromPoint({347,114});player.PaintSkin(paint.dc);
+            Require(GetPixel(paint.dc,320,114)==RGB(255,32,32) &&
+                    GetPixel(paint.dc,347,114)==RGB(255,255,255),"full-volume endpoint mismatch");
+            DestroyWindow(player.window_);player.window_=nullptr;
+        } catch (...) {DestroyWindow(player.window_);player.window_=nullptr;throw;}
+        std::cout << "Volume slider: zero/middle/full/outside drag, bar/fill/thumb order and endpoint alignment passed\n";
+    }
+    static void ToolbarLayout(const fs::path& output) {
+        const auto fixture = output / L"toolbar-layout";
+        fs::create_directories(fixture);
+        Canvas background(368,630), hot(359,56);
+        background.Save(fixture / L"background.bmp");
+        GdiFlush();
+        std::fill(hot.pixels, hot.pixels + hot.width * hot.height, 0x00e01020);
+        hot.Save(fixture / L"hot.bmp");
+        const char* custom =
+            "<item index=\"0\" position=\"63,28,112,56\"/>"
+            "<item index=\"1\" position=\"161,28,211,56\"/>"
+            "<item index=\"2\" position=\"211,28,260,56\"/>"
+            "<item index=\"3\" position=\"112,28,161,56\"/>"
+            "<item index=\"4\" position=\"207,2,225,20\"/>"
+            "<item index=\"5\" position=\"260,28,309,56\"/>"
+            "<item index=\"6\" position=\"309,28,359,56\"/>";
+        auto load = [&](const char* items) {
+            {
+                std::ofstream xml(fixture/L"Skin.xml",std::ios::binary);
+                xml << "<skin><player_window image=\"background.bmp\"/>"
+                       "<playlist_window image=\"background.bmp\"><toolbar position=\"8,145,367,201\" "
+                       "image=\"hot.bmp\" hot_image=\"hot.bmp\">" << items <<
+                       "</toolbar><playlist position=\"1,202,367,629\"/></playlist_window></skin>";
+            }
+            return skin::LegacySkin::Load(fixture);
+        };
+        settings::Settings settings;
+        settings.general.send_title_to_msn = false;
+        settings.general.tray_icon = false;
+        ui::PlayerWindow player(settings);
+        player.playlists_.NewList(L"Toolbar fixture");
+        player.playlist_window_ = CreateWindowExW(0,L"STATIC",L"",WS_POPUP,
+            0,0,368,630,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        Require(player.playlist_window_ != nullptr,"toolbar test window failed");
+        try {
+            player.skin_.emplace(load(custom));
+            const auto& layout = player.skin_->Playlist();
+            Require(layout.valid && layout.toolbar_items.has_value(),"custom toolbar XML not parsed");
+            const RECT toolbar{8,145,367,201};
+            const RECT expected[] = {{71,173,120,201},{169,173,219,201},{219,173,268,201},
+                {120,173,169,201},{215,147,233,165},{268,173,317,201},{317,173,367,201}};
+            for (size_t index=0;index<7;++index) {
+                const RECT rect = ui::detail::PlaylistToolbarItemBounds(layout,toolbar,index);
+                Require(EqualRect(&rect,&expected[index]),"custom toolbar rectangle mismatch");
+                for (int y=rect.top;y<rect.bottom;++y) for (int x=rect.left;x<rect.right;++x)
+                    Require(player.PlaylistToolbarButtonAt({x,y})==index,"custom toolbar mouse hit mismatch");
+                Canvas actual(368,220), baseline(368,220);
+                ui::detail::DrawPlaylistToolbarBitmap(actual.dc,layout.toolbar_hot,toolbar,
+                    RGB(255,0,255),index,255,&layout);
+                GdiFlush();
+                for (int y=0;y<220;++y) for (int x=0;x<368;++x) {
+                    const bool inside=PtInRect(&rect,POINT{x,y})!=FALSE;
+                    const DWORD want=inside?0x00e01020:baseline.pixels[y*368+x]&0xffffff;
+                    Require((actual.pixels[y*368+x]&0xffffff)==want,"hot frame spills into another item");
+                }
+            }
+            for (POINT blank : {POINT{10,150},POINT{214,156},POINT{233,156},POINT{224,166},POINT{60,188}})
+                Require(!player.PlaylistToolbarButtonAt(blank),"open field / toolbar gap captured by toolbar");
+            player.skin_.emplace(load("<item index=\"4\" position=\"207,2,225,20\"/>"));
+            Require(!player.PlaylistToolbarButtonAt({130,188}) && player.PlaylistToolbarButtonAt({224,156})==size_t{4},
+                    "undeclared custom toolbar item remains clickable");
+            for (const char* fallback : {"", "<item index=\"8\" position=\"1,1,10,10\"/>"
+                "<item index=\"0\" position=\"0,0,500,20\"/><item index=\"1\" position=\"-1,0,2,2\"/>"}) {
+                player.skin_.emplace(load(fallback));
+                Require(!player.skin_->Playlist().toolbar_items,"invalid custom item changed legacy layout");
+                Require(player.PlaylistToolbarButtonAt({20,150})==size_t{0} &&
+                        !player.PlaylistToolbarButtonAt({20,190}) &&
+                        player.PlaylistToolbarButtonAt({224,190})==size_t{4} &&
+                        !player.PlaylistToolbarButtonAt({224,150}),"legacy two-row toolbar behavior changed");
+            }
+            DestroyWindow(player.playlist_window_);player.playlist_window_=nullptr;
+        } catch (...) {
+            DestroyWindow(player.playlist_window_);player.playlist_window_=nullptr;throw;
+        }
+        std::cout << "Toolbar layouts: XML, all seven hit regions, isolated hot frames, gaps, hidden items, legacy fallback passed\n";
+    }
     static void MiniLyricAppearance(const fs::path& output) {
         const auto fixture = output / L"mini-style";
         fs::create_directories(fixture);
@@ -352,6 +476,8 @@ int wmain(int argc,wchar_t** argv) {
             std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));
         fs::create_directories(output); SyntheticTests(output);
         testing::SkinRebindAccess::MiniLyricAppearance(output);
+        testing::SkinRebindAccess::ToolbarLayout(output);
+        testing::SkinRebindAccess::VolumeSlider(output);
         const fs::path root=argc>1?argv[1]:L".";
         const auto directory=root/L"TTPlayer6120/reverse/resources/ttpres.dll/ZIP__DEFAULT_SKIN__2052";
         if(fs::exists(directory/L"Skin.xml")) {

@@ -2372,6 +2372,10 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
             POINT screen{
                 metrics.toolbar.left + static_cast<int>(*button) * width / button_count,
                 metrics.toolbar.bottom};
+            if (skin_->Playlist().toolbar_items) {
+                const RECT item = PlaylistToolbarItemBounds(skin_->Playlist(), metrics.toolbar, *button);
+                screen = {item.left, item.bottom};
+            }
             ClientToScreen(playlist_window_, &screen);
             InvokePlaylistToolbar(*button, screen);
             if (IsWindow(playlist_mouse_tracking_window_)) {
@@ -3387,19 +3391,8 @@ void PlayerWindow::UpdatePlaylistToolRects() {
     if (!skin_->Playlist().toolbar.image ||
         metrics.toolbar.right <= metrics.toolbar.left) { park_unused(); return; }
     constexpr int count = 7;
-    const int height = metrics.toolbar.bottom - metrics.toolbar.top;
     for (int index = 0; index < count; ++index) {
-        RECT bounds{
-            metrics.toolbar.left + index *
-                (metrics.toolbar.right - metrics.toolbar.left) / count,
-            metrics.toolbar.top,
-            metrics.toolbar.left + (index + 1) *
-                (metrics.toolbar.right - metrics.toolbar.left) / count,
-            metrics.toolbar.bottom};
-        if (height > 0x1e) {
-            if (index == 4) bounds.top = metrics.toolbar.top + 0x1e;
-            else bounds.bottom = metrics.toolbar.top + 0x1e;
-        }
+        const RECT bounds = PlaylistToolbarItemBounds(skin_->Playlist(), metrics.toolbar, index);
         add_control(kPlaylistToolFirst + index,
             static_cast<UINT>(kPlaylistToolFirst + index), bounds);
     }
@@ -3660,6 +3653,13 @@ std::optional<size_t> PlayerWindow::PlaylistToolbarButtonAt(POINT point) const {
         settings_.playlist.split_on_lists, client.right, client.bottom,
         VisiblePlaylistTrackCount());
     if (!PtInRect(&metrics.toolbar, point)) return std::nullopt;
+    if (skin_->Playlist().toolbar_items) {
+        for (size_t index = 0; index < 7; ++index) {
+            const RECT item = PlaylistToolbarItemBounds(skin_->Playlist(), metrics.toolbar, index);
+            if (PtInRect(&item, point)) return index;
+        }
+        return std::nullopt;
+    }
     constexpr size_t button_count = 7;
     const int width = metrics.toolbar.right - metrics.toolbar.left;
     if (width <= 0) return std::nullopt;
@@ -4214,7 +4214,7 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
         // custom-draw path treats the package transparent color as a mask.
         // SRCCOPY exposes the common #ff00ff key as a purple rectangle.
         DrawPlaylistToolbarBitmap(canvas, layout.toolbar, metrics.toolbar,
-                                  skin_->TransparentColor());
+                                  skin_->TransparentColor(), std::nullopt, 255, &layout);
         const auto hot = playlist_toolbar_hover_;
         if (layout.toolbar.image.IsGdiPlus() && layout.toolbar_hot.image.IsGdiPlus() &&
             layout.toolbar_animation.Enabled()) {
@@ -4225,11 +4225,11 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
                     L"toolbar" + std::to_wstring(index), metrics.toolbar,
                     hot && *hot == index ? 1 : 0, layout.toolbar_animation);
                 DrawPlaylistToolbarBitmap(canvas, layout.toolbar_hot, metrics.toolbar,
-                    skin_->TransparentColor(), index, fade.HotOpacity(layout.toolbar_animation));
+                    skin_->TransparentColor(), index, fade.HotOpacity(layout.toolbar_animation), &layout);
             }
         } else if (hot && layout.toolbar_hot.image && layout.toolbar_hot.size.cx > 0) {
             DrawPlaylistToolbarBitmap(canvas, layout.toolbar_hot, metrics.toolbar,
-                                      skin_->TransparentColor(), *hot);
+                                      skin_->TransparentColor(), *hot, 255, &layout);
         }
     }
 

@@ -88,6 +88,9 @@ struct PlaylistSkin {
     SkinBitmap toolbar;
     SkinBitmap toolbar_hot;
     SkinAnimation toolbar_animation;
+    // Community extension: positions within a composed toolbar bitmap.
+    // Missing items are hidden; no array means the original seven-cell layout.
+    std::optional<std::array<RECT, 7>> toolbar_items;
     RECT list_bounds{};
     SkinBitmap selected;
     SkinBitmap splitter_bar;

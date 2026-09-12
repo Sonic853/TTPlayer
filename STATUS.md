@@ -1,5 +1,14 @@
 # Reconstruction status
 
+2026-09-13: add optional per-item playlist toolbar rectangles for the approved
+BaiduMusic8209 layout. Keep legacy seven-cell/two-row behavior when absent.
+Use a 70px My Music header and equally divided Add/Sort/Delete/Lists/Edit/Mode
+buttons, with Find inside the open-file field. Restore the missing volume
+bar_image layer; align this package's fill with its 53px thumb-centre travel
+so zero volume no longer leaves a visible filled stub. Preserve user skin
+edits and configuration. Release/Debug, four regressions and native host
+mouse tests pass; see PLAYLIST_TOOLBAR_LAYOUT.md.
+
 2026-09-12: add Dream/Spectrum/Scope/Album as the first four commands in
 the fullscreen lyric context menu, before a separator and the original
 lyric commands. Reuse DLL string-list 2232, the EXE album label and the

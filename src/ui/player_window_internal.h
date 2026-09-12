@@ -423,10 +423,12 @@ std::wstring FromUtf8OrFallback(const std::string& value,
 std::wstring DisplayName(const playlist::Track& track);
 std::wstring ArtistName(const playlist::Track& track, std::wstring fallback);
 bool IsPlaylistFile(const std::filesystem::path& path);
+RECT PlaylistToolbarItemBounds(const skin::PlaylistSkin& layout, RECT toolbar,
+                               size_t index);
 void DrawPlaylistToolbarBitmap(
     HDC target, const skin::SkinBitmap& bitmap, RECT bounds,
     COLORREF transparent, std::optional<size_t> only_button = std::nullopt,
-    BYTE opacity = 255);
+    BYTE opacity = 255, const skin::PlaylistSkin* layout = nullptr);
 inline constexpr UINT_PTR kSkinControlAnimationTimer = 0x6120;
 void TileBitmap(HDC target, const skin::SkinBitmap& bitmap, const RECT& bounds);
 COLORREF InterpolateColor(COLORREF first, COLORREF second,

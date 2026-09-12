@@ -1200,6 +1200,27 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory) {
                 playlist.toolbar = LoadSkinBitmap(skin, directory, node, L"image");
                 playlist.toolbar_hot = LoadSkinBitmap(skin, directory, node, L"hot_image");
                 playlist.toolbar_animation = LoadAnimation(node, 1);
+                IXMLDOMNodeList* items{};
+                node->selectNodes(_bstr_t(L"item"), &items);
+                long toolbar_item_count{};
+                if (items) items->get_length(&toolbar_item_count);
+                for (long item_index = 0; item_index < toolbar_item_count; ++item_index) {
+                    IXMLDOMNode* item{};
+                    items->get_item(item_index, &item);
+                    if (!item) continue;
+                    const int slot = ParseInt(Attribute(item, L"index"), -1);
+                    const RECT rect = ParseRect(Attribute(item, L"position"));
+                    if (slot >= 0 && slot < 7 && rect.left >= 0 && rect.top >= 0 &&
+                        rect.right > rect.left && rect.bottom > rect.top &&
+                        rect.right <= playlist.toolbar_bounds.right - playlist.toolbar_bounds.left &&
+                        rect.bottom <= playlist.toolbar_bounds.bottom - playlist.toolbar_bounds.top) {
+                        if (!playlist.toolbar_items)
+                            playlist.toolbar_items.emplace(std::array<RECT, 7>{});
+                        (*playlist.toolbar_items)[slot] = rect;
+                    }
+                    item->Release();
+                }
+                if (items) items->Release();
             } else if (_wcsicmp(name.c_str(), L"scrollbar") == 0) {
                 playlist.scrollbar_buttons = LoadSkinBitmap(skin, directory, node, L"buttons_image");
                 playlist.scrollbar_thumb = LoadSkinBitmap(skin, directory, node, L"thumb_image");
