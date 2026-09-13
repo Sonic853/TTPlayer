@@ -26,7 +26,7 @@
 <lyric_window ...>
   <mini_border left_top_color="#323f6c" right_bottom_color="#323f6c"/>
   <mini_lyric Font="-12,0,0,0,400,0,0,0,1,0,0,4,0,宋体"
-              TextColor="#646464" HilightColor="#646464"
+              TextColor="#646464" HilightColor="#323f6c"
               BkgndColor="#f5f5f7" padding="6,6,6,6"/>
 </lyric_window>
 ```
@@ -56,3 +56,21 @@
 最终 Release 动态歌曲文字及鼠标流程结果：
 `BaiduMusic8209/compat/mini-tests-20260912-195142/results.json`；
 实际屏幕截图为同目录 `mini-pair.png`。4 项 CTest 回归均通过。
+
+## 2026-09-13：卡拉 OK 配色修复
+
+上次示例把 `TextColor` 和 `HilightColor` 都设为 #646464，导致
+`0043FC10` 对应的两次裁剪绘制使用同色，卡拉 OK 看起来没有效果。
+此次仅将迷你高亮色改为与皮肤主题一致的 #323f6c，普通文字仍为 #646464。
+不更改卡拉 OK 开关、渲染算法、全屏或普通歌词设置，也不覆盖用户修改的布局。
+
+`skin_png_tests` 现在用真实歌词绘制路径验证水平/垂直两种滚动、带 offset 的
+25%/50%/75% 时间边界、两种颜色的像素数量和菜单开关。
+宿主机用相同静音 WAV/LRC 对比旧包和修复包：旧包两种滚动的高亮像素均为0、
+开关画面无差异；修复包均出现分色，关闭后整行高亮，再开启恢复。
+详见本地 `BaiduMusic8209/compat/karaoke-tests-20260913-160820`（修复前）、
+`karaoke-tests-20260913-160957`（配色修复后）及
+`karaoke-tests-20260913-161937`（全PNG包）。
+
+用户更新的皮肤位于 `Skin/new/BaiduMusic8209.skn`。
+全PNG升级及逐文件保留规则见 `BAIDU_SKIN_PNG_UPGRADE.md`。

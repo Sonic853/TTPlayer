@@ -62,6 +62,8 @@ public:
         audio_.SetPluginManager(manager);
     }
     void SetTtpCommModule(HMODULE module) noexcept;
+    // Validate the saved package before restoring its profile; pre-Create only.
+    bool LoadStartupSkin(HMODULE module);
     bool LoadSkinPackage(const std::filesystem::path& path, bool restore_profile = true);
     bool LoadSkinResource(HMODULE module, const wchar_t* name = L"<Default_Skin>",
                           bool restore_profile = true);

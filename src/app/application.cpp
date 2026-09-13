@@ -24,9 +24,6 @@ std::wstring Lower(std::wstring value) {
 settings::Settings LoadSettingsIfPresent() {
     return settings::LoadRuntimeSettings(RuntimePath({}));
 }
-std::filesystem::path ResolveSkin(const settings::Settings& settings) {
-    return skin::ResolveSkinPackagePath(RuntimePath(L"Skin"), settings.skin_file);
-}
 } // namespace
 
 bool ParsedCommandLine::HasSwitch(std::wstring_view name) const {
@@ -81,46 +78,11 @@ int TTPlayer_RunApplicationSession(HINSTANCE instance, int show_command,
         return 0;
     }
 
-    const bool default_skin = settings.skin_file.empty() ||
-        _wcsicmp(settings.skin_file.c_str(), L"<Default_Skin>") == 0;
-    const auto skin_path = ResolveSkin(settings);
-    // FUN_0045D5FA selects the package-specific geometry snapshot before
-    // constructing the live skin windows. TTPlayerRebuild.xml supplies the startup
-    // visual globals; see the deliberately restored value below.
-    std::filesystem::path skin_profile = default_skin
-        ? RuntimePath(L"Skin/Default.xml") : skin_path;
-    if (!default_skin && !skin_profile.empty()) skin_profile += L".xml";
-    std::error_code profile_error;
-    if (!skin_profile.empty() &&
-        std::filesystem::exists(skin_profile, profile_error) && !profile_error) {
-        const auto global_visual = settings.visual;
-        static_cast<void>(settings::LoadSkinVisualProfile(
-            skin_profile, settings.player, settings.playlist,
-            settings.lyric, settings.visual));
-        // The startup restore path materialises the saved skin geometry but
-        // leaves the root TTPlayerRebuild.xml visual globals active. Package and
-        // sidecar visual overrides are applied only by the live skin-change
-        // transaction (FUN_0045D5FA/FUN_0045DDEE).  This distinction is
-        // directly observable with LX-iPlay: a restored startup uses the
-        // root #194d5c spectrum, whereas selecting the skin at runtime uses
-        // its grey Visual.xml palette.
-        settings.visual = global_visual;
-    }
     ui::PlayerWindow player(std::move(settings));
     player.SetSkinResourceModule(resource_module);
     player.SetTtpCommModule(ttpcomm_module);
     player.SetSoundLibrary(&sound_library);
-    bool skin_loaded{};
-    if (default_skin)
-        skin_loaded = player.LoadSkinResource(resource_module, L"<Default_Skin>");
-    else if (!skin_path.empty())
-        skin_loaded = player.LoadSkinPackage(skin_path);
-    // FUN_0045FAD8/FUN_0045D5FA always leave CPlayerWnd with the embedded
-    // package when the configured external package cannot be opened.  Do not
-    // expose the reconstruction-only 860x540 fallback merely because a saved
-    // skin was renamed or damaged.
-    if (!skin_loaded && !default_skin)
-        skin_loaded = player.LoadSkinResource(resource_module, L"<Default_Skin>");
+    static_cast<void>(player.LoadStartupSkin(resource_module));
     if (!player.Create(instance, show_command)) return 0;
 
     // TTPlayer_RunApplicationSession trims the working set and routes the

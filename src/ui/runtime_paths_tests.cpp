@@ -2,6 +2,7 @@
 #include "ttplayer/ui/player_runtime_policy.h"
 #include "player_window_internal.h"
 
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -57,6 +58,51 @@ void StartupTests(const fs::path& runtime, const fs::path& built_executable) {
             "renamed player second launch failed");
     Require(settings::LoadLegacyXml(current).skin_file == L"new\\common.skn" &&
             Read(previous) == changed_old, "subsequent startup reused/wrote old configuration");
+    // Closing on an external skin leaves both its styles in the main XML
+    // and its adjacent profile on disk. Remove only the synthetic package,
+    // exactly as a user deleting a previously selected .skn would do.
+    auto selected = settings::LoadLegacyXml(current);
+    selected.lyric.background_color = RGB(91, 17, 29);
+    selected.playlist.background_color = RGB(73, 19, 37);
+    settings::SaveWindowState(current, selected);
+    const auto orphan = runtime / L"Skin/new/common.skn.xml";
+    Require(settings::SaveSkinVisualProfile(orphan, selected.player, selected.playlist,
+        selected.lyric, selected.visual), "cannot save removed skin fixture profile");
+    auto embedded = selected;
+    embedded.lyric.background_color = RGB(13, 43, 71);
+    embedded.playlist.background_color = RGB(23, 47, 89);
+    const auto default_profile = runtime / L"Skin/Default.xml";
+    Require(settings::SaveSkinVisualProfile(default_profile, embedded.player, embedded.playlist,
+        embedded.lyric, embedded.visual), "cannot save default fixture profile");
+    const auto orphan_xml = Read(orphan);
+    fs::rename(runtime / L"Skin/new/common.skn", runtime / L"Skin/new/common.skn.removed");
+    Require(RunChild(executable, L"--smoke-test", runtime.parent_path()) == 0,
+            "removed skin fallback startup failed");
+    const auto fallback = settings::LoadLegacyXml(current);
+    Require(fallback.skin_file == L"<Default_Skin>" &&
+            fallback.lyric.background_color == embedded.lyric.background_color &&
+            fallback.playlist.background_color == embedded.playlist.background_color,
+            "missing package fallback retained the removed skin's styles");
+    Require(Read(orphan) == orphan_xml, "fallback overwrote the removed skin's profile");
+    // The first fallback must not poison Default.xml on close. Its next
+    // ordinary-default startup should retain exactly the recovered styles.
+    Require(RunChild(executable, L"--smoke-test", runtime.parent_path()) == 0,
+            "default restart after fallback failed");
+    const auto restarted = settings::LoadLegacyXml(current);
+    Require(restarted.lyric.background_color == embedded.lyric.background_color &&
+            restarted.playlist.background_color == embedded.playlist.background_color,
+            "fallback shutdown contaminated the default profile");
+    // Deleting the orphan as well must not resurrect old styles from the
+    // main XML. This additionally exercises the non-Skin/new resolution.
+    selected.skin_file = L"removed-root.skn";
+    settings::SaveWindowState(current, selected);
+    Require(RunChild(executable, L"--smoke-test", runtime.parent_path()) == 0,
+            "fallback without an orphan profile failed");
+    const auto no_orphan = settings::LoadLegacyXml(current);
+    Require(no_orphan.skin_file == L"<Default_Skin>" &&
+            no_orphan.lyric.background_color == embedded.lyric.background_color &&
+            no_orphan.playlist.background_color == embedded.playlist.background_color &&
+            Read(previous) == changed_old, "fallback without a sidecar retained main XML styles");
     OleUninitialize();
 }
 void SettingsTests(const fs::path& runtime) {
@@ -106,6 +152,117 @@ void PathTests(const fs::path& runtime) {
 
 namespace ttplayer::testing {
 struct SkinRebindAccess {
+    static void StartupFallbacks(const fs::path& runtime, HMODULE resources, HMODULE comm) {
+        settings::Settings seed;
+        seed.source_path = runtime / settings::kSettingsFileName;
+        seed.general.fade_windows = seed.general.tray_icon = seed.general.send_title_to_msn = false;
+        seed.lyric.auto_download = false;
+        seed.player.mute = true; seed.player.volume = 37;
+        seed.player.top_most = true; seed.player.mini_top_most = false;
+        seed.player.lyric_top_most = true;
+        seed.player.player_window = seed.player.mini_player_window =
+            seed.player.lyric_window = seed.player.mini_lyric_window =
+            seed.player.playlist_window = seed.player.equalizer_window = {21, 43, 777, 888};
+        seed.playlist.font = L"Arial"; seed.playlist.font_height = -29;
+        seed.playlist.font_descriptor_valid = true;
+        seed.playlist.font_descriptor.lfHeight = -29;
+        seed.playlist.background_color = seed.playlist.alternate_background_color =
+            seed.playlist.text_color = seed.playlist.highlight_color =
+            seed.playlist.number_color = seed.playlist.duration_color =
+            seed.playlist.selected_color = RGB(91, 17, 29);
+        seed.lyric.font.lfHeight = -31; seed.lyric.font_valid = true;
+        seed.lyric.background_color = seed.lyric.text_color =
+            seed.lyric.highlight_color = RGB(73, 19, 37);
+        seed.visual.spectrum_top_color = seed.visual.spectrum_bottom_color =
+            seed.visual.spectrum_middle_color = seed.visual.spectrum_peak_color =
+            seed.visual.text_color = seed.visual.blur_scope_color = RGB(79, 23, 41);
+        seed.visual.font = seed.lyric.font; seed.visual.font_valid = true;
+        seed.visual.type = 4; seed.visual.frames_per_second = 37;
+        seed.lyric.scroll_mode = 1; seed.playlist.item_tips = false;
+
+        const auto profile = runtime / L"Skin/Default.xml";
+        const auto previous_profile = Read(profile); // generated by Run, never a user file
+        const auto main_xml = Read(seed.source_path);
+        for (const auto selector : {L"missing.skn", L"new\\missing.skn",
+                                    L"broken.skn", L"new\\broken.skn"}) {
+            seed.skin_file = selector;
+            const auto package = skin::ResolveSkinPackagePath(runtime / L"Skin", selector);
+            if (std::wstring_view(selector).find(L"broken") != std::wstring_view::npos)
+                Write(package, "invalid ZIP data");
+            const auto orphan = fs::path(package.wstring() + L".xml");
+            Write(orphan, "<ttplayer><Player PlayerWnd=\"999,999,1999,1999\"/>"
+                "<Lyric TextColor=\"#ffffff\"/><PlayList CreateNewVerPlayList=\"1\"/></ttplayer>");
+            const auto orphan_xml = Read(orphan);
+            for (int kind = 0; kind < 4; ++kind) {
+                if (kind == 0) fs::remove(profile); // this isolated test's own profile
+                if (kind == 1) Write(profile, "<ttplayer>");
+                if (kind == 2) Write(profile, "<unrelated/>");
+                if (kind == 3) Write(profile,
+                    "<ttplayer><Player PlayerWnd=\"60,70,387,211\" PlayListVisible=\"0\"/>"
+                    "<Lyric TextColor=\"#123456\" Font=\"invalid\"/>"
+                    "<PlayList Color_Select=\"#654321\" Font=\"invalid\"/>"
+                    "<Visual TextColor=\"#abcdef\" Type=\"1\" FramesPerSec=\"1\"/></ttplayer>");
+                const auto before = fs::exists(profile) ? Read(profile) : std::string{};
+                ui::PlayerWindow p(seed);
+                p.SetSkinResourceModule(resources); p.SetTtpCommModule(comm);
+                Require(p.LoadStartupSkin(resources) && p.skin_ &&
+                    p.settings_.skin_file == L"<Default_Skin>" && p.CurrentSkinProfilePath() == profile,
+                    "startup did not select the real default package/profile");
+                const auto& s = p.settings_;
+                const auto& list = p.skin_->Playlist();
+                const auto& lyric = p.skin_->Lyric();
+                const auto& visual = p.skin_->Visual();
+                Require(s.playlist.font == list.font && s.playlist.font_height == list.font_height &&
+                    !s.playlist.font_descriptor_valid && s.lyric.font_valid &&
+                    std::memcmp(&s.lyric.font, &lyric.font, sizeof(LOGFONTW)) == 0,
+                    "fallback retained a deleted skin font");
+                Require(s.playlist.background_color == list.background_color &&
+                    s.playlist.alternate_background_color == list.alternate_background_color &&
+                    s.playlist.text_color == list.text_color && s.playlist.highlight_color == list.highlight_color &&
+                    s.playlist.number_color == list.number_color && s.playlist.duration_color == list.duration_color &&
+                    s.playlist.selected_color == (kind == 3 ? RGB(0x65,0x43,0x21) : list.selected_color) &&
+                    s.lyric.background_color == lyric.background_color &&
+                    s.lyric.highlight_color == lyric.highlight_color &&
+                    s.lyric.text_color == (kind == 3 ? RGB(0x12,0x34,0x56) : lyric.text_color),
+                    "fallback ignored default package colors / sparse profile overrides");
+                const settings::VisualSettings base;
+                Require(s.visual.spectrum_top_color == visual.spectrum_top_color.value_or(base.spectrum_top_color) &&
+                    s.visual.spectrum_bottom_color == visual.spectrum_bottom_color.value_or(base.spectrum_bottom_color) &&
+                    s.visual.spectrum_middle_color == visual.spectrum_middle_color.value_or(base.spectrum_middle_color) &&
+                    s.visual.spectrum_peak_color == visual.spectrum_peak_color.value_or(base.spectrum_peak_color) &&
+                    s.visual.blur_scope_color == visual.blur_scope_color.value_or(base.blur_scope_color) &&
+                    s.visual.text_color == (kind == 3 ? RGB(0xab,0xcd,0xef) : visual.text_color.value_or(base.text_color)) &&
+                    s.visual.font_valid == visual.font.has_value(), "fallback retained an old visual palette/font");
+                const RECT main = kind == 3 ? RECT{60,70,387,211} : RECT{};
+                Require(EqualRect(&s.player.player_window, &main) &&
+                    IsRectEmpty(&s.player.mini_player_window) && IsRectEmpty(&s.player.lyric_window) &&
+                    IsRectEmpty(&s.player.mini_lyric_window) && IsRectEmpty(&s.player.playlist_window) &&
+                    IsRectEmpty(&s.player.equalizer_window) && s.player.lyric_visible &&
+                    s.player.equalizer_visible && s.player.playlist_visible == (kind != 3),
+                    "fallback kept another skin's geometry or ignored default visibility");
+                Require(s.player.volume == 37 && s.player.mute && s.player.top_most &&
+                    !s.player.mini_top_most && s.player.lyric_top_most && !s.playlist.item_tips &&
+                    s.lyric.scroll_mode == 1 && s.visual.type == 4 && s.visual.frames_per_second == 37 &&
+                    !s.playlist.legacy_playlist_generation, "fallback changed global options/read an orphan profile");
+                Require(Read(orphan) == orphan_xml && Read(seed.source_path) == main_xml &&
+                    (kind == 0 ? !fs::exists(profile) : Read(profile) == before),
+                    "pre-Create fallback wrote a configuration file");
+            }
+        }
+        // Valid-package startup is deliberately different from fallback: do
+        // not reset saved global visual preferences on ordinary restarts.
+        for (const auto selector : {L"<Default_Skin>", L"common.skn", L"new\\common.skn"}) {
+            seed.skin_file = selector;
+            ui::PlayerWindow p(seed);
+            p.SetSkinResourceModule(resources); p.SetTtpCommModule(comm);
+            Require(p.LoadStartupSkin(resources) && p.settings_.skin_file == selector &&
+                p.settings_.visual.text_color == seed.visual.text_color &&
+                p.settings_.visual.font.lfHeight == seed.visual.font.lfHeight &&
+                p.settings_.visual.type == seed.visual.type, "valid startup was treated as fallback");
+        }
+        Write(profile, previous_profile);
+        std::cout << "16 missing/corrupt package/profile combinations + 3 normal startups passed\n";
+    }
     static void CheckMenus(ui::PlayerWindow& p) {
         using namespace ui::detail;
         const HMENU menu = CreatePopupMenu();
@@ -242,6 +399,7 @@ int wmain(int argc, wchar_t** argv) {
         HMODULE comm = LoadLibraryW((runtime / L"ttpcomm.dll").c_str());
         Require(resources && comm, "cannot load native DLL fixtures");
         testing::SkinRebindAccess::Run(runtime, resources, comm);
+        testing::SkinRebindAccess::StartupFallbacks(runtime, resources, comm);
         FreeLibrary(comm); FreeLibrary(resources); OleUninitialize();
         std::cout << "runtime settings/skin paths tests passed\n";
         return 0;

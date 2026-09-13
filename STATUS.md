@@ -1,5 +1,14 @@
 # Reconstruction status
 
+2026-09-13: fix startup fallback after the selected skin is deleted or damaged.
+Validate/bind the package before reading its profile; on fallback restore the
+embedded package's playlist/lyric/visual styles and geometry baseline, then
+overlay Skin/Default.xml. Never load orphan sidecars or retain the removed
+skin's main-XML styles. Preserve unrelated global settings and normal valid
+startup semantics. Reproduced the actual-EXE failure before the fix; Release
+and seven host regressions pass, including 16 fallback combinations and five
+real EXE startup/shutdown runs. See SKIN_STARTUP_FALLBACK.md.
+
 2026-09-13: add EXE-local Skin/new to async skin menus/options, retaining
 new\\package.skn selectors and adjacent .skn.xml profiles across startup,
 skin switches, options application and shutdown. Preserve Skin/Default.xml

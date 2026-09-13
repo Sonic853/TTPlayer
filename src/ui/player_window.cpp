@@ -1997,6 +1997,54 @@ bool PlayerWindow::DrawPopupMenuItem(const DRAWITEMSTRUCT& item) const {
     return true;
 }
 
+bool PlayerWindow::LoadStartupSkin(HMODULE module) {
+    if (window_) return false;
+    const bool requested_default = settings_.skin_file.empty() ||
+        _wcsicmp(settings_.skin_file.c_str(), L"<Default_Skin>") == 0;
+    const bool loaded = requested_default ? LoadSkinResource(module) :
+        LoadSkinPackage(skin::ResolveSkinPackagePath(
+            PlayerRuntimeDirectory() / L"Skin", settings_.skin_file));
+    const bool fallback = !loaded && !requested_default;
+    if (!loaded && (!fallback || !LoadSkinResource(module))) return false;
+
+    const auto global_visual = settings_.visual;
+    if (fallback) {
+        // FUN_0045D5FA's requested-package-missing branch replaces the
+        // selector BEFORE binding 0045DDEE and reading Skin/Default.xml.
+        // It is a skin change even on first startup, not an ordinary restore
+        // of the last main XML. Never read the orphan .skn.xml or retain its
+        // styles/rectangles already serialized into TTPlayerRebuild.xml.
+        ApplyPlaylistSkinDefaults(skin_->Playlist(), settings_.playlist);
+        ApplyLyricSkinDefaults(skin_->Lyric(), settings_.lyric);
+        settings_.visual = settings::VisualSettings{};
+        ApplySkinVisualSettings();
+        // Type/FPS are global preferences, not per-skin profile fields.
+        settings_.visual.type = global_visual.type;
+        settings_.visual.frames_per_second = global_visual.frames_per_second;
+        SetRectEmpty(&settings_.player.player_window);
+        SetRectEmpty(&settings_.player.mini_player_window);
+        SetRectEmpty(&settings_.player.lyric_window);
+        SetRectEmpty(&settings_.player.mini_lyric_window);
+        SetRectEmpty(&settings_.player.playlist_window);
+        SetRectEmpty(&settings_.player.equalizer_window);
+        settings_.player.lyric_visible = true;
+        settings_.player.playlist_visible = true;
+        settings_.player.equalizer_visible = true;
+    }
+    // Use the successfully loaded selector, after validation but before any
+    // HWND/font/brush is created. Missing/partial profiles overlay only their
+    // actual fields on the package baseline; no configuration is written here.
+    static_cast<void>(settings::LoadSkinVisualProfile(CurrentSkinProfilePath(),
+        settings_.player, settings_.playlist, settings_.lyric, settings_.visual));
+    if (!fallback) {
+        // Preserve the established normal-startup contract: main XML visual
+        // globals remain active (e.g. LX-iPlay's restored #194d5c spectrum).
+        // Only an actual package replacement applies its visual palette.
+        settings_.visual = global_visual;
+    }
+    return true;
+}
+
 bool PlayerWindow::LoadSkinPackage(const std::filesystem::path& path, bool restore_profile) {
     try {
         auto package = skin::SkinPackage::Open(path);

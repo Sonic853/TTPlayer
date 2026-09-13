@@ -365,6 +365,12 @@ void PreviewTests(const fs::path& output, const fs::path& root) {
 } // namespace
 
 namespace ttplayer::testing {
+struct ProgressSeekAccess {
+    static void SetClock(ui::PlayerWindow& player, int milliseconds) {
+        player.audio_.position_ms_.store(milliseconds);
+        player.audio_.pending_seek_position_ms_.store(-1);
+    }
+};
 struct SkinRebindAccess {
     static void PngBackgrounds(const fs::path& output) {
         const auto directory=output/L"png-backgrounds";
@@ -687,7 +693,7 @@ struct SkinRebindAccess {
             const char* variants[] = {
                 "",
                 "<mini_lyric Font=\"-12,0,0,0,400,0,0,0,1,0,0,4,0,SimSun\" "
-                "TextColor=\"#646464\" HilightColor=\"#646464\" BkgndColor=\"#f5f5f7\" padding=\"6,6,6,6\"/>",
+                "TextColor=\"#646464\" HilightColor=\"#323f6c\" BkgndColor=\"#f5f5f7\" padding=\"6,6,6,6\"/>",
                 "<mini_lyric Font=\"invalid\" TextColor=\"invalid\" padding=\"-1,2,3,4\"/>"};
             for (int variant = 0; variant < 3; ++variant) {
                 {
@@ -711,7 +717,7 @@ struct SkinRebindAccess {
                     Require(font.lfHeight == (mini && custom ? -12 : -20),
                             "mini font leaked into normal mode or failed to apply");
                     Require(player.ActiveLyricTextColor() == (mini && custom ? RGB(100,100,100) : settings.lyric.text_color) &&
-                            player.ActiveLyricHighlightColor() == (mini && custom ? RGB(100,100,100) : settings.lyric.highlight_color) &&
+                            player.ActiveLyricHighlightColor() == (mini && custom ? RGB(50,63,108) : settings.lyric.highlight_color) &&
                             player.ActiveLyricBackgroundColor() == (mini && custom ? RGB(245,245,247) : settings.lyric.background_color),
                             "mini style override/fallback mismatch");
                     if (mini) {
@@ -743,6 +749,7 @@ struct SkinRebindAccess {
                 player.settings_.lyric.transparent = false;
                 Require(player.settings_.lyric.font.lfHeight == -20 && player.settings_.lyric.background_color == RGB(56,78,90),
                         "mini style overwrote user settings");
+                if (custom) MiniKaraokePixels(player, fixture);
             }
             player.DestroyLyricControls();
             DestroyWindow(player.lyric_window_); player.lyric_window_ = nullptr;
@@ -752,6 +759,54 @@ struct SkinRebindAccess {
             throw;
         }
         std::cout << "Mini lyric appearance: optional XML, legacy fallback, font/mode transitions, frame pixels passed\n";
+    }
+    static void MiniKaraokePixels(ui::PlayerWindow& player, const fs::path& output) {
+        // Exercise the real two-pass painter (0043FC10) with a deterministic
+        // clock and timed lyrics. No audio device or user preferences needed.
+        const auto original = player.settings_.lyric;
+        player.mini_mode_ = true;
+        player.settings_.lyric.fade_index = 0;
+        player.settings_.lyric.fade_highlight = false;
+        player.settings_.lyric.karaoke_mode = true;
+        player.lyrics_ = lyrics::ParseLrc("[offset:1500]\n[00:00.00]MMMMMMMMMM\n[00:10.00]\n");
+        // Preserve a silent end marker even if the parser drops empty LRC rows.
+        player.lyrics_.lines = {{std::chrono::milliseconds(0),"MMMMMMMMMM"},
+                               {std::chrono::milliseconds(10000),""}};
+        player.RebuildLyricFont(false);
+        const auto count = [](const Canvas& image, COLORREF color) {
+            int result{};
+            for (int y=0;y<image.height;++y) for (int x=0;x<image.width;++x)
+                if (GetPixel(image.dc,x,y)==color) ++result;
+            return result;
+        };
+        for (int scroll : {0,1}) {
+            player.settings_.lyric.mini_scroll_mode = scroll;
+            int previous_highlight=-1, previous_normal=INT_MAX;
+            for (int ms : {2500,5000,7500}) {
+                ProgressSeekAccess::SetClock(player,ms+1500);
+                Canvas canvas(200,35);
+                player.PaintLyricControl(player.lyric_control_,canvas.dc);
+                const int normal=count(canvas,RGB(100,100,100));
+                const int highlight=count(canvas,RGB(50,63,108));
+                Require(normal>0 && highlight>0,"mini karaoke does not paint both lyric colours");
+                Require(highlight>previous_highlight && normal<previous_normal,
+                        "mini karaoke boundary does not follow the playback clock");
+                previous_highlight=highlight; previous_normal=normal;
+                canvas.Save(output/(L"karaoke-"+std::to_wstring(scroll)+L"-"+std::to_wstring(ms)+L".bmp"));
+            }
+            Require(player.HandleLyricCommand(ui::detail::kCmdLyricKaraoke) &&
+                    !player.ActiveLyricKaraokeMode(),"mini karaoke menu toggle failed");
+            Canvas disabled(200,35);
+            player.PaintLyricControl(player.lyric_control_,disabled.dc);
+            Require(count(disabled,RGB(100,100,100))==0 && count(disabled,RGB(50,63,108))>0,
+                    "karaoke-off still splits the current line");
+            player.HandleLyricCommand(ui::detail::kCmdLyricKaraoke);
+            Require(player.ActiveLyricKaraokeMode(),"mini karaoke cannot be re-enabled");
+        }
+        player.settings_.lyric = original;
+        player.lyrics_ = {};
+        ProgressSeekAccess::SetClock(player,0);
+        std::cout<<"Mini karaoke: two colours, 25/50/75 percent timing with offset, both scroll modes, menu off/on passed\n";
     }
     static void Render(const fs::path& directory, const fs::path& output,
                        HMODULE resources, HMODULE comm) {
