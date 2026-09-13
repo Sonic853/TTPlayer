@@ -3,6 +3,7 @@
 #include "ttplayer/audio/audio_engine.h"
 #include "ttplayer/integrations/discord_presence.h"
 #include "ttplayer/lyrics/lrc_parser.h"
+#include "ttplayer/lyrics/online_search.h"
 #include "ttplayer/playlist/playlist_store.h"
 #include "ttplayer/plugins/plugin_manager.h"
 #include "ttplayer/settings/settings.h"
@@ -201,6 +202,14 @@ private:
     // the original private 0x7F4 entry used by desktop lyrics/network links.
     void ShowOptions(int page = -1, UINT focus_control = 0);
     void CloseOptions();
+    void ShowOnlineLyricSearch(bool automatic_results = false);
+    void StartOnlineLyricSearch(bool automatic);
+    void PollOnlineLyricSearch();
+    void CloseOnlineLyricSearch();
+    void DownloadOnlineLyric(int index);
+    void UpdateOnlineLyricSelection();
+    void CancelOnlineLyricCountdown();
+    static INT_PTR CALLBACK OnlineLyricDialogProc(HWND, UINT, WPARAM, LPARAM);
     static INT_PTR CALLBACK OptionsPageDialogProc(HWND, UINT, WPARAM, LPARAM);
     static INT_PTR CALLBACK OptionsChildDialogProc(HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK OptionsSheetSubclassProc(
@@ -869,6 +878,20 @@ private:
     lyrics::Lyrics lyrics_;
     std::filesystem::path lyric_path_;
     std::filesystem::path associated_lyric_path_;
+    HWND lyric_search_dialog_{};
+    std::unique_ptr<lyrics::OnlineSearch> lyric_search_;
+    playlist::Track lyric_search_track_;
+    std::wstring lyric_search_artist_, lyric_search_title_;
+    std::wstring lyric_auto_search_key_;
+    std::filesystem::path lyric_download_path_;
+    size_t lyric_search_revision_{static_cast<size_t>(-1)};
+    bool lyric_search_automatic_{};
+    bool lyric_search_results_shown_{};
+    bool lyric_search_saved_{};
+    bool lyric_download_overwrite_{};
+    bool lyric_download_associate_{};
+    ULONGLONG lyric_download_deadline_{};
+    std::wstring lyric_download_countdown_format_;
     std::filesystem::path lyric_editor_path_;
     int lyric_editor_encoding_{};
     bool lyric_editor_bom_{};

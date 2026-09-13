@@ -1,5 +1,10 @@
 # Lyric window recovery
 
+Online search/download is now connected to the real lyric AddIn ABI, including
+DLL-owned external server XML/cache and original dialogs 208/209. See
+[LYRIC_SEARCH_RECOVERY.md](LYRIC_SEARCH_RECOVERY.md) for protocol evidence,
+host loopback tests and the remaining compatibility boundaries.
+
 This note records the reconstruction of the normal and mini, skinned lyric popup
 (`TTPlayer_LyricWnd`).  The desktop overlay (`DeskLrcCtrlClass`,
 `DeskLrcPaintClass`, and `DeskLrcBarClass`) is a separate subsystem in the

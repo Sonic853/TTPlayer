@@ -194,12 +194,40 @@ private:
 
 // Session returned by the fourth Sound AddIn category.  Shipped
 // ttp_lrcsh*.dll modules implement this category; it is not an audio encoder.
+// ttp_lrcsh!603520CD / 60353428: this is a proxy descriptor, NOT a
+// SoundLibrary interface. Strings are copied by Initialize.
+struct LyricNetworkConfig {
+    DWORD size{sizeof(LyricNetworkConfig)};
+    int proxy_type{1};
+    LPCWSTR server{};
+    DWORD port{};
+    LPCWSTR username{};
+    LPCWSTR password{};
+};
+static_assert(sizeof(LyricNetworkConfig) == 24);
+
+inline constexpr GUID kLyricCallbackId{0xca540428,0x2528,0x4bbc,
+    {0x87,0xb0,0x66,0x05,0xf2,0x18,0x10,0xc9}};
+inline constexpr GUID kLyricHostId{0x6f1f38a8,0x3021,0x4e2e,
+    {0xbb,0xfb,0x7f,0x61,0x6a,0x5c,0x3d,0x62}};
+struct LyricSearchCallback : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE OnResults(int count, LPCWSTR* artists,
+                                                 LPCWSTR* titles) = 0;
+    virtual HRESULT STDMETHODCALLTYPE OnDownload(int length, LPCWSTR text,
+        LPCWSTR extra_title, LPCWSTR extra_url) = 0;
+    virtual HRESULT STDMETHODCALLTYPE OnError(LPCWSTR text) = 0;
+    virtual HRESULT STDMETHODCALLTYPE OnServer(LPCWSTR name) = 0;
+};
+
 class LegacyLyricSearchSession {
 public:
     ~LegacyLyricSearchSession();
     LegacyLyricSearchSession(const LegacyLyricSearchSession&) = delete;
     LegacyLyricSearchSession& operator=(const LegacyLyricSearchSession&) = delete;
 
+    HRESULT Search(LPCWSTR artist, LPCWSTR title) const noexcept;
+    HRESULT Download(int index) const noexcept;
+    HRESULT GetExtra(LPWSTR* title, LPWSTR* url) const noexcept;
     HRESULT QueryInterface(REFIID iid, void** result) const noexcept;
     [[nodiscard]] const std::filesystem::path& ModulePath() const noexcept;
 
@@ -283,11 +311,9 @@ public:
         size_t index, HRESULT* result = nullptr,
         std::wstring* diagnostic = nullptr) const;
 
-    // FUN_004CD44E.  sound_library_host is the private host interface passed
-    // to the shipped lyric provider; nullptr is permitted for providers that
-    // do not require it.
+    // FUN_004CD44E. Initialize may wait for the DLL's worker: call off UI.
     [[nodiscard]] std::unique_ptr<LegacyLyricSearchSession> CreateLyricSearch(
-        size_t index, void* context, void* sound_library_host,
+        size_t index, LyricSearchCallback* context, const LyricNetworkConfig* network,
         HRESULT* result = nullptr,
         std::wstring* diagnostic = nullptr) const;
 

@@ -3166,6 +3166,8 @@ void PlayerWindow::AddToolTipTool(HWND owner, UINT_PTR identifier,
 
 bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
     auto* queued = const_cast<MSG*>(&message);
+    if (lyric_search_dialog_ && IsWindow(lyric_search_dialog_) &&
+        IsDialogMessageW(lyric_search_dialog_, queued)) return true;
     if (TranslatePlaylistConverterMessage(*queued)) return true;
     // PSH_MODELESS requires the application's message filter to run the
     // property-sheet dialog manager.  Omitting this was also enough to make

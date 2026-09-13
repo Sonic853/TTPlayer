@@ -3582,9 +3582,7 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
         CopyLyricsToClipboard();
         return true;
     case kCmdLyricDownload:
-        // The command remains present because it belongs to the recovered
-        // ttpres.dll menu. The legacy network service is not contacted by the
-        // offline rebuild; local association/reload continue to work.
+        ShowOnlineLyricSearch();
         return true;
     case kCmdDesktopLyrics:
         EnterDesktopLyricMode();
@@ -3683,6 +3681,11 @@ void PlayerWindow::LoadDroppedLyrics(const std::filesystem::path& path) {
 }
 
 void PlayerWindow::LoadCurrentLyrics(bool force) {
+    const auto* requested_track = PlaybackTrackForUi();
+    if (lyric_search_ && (!requested_track ||
+        requested_track->path != lyric_search_track_.path ||
+        requested_track->subtrack != lyric_search_track_.subtrack))
+        CloseOnlineLyricSearch();
     ClearLyrics();
     const auto* playback_track = PlaybackTrackForUi();
     if (!playback_track || (!force && !settings_.lyric.auto_load_lyric)) {
@@ -3714,6 +3717,9 @@ void PlayerWindow::LoadCurrentLyrics(bool force) {
         LoadLyricsFrom(candidate, false);
         return;
     }
+    if (!lyric_editor_ && settings_.lyric.auto_download &&
+        (!settings_.lyric.download_when_full_info || (!artist.empty() && !title.empty())))
+        StartOnlineLyricSearch(true);
     ApplyAutoLyricVisibility();
 }
 

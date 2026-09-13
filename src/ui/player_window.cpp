@@ -1358,6 +1358,7 @@ PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(se
 }
 
 PlayerWindow::~PlayerWindow() {
+    CloseOnlineLyricSearch();
     DestroyFullScreenLyricInput();
     ShutdownMediaLibrary();
     ShutdownPlaylistInfoLoading();
@@ -2998,6 +2999,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             // procedure.
             if (skin_catalog_result_stale_) StartSkinMenuCatalogLoad();
             PollMediaLibraryWorkers();
+            PollOnlineLyricSearch();
             playlists_.FlushDirty(false);
             if (pending_natural_play_ &&
                 GetTickCount64() >= pending_natural_play_tick_) {
@@ -3101,6 +3103,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         }
         return 0;
     case WM_DESTROY:
+        CloseOnlineLyricSearch();
         ClosePlaylistConverter(window_);
         taskbar_playback_.Reset();
         KillTimer(window_, kCloseAudioFadeTimer);

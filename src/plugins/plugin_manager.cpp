@@ -47,7 +47,7 @@ using ConfigureEncoder = HRESULT(WINAPI*)(void*, HWND);
 using OpenEncoderPath = HRESULT(WINAPI*)(void*, const wchar_t*, WAVEFORMATEX*);
 using OpenEncoderStream = HRESULT(WINAPI*)(void*, IStream*, WAVEFORMATEX*);
 using EncodeSoundBuffer = HRESULT(WINAPI*)(void*, void*, DWORD*);
-using InitializeLyricSearch = HRESULT(WINAPI*)(void*, void*, void*);
+using InitializeLyricSearch = HRESULT(WINAPI*)(void*, void*, const LyricNetworkConfig*);
 using NoArgumentMethod = HRESULT(WINAPI*)(void*);
 using OpenReader = HRESULT(WINAPI*)(void*, IStream*, DWORD);
 using GetReaderDword = HRESULT(WINAPI*)(void*, DWORD*);
@@ -539,19 +539,19 @@ HRESULT InvokeEncoderWrite(void* encoder, LegacyBuffer* buffer,
 }
 
 HRESULT InvokeLyricSearchInitialize(void* search, void* context,
-                                    void* sound_library_host) noexcept {
+                                    const LyricNetworkConfig* network) noexcept {
     auto table = Vtable(search);
     if (!table || !table[3]) return E_POINTER;
 #if defined(_MSC_VER)
     __try {
         return reinterpret_cast<InitializeLyricSearch>(table[3])(
-            search, context, sound_library_host);
+            search, context, network);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return E_UNEXPECTED;
     }
 #else
     return reinterpret_cast<InitializeLyricSearch>(table[3])(
-        search, context, sound_library_host);
+        search, context, network);
 #endif
 }
 
@@ -1725,6 +1725,47 @@ LegacyLyricSearchSession::LegacyLyricSearchSession(
     std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 LegacyLyricSearchSession::~LegacyLyricSearchSession() = default;
 
+HRESULT LegacyLyricSearchSession::Search(LPCWSTR artist, LPCWSTR title) const noexcept {
+    auto table = Vtable(impl_->search);
+    if (!table || !table[4] || !title) return E_POINTER;
+    using Call = HRESULT(WINAPI*)(void*, LPCWSTR, LPCWSTR);
+#if defined(_MSC_VER)
+    __try {
+#endif
+        return reinterpret_cast<Call>(table[4])(impl_->search, artist, title);
+#if defined(_MSC_VER)
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return E_UNEXPECTED; }
+#endif
+}
+
+HRESULT LegacyLyricSearchSession::Download(int index) const noexcept {
+    auto table = Vtable(impl_->search);
+    if (!table || !table[5]) return E_POINTER;
+    using Call = HRESULT(WINAPI*)(void*, int);
+#if defined(_MSC_VER)
+    __try {
+#endif
+        return reinterpret_cast<Call>(table[5])(impl_->search, index);
+#if defined(_MSC_VER)
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return E_UNEXPECTED; }
+#endif
+}
+
+HRESULT LegacyLyricSearchSession::GetExtra(LPWSTR* title, LPWSTR* url) const noexcept {
+    if (!title || !url) return E_POINTER;
+    *title = nullptr; *url = nullptr;
+    auto table = Vtable(impl_->search);
+    if (!table || !table[6]) return E_NOINTERFACE;
+    using Call = HRESULT(WINAPI*)(void*, LPWSTR*, LPWSTR*);
+#if defined(_MSC_VER)
+    __try {
+#endif
+        return reinterpret_cast<Call>(table[6])(impl_->search, title, url);
+#if defined(_MSC_VER)
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return E_UNEXPECTED; }
+#endif
+}
+
 HRESULT LegacyLyricSearchSession::QueryInterface(
     REFIID iid, void** result) const noexcept {
     if (!result) return E_POINTER;
@@ -2520,7 +2561,7 @@ std::unique_ptr<LegacyEncoderSession> PluginManager::CreateEncoder(
 }
 
 std::unique_ptr<LegacyLyricSearchSession> PluginManager::CreateLyricSearch(
-    size_t index, void* context, void* sound_library_host,
+    size_t index, LyricSearchCallback* context, const LyricNetworkConfig* network,
     HRESULT* result, std::wstring* diagnostic) const {
     if (diagnostic) diagnostic->clear();
     if (index >= lyric_providers_.size()) {
@@ -2550,7 +2591,7 @@ std::unique_ptr<LegacyLyricSearchSession> PluginManager::CreateLyricSearch(
         return {};
     }
     current = InvokeLyricSearchInitialize(
-        search, context, sound_library_host);
+        search, context, network);
     if (FAILED(current)) {
         Release(search);
         if (result) *result = current;

@@ -168,13 +168,6 @@ struct DspProbeResult {
 };
 
 constexpr std::array<int, 9> kLyricFadeValues{0,3,4,5,6,8,10,12,16};
-// DAT_00547F78 is populated by the two shipped lyric-search add-ins before
-// COptionsLrcSearch::FUN_00497AE5 fills combo 2090.  These provider names are
-// not ttpres resources.  Their exact order was confirmed by expanding the
-// original combo in Windows Sandbox (20260905-035829).
-constexpr std::array<const wchar_t*, 4> kLegacyLyricServices{
-    L"moeinn Lyrics Server", L"千古八方服务器", L"NCAB在线",
-    L"TTPlayer.co(香港)"};
 
 struct OptionsChildInit {
     PlayerWindow* self{};
@@ -3649,15 +3642,19 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                         settings_.lyric.download_folder.c_str());
         const HWND server = GetDlgItem(dialog, 2090);
         if (server) {
-            for (const auto* label : kLegacyLyricServices)
-                SendMessageW(server, CB_ADDSTRING, 0,
-                             reinterpret_cast<LPARAM>(label));
+            // FUN_00497AE5 reads DAT_00547F78: only loaded AddIns can
+            // advertise a lyric service (including their external .ini).
+            SendMessageW(server, CB_RESETCONTENT, 0, 0);
+            if (sound_library_)
+                for (const auto& provider : sound_library_->LyricSearchProviders())
+                    SendMessageW(server, CB_ADDSTRING, 0,
+                        reinterpret_cast<LPARAM>(provider.name.c_str()));
             const LRESULT count = SendMessageW(server, CB_GETCOUNT, 0, 0);
             const int selected = count > 0
-                ? std::clamp(settings_.lyric.add_in_index, 0,
-                             static_cast<int>(count) - 1)
-                : 0;
+                ? (settings_.lyric.add_in_index >= 0 && settings_.lyric.add_in_index < count
+                    ? settings_.lyric.add_in_index : 0) : -1;
             SendMessageW(server, CB_SETCURSEL, selected, 0);
+            EnableWindow(server, count > 0);
         }
         MakeOptionsHyperlink(dialog, 2185);
         UpdateFolderListButtons(dialog, resources, true);
