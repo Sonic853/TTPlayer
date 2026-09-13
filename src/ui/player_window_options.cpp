@@ -3124,6 +3124,10 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
 
 void PlayerWindow::InitializeOptionsShell() {
     if (!options_window_) return;
+    // COptionsSheet::004A2F66 adds 0x02000000 through 004053CD.
+    // The sheet background must not paint over the navigation/page HWNDs.
+    SetWindowLongPtrW(options_window_, GWL_STYLE,
+        GetWindowLongPtrW(options_window_, GWL_STYLE) | WS_CLIPCHILDREN);
     SetWindowSubclass(options_window_, OptionsSheetSubclassProc,
                       kOptionsSheetSubclass,
                       reinterpret_cast<DWORD_PTR>(this));
@@ -3239,15 +3243,33 @@ void PlayerWindow::PositionOptionsPage(HWND page) {
     if (!options_window_ || !page) return;
     const UINT dpi = GetDpiForWindow(options_window_);
     const auto scale = [dpi](int value) { return MulDiv(value, dpi, 96); };
-    SetWindowPos(page, nullptr, scale(116), scale(50), scale(420), scale(323),
-                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
+    const RECT target{scale(116), scale(50), scale(116) + scale(420),
+                      scale(50) + scale(323)};
+    RECT current{};
+    GetWindowRect(page, &current);
+    MapWindowPoints(nullptr, options_window_, reinterpret_cast<POINT*>(&current), 2);
+    if (EqualRect(&current, &target) &&
+        (GetWindowLongPtrW(page, GWL_STYLE) & WS_VISIBLE)) return;
+    // Comctl32 can first place a page at the hidden tab's stock origin.
+    // Repaint its new client area rather than copying pixels from that
+    // overlapping location (which can contain the navigation selection).
+    SetWindowPos(page, nullptr, target.left, target.top,
+                 target.right - target.left, target.bottom - target.top,
+                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
 }
 
 void PlayerWindow::SelectOptionsPage(int page, UINT focus_control) {
     if (!options_window_) return;
     page = std::clamp(page, 0, static_cast<int>(kOptionTemplates.size()) - 1);
     options_focus_control_ = focus_control;
-    if (!PropSheet_SetCurSel(options_window_, nullptr, page)) {
+    const HWND active = PropSheet_GetCurrentPageHwnd(options_window_);
+    // 004A3651 compares LB_GETCURSEL with the active property-sheet index
+    // before 004345B4/PSM_SETCURSEL. A second click on the same item must not
+    // send PSN_KILLACTIVE/PSN_SETACTIVE or move the live page through the
+    // stock tab origin. Still honour 0049FD89's targeted nested-page focus.
+    const bool different_page = !active ||
+        active != options_pages_[static_cast<size_t>(page)];
+    if (different_page && !PropSheet_SetCurSel(options_window_, nullptr, page)) {
         const HWND current = PropSheet_GetCurrentPageHwnd(options_window_);
         const auto found = std::find(options_pages_.begin(),
                                      options_pages_.end(), current);
@@ -3257,7 +3279,8 @@ void PlayerWindow::SelectOptionsPage(int page, UINT focus_control) {
         options_focus_control_ = 0;
     }
     options_page_index_ = page;
-    if (options_navigation_)
+    if (options_navigation_ &&
+        SendMessageW(options_navigation_, LB_GETCURSEL, 0, 0) != page)
         SendMessageW(options_navigation_, LB_SETCURSEL, page, 0);
     const HWND current = PropSheet_GetCurrentPageHwnd(options_window_);
     if (current) PositionOptionsPage(current);
@@ -3267,8 +3290,14 @@ void PlayerWindow::SelectOptionsPage(int page, UINT focus_control) {
         auto description = ResourceText(template_id);
         if (description.empty())
             description = DialogCaption(ResourceModule(), template_id);
-        SetWindowTextW(options_header_, description.c_str());
-        InvalidateRect(options_header_, nullptr, TRUE);
+        std::wstring previous(static_cast<size_t>(
+            GetWindowTextLengthW(options_header_)) + 1U, L'\0');
+        previous.resize(static_cast<size_t>(GetWindowTextW(options_header_,
+            previous.data(), static_cast<int>(previous.size()))));
+        if (previous != description) {
+            SetWindowTextW(options_header_, description.c_str());
+            InvalidateRect(options_header_, nullptr, TRUE);
+        }
     }
 
     HWND target = nullptr;

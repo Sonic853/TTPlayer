@@ -1,5 +1,17 @@
 # Reconstruction status
 
+2026-09-13: fix options-page redraw on repeated navigation clicks. Match
+004A3651's active-page guard and 004A2F66's WS_CLIPCHILDREN shell style;
+make page positioning/header synchronization idempotent and prevent stale
+pixel copying when adapting native property-page geometry. Preserve HWNDs,
+nested-page targeted entries and save semantics. options_drawing_tests covers
+all 15 native pages; the pre-fix test reproduced three activation/deactivation
+cycles and twelve positioning requests for three same-page clicks. See
+OPTIONS_RECOVERY.md section 9 for evidence and verification boundaries.
+Release built successfully; options_drawing_tests, fullscreen_album_tests,
+window_topmost_tests, project_links_tests and skin_rebind_tests all passed
+on the host (5/5, 31.83 seconds).
+
 2026-09-13: remove resource 143's fullscreen-only Exit Fullscreen command
 (0x7DE7) and its extra separator from ordinary/mini lyric popups and grafted
 lyric menus. Explicitly retain it in the detached fullscreen popup. Add native
