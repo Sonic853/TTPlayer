@@ -24,10 +24,11 @@ public:
         if (suspended_) SendMessageW(window_, WM_SETREDRAW, FALSE, 0);
     }
     ~ScopedSkinRedraw() { Resume(); }
-    void Resume() {
+    void Resume(bool invalidate = true) {
         if (suspended_ && IsWindow(window_)) {
             SendMessageW(window_, WM_SETREDRAW, TRUE, 0);
-            RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+            if (invalidate)
+                RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
         }
         suspended_ = false;
     }

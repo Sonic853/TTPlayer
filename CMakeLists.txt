@@ -526,7 +526,7 @@ target_compile_definitions(taskbar_playback_tests PRIVATE UNICODE _UNICODE NOMIN
 target_compile_options(taskbar_playback_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(taskbar_playback_tests PRIVATE ttplayer_core)
 
-add_executable(skin_rebind_tests tests/skin_rebind_tests.cpp)
+add_executable(skin_rebind_tests src/ui/skin_rebind_tests.cpp)
 target_compile_definitions(skin_rebind_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(skin_rebind_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(skin_rebind_tests PRIVATE ttplayer_core)

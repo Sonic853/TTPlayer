@@ -1985,6 +1985,9 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         return 0;
     }
     switch (message) {
+    case WM_ACTIVATE:
+        RaiseSkinOwnerOnActivation(playlist_window_, wparam, lparam);
+        break;
     case WM_ERASEBKGND:
         return 1;
     case WM_GETMINMAXINFO: {

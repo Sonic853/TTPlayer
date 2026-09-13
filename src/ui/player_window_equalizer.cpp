@@ -75,6 +75,9 @@ LRESULT PlayerWindow::HandleEqualizerMessage(UINT message, WPARAM wparam,
                (hit >= kEqSliderFirstBand && hit <= kEqSliderLastBand);
     };
     switch (message) {
+    case WM_ACTIVATE:
+        RaiseSkinOwnerOnActivation(equalizer_window_, wparam, lparam);
+        break;
     case WM_ERASEBKGND:
         return 1;
     case WM_NCHITTEST:

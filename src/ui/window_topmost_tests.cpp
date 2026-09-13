@@ -2,7 +2,9 @@
 #include "player_window_internal.h"
 
 #include <iostream>
+#include <future>
 #include <stdexcept>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -18,11 +20,102 @@ struct SkinRebindAccess {
         if (((GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) != topmost)
             std::cerr << "HWND=" << window << " owner=" << GetWindow(window, GW_OWNER)
                       << " expected=" << topmost << " exstyle="
-                      << std::hex << GetWindowLongPtrW(window, GWL_EXSTYLE) << std::dec << '\n';
+                      << std::hex << GetWindowLongPtrW(window, GWL_EXSTYLE) << std::dec
+                      << " hung=" << IsHungAppWindow(window) << '\n';
         Require(((GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) == topmost,
                 message);
     }
+    static bool Above(HWND first, HWND second) {
+        for (HWND h = GetWindow(second, GW_HWNDPREV); h; h = GetWindow(h, GW_HWNDPREV))
+            if (h == first) return true;
+        return false;
+    }
+    struct OtherThreadWindow {
+        HWND window{};
+        DWORD thread_id{};
+        std::thread worker;
+        OtherThreadWindow() {
+            std::promise<std::pair<HWND, DWORD>> ready;
+            auto future = ready.get_future();
+            worker = std::thread([&ready] {
+                HWND h = CreateWindowExW(0, L"STATIC", L"Z-order witness", WS_POPUP,
+                    3000, 3000, 80, 80, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+                ready.set_value({h, GetCurrentThreadId()});
+                if (!h) return;
+                MSG message{};
+                while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+                    TranslateMessage(&message); DispatchMessageW(&message);
+                }
+                DestroyWindow(h);
+            });
+            const auto result = future.get();
+            window = result.first; thread_id = result.second;
+            if (!window) { worker.join(); throw std::runtime_error("cannot create Z-order witness"); }
+        }
+        ~OtherThreadWindow() { PostThreadMessageW(thread_id, WM_QUIT, 0, 0); worker.join(); }
+    };
+    static void ActivationOrder(ui::PlayerWindow& p) {
+        OtherThreadWindow witness;
+        struct Observation { unsigned owner_raises{}; } observed;
+        const auto watch = [](HWND window, UINT message, WPARAM wparam, LPARAM lparam,
+                              UINT_PTR, DWORD_PTR data) -> LRESULT {
+            if (message == WM_WINDOWPOSCHANGING && lparam) {
+                const auto& position = *reinterpret_cast<const WINDOWPOS*>(lparam);
+                // User32 resolves HWND_TOP to a real insert-after HWND when
+                // the owner must stay below one of its own popups.
+                if ((position.flags & (SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER)) ==
+                        (SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
+                    ++reinterpret_cast<Observation*>(data)->owner_raises;
+            }
+            return DefSubclassProc(window, message, wparam, lparam);
+        };
+        constexpr UINT_PTR watch_id = 0x5a4f;
+        Require(SetWindowSubclass(p.window_, watch, watch_id, reinterpret_cast<DWORD_PTR>(&observed)),
+            "cannot observe activation Z-order requests");
+        bool cross_thread = true, internal = true, inactive = true;
+        for (HWND auxiliary : {p.lyric_window_, p.equalizer_window_, p.playlist_window_}) {
+            const auto interleave = [&] {
+                SetWindowPos(witness.window, HWND_TOP, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                SetWindowPos(auxiliary, HWND_TOP, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                observed = {};
+            };
+            interleave();
+            // Deliver the same WM_ACTIVATE boundary as a click from another
+            // GUI thread; no external user's window or foreground is needed.
+            // Assert the native HWND_TOP/0x13 owner request, not whether a
+            // different thread/foreground app reordered itself immediately
+            // afterwards. Startup/dialog tests separately check actual Z order.
+            SendMessageW(auxiliary, WM_ACTIVATE, WA_ACTIVE, reinterpret_cast<LPARAM>(witness.window));
+            cross_thread = cross_thread && observed.owner_raises != 0;
+            interleave();
+            SendMessageW(auxiliary, WM_ACTIVATE, WA_ACTIVE, reinterpret_cast<LPARAM>(p.window_));
+            internal = internal && observed.owner_raises == 0;
+            observed.owner_raises = 0;
+            SendMessageW(auxiliary, WM_ACTIVATE, WA_INACTIVE, reinterpret_cast<LPARAM>(witness.window));
+            inactive = inactive && observed.owner_raises == 0;
+        }
+        RemoveWindowSubclass(p.window_, watch, watch_id);
+        Require(cross_thread, "auxiliary activation did not request the original owner-group raise");
+        Require(internal, "internal activation unexpectedly reordered the group");
+        Require(inactive, "deactivation unexpectedly raised the group");
+    }
     static void Check(ui::PlayerWindow& p, const char* phase) {
+        // This matrix lives longer than User32's hung-window timeout. Like
+        // Application::Run, keep servicing native messages between commands;
+        // otherwise ghost HWNDs replace visible windows and invalidate real
+        // Z-order/band observations even though the production loop is healthy.
+        MSG message{};
+        for (unsigned count = 0; count < 256 &&
+             PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE); ++count) {
+            if (message.message == WM_QUIT) continue; // Previous fixture teardown.
+            if (!p.PreTranslateMessage(message)) {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+        Require(!IsHungAppWindow(p.window_), "test UI stopped servicing its message queue");
         std::cout << phase << " mini=" << p.mini_mode_ << std::endl;
         const bool main = p.mini_mode_ ? p.settings_.player.mini_top_most
                                       : p.settings_.player.top_most;
@@ -32,9 +125,25 @@ struct SkinRebindAccess {
         CheckWindow(p.lyric_window_, lyric, "lyric effective topmost mismatch");
         CheckWindow(p.playlist_window_, main, "playlist owner topmost mismatch");
         CheckWindow(p.equalizer_window_, main, "equalizer owner topmost mismatch");
+        for (const HWND auxiliary : {p.lyric_window_, p.playlist_window_, p.equalizer_window_}) {
+            if (IsWindowVisible(auxiliary) && IsWindowVisible(p.window_) && !IsIconic(p.window_)) {
+                if (!Above(auxiliary, p.window_)) {
+                    wchar_t name[128]{};
+                    GetClassNameW(auxiliary, name, 128);
+                    std::wcerr << L"below owner: " << name << L" window=" << auxiliary
+                        << L" main=" << p.window_ << L" main_top=" << main
+                        << L" lyric_top=" << lyric << L" desktop_top=" << desktop
+                        << L" main_hung=" << IsHungAppWindow(p.window_)
+                        << L" auxiliary_hung=" << IsHungAppWindow(auxiliary) << L'\n';
+                }
+                Require(Above(auxiliary, p.window_), "visible popup ended up below its owner");
+            }
+        }
         CheckWindow(p.desktop_lyrics_.ControlHandle(), desktop, "desktop control topmost mismatch");
         CheckWindow(p.desktop_lyrics_.PaintHandle(), desktop, "desktop paint topmost mismatch");
         CheckWindow(p.desktop_lyrics_.BarHandle(), desktop, "desktop toolbar topmost mismatch");
+        if (p.options_window_ && IsWindow(p.options_window_))
+            CheckWindow(p.options_window_, main, "options retained a stale owner topmost band");
     }
     static void Pin(ui::PlayerWindow& p, bool main, bool lyric) {
         using namespace ui::detail;
@@ -62,6 +171,11 @@ struct SkinRebindAccess {
         p.fullscreen_lyric_window_was_visible_ = IsWindowVisible(p.lyric_window_) != FALSE;
         p.fullscreen_desktop_lyric_was_visible_ = false;
         p.fullscreen_mode_ = mode;
+        // Production fullscreen hides the normal owner before detaching its
+        // controls. Keeping it visible here creates an impossible intermediate
+        // Z-order state while the child is promoted to a separate popup.
+        SetWindowPos(p.window_, nullptr, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
         const RECT target{3000, 3000, 3160, 3080};
         if (mode != 1) p.DetachVisualWindow(target);
         if (mode != 2) p.DetachLyricControl(target, HWND_TOPMOST);
@@ -72,6 +186,65 @@ struct SkinRebindAccess {
         Require(GetParent(p.visual_window_) == p.window_ &&
                 GetParent(p.lyric_control_) == p.lyric_window_, "fullscreen parent not restored");
         Check(p, "fullscreen return");
+    }
+    static void DialogTransitions(ui::PlayerWindow& p, const fs::path& runtime) {
+        using namespace ui::detail;
+        const bool initial_pin = p.settings_.player.top_most;
+        p.ShowOptions(0);
+        Require(p.options_window_ && IsWindow(p.options_window_), "options did not open");
+        const HWND original_options = p.options_window_;
+        constexpr auto identity_key = L"TTPlayer.OptionsLifetimeTest";
+        Require(SetPropW(original_options, identity_key, reinterpret_cast<HANDLE>(1)),
+            "cannot tag the options HWND");
+        // Native captioned owned windows model the nested file/color dialogs
+        // launched from options; include an initially hidden grandchild.
+        HWND nested = CreateWindowExW(0, L"STATIC", L"Owned dialog", WS_POPUP | WS_CAPTION | WS_VISIBLE,
+            3000, 3000, 100, 80, p.options_window_, nullptr, GetModuleHandleW(nullptr), nullptr);
+        HWND child = CreateWindowExW(0, L"STATIC", L"Nested dialog", WS_POPUP | WS_CAPTION,
+            3000, 3000, 100, 80, nested, nullptr, GetModuleHandleW(nullptr), nullptr);
+        HWND lyric_dialog = CreateWindowExW(0, L"STATIC", L"Lyric-owned dialog", WS_POPUP | WS_CAPTION,
+            3000, 3000, 100, 80, p.lyric_window_, nullptr, GetModuleHandleW(nullptr), nullptr);
+        Require(nested && child && lyric_dialog, "cannot create nested dialog fixtures");
+        const auto check = [&] {
+            Check(p, "options and nested dialog bands");
+            Require(p.options_window_ == original_options &&
+                GetPropW(original_options, identity_key) == reinterpret_cast<HANDLE>(1),
+                "window transition destroyed/recreated the options sheet");
+            const bool pin = p.mini_mode_ ? p.settings_.player.mini_top_most : p.settings_.player.top_most;
+            CheckWindow(nested, pin, "nested dialog retained stale topmost state");
+            CheckWindow(child, pin, "hidden grandchild dialog retained stale topmost state");
+            CheckWindow(lyric_dialog, pin || p.ActiveLyricTopMost(), "lyric-owned dialog lost independent pin inheritance");
+            Require(Above(nested, p.options_window_), "dialog went behind its options owner");
+        };
+        p.ApplySkinWindowTopMost(); check();
+        for (bool main : {false, true, false, true}) {
+            const bool sibling_order = Above(p.playlist_window_, p.equalizer_window_);
+            Pin(p, main, false); check();
+            Require(Above(p.playlist_window_, p.equalizer_window_) == sibling_order,
+                "pin/unpin reversed the playlist/equalizer stacking order");
+            // A no-op reconciliation must not reorder siblings or dialogs.
+            const bool order = Above(p.playlist_window_, p.equalizer_window_);
+            p.ApplySkinWindowTopMost(); check();
+            Require(Above(p.playlist_window_, p.equalizer_window_) == order,
+                "unchanged pin policy reordered sibling windows");
+        }
+        Pin(p, false, true); check();
+        Pin(p, true, false); check();
+        p.settings_.player.mini_top_most = false;
+        Mini(p, true); check();
+        ShowWindow(child, SW_SHOWNOACTIVATE); check();
+        Mini(p, false); check();
+        Require(p.LoadSkinPackage(runtime / L"Skin/LX-iPlay.skn"), "options-open skin switch failed");
+        check();
+        Require(p.HandleContextCommand(kCmdDefaultSkin), "options-open default restore failed");
+        check();
+        for (int mode : {1, 2, 3}) { FullscreenRestore(p, mode); check(); }
+        DestroyWindow(child); DestroyWindow(nested); DestroyWindow(lyric_dialog);
+        const HWND options = p.options_window_;
+        SendMessageW(options, WM_COMMAND, IDOK, 0);
+        Require(!IsWindow(options), "options Close button did not destroy the sheet");
+        Pin(p, initial_pin, false);
+        Check(p, "closing options restored the player group");
     }
     static void Run(const fs::path& runtime, HMODULE resources, HMODULE comm, bool startup_top,
                     bool startup_mini = false) {
@@ -112,6 +285,11 @@ struct SkinRebindAccess {
                 return;
             }
             const HWND original = p.window_;
+            Require(Above(p.playlist_window_, p.equalizer_window_) &&
+                Above(p.equalizer_window_, p.lyric_window_) && Above(p.lyric_window_, p.window_),
+                "startup window stacking differs from 00467B9B's lyric/EQ/playlist order");
+            if (!startup_top) ActivationOrder(p);
+            DialogTransitions(p, runtime);
             for (bool desktop : {false, true}) {
                 p.settings_.desktop_lyric.topmost = desktop;
                 p.desktop_lyrics_.ApplySettings();

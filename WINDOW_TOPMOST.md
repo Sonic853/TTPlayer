@@ -1,5 +1,10 @@
 # Preserve "Always on top" across window transitions
 
+Follow-up: [WINDOW_Z_ORDER.md](WINDOW_Z_ORDER.md) extends this recovery to
+actual owner/sibling ordering and existing options/nested dialogs, which the
+original flag-only regression did not cover. The current implementation builds
+an owner-first plan from the existing Z order instead of a fixed window array.
+
 ## Cause and recovered behavior
 
 The old rebuild preserved the `TopMost` setting and menu check but lost the

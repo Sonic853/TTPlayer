@@ -185,7 +185,8 @@ struct SkinRebindAccess {
                     GetMenuStringW(menu,i,label,128,MF_BYPOSITION); lyric_labels[i] = label;
                 }
                 lyric_separator = (GetMenuState(menu,4,MF_BYPOSITION) & MF_SEPARATOR) != 0;
-                lyric_commands = FindCommandMenu(menu,kCmdLyricCopy) && FindCommandMenu(menu,kCmdLyricScrollMode);
+                lyric_commands = FindCommandMenu(menu,kCmdLyricCopy) && FindCommandMenu(menu,kCmdLyricScrollMode) &&
+                    FindCommandMenu(menu,kCmdFullscreenExit);
                 monitor_menu = FindCommandMenu(menu,kCmdFullscreenMonitorFirst) != nullptr;
             }
         }
@@ -337,13 +338,33 @@ struct SkinRebindAccess {
                 }
             }
             capture_lyric_menu = false; p.lyric_control_ = nullptr;
-            const HMENU ordinary = DetachFirstPopup(LoadMenuW(resources,MAKEINTRESOURCEW(kMenuLyricDisplay)));
-            Require(ordinary != nullptr,"normal lyric menu fixture unavailable");
-            p.PrepareLyricMenu(ordinary);
-            const bool unchanged = GetMenuItemID(ordinary,0) != kCmdVisualDream &&
-                                   !FindCommandMenu(ordinary,kCmdVisualCover);
-            DestroyMenu(ordinary);
-            Require(unchanged,"normal lyric context menu was changed by the fullscreen extension");
+            for (bool mini : {false,true}) {
+                p.mini_mode_ = mini;
+                const HMENU ordinary = DetachFirstPopup(LoadMenuW(resources,MAKEINTRESOURCEW(kMenuLyricDisplay)));
+                Require(ordinary != nullptr,"normal lyric menu fixture unavailable");
+                p.PrepareLyricMenu(ordinary);
+                const bool unchanged = GetMenuItemID(ordinary,0) != kCmdVisualDream &&
+                                       !FindCommandMenu(ordinary,kCmdVisualCover);
+                const bool exit_removed = !FindCommandMenu(ordinary,kCmdFullscreenExit);
+                const bool commands_retained = FindCommandMenu(ordinary,kCmdFullscreenLyrics) &&
+                    FindCommandMenu(ordinary,kCmdFullscreenVisual) && FindCommandMenu(ordinary,kCmdFullscreenAll) &&
+                    FindCommandMenu(ordinary,kCmdLyricOptions);
+                bool clean_separators = true, previous_separator = true;
+                for (int i = 0; i < GetMenuItemCount(ordinary); ++i) {
+                    MENUITEMINFOW item{sizeof(item)};
+                    item.fMask = MIIM_FTYPE;
+                    Require(GetMenuItemInfoW(ordinary,i,TRUE,&item),"cannot read lyric menu item type");
+                    const bool separator = (item.fType & MFT_SEPARATOR) != 0;
+                    clean_separators = clean_separators && !(separator && previous_separator);
+                    previous_separator = separator;
+                }
+                clean_separators = clean_separators && !previous_separator;
+                DestroyMenu(ordinary);
+                Require(unchanged,"normal lyric context menu was changed by the fullscreen extension");
+                Require(exit_removed,"normal/mini lyric menu exposes Exit Fullscreen");
+                Require(commands_retained && clean_separators,"lyric menu lost commands or retained an orphan separator");
+            }
+            p.mini_mode_ = false;
             p.fullscreen_mode_ = 0; p.fullscreen_visual_detached_ = false;
             p.visual_window_ = nullptr;
             Window page{CreateDialogParamW(resources, MAKEINTRESOURCEW(263), owner.value,

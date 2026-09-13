@@ -1,5 +1,35 @@
 # Reconstruction status
 
+2026-09-13: remove resource 143's fullscreen-only Exit Fullscreen command
+(0x7DE7) and its extra separator from ordinary/mini lyric popups and grafted
+lyric menus. Explicitly retain it in the detached fullscreen popup. Add native
+menu regressions for command presence, preserved entry points and separators.
+Release build and fullscreen_album_tests passed. The additional native-input
+fullscreen_lyric_drag_tests run could not complete: its guard detected the host
+mouse in use; no drag/input code was changed by this menu fix.
+
+2026-09-13: correct the main skin-rebind redraw boundary. 0046D0C1 resumes
+WM_SETREDRAW before native geometry/region changes; 00468363 then binds the
+auxiliary windows. Previously the guard spanned the entire operation,
+leaving WS_VISIBLE temporarily cleared during layout and owner reconciliation.
+Resume without premature group invalidation, retain all HWNDs and the existing
+topmost policy. Add tracked lifecycle/message-order regressions, optional
+Classic/PNG packages and options-HWND identity checks. See SKIN_REBIND_LIFECYCLE.md.
+Release and all ten targeted host regressions pass (55.77 seconds).
+
+2026-09-13: recover window-group Z order, including existing modeless options
+and nested owned dialogs. Compare 5.7.9's 00467B9B, 004A3A66, 0041964D,
+0044F073/0046CD66 and options-sheet paths with isolated original/rebuilt
+host runs. Preserve sibling order during pin changes, synchronize dialog
+bands, restore owned-above-owner relations after shadow/visibility changes,
+and recover cross-thread owner activation plus the explicit desktop-group
+reorder on the main pin command. Keep independent normal/mini/lyric/desktop
+preferences. Expand native regressions to include real options, nested
+dialogs and actual Z order; service the test message queue to avoid Windows
+hung-window ghosting corrupting measurements. The expanded native regression
+passes three consecutive runs, followed by all ten targeted host regressions
+(55.47 seconds). See WINDOW_Z_ORDER.md.
+
 2026-09-13: fix startup fallback after the selected skin is deleted or damaged.
 Validate/bind the package before reading its profile; on fallback restore the
 embedded package's playlist/lyric/visual styles and geometry baseline, then

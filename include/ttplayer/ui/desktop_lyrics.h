@@ -43,7 +43,9 @@ public:
     void UpdatePlayback(std::chrono::milliseconds position, bool playing);
     void ApplySettings();
     // Reconcile owner/owned Z order without rebuilding fonts or repainting.
-    void RefreshTopmost();
+    // Main pin command uses the original explicit owner-group reorder;
+    // ordinary skin/visibility refreshes preserve owner Z order.
+    void RefreshTopmost(bool raise_owner_group = false);
     void CaptureBounds() noexcept;
 
     void Show(bool visible);

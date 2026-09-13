@@ -620,6 +620,9 @@ LRESULT PlayerWindow::HandleLyricMessage(UINT message, WPARAM wparam,
         return 0;
     }
     switch (message) {
+    case WM_ACTIVATE:
+        RaiseSkinOwnerOnActivation(lyric_window_, wparam, lparam);
+        break;
     case WM_ERASEBKGND:
         if (wparam) PaintLyricWindow(reinterpret_cast<HDC>(wparam));
         return 1;
@@ -3195,8 +3198,28 @@ void PlayerWindow::ShowFullScreenLyricContextMenu(POINT screen_point) {
     PostMessageW(window_, WM_NULL, 0, 0);
 }
 
-void PlayerWindow::PrepareLyricMenu(HMENU menu) const {
+void PlayerWindow::PrepareLyricMenu(HMENU menu, bool fullscreen_popup) const {
     if (!menu) return;
+    // Resource 143 is shared by the ordinary lyric host and the detached
+    // fullscreen surface. Only the latter exposes 0x7DE7 (Exit Fullscreen).
+    // Use the popup's kind, not the global mode: the host menu must stay
+    // ordinary during mini/fullscreen transitions and when grafted elsewhere.
+    if (!fullscreen_popup) {
+        if (const HMENU parent = FindCommandMenu(menu, kCmdFullscreenExit)) {
+            for (int position = 0; position < GetMenuItemCount(parent); ++position) {
+                if (GetMenuItemID(parent, position) != kCmdFullscreenExit) continue;
+                DeleteMenu(parent, position, MF_BYPOSITION);
+                // Keep the separator preceding the options section; remove
+                // only the extra one belonging to the fullscreen-only item.
+                MENUITEMINFOW next{sizeof(next)};
+                next.fMask = MIIM_FTYPE;
+                if (GetMenuItemInfoW(parent, position, TRUE, &next) &&
+                    (next.fType & MFT_SEPARATOR))
+                    DeleteMenu(parent, position, MF_BYPOSITION);
+                break;
+            }
+        }
+    }
     const bool have_lyrics = !lyrics_.lines.empty();
     CheckCommand(menu, kCmdLyricTopMost, ActiveLyricTopMost());
     // CPlayerWnd's menu refresh at 0045Axxx changes command 0x409 into the
@@ -3257,7 +3280,7 @@ void PlayerWindow::PrepareLyricMenu(HMENU menu) const {
 
 void PlayerWindow::PrepareFullScreenLyricMenu(HMENU menu) const {
     if (!menu) return;
-    PrepareLyricMenu(menu);
+    PrepareLyricMenu(menu, true);
 
     // CLyricCtrl::OnContextMenu (FUN_004427B1) starts with menu 143 and
     // removes precisely the commands which belong to the normal lyric host.

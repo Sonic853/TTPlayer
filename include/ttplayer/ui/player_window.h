@@ -293,6 +293,7 @@ private:
     bool ApplyLoadedSkin(bool apply_visual_settings = true, bool saved_bounds = false);
     void ApplySkinProfileWindowState();
     void ApplySkinWindowTopMost();
+    static void RaiseSkinOwnerOnActivation(HWND target, WPARAM activation, LPARAM previous);
     void ApplySkinWindowAlpha(BYTE alpha);
     void ApplySkinWindowAlpha(HWND target, BYTE alpha);
     void AnimateSkinWindowAlpha(BYTE alpha);
@@ -462,7 +463,7 @@ private:
     [[nodiscard]] unsigned int LyricDragHitTest(POINT point) const;
     void ShowLyricContextMenu(POINT screen_point);
     void ShowFullScreenLyricContextMenu(POINT screen_point);
-    void PrepareLyricMenu(HMENU menu) const;
+    void PrepareLyricMenu(HMENU menu, bool fullscreen_popup = false) const;
     void PrepareFullScreenLyricMenu(HMENU menu) const;
     void PrepareLyricEditorMenu(HMENU menu) const;
     bool HandleLyricCommand(UINT command);

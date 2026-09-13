@@ -2401,10 +2401,12 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
     // initialization and are dispatched by the two startup PeekMessage pumps
     // only after the main HWND has been shown.  Preserve that visible order.
     if (lyric_window_) ApplyActiveLyricWindowState();
-    if (!mini_mode_ && settings_.player.playlist_visible && playlist_window_)
-        ShowWindow(playlist_window_, SW_SHOW);
+    // 00467B9B's normal order is Lyric -> Equalizer -> PlayList, leaving
+    // the playlist above the equalizer when their rectangles overlap.
     if (!mini_mode_ && settings_.player.equalizer_visible && equalizer_window_)
         ShowWindow(equalizer_window_, SW_SHOW);
+    if (!mini_mode_ && settings_.player.playlist_visible && playlist_window_)
+        ShowWindow(playlist_window_, SW_SHOW);
     suppress_skin_window_activation_fade_ = false;
     if (skinned) {
         // The following -1 sentinel restores DAT_00547820's configured alpha
@@ -2535,8 +2537,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             StartMediaLibraryMonitoring();
         }
         CreateLyricWindow();
-        CreatePlaylistWindow();
         CreateEqualizerWindow();
+        CreatePlaylistWindow();
         // CPlayerWnd::OnCreate (0045FAD8) exposes files through an OLE drop
         // target.  WM_DROPFILES is not enabled on the original top-level
         // window and cannot preserve IDataObject ordering or drop effects.
@@ -4994,6 +4996,10 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
                                     : settings_.player.top_most;
         top_most = !top_most;
         ApplySkinWindowTopMost();
+        // 004A3A66 explicitly calls 0041964D after changing the main pin.
+        // Unlike geometry/visibility reconciliation, this user command also
+        // reorders the desktop lyric owner group using the original 0x13.
+        desktop_lyrics_.RefreshTopmost(true);
         break;
     }
     case kCmdShowLyrics: ToggleLyricWindow(); break;
@@ -5078,6 +5084,13 @@ bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings, bool saved_bounds
     if (frame_changed) SetWindowLongPtrW(window_, GWL_STYLE, desired_style);
     if (GetWindowLongPtrW(window_, GWL_EXSTYLE) != desired_extended)
         SetWindowLongPtrW(window_, GWL_EXSTYLE, desired_extended);
+    // 0046D0C1 ends WM_SETREDRAW before SetWindowPos/SetWindowRgn;
+    // 00468363 then rebinds the other top-level HWNDs independently. Keeping
+    // the main redraw guard across those operations leaves WS_VISIBLE
+    // temporarily cleared while User32 and the owner-group policy inspect
+    // the window. Do not resize/reorder a temporarily invisible main HWND.
+    // The final RedrawWindow below publishes the completed skin, not Resume.
+    redraw.Resume(false);
     ApplySkinWindowAlpha(EffectiveSkinWindowAlpha(window_));
     const SIZE size = skin_->WindowSize();
     const RECT& saved = settings_.player.player_window;
@@ -5118,37 +5131,111 @@ bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings, bool saved_bounds
     ApplySkinWindowAlpha(EffectiveSkinWindowAlpha(window_));
     UpdateMainToolRects();
     ResetSkinInfoScroll();
-    redraw.Resume();
     RedrawWindow(window_, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
     return true;
+}
+
+void PlayerWindow::RaiseSkinOwnerOnActivation(HWND target, WPARAM activation, LPARAM previous) {
+    // 0044F073 / 0046CD66: when an auxiliary popup is activated from
+    // another GUI thread, raise its owner without activating it. Merely
+    // activating the popup can otherwise leave the player and its siblings
+    // behind another application. Internal focus changes and deactivation
+    // must leave the existing order (including modeless options) alone.
+    if (LOWORD(activation) == WA_INACTIVE) return;
+    const HWND owner = GetWindow(target, GW_OWNER);
+    if (!IsWindow(owner)) return;
+    if (previous && GetWindowThreadProcessId(reinterpret_cast<HWND>(previous), nullptr) ==
+            GetCurrentThreadId()) return;
+    SetWindowPos(owner, HWND_TOP, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 void PlayerWindow::ApplySkinWindowTopMost() {
     if (!window_ || !IsWindow(window_)) return;
     const bool main_top = mini_mode_ ? settings_.player.mini_top_most
                                      : settings_.player.top_most;
-    const auto apply = [](HWND target, bool topmost) {
+    const auto apply = [](HWND target, bool topmost, bool owner_changed) {
         if (!target || !IsWindow(target)) return;
-        if (((GetWindowLongPtrW(target, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) == topmost)
+        if (!owner_changed &&
+            (((GetWindowLongPtrW(target, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) == topmost))
             return; // Rebinding geometry must not reorder an unchanged window.
         SetWindowPos(target, topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
-            0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+            0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE |
+                SWP_NOOWNERZORDER);
     };
-    // Win32 makes owned popups topmost with their owner. Demoting an owned
-    // lyric HWND with HWND_NOTOPMOST also demotes its owner, even though the
-    // main TopMost setting remains checked. Apply the owner's band first,
-    // then the lyric's effective band, without changing either preference.
-    // Conversely, demoting the main window also demotes owned windows, so
-    // restore a separately pinned lyric after the owner's change.
-    apply(window_, main_top);
-    // Mini transitions hide these popups before changing the owner's band.
-    // Reconcile the hidden HWNDs too, so restoring them cannot retain the
-    // previous mode's TOPMOST state.
-    apply(playlist_window_, main_top);
-    apply(equalizer_window_, main_top);
-    apply(lyric_window_, main_top || ActiveLyricTopMost());
-    desktop_lyrics_.RefreshTopmost();
+    // Recover 004A3A66/00464B6C's owner-group change, including modeless
+    // sheets. Our asynchronous transitions use NOOWNERZORDER: User32 can
+    // leave owned dialogs in the old band, so reconcile them explicitly.
+    // Owner first; siblings back-to-front in their CURRENT Z order. Applying
+    // a fixed playlist/EQ/lyric/dialog array reverses their user's stacking
+    // order whenever several HWNDs change bands together.
+    struct Target { HWND window; unsigned depth; unsigned rank; bool topmost; bool band_changed; };
+    struct Plan { PlayerWindow* player; bool main_top; unsigned rank{}; std::vector<Target> targets; } plan{this, main_top};
+    EnumThreadWindows(GetCurrentThreadId(), [](HWND candidate, LPARAM data) -> BOOL {
+        auto& context = *reinterpret_cast<Plan*>(data);
+        auto& p = *context.player;
+        const unsigned rank = context.rank++;
+        const auto is_desktop = [&p](HWND h) {
+            return h && (h == p.desktop_lyrics_.ControlHandle() ||
+                h == p.desktop_lyrics_.PaintHandle() || h == p.desktop_lyrics_.BarHandle());
+        };
+        const bool skin_window = candidate == p.window_ || candidate == p.lyric_window_ ||
+            candidate == p.playlist_window_ || candidate == p.equalizer_window_ || is_desktop(candidate);
+        // Standard owned dialogs inherit their owner's effective pin. Native
+        // menus, tooltips, fullscreen surfaces and notification bubbles have
+        // their own band policies, and are not ordinary captioned dialogs.
+        if (!skin_window && (GetWindowLongPtrW(candidate, GWL_STYLE) & WS_CAPTION) != WS_CAPTION)
+            return TRUE;
+        bool topmost = context.main_top;
+        HWND ancestor = candidate;
+        for (unsigned depth = 0; ancestor && depth < 64; ++depth) {
+            if (ancestor == p.lyric_window_) topmost = topmost || p.ActiveLyricTopMost();
+            if (is_desktop(ancestor)) topmost = topmost || p.settings_.desktop_lyric.topmost;
+            if (ancestor == p.window_) {
+                const bool changed = ((GetWindowLongPtrW(candidate, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) != topmost;
+                context.targets.push_back({candidate, depth, rank, topmost, changed});
+                break;
+            }
+            ancestor = GetWindow(ancestor, GW_OWNER);
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&plan));
+    std::sort(plan.targets.begin(), plan.targets.end(), [](const Target& a, const Target& b) {
+        return a.depth != b.depth ? a.depth < b.depth : a.rank > b.rank;
+    });
+    for (const auto& target : plan.targets) {
+        bool owner_changed = target.band_changed;
+        for (HWND owner = GetWindow(target.window, GW_OWNER); owner; owner = GetWindow(owner, GW_OWNER)) {
+            const auto found = std::find_if(plan.targets.begin(), plan.targets.end(),
+                [owner](const Target& other) { return other.window == owner; });
+            if (found != plan.targets.end() && found->band_changed) owner_changed = true;
+        }
+        // A previously pinned lyric/dialog may retain its TOPMOST bit while
+        // its owner's promotion moves that owner ABOVE it. Reassert owned
+        // positions when an ancestor changed bands, even if the bit already
+        // matches. Without an ancestor change, never reorder a no-op refresh.
+        apply(target.window, target.topmost, owner_changed);
+    }
+    // Hide/show (e.g. changing CS_DROPSHADOW) can also leave an owned
+    // surface below its owner without changing either TOPMOST bit. Repair
+    // only that broken relation, directly above the owner, not at the front
+    // of all the application's dialogs or another application's windows.
+    for (const auto& target : plan.targets) {
+        const HWND owner = GetWindow(target.window, GW_OWNER);
+        if (!IsWindowVisible(target.window) || !IsWindowVisible(owner) || IsIconic(owner)) continue;
+        bool above = false;
+        for (HWND prior = GetWindow(owner, GW_HWNDPREV); prior; prior = GetWindow(prior, GW_HWNDPREV)) {
+            if (prior == target.window) { above = true; break; }
+        }
+        if (above) continue;
+        HWND insert_after = GetWindow(owner, GW_HWNDPREV);
+        if (insert_after &&
+            (((GetWindowLongPtrW(insert_after, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) != target.topmost))
+            insert_after = HWND_TOP;
+        SetWindowPos(target.window, insert_after, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
 }
 
 void PlayerWindow::ApplySkinWindowAlpha(BYTE alpha) {
@@ -5194,6 +5281,7 @@ void PlayerWindow::ApplyWindowShadow() {
         SetClassLongPtrW(target, GCL_STYLE, style);
         if (visible) ShowWindow(target, SW_SHOW);
     }
+    ApplySkinWindowTopMost();
 }
 
 void PlayerWindow::UpdateAutoShutdownTimer() {
@@ -5243,6 +5331,7 @@ void PlayerWindow::SetSkinWindowVisible(HWND target, bool visible) {
         suppress_skin_window_activation_fade_ = true;
         ShowWindow(target, SW_SHOW);
         BringWindowToTop(target);
+        ApplySkinWindowTopMost();
         suppress_skin_window_activation_fade_ = false;
         BeginSkinWindowFade(target, plan.from, plan.to, false,
                             kFadeCompleteNone, plan.restore);
