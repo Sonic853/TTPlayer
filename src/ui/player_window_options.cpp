@@ -3462,6 +3462,16 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetDlgItemTextW(dialog, 1011, version.c_str());
         SetDlgItemTextW(dialog, 1005, L"nanling与社区");
         SetDlgItemTextW(dialog, 1040, build::kCompletionDate);
+        // RT_DIALOG 200 uses the shared IDC_STATIC (-1) for its captions.
+        // Replace only the date caption, not the other anonymous labels.
+        EnumChildWindows(dialog, [](HWND control, LPARAM) -> BOOL {
+            wchar_t caption[32]{}, klass[16]{};
+            GetClassNameW(control, klass, static_cast<int>(std::size(klass)));
+            GetWindowTextW(control, caption, static_cast<int>(std::size(caption)));
+            if (_wcsicmp(klass, L"Static") == 0 && std::wstring_view(caption) == L"完成日期:")
+                SetWindowTextW(control, L"构建日期:");
+            return TRUE;
+        }, 0);
         SetDlgItemTextW(dialog, 1009, ResourceText(0x80).c_str());
         SetDlgItemTextW(dialog, 1020, L"社区版");
         // The resource placeholders are intentionally hidden.  AboutPage's

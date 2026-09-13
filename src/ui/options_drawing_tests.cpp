@@ -173,6 +173,22 @@ struct SkinRebindAccess {
                 ClickNavigation(player, page);
                 const HWND current = PropSheet_GetCurrentPageHwnd(sheet);
                 Require(current && current == player.options_pages_[page], "navigation selected wrong page");
+                if (page == 0) {
+                    struct Captions { int build{}, completion{}; } captions;
+                    EnumChildWindows(current, [](HWND control, LPARAM data) -> BOOL {
+                        auto& found = *reinterpret_cast<Captions*>(data);
+                        wchar_t text[64]{};
+                        GetWindowTextW(control, text, static_cast<int>(std::size(text)));
+                        found.build += std::wstring_view(text) == L"构建日期:";
+                        found.completion += std::wstring_view(text) == L"完成日期:";
+                        return TRUE;
+                    }, reinterpret_cast<LPARAM>(&captions));
+                    Require(captions.build == 1 && captions.completion == 0,
+                        "About page did not replace only the completion-date caption");
+                    wchar_t date[32]{};
+                    Require(GetDlgItemTextW(current, 1040, date, static_cast<int>(std::size(date))) > 0,
+                        "renaming the date caption removed the generated date value");
+                }
                 Events page_events;
                 Require(SetWindowSubclass(current, Observe, 1,
                     reinterpret_cast<DWORD_PTR>(&page_events)), "cannot observe options page");

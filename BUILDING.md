@@ -43,7 +43,7 @@ TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一�
 例如 `Skin/new/Example.skn` 的配置是 `Skin/new/Example.skn.xml`，
 主配置中的皮肤标识保存为 `new\Example.skn`。内置皮肤仍使用 `Skin/Default.xml`。
 
-“选项 → 关于”的完成日期由每次构建开始时的北京时间（UTC+08:00）生成，
+“选项 → 关于”的构建日期由每次构建开始时的北京时间（UTC+08:00）生成，
 格式为 `yyyy-M-d`，不使用构建机器本地时区。该日期编入 EXE，启动播放器时
 不会变化。本地和 GitHub Actions 共用同一生成步骤；跨日增量构建会更新日期，
 同日重复构建不重复写入生成头文件，也不需要手工改源码或重新配置 CMake。
