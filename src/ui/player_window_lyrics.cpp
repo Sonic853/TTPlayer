@@ -985,16 +985,16 @@ void PlayerWindow::ApplyActiveLyricWindowState() {
         target = {left, top, left + width, top + height};
     }
     ActiveLyricWindowBounds() = target;
-    SetWindowPos(lyric_window_, ActiveLyricTopMost()
-            ? HWND_TOPMOST : HWND_NOTOPMOST,
+    SetWindowPos(lyric_window_, nullptr,
         target.left, target.top, target.right - target.left,
-        target.bottom - target.top, SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        target.bottom - target.top, SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED);
     LayoutLyricControls();
     RebuildLyricFont(false);
     UpdateLyricWindowRegion();
     UpdateLyricToolRects();
     ShowWindow(lyric_window_, ActiveLyricVisible()
         ? SW_SHOWNOACTIVATE : SW_HIDE);
+    ApplySkinWindowTopMost();
     RedrawWindow(lyric_window_, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN |
         RDW_UPDATENOW);
@@ -1356,10 +1356,12 @@ void PlayerWindow::UpdateLyricWindowSkin(bool saved_bounds) {
     // 00468363 -> 00449451 rebinds the existing lyric HWND to the package's
     // position. A fixed-size skin such as LX-iPlay must not inherit the prior
     // package's larger dimensions.
-    SetWindowPos(lyric_window_, ActiveLyricTopMost()
-            ? HWND_TOPMOST : HWND_NOTOPMOST,
+    // Keep geometry separate from the topmost policy (00464B6C uses 0x14
+    // for its lyric bounds). Do not demote an owned HWND to apply its bounds.
+    SetWindowPos(lyric_window_, nullptr,
         player.left + layout.position.left, player.top + layout.position.top,
-        width, height, SWP_NOACTIVATE);
+        width, height, SWP_NOACTIVATE | SWP_NOZORDER);
+    ApplySkinWindowTopMost();
     CreateLyricControls();
     UpdateLyricWindowRegion();
     redraw.Resume();
@@ -3450,9 +3452,7 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
         return true;
     case kCmdLyricTopMost:
         ActiveLyricTopMost() = !ActiveLyricTopMost();
-        if (lyric_window_) SetWindowPos(lyric_window_,
-            ActiveLyricTopMost() ? HWND_TOPMOST : HWND_NOTOPMOST,
-            0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        ApplySkinWindowTopMost();
         if (lyric_ontop_) InvalidateRect(lyric_ontop_, nullptr, FALSE);
         return true;
     case kCmdLyricScrollMode:

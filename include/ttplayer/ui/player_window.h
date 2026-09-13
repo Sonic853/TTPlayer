@@ -290,6 +290,7 @@ private:
     [[nodiscard]] std::wstring ResourceText(UINT identifier) const;
     bool ApplyLoadedSkin(bool apply_visual_settings = true, bool saved_bounds = false);
     void ApplySkinProfileWindowState();
+    void ApplySkinWindowTopMost();
     void ApplySkinWindowAlpha(BYTE alpha);
     void ApplySkinWindowAlpha(HWND target, BYTE alpha);
     void AnimateSkinWindowAlpha(BYTE alpha);

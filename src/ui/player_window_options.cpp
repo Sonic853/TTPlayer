@@ -5075,13 +5075,7 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
         skin_window_alpha_ = static_cast<BYTE>(
             255 * (100 - transparency_percent_) / 100);
         ApplySkinWindowAlpha(EffectiveSkinWindowAlpha(window_));
-        const bool top_most = mini_mode_ ? settings_.player.mini_top_most
-                                         : settings_.player.top_most;
-        if (window_) {
-            SetWindowPos(window_, top_most ? HWND_TOPMOST : HWND_NOTOPMOST,
-                         0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
+        ApplySkinWindowTopMost();
         if (playlist_window_)
             ShowWindow(playlist_window_,
                        settings_.player.playlist_visible ? SW_SHOWNOACTIVATE

@@ -49,6 +49,14 @@ Mini-mode exit intentionally still hides/shows the main window (`00464B6C`).
 Changing the actual shadow option also retains its native hide/show behavior.
 Neither exception means a package switch should create a new main HWND.
 
+## Topmost state during rebind
+
+Geometry must also preserve the native window band, not only the stored
+`TopMost` value. The 2026-09-13 fix removes the owned lyric window's unconditional
+`HWND_NOTOPMOST` geometry call and reconciles normal/mini, lyric and desktop
+topmost state at transition boundaries. See [WINDOW_TOPMOST.md](WINDOW_TOPMOST.md)
+for the original-code evidence, owner-propagation failures and host regressions.
+
 ## Host verification, 2026-09-07
 
 - Release build and all **25 CTest cases passed**.

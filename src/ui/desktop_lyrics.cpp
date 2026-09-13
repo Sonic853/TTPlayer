@@ -434,6 +434,8 @@ public:
         RenderLayered();
     }
 
+    void RefreshTopmost() { ApplyTopmost(); }
+
     void CaptureBounds() noexcept {
         if (control_ && IsWindow(control_) && persisted_bounds_)
             GetWindowRect(control_, persisted_bounds_);
@@ -1735,14 +1737,18 @@ private:
 
     void ApplyTopmost() const {
         if (!settings_) return;
-        const HWND order = settings_->topmost ? HWND_TOPMOST : HWND_NOTOPMOST;
-        constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-        if (control_ && IsWindow(control_))
-            SetWindowPos(control_, order, 0, 0, 0, 0, flags);
-        if (paint_ && IsWindow(paint_))
-            SetWindowPos(paint_, order, 0, 0, 0, 0, flags);
-        if (bar_ && IsWindow(bar_))
-            SetWindowPos(bar_, order, 0, 0, 0, 0, flags);
+        // DeskLrcCtrl is owned by LyricWnd, which is in turn owned by the
+        // main player. Demoting any popup in this chain would demote its
+        // owners too. Keep the preference independent from inherited state.
+        const bool owner_top = owner_ && IsWindow(owner_) &&
+            (GetWindowLongPtrW(owner_, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+        const bool topmost = settings_->topmost || owner_top;
+        constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+        for (const HWND target : {control_, paint_, bar_}) {
+            if (target && IsWindow(target) &&
+                (((GetWindowLongPtrW(target, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) != topmost))
+                SetWindowPos(target, topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+        }
     }
 
     void RebuildFont() {
@@ -2138,6 +2144,7 @@ void DesktopLyricsWindow::UpdatePlayback(std::chrono::milliseconds position,
     impl_->UpdatePlayback(position, playing);
 }
 void DesktopLyricsWindow::ApplySettings() { impl_->ApplySettings(); }
+void DesktopLyricsWindow::RefreshTopmost() { impl_->RefreshTopmost(); }
 void DesktopLyricsWindow::CaptureBounds() noexcept { impl_->CaptureBounds(); }
 void DesktopLyricsWindow::Show(bool visible) { impl_->Show(visible); }
 void DesktopLyricsWindow::Toggle() { impl_->Toggle(); }

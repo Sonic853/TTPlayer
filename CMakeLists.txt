@@ -178,6 +178,14 @@ target_link_libraries(desktop_lyrics_menu_tests PRIVATE ttplayer_core)
 add_test(NAME desktop_lyrics_menu_tests COMMAND desktop_lyrics_menu_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(desktop_lyrics_menu_tests PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
 
+add_executable(window_topmost_tests src/ui/window_topmost_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(window_topmost_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(window_topmost_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(window_topmost_tests PRIVATE ttplayer_core)
+add_test(NAME window_topmost_tests COMMAND window_topmost_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(window_topmost_tests PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+
 add_executable(skin_profile_tests src/skin/skin_profile_tests.cpp)
 target_compile_definitions(skin_profile_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(skin_profile_tests PRIVATE /W4 /permissive- /EHsc /utf-8)

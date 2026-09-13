@@ -1,5 +1,16 @@
 # Reconstruction status
 
+2026-09-13: fix loss of "Always on top" on skin/mini transitions. Separate
+geometry from Z order and reconcile main, playlist/EQ, lyric and desktop lyric
+HWND bands in owner-first order, after mini visibility restoration. Preserve
+independent normal/mini and lyric/desktop pin preferences; unpinning an owned
+lyric/desktop popup no longer demotes a pinned main window. Cover settings
+application and fullscreen return without recreating windows or forcing their
+Z order on a timer. A new native host regression covers startup, all pin
+combinations, four skin choices, mini/desktop transitions, queued fades,
+visibility/minimize/shadow changes and fullscreen control restoration.
+Release builds and all eight targeted host regressions pass. See WINDOW_TOPMOST.md.
+
 2026-09-13: restore the independent skin preview's initial control state from
 5.7.9's 0049A6EF/00467B9B, including resource info/channel strings, empty status
 backing, fixed 80% volume (EAX=0x50 at 00467F9B), horizontal/vertical slider

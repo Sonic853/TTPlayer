@@ -4125,14 +4125,13 @@ void PlayerWindow::ToggleMiniMode() {
         ShowWindow(equalizer_window_, SW_HIDE);
     mini_mode_ = next_mini;
     settings_.player.mini_mode = mini_mode_;
-    const bool active_top_most = mini_mode_ ? settings_.player.mini_top_most
-                                            : settings_.player.top_most;
     const LONG_PTR desired_extended =
         WS_EX_LAYERED | (mini_mode_ ? WS_EX_TOOLWINDOW : 0) |
-        (active_top_most ? WS_EX_TOPMOST : 0);
+        (GetWindowLongPtrW(window_, GWL_EXSTYLE) & WS_EX_TOPMOST);
     SetWindowLongPtrW(window_, GWL_EXSTYLE, desired_extended);
-    SetWindowPos(window_, active_top_most ? HWND_TOPMOST : HWND_NOTOPMOST,
-                 left, top, size.cx, size.cy, SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    SetWindowPos(window_, nullptr, left, top, size.cx, size.cy,
+                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    ApplySkinWindowTopMost();
     if (!SetWindowRgn(window_, next_region, FALSE)) DeleteObject(next_region);
     UpdateMainToolRects();
     UpdateVisualWindowLayout();
@@ -4153,6 +4152,7 @@ void PlayerWindow::ToggleMiniMode() {
         ShowWindow(playlist_window_, SW_SHOWNOACTIVATE);
     if (!next_mini && settings_.player.equalizer_visible && equalizer_window_)
         ShowWindow(equalizer_window_, SW_SHOWNOACTIVATE);
+    ApplySkinWindowTopMost();
     suppress_skin_window_activation_fade_ = false;
     // The -1 sentinel at the end of 00464B6C restores the configured group
     // alpha only after all mode-specific windows have their final visibility.
@@ -4938,8 +4938,7 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
         bool& top_most = mini_mode_ ? settings_.player.mini_top_most
                                     : settings_.player.top_most;
         top_most = !top_most;
-        SetWindowPos(window_, top_most ? HWND_TOPMOST : HWND_NOTOPMOST,
-            0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        ApplySkinWindowTopMost();
         break;
     }
     case kCmdShowLyrics: ToggleLyricWindow(); break;
@@ -5019,7 +5018,7 @@ bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings, bool saved_bounds
         WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPSIBLINGS |
         (current_style & (WS_VISIBLE | WS_DISABLED));
     const LONG_PTR desired_extended =
-        WS_EX_LAYERED | (settings_.player.top_most ? WS_EX_TOPMOST : 0);
+        WS_EX_LAYERED | (GetWindowLongPtrW(window_, GWL_EXSTYLE) & WS_EX_TOPMOST);
     const bool frame_changed = current_style != desired_style;
     if (frame_changed) SetWindowLongPtrW(window_, GWL_STYLE, desired_style);
     if (GetWindowLongPtrW(window_, GWL_EXSTYLE) != desired_extended)
@@ -5054,6 +5053,7 @@ bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings, bool saved_bounds
     desktop_lyrics_.ApplySettings();
     UpdatePlaylistWindowSkin(saved_bounds);
     UpdateEqualizerWindowSkin(saved_bounds);
+    ApplySkinWindowTopMost();
     ApplyWindowShadow();
     UpdateVisualWindowLayout();
     UpdateVisualFrame();
@@ -5067,6 +5067,33 @@ bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings, bool saved_bounds
     RedrawWindow(window_, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
     return true;
+}
+
+void PlayerWindow::ApplySkinWindowTopMost() {
+    if (!window_ || !IsWindow(window_)) return;
+    const bool main_top = mini_mode_ ? settings_.player.mini_top_most
+                                     : settings_.player.top_most;
+    const auto apply = [](HWND target, bool topmost) {
+        if (!target || !IsWindow(target)) return;
+        if (((GetWindowLongPtrW(target, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) == topmost)
+            return; // Rebinding geometry must not reorder an unchanged window.
+        SetWindowPos(target, topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+            0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    };
+    // Win32 makes owned popups topmost with their owner. Demoting an owned
+    // lyric HWND with HWND_NOTOPMOST also demotes its owner, even though the
+    // main TopMost setting remains checked. Apply the owner's band first,
+    // then the lyric's effective band, without changing either preference.
+    // Conversely, demoting the main window also demotes owned windows, so
+    // restore a separately pinned lyric after the owner's change.
+    apply(window_, main_top);
+    // Mini transitions hide these popups before changing the owner's band.
+    // Reconcile the hidden HWNDs too, so restoring them cannot retain the
+    // previous mode's TOPMOST state.
+    apply(playlist_window_, main_top);
+    apply(equalizer_window_, main_top);
+    apply(lyric_window_, main_top || ActiveLyricTopMost());
+    desktop_lyrics_.RefreshTopmost();
 }
 
 void PlayerWindow::ApplySkinWindowAlpha(BYTE alpha) {

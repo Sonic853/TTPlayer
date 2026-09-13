@@ -42,6 +42,8 @@ public:
     void SetFallbackText(std::wstring text);
     void UpdatePlayback(std::chrono::milliseconds position, bool playing);
     void ApplySettings();
+    // Reconcile owner/owned Z order without rebuilding fonts or repainting.
+    void RefreshTopmost();
     void CaptureBounds() noexcept;
 
     void Show(bool visible);

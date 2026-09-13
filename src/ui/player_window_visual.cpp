@@ -2048,6 +2048,7 @@ void PlayerWindow::LeaveFullScreen() {
             ShowWindow(window_, SW_HIDE);
         }
     }
+    ApplySkinWindowTopMost();
     // The original keeps the hotkey registered through the complete restore
     // sequence and removes it only after the main window is back in place.
     UnregisterHotKey(window_, kFullscreenEscapeHotkey);
