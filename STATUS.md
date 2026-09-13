@@ -1,5 +1,12 @@
 # Reconstruction status
 
+2026-09-14: default fullscreen album-background transparency to 60 percent
+and the independent album profile's lyric height to 100 percent (LrcSizeAlbum=10).
+Keep All and the other visual profiles at 20 percent; preserve explicit saved
+values, including zero transparency. New settings and missing XML sections/
+attributes use the updated defaults. Album rendering/settings/options and
+fullscreen lyric-drag host regressions passed (2/2, 12.14 seconds).
+
 2026-09-14: extend native service-editor modality to Online Search and Download
 Lyrics. Pass the actual entry HWND, even when Options exists simultaneously;
 disable/restore only that owner and center the editor on it. Repeated entry

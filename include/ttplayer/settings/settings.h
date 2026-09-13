@@ -160,9 +160,9 @@ struct VisualSettings {
 struct FullScreenSettings {
     int visual_type{1};
     std::array<int, 5> position_relation{0, 1, 0, 1, 1};
-    std::array<int, 5> lyric_size{2, 2, 2, 2, 2};
+    std::array<int, 5> lyric_size{2, 2, 2, 2, 10};
     std::wstring album_fallback_image;
-    int album_transparency_percent{}; // 0 = opaque, 100 = no image
+    int album_transparency_percent{60}; // 0 = opaque, 100 = no image
     // Background colour is LyricSettings::fullscreen_background_color.
 };
 struct DesktopLyricColorProfile {

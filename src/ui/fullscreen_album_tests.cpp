@@ -117,6 +117,9 @@ void GeometryAndAlpha() {
 }
 void SettingsRoundtrip(const fs::path& directory) {
     settings::Settings values;
+    Require(values.fullscreen.album_transparency_percent == 60 &&
+        values.fullscreen.lyric_size == std::array<int,5>{2,2,2,2,10},
+        "album defaults must be 60 percent transparency and full-height lyrics only for album mode");
     values.fullscreen.visual_type = 4;
     values.fullscreen.position_relation = {1,0,1,0,1};
     values.fullscreen.lyric_size = {1,2,3,4,8};
@@ -136,9 +139,17 @@ void SettingsRoundtrip(const fs::path& directory) {
     { std::ofstream file(xml); file << "<ttplayer><FullScreen VisualType=\"3\" PosRelationSpectrum=\"1\" LrcSizeSpectrum=\"7\"/></ttplayer>"; }
     loaded = settings::LoadLegacyXml(xml);
     Require(loaded.fullscreen.visual_type == 3 && loaded.fullscreen.lyric_size[2] == 7 &&
-        loaded.fullscreen.album_fallback_image.empty() && loaded.fullscreen.album_transparency_percent == 0 &&
-        loaded.fullscreen.position_relation[4] == 1 && loaded.fullscreen.lyric_size[4] == 2,
+        loaded.fullscreen.album_fallback_image.empty() && loaded.fullscreen.album_transparency_percent == 60 &&
+        loaded.fullscreen.position_relation[4] == 1 && loaded.fullscreen.lyric_size[4] == 10,
         "older settings did not retain backward-compatible defaults");
+    { std::ofstream file(xml); file << "<ttplayer><FullScreen AlbumTransparency=\"0\" LrcSizeAlbum=\"2\"/></ttplayer>"; }
+    loaded = settings::LoadLegacyXml(xml);
+    Require(loaded.fullscreen.album_transparency_percent == 0 && loaded.fullscreen.lyric_size[4] == 2,
+        "new defaults overwrote explicit old album preferences");
+    { std::ofstream file(xml); file << "<ttplayer/>"; }
+    loaded = settings::LoadLegacyXml(xml);
+    Require(loaded.fullscreen.album_transparency_percent == 60 && loaded.fullscreen.lyric_size[4] == 10,
+        "missing FullScreen section did not use album defaults");
     { std::ofstream file(xml); file << "<ttplayer><FullScreen VisualType=\"99\" AlbumTransparency=\"300\"/></ttplayer>"; }
     loaded = settings::LoadLegacyXml(xml);
     Require(loaded.fullscreen.visual_type == 4 && loaded.fullscreen.album_transparency_percent == 100,
@@ -255,6 +266,8 @@ struct SkinRebindAccess {
             const DWORD green[4]{0xff00ff00,0xff00ff00,0xff00ff00,0xff00ff00};
             SavePng(fallback,2,2,green);
             p.settings_.fullscreen.album_fallback_image = fallback.wstring();
+            render(); Pixel(canvas.dc,0,0,RGB(0,102,153),1);
+            p.settings_.fullscreen.album_transparency_percent = 0; // Explicit opacity for the rendering matrix below.
             render(); Pixel(canvas.dc,0,0,RGB(0,255,0)); Pixel(canvas.dc,127,79,RGB(0,255,0));
             Require(!p.VisualFallbackHit({64,40}), "background exposes normal missing-cover prompt");
             const auto album = directory / L"embedded.png";
@@ -410,6 +423,8 @@ struct SkinRebindAccess {
             }
             SendDlgItemMessageW(page.value,2232,CB_SETCURSEL,3,0);
             p.HandleOptionsPageDialog(page.value,WM_COMMAND,MAKEWPARAM(2232,CBN_SELCHANGE),0);
+            Require(SendDlgItemMessageW(page.value,2231,CB_GETCURSEL,0,0) == 9,
+                "album options did not initially show 100 percent lyric height");
             SendDlgItemMessageW(page.value,2231,CB_SETCURSEL,7,0);
             p.HandleOptionsPageDialog(page.value,WM_COMMAND,MAKEWPARAM(2231,CBN_SELCHANGE),0);
             Require(p.settings_.fullscreen.visual_type == 4 && p.settings_.fullscreen.lyric_size[4] == 8 &&
