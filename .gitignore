@@ -23,6 +23,7 @@ compile_commands.json
 /PlayList/
 /RealCodec/
 /Skin/*.xml
+/Skin/new/*.xml
 /FAQ.txt
 /mp3PRO.dll
 /msdmo.dll
@@ -31,6 +32,8 @@ compile_commands.json
 /TTPlayer.exe
 /TTPlayer.rll
 /TTPlayer.xml
+/TTPlayerRebuild.xml
+/TTPlayerRebuild.exe
 /TTPlayerSet.exe
 /ttpres.dll
 /uninstall.exe

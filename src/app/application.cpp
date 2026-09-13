@@ -22,24 +22,10 @@ std::wstring Lower(std::wstring value) {
     return value;
 }
 settings::Settings LoadSettingsIfPresent() {
-    const auto path = RuntimePath(L"TTPlayer.xml");
-    settings::Settings defaults;
-    defaults.source_path = path;
-    if (path.empty()) return defaults;
-    std::error_code error;
-    if (!std::filesystem::exists(path, error) || error) return defaults;
-    try { return settings::LoadLegacyXml(path); }
-    catch (const std::exception&) { return defaults; }
+    return settings::LoadRuntimeSettings(RuntimePath({}));
 }
 std::filesystem::path ResolveSkin(const settings::Settings& settings) {
-    std::filesystem::path skin_path;
-    if (!settings.skin_file.empty() &&
-        _wcsicmp(settings.skin_file.c_str(), L"<Default_Skin>") != 0) {
-        auto name = std::filesystem::path(settings.skin_file).filename().wstring();
-        if (std::filesystem::path(name).extension().empty()) name += L".skn";
-        skin_path = FindRuntimePath(std::filesystem::path(L"Skin") / name);
-    }
-    return skin_path;
+    return skin::ResolveSkinPackagePath(RuntimePath(L"Skin"), settings.skin_file);
 }
 } // namespace
 
@@ -99,7 +85,7 @@ int TTPlayer_RunApplicationSession(HINSTANCE instance, int show_command,
         _wcsicmp(settings.skin_file.c_str(), L"<Default_Skin>") == 0;
     const auto skin_path = ResolveSkin(settings);
     // FUN_0045D5FA selects the package-specific geometry snapshot before
-    // constructing the live skin windows. TTPlayer.xml supplies the startup
+    // constructing the live skin windows. TTPlayerRebuild.xml supplies the startup
     // visual globals; see the deliberately restored value below.
     std::filesystem::path skin_profile = default_skin
         ? RuntimePath(L"Skin/Default.xml") : skin_path;
@@ -112,7 +98,7 @@ int TTPlayer_RunApplicationSession(HINSTANCE instance, int show_command,
             skin_profile, settings.player, settings.playlist,
             settings.lyric, settings.visual));
         // The startup restore path materialises the saved skin geometry but
-        // leaves the root TTPlayer.xml visual globals active.  Package and
+        // leaves the root TTPlayerRebuild.xml visual globals active. Package and
         // sidecar visual overrides are applied only by the live skin-change
         // transaction (FUN_0045D5FA/FUN_0045DDEE).  This distinction is
         // directly observable with LX-iPlay: a restored startup uses the

@@ -58,6 +58,7 @@ add_library(ttplayer_core
   src/plugins/plugin_manager.cpp
   src/settings/file_association.cpp
   src/settings/settings.cpp
+  src/settings/runtime_settings.cpp
   src/skin/skin.cpp
   src/skin/skin_image.cpp
   src/skin/skin_package.cpp
@@ -116,6 +117,8 @@ add_executable(ttplayer_rebuild WIN32
   src/app/single_instance.cpp
   src/app/ttplayer.manifest
 )
+set_target_properties(ttplayer_rebuild PROPERTIES
+  OUTPUT_NAME "TTPlayerRebuild" PDB_NAME "TTPlayerRebuild")
 target_compile_definitions(ttplayer_rebuild PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(ttplayer_rebuild PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_rebuild PRIVATE ttplayer_core ttpcomm_api comctl32 comdlg32 shell32)
@@ -154,6 +157,19 @@ endif()
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
 if(BUILD_TESTING)
+add_executable(runtime_paths_tests src/ui/runtime_paths_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(runtime_paths_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(runtime_paths_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(runtime_paths_tests PRIVATE ttplayer_core)
+add_dependencies(runtime_paths_tests ttplayer_rebuild)
+add_test(NAME runtime_paths_tests COMMAND runtime_paths_tests "${CMAKE_CURRENT_SOURCE_DIR}/.."
+  "$<TARGET_FILE:ttplayer_rebuild>")
+set_tests_properties(runtime_paths_tests PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+add_test(NAME stage_settings_tests COMMAND "${CMAKE_COMMAND}"
+  "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/Testing"
+  -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_stage_settings.cmake")
+
 add_executable(fullscreen_lyric_drag_tests src/ui/fullscreen_lyric_drag_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(fullscreen_lyric_drag_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -596,6 +612,8 @@ add_custom_command(TARGET ttplayer_rebuild POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory
           "${CMAKE_CURRENT_SOURCE_DIR}/../Skin"
           "$<TARGET_FILE_DIR:ttplayer_rebuild>/Skin"
+  COMMAND "${CMAKE_COMMAND}" -E make_directory
+          "$<TARGET_FILE_DIR:ttplayer_rebuild>/Skin/new"
   COMMAND "${CMAKE_COMMAND}" -E copy_directory
           "${CMAKE_CURRENT_SOURCE_DIR}/../Icons"
           "$<TARGET_FILE_DIR:ttplayer_rebuild>/Icons"
@@ -608,9 +626,10 @@ add_custom_command(TARGET ttplayer_rebuild POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
           "${TTPRES_OUTPUT_DIR}/AddIn/ttpres.dll"
           "$<TARGET_FILE_DIR:ttplayer_rebuild>/AddIn/ttpres.dll"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${CMAKE_CURRENT_SOURCE_DIR}/../TTPlayer.xml"
-          "$<TARGET_FILE_DIR:ttplayer_rebuild>/TTPlayer.xml"
+  COMMAND "${CMAKE_COMMAND}"
+          "-DSOURCE_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}/.."
+          "-DDESTINATION=$<TARGET_FILE_DIR:ttplayer_rebuild>"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/stage_settings.cmake"
   COMMAND "${CMAKE_COMMAND}"
           "-DPRESET_FILE=$<TARGET_FILE_DIR:ttplayer_rebuild>/AddIn/ttp_clienc.xml"
           -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/repair_cli_presets.cmake"

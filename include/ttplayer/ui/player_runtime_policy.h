@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ttplayer/skin/skin_paths.h"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -48,8 +50,8 @@ enum class OutputRestartState {
         _wcsicmp(std::wstring(package_name).c_str(), L"<Default_Skin>") == 0) {
         return skin_directory / L"Default.xml";
     }
-    auto package = std::filesystem::path(package_name).filename();
-    if (package.extension().empty()) package += L".skn";
+    auto package = skin::NormalizeSkinPackageName(package_name);
+    if (package.empty()) return {};
     package += L".xml";
     return skin_directory / package;
 }

@@ -1,5 +1,15 @@
 # Reconstruction status
 
+2026-09-13: add EXE-local Skin/new to async skin menus/options, retaining
+new\\package.skn selectors and adjacent .skn.xml profiles across startup,
+skin switches, options application and shutdown. Preserve Skin/Default.xml
+for the embedded package and isolate same-name/timestamp extraction caches
+by content. Rename the built player to TTPlayerRebuild.exe and the live
+configuration to TTPlayerRebuild.xml, with one-time non-destructive old-config
+import and incremental-build preservation. Update manual Actions packaging.
+Release and seven host regressions pass, including two actual renamed-EXE
+startup runs; see RUNTIME_LAYOUT.md for layout and migration rules.
+
 2026-09-13: fix loss of "Always on top" on skin/mini transitions. Separate
 geometry from Z order and reconcile main, playlist/EQ, lyric and desktop lyric
 HWND bands in owner-first order, after mini visibility restoration. Preserve

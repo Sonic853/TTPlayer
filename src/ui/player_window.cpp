@@ -2002,10 +2002,13 @@ bool PlayerWindow::LoadSkinPackage(const std::filesystem::path& path, bool resto
         auto package = skin::SkinPackage::Open(path);
         const auto stamp = std::filesystem::last_write_time(path).time_since_epoch().count();
         const auto cache = std::filesystem::temp_directory_path() / L"TTPlayerRebuild" /
-            (path.stem().wstring() + L"-" + std::to_wstring(stamp));
+            (path.stem().wstring() + L"-" + std::to_wstring(stamp) + L"-" +
+             std::to_wstring(package.Fingerprint()));
         auto profile = path;
         profile += L".xml";
-        return LoadSkin(std::move(package), cache, path.filename().wstring(),
+        const auto selector = skin::SkinPackageSelector(
+            PlayerRuntimeDirectory() / L"Skin", path);
+        return LoadSkin(std::move(package), cache, selector,
                         profile, restore_profile);
     } catch (const std::exception&) { return false; }
 }
@@ -2016,8 +2019,11 @@ bool PlayerWindow::LoadSkinResource(HMODULE module, const wchar_t* name, bool re
         auto package = skin::SkinPackage::OpenResource(module, name, L"ZIP");
         const auto cache = std::filesystem::temp_directory_path() / L"TTPlayerRebuild" /
             (L"DefaultSkin-resource-" + std::to_wstring(package.Fingerprint()));
+        const auto global = settings_.source_path.empty()
+            ? PlayerRuntimeDirectory() / settings::kSettingsFileName
+            : settings_.source_path;
         return LoadSkin(std::move(package), cache, L"<Default_Skin>",
-            CurrentSkinProfilePath().parent_path() / L"Default.xml", restore_profile);
+            ResolveSkinProfilePath(global, L"<Default_Skin>"), restore_profile);
     } catch (const std::exception&) { return false; }
 }
 
@@ -2999,7 +3005,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             desktop_lyrics_.ApplySettings();
         }
         // 004616BD asks the modeless sheet to execute its IDOK transaction
-        // before the main window persists TTPlayer.xml.  A raw DestroyWindow
+        // before the main window persists TTPlayerRebuild.xml. A raw DestroyWindow
         // loses edits still resident in the active/nested page controls.
         if (options_window_ && IsWindow(options_window_))
             SendMessageW(options_window_, WM_COMMAND, IDOK, 0);
@@ -3188,7 +3194,7 @@ std::filesystem::path PlayerWindow::CurrentSkinProfilePath() const {
         if (length == 0 || length >= executable.size()) return {};
         executable.resize(length);
         global_settings = std::filesystem::path(executable).parent_path() /
-                          L"TTPlayer.xml";
+                          settings::kSettingsFileName;
     }
     return ResolveSkinProfilePath(global_settings, settings_.skin_file);
 }
@@ -3224,7 +3230,7 @@ void PlayerWindow::PersistWindowState() {
     settings_.player.playing_time = position < 0 ? 0 :
         (position > INT_MAX ? INT_MAX : static_cast<int>(position));
 
-    // Startup applies the active package sidecar after TTPlayer.xml.  Writing
+    // Startup applies the active package sidecar after TTPlayerRebuild.xml. Writing
     // only the root document made that stale sidecar replace the just-saved
     // PlayerWnd/LyricWnd/PlayListWnd/EqualizerWnd rectangles and visibility
     // flags on the next launch.  FUN_0045D5FA uses this same per-skin branch
@@ -4302,9 +4308,10 @@ std::vector<PlayerWindow::SkinMenuEntry> PlayerWindow::LoadSkinMenuCatalog(
     catalog.push_back(std::move(embedded));
 
     std::vector<SkinMenuEntry> installed;
-    if (!skin_directory.empty()) {
+    for (const auto& directory : skin::SkinSearchDirectories(skin_directory)) {
+        if (directory.empty()) continue;
         std::error_code error;
-        std::filesystem::directory_iterator iterator(skin_directory, error);
+        std::filesystem::directory_iterator iterator(directory, error);
         const std::filesystem::directory_iterator end;
         while (!error && iterator != end) {
             if (cancelled()) return {};
@@ -4326,7 +4333,7 @@ std::vector<PlayerWindow::SkinMenuEntry> PlayerWindow::LoadSkinMenuCatalog(
                 if (cancelled()) return {};
                 if (!metadata) continue;
                 installed.push_back(SkinMenuEntry{
-                    0, path, path.filename().wstring(), *metadata, false});
+                    0, path, skin::SkinPackageSelector(skin_directory, path), *metadata, false});
             } catch (const std::exception&) {
                 // 0045E518 simply releases a package whose ZIP/XML loader
                 // failed and proceeds with the next FindNextFile result.
@@ -4337,8 +4344,9 @@ std::vector<PlayerWindow::SkinMenuEntry> PlayerWindow::LoadSkinMenuCatalog(
     if (cancelled()) return {};
     std::sort(installed.begin(), installed.end(),
         [](const SkinMenuEntry& left, const SkinMenuEntry& right) {
-            return CompareSkinNames(left.metadata.name,
-                                    right.metadata.name) < 0;
+            const int order = CompareSkinNames(left.metadata.name, right.metadata.name);
+            return order != 0 ? order < 0
+                : _wcsicmp(left.package_name.c_str(), right.package_name.c_str()) < 0;
         });
 
     catalog.insert(catalog.end(),
@@ -4495,9 +4503,8 @@ void PlayerWindow::PopulateSkinMenu(HMENU menu) {
     if (!catalog_pending && !skin_catalog_cache_.empty() &&
         !current_found && !skin_directory.empty() &&
         !settings_.skin_file.empty()) {
-        const auto package_name =
-            std::filesystem::path(settings_.skin_file).filename();
-        const auto configured = skin_directory / package_name;
+        const auto package_name = skin::NormalizeSkinPackageName(settings_.skin_file);
+        const auto configured = skin::ResolveSkinPackagePath(skin_directory, settings_.skin_file);
         try {
             const auto package = skin::SkinPackage::Open(configured);
             const auto metadata = skin::ParseLegacySkinMetadata(

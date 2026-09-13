@@ -68,7 +68,7 @@ public:
     DiscordPresence(const DiscordPresence&) = delete;
     DiscordPresence& operator=(const DiscordPresence&) = delete;
 
-    // application_id comes from TTPlayer.xml; an empty value falls back to
+    // application_id comes from TTPlayerRebuild.xml; an empty value falls back to
     // kDefaultDiscordApplicationId. Discord only needs this registered public
     // ID--no client secret or user authentication.
     void Configure(bool enabled, std::wstring application_id = {});

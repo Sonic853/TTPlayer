@@ -5062,9 +5062,8 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
             // replace them with an outgoing capture or a saved skin profile.
             static_cast<void>(LoadSkinResource(ResourceModule(), L"<Default_Skin>", false));
         } else {
-            const auto skin_path = CurrentExecutablePath().parent_path() /
-                L"Skin" /
-                std::filesystem::path(settings_.skin_file).filename();
+            const auto skin_path = skin::ResolveSkinPackagePath(
+                CurrentExecutablePath().parent_path() / L"Skin", settings_.skin_file);
             static_cast<void>(LoadSkinPackage(skin_path, false));
         }
     }

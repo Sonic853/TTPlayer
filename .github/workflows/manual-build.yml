@@ -68,7 +68,7 @@ jobs:
       - name: Prepare artifact
         run: |
           $output = Join-Path 'build' $env:BUILD_CONFIGURATION
-          $executable = Join-Path $output 'ttplayer_rebuild.exe'
+          $executable = Join-Path $output 'TTPlayerRebuild.exe'
           if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
             throw 'The player executable was not produced.'
           }
@@ -76,12 +76,12 @@ jobs:
           Copy-Item -LiteralPath $executable -Destination artifact
           Copy-Item -LiteralPath LICENSE -Destination artifact
           Copy-Item -LiteralPath BUILDING.md -Destination artifact
-          $symbols = Join-Path $output 'ttplayer_rebuild.pdb'
+          $symbols = Join-Path $output 'TTPlayerRebuild.pdb'
           if (Test-Path -LiteralPath $symbols) {
             Copy-Item -LiteralPath $symbols -Destination artifact
           }
           $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  ttplayer_rebuild.exe" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
+          "$hash  TTPlayerRebuild.exe" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
           [ordered]@{
             commit = $env:GITHUB_SHA
             ref = $env:GITHUB_REF

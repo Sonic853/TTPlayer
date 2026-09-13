@@ -82,7 +82,7 @@ until a positive endpoint exists. This does not add seeking to unseekable stream
 
 ## Synchronized lyric lines
 
-`General/@DiscordSyncLyrics` defaults to `0` and is saved in `TTPlayer.xml`.
+`General/@DiscordSyncLyrics` defaults to `0` and is saved in `TTPlayerRebuild.xml`.
 The General options page exposes it as **向 Discord 发送歌词**. New settings and
 older XML files without this attribute leave lyric sharing off. Check it (or set
 the XML attribute to `1`) to enable lyric sharing. An explicitly saved preference

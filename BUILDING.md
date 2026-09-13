@@ -32,10 +32,16 @@ VS 2026 生成器要求 CMake 4.2 或更新版本，Runner 已提供相应工具
 直接 **Re-run jobs** 重跑旧失败记录仍使用旧提交中的工作流。
 
 产物包含 EXE、许可证、本说明、SHA-256 校验值、提交信息，以及生成时的 PDB。
-**这不是包含原版运行依赖的安装包**：请把 `ttplayer_rebuild.exe` 放入已有
+**这不是包含原版运行依赖的安装包**：请把 `TTPlayerRebuild.exe` 放入已有
 TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一起使用。
-不会上传原版 DLL、编码器、歌曲、播放列表或 `TTPlayer.xml` 等个人配置。
+不会上传原版 DLL、编码器、歌曲、播放列表或 `TTPlayerRebuild.xml` 等个人配置。
 普通使用选择 Release；Debug 需要开发环境的调试运行库，不适合分发。
+
+程序从 EXE 同目录读写 `TTPlayerRebuild.xml`；仅当新文件不存在时，
+自动导入同目录旧 `TTPlayer.xml`，保留旧文件且不再向其写入。
+皮肤同时扫描 `Skin`、`Skin/new`（后者用于 PNG 皮肤），不递归扫描其它目录。
+例如 `Skin/new/Example.skn` 的配置是 `Skin/new/Example.skn.xml`，
+主配置中的皮肤标识保存为 `new\Example.skn`。内置皮肤仍使用 `Skin/Default.xml`。
 
 “选项 → 关于”的完成日期由每次构建开始时的北京时间（UTC+08:00）生成，
 格式为 `yyyy-M-d`，不使用构建机器本地时区。该日期编入 EXE，启动播放器时
@@ -52,6 +58,9 @@ cmake --build out/ci --config Release --target ttplayer_rebuild --parallel 4
 ```
 
 使用独立输出目录，不覆盖已有播放器运行目录。
+构建目标名仍为 `ttplayer_rebuild`，生成文件改为 `Release/TTPlayerRebuild.exe`
+（以及有调试信息时的 `TTPlayerRebuild.pdb`）。本地运行文件复制只在目标
+`TTPlayerRebuild.xml` 不存在时初始化它，增量构建不会覆盖该配置。
 本地同样需要 VS 2026 的 C++ 工具和 CMake 4.2+。如果某个构建目录曾用
 VS 2022 配置，请改用新的空构建目录，不要复用旧的生成器缓存。
 

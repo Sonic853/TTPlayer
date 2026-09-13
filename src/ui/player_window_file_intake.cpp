@@ -1460,7 +1460,10 @@ void PlayerWindow::HandleDroppedFiles(FileDropSurface surface, IDataObject* data
                 if (!error) {
                     const auto source = std::filesystem::absolute(
                         paths.front(), error);
-                    installed = skin_directory / paths.front().filename();
+                    // Keep an already installed new/ package beside its own
+                    // profile instead of overwriting Skin/<same-name>.
+                    installed = skin::ResolveSkinPackagePath(skin_directory,
+                        skin::SkinPackageSelector(skin_directory, source));
                     const auto destination = std::filesystem::absolute(
                         installed, error);
                     if (!error) {

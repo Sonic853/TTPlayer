@@ -91,7 +91,7 @@ Current milestone (0.1):
   with the recovered pre-translate `MSG` relay and no duplicate tooltip
   subclass/periodic-update path;
   evidence is in `EQUALIZER_RECOVERY.md`;
-- legacy `TTPlayer.xml` import/save and runtime consumers for player, playback,
+- `TTPlayerRebuild.xml` settings with one-time legacy `TTPlayer.xml` import; runtime consumers for player, playback,
   device, conversion, media-library, history, hotkey, visual, lyric and desktop-
   lyric settings; `/reg` and `/unreg` use safe per-user association transactions;
 - `.skn` ZIP central-directory inspection and compatibility validation.
@@ -114,16 +114,22 @@ cmake --build rebuild/build --config Debug
 ctest --test-dir rebuild/build -C Debug --output-on-failure
 ```
 
-Run the reconstructed player UI from the repository root so it can import the
-legacy `TTPlayer.xml` settings automatically:
+Runtime files are resolved beside the executable, independently of the working
+directory. Run the reconstructed player UI:
 
 ```powershell
-.\rebuild\build\Debug\ttplayer_rebuild.exe
+.\rebuild\build\Debug\TTPlayerRebuild.exe
 ```
 
 A supported audio or playlist path may also be passed directly. The program first renders the
 original 327x141 default player skin; the native dark window is retained only
 as a safe fallback when a skin package cannot be loaded.
+
+The main configuration is `TTPlayerRebuild.xml` beside the EXE. If it is absent,
+the old EXE-local `TTPlayer.xml` is imported once without modifying that file.
+Skin menus and options scan both `Skin/` and `Skin/new/`; PNG packages may be
+placed in the latter. Per-package profiles remain next to their `.skn` files
+(`Skin/new/Example.skn.xml`), and the saved selector retains `new\Example.skn`.
 
 Recovered resource DLLs are written to:
 

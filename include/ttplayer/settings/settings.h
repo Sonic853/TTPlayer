@@ -9,6 +9,7 @@
 #include <windows.h>
 
 namespace ttplayer::settings {
+inline constexpr wchar_t kSettingsFileName[] = L"TTPlayerRebuild.xml";
 struct GeneralSettings {
     bool startup_minimize{};
     bool tray_icon{true};
@@ -27,7 +28,7 @@ struct GeneralSettings {
     bool discord_sync_lyrics{false};
     // Discord requires every Rich Presence producer to use an application
     // registered in its developer portal.  This is a public identifier, not
-    // a credential; private builds may replace it only in TTPlayer.xml.
+    // a credential; private builds may replace it only in TTPlayerRebuild.xml.
     std::wstring discord_application_id{
         integrations::kDefaultDiscordApplicationId};
     // The original stores the enabled flag and numeric value together in
@@ -414,6 +415,9 @@ struct StartupPlaybackPlan {
 void ClearPlaybackIdentity(PlayerSettings& player) noexcept;
 
 Settings LoadLegacyXml(const std::filesystem::path& path);
+// Import EXE-local TTPlayer.xml only when the new file is absent; never save
+// back to the old file. An existing rebuild config always takes precedence.
+Settings LoadRuntimeSettings(const std::filesystem::path& runtime_directory);
 bool LoadPlaylistProfile(const std::filesystem::path& path,
                          PlaylistSettings& playlist);
 bool LoadPlaylistOptionsProfile(const std::filesystem::path& path,
