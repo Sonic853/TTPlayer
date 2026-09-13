@@ -1,4 +1,6 @@
 #include "ttplayer/lyrics/online_search.h"
+#include "ttplayer/lyrics/lyric_http.h"
+#include "ttplayer/core/text.h"
 
 #include <algorithm>
 #include <atomic>
@@ -182,6 +184,43 @@ OnlineSearch::OnlineSearch(const plugins::PluginManager& plugins, size_t provide
     }).detach();
 }
 OnlineSearch::~OnlineSearch() { Cancel(); }
+
+OnlineSearch::OnlineSearch(LyricService service, size_t index, settings::NetworkSettings network,
+    std::wstring artist, std::wstring title) : state_(std::make_shared<State>()) {
+    state_->snapshot.provider = index;
+    state_->snapshot.server = service.name;
+    std::thread([state = state_, service = std::move(service), network = std::move(network),
+        artist = std::move(artist), title = std::move(title)] {
+        const auto canceled = [state] { std::lock_guard lock(state->mutex); return state->canceled; };
+        try {
+            const auto results = SearchHttpLyrics(service.url, artist, title, network, canceled);
+            std::unique_lock lock(state->mutex);
+            if (state->canceled) return;
+            for (const auto& item : results) state->snapshot.results.push_back({item.artist,item.title});
+            state->snapshot.phase = Phase::results; ++state->snapshot.revision;
+            while (!state->canceled) {
+                state->changed.wait(lock, [&] { return state->canceled || state->download >= 0; });
+                if (state->canceled) break;
+                const int selected = std::exchange(state->download, -1);
+                lock.unlock();
+                const auto downloaded = DownloadHttpLyric(service.url, results.at(selected), network, canceled);
+                lock.lock();
+                if (state->canceled) break;
+                state->snapshot.text = downloaded.text;
+                state->snapshot.extra_title = downloaded.extra_title;
+                state->snapshot.extra_url = downloaded.extra_url;
+                state->snapshot.phase = Phase::downloaded; ++state->snapshot.revision;
+            }
+        } catch (const std::exception& e) {
+            std::lock_guard lock(state->mutex);
+            if (!state->canceled) { state->snapshot.phase = Phase::failed;
+                state->snapshot.error = core::Utf8ToWide(e.what()); ++state->snapshot.revision; }
+        } catch (...) {
+            std::lock_guard lock(state->mutex);
+            if (!state->canceled) { state->snapshot.phase = Phase::failed; ++state->snapshot.revision; }
+        }
+    }).detach();
+}
 void OnlineSearch::Cancel() noexcept {
     std::lock_guard lock(state_->mutex);
     state_->canceled = true;

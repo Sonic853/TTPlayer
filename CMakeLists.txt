@@ -54,6 +54,8 @@ add_library(ttplayer_core
   src/integrations/discord_track_presence.cpp
   src/lyrics/lrc_parser.cpp
   src/lyrics/online_search.cpp
+  src/lyrics/service_catalog.cpp
+  src/lyrics/lyric_http.cpp
   src/playlist/playlist.cpp
   src/playlist/playlist_store.cpp
   src/plugins/plugin_manager.cpp
@@ -76,7 +78,8 @@ add_library(ttplayer_core
   src/ui/modern_file_dialog.cpp
   src/ui/player_control_packet.cpp
   src/ui/player_window_lyrics.cpp
-  src/ui/player_window_lyric_search.cpp
+    src/ui/player_window_lyric_search.cpp
+    src/ui/player_window_lyric_services.cpp
   src/ui/player_window_lyric_input.cpp
   src/ui/player_window_library.cpp
   src/ui/player_window_options.cpp
@@ -102,8 +105,8 @@ target_compile_definitions(ttplayer_core PRIVATE UNICODE _UNICODE NOMINMAX WIN32
 target_compile_options(ttplayer_core PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_core PUBLIC
   winmm ole32 oleaut32 comsuppw uuid msimg32 shell32 shlwapi comctl32 comdlg32
-  windowscodecs gdiplus dsound setupapi dwmapi
-  mfplat mfreadwrite mfuuid propsys
+  windowscodecs gdiplus dsound setupapi dwmapi uxtheme
+  mfplat mfreadwrite mfuuid propsys winhttp
 )
 
 add_library(ttpcomm_api STATIC src/app/ttpcomm_api.c)
@@ -204,12 +207,19 @@ target_link_libraries(options_drawing_tests PRIVATE ttplayer_core)
 add_test(NAME options_drawing_tests COMMAND options_drawing_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(options_drawing_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
-add_executable(lyric_search_tests src/ui/lyric_search_tests.cpp)
+add_executable(lyric_search_tests src/ui/lyric_search_tests.cpp src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(lyric_search_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(lyric_search_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(lyric_search_tests PRIVATE ttplayer_core ws2_32)
 add_test(NAME lyric_search_tests COMMAND lyric_search_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(lyric_search_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+
+add_executable(lyric_service_catalog_tests src/lyrics/service_catalog_tests.cpp)
+target_compile_definitions(lyric_service_catalog_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(lyric_service_catalog_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(lyric_service_catalog_tests PRIVATE ttplayer_core)
+add_test(NAME lyric_service_catalog_tests COMMAND lyric_service_catalog_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(lyric_service_catalog_tests PROPERTIES TIMEOUT 60)
 
 add_executable(window_topmost_tests src/ui/window_topmost_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)

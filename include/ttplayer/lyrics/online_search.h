@@ -2,6 +2,7 @@
 
 #include "ttplayer/plugins/plugin_manager.h"
 #include "ttplayer/settings/settings.h"
+#include "ttplayer/lyrics/service_catalog.h"
 
 namespace ttplayer::lyrics {
 
@@ -23,6 +24,8 @@ public:
     OnlineSearch(const plugins::PluginManager& plugins, size_t provider,
                  settings::NetworkSettings network, std::wstring artist,
                  std::wstring title);
+    OnlineSearch(LyricService service, size_t index, settings::NetworkSettings network,
+                 std::wstring artist, std::wstring title);
     ~OnlineSearch();
     OnlineSearch(const OnlineSearch&) = delete;
     OnlineSearch& operator=(const OnlineSearch&) = delete;

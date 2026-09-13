@@ -3166,13 +3166,15 @@ void PlayerWindow::AddToolTipTool(HWND owner, UINT_PTR identifier,
 
 bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
     auto* queued = const_cast<MSG*>(&message);
-    if (lyric_search_dialog_ && IsWindow(lyric_search_dialog_) &&
+    if (lyric_service_editor_ && IsWindow(lyric_service_editor_) && IsWindowEnabled(lyric_service_editor_) &&
+        IsDialogMessageW(lyric_service_editor_, queued)) return true;
+    if (lyric_search_dialog_ && IsWindow(lyric_search_dialog_) && IsWindowEnabled(lyric_search_dialog_) &&
         IsDialogMessageW(lyric_search_dialog_, queued)) return true;
     if (TranslatePlaylistConverterMessage(*queued)) return true;
     // PSH_MODELESS requires the application's message filter to run the
     // property-sheet dialog manager.  Omitting this was also enough to make
     // keyboard navigation appear hung while the audio/UI thread remained up.
-    if (options_window_ && IsWindow(options_window_) &&
+    if (options_window_ && IsWindow(options_window_) && IsWindowEnabled(options_window_) &&
         PropSheet_IsDialogMessage(options_window_, queued)) {
         return true;
     }

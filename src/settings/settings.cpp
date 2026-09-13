@@ -1164,6 +1164,7 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         s.lyric.lyric_save_mode=IntAttr(
             n,L"LyricSaveMode",s.lyric.lyric_save_mode);
         s.lyric.add_in_index=IntAttr(n,L"AddInIndex",s.lyric.add_in_index);
+        s.lyric.server_key=StringAttr(n,L"ServerKey");
         s.lyric.auto_download=IntAttr(
             n,L"AutoDownLoad",s.lyric.auto_download ? 1 : 0)!=0;
         s.lyric.download_when_full_info=IntAttr(
@@ -1874,6 +1875,7 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"TrimSpaces",settings.lyric.trim_spaces ? 1 : 0);
         SetAttribute(element,L"LyricSaveMode",settings.lyric.lyric_save_mode);
         SetAttribute(element,L"AddInIndex",settings.lyric.add_in_index);
+        SetAttribute(element,L"ServerKey",settings.lyric.server_key);
         SetAttribute(element,L"AutoDownLoad",
                      settings.lyric.auto_download ? 1 : 0);
         SetAttribute(element,L"DownLoadWhenFullInfo",

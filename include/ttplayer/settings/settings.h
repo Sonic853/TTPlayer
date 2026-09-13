@@ -371,6 +371,7 @@ struct LyricSettings {
     bool trim_spaces{true};
     int lyric_save_mode{1};
     int add_in_index{};
+    std::wstring server_key;
     bool auto_download{true};
     bool download_when_full_info{};
     bool auto_associate{};

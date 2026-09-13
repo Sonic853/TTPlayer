@@ -1,5 +1,76 @@
 # Reconstruction status
 
+2026-09-14: extend native service-editor modality to Online Search and Download
+Lyrics. Pass the actual entry HWND, even when Options exists simultaneously;
+disable/restore only that owner and center the editor on it. Repeated entry
+and queued search/download/close commands target the editor or its nested
+confirmation; disabled dialogs no longer translate keyboard input. Defer
+network-result UI/automatic close and stale-track teardown while editing,
+without stopping background work or discarding drafts. Forced owner teardown
+cleans up the editor and its recorded enablement. Both entry paths preserve
+native ownership, topmost policy and HWND identity. Four host regressions
+passed (4/4, 34.49 seconds), including actual discard confirmations, coexistence,
+track-change draft preservation and online-editor normal/mini/pin transitions.
+
+2026-09-14: correct image-only buttons beside lyric local-search folders and
+in the service editor. Their 5.7.9 bitmaps are 16x15, not 16x16; preserve
+resource dimensions (00434754/00434F8C) and port 0046E0C9's no-caption
+placement: (client-image+1)/2, with +1/+1 when pressed. Paint this branch
+through the existing button subclass, using theme/disabled image rendering
+and buffered screen paint, without replacing native input or captioned
+button layout. Native CENTER alone failed odd-size/pressed pixel checks.
+Add host pixel regressions for all eight buttons, odd/even resizes, themed/
+classic rendering and normal/pressed/disabled states; see OPTIONS_RECOVERY.md.
+Release build and all four targeted host regressions passed (32.98 seconds).
+
+2026-09-14: use native modal ownership for the lyric-service editor: Options
+owns the popup it disables, rather than owning a sibling of that popup. This
+lets User32 handle disabled-owner clicks and attention feedback without a
+custom flash timer. Restore Options before destroying the editor; retain
+the external-destruction fallback and pre-existing disabled state. Repeated
+options entry during the unsaved-changes MessageBox targets the enabled
+confirmation popup. No extra message loop or window recreation was added.
+Host regressions cover the native owner/popup chain, actual Yes/No confirmation
+dialogs, activation retention, destruction order, untouched INIs and topmost/
+HWND identity through skin, mini and fullscreen transitions (4/4 passed).
+
+2026-09-14: move lyric-service Add/Delete to a right-hand icon column with
+Up/Down, reusing local-search resources 1027/1039/1042/1045 and the existing
+button image-list lifetime. Only INI rows can move; enforce fixed DLL order
+and the DLL/INI boundary in both input handling and persistence. Save an
+INI-only order attribute for stable cross-plugin ordering without changing
+file ownership. Disable options until the editor closes, guarding repeat
+options entry and queued apply/close commands; retain normal/mini topmost
+behavior and restore only enablement owned by this editor. Four targeted
+host regressions passed (4/4, 32.27 seconds), including image-button layout,
+sorting persistence, options drawing and modality through skin/mode changes.
+
+2026-09-14: put all DLL lyric-service entries before INI entries in the editor
+and both server selectors. Stable source grouping applies after reads and
+saves, including multiple AddIns, without rewriting INIs merely to reorder the
+display. Retain selected service identity through ServerKey.
+Both lyric search/catalog host regressions passed (2/2, 6.74 seconds).
+
+2026-09-14: add asynchronous lyric-service INI refresh once per options opening
+and an Edit List dialog in place of the proxy shortcut. Merge immutable DLL
+resource entries with editable DLL-sibling INI entries; enforce read-only source
+paths, preserve other XML, detect external edits, atomically save with backups,
+and retain service selection across reordering/renaming. Add a background
+WinHTTP client for the recovered search/download protocol, including HTTPS,
+certificate validation and more than two INI servers. Do not let the old remote
+svrlst cache overwrite user edits. See LYRIC_SERVICE_EDITOR.md for deliberate
+compatibility differences, protocol addresses and host verification.
+Compact editor measured 436x369 versus options 558x458 at the host DPI. It
+inherits normal/mini topmost preferences through the existing owner-group
+policy, with real-editor HWND lifetime tests across skin/fullscreen changes.
+Release builds successfully; all seven targeted host regressions passed
+(42.50 seconds), plus valid-certificate HTTPS and rejection of an untrusted
+loopback TLS certificate. No historical lyric endpoint was contacted.
+Final lyric UI regression passed again after the compact layout change.
+Updated build/Release/TTPlayerRebuild.exe with a verified matching hash;
+previous executable retained as .before-lyric-services-20260914-030316911.bak.
+Existing runtime DLLs, INIs and TTPlayerRebuild.xml were not replaced.
+
 2026-09-13: connect real lyric-search AddIns to the UI. Replace hard-coded
 server names with the loaded registry; recover search/download/extra/callback
 slots and the 24-byte network/proxy descriptor. Reuse 5.7.9 dialogs 208/209,

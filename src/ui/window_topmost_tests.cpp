@@ -144,6 +144,10 @@ struct SkinRebindAccess {
         CheckWindow(p.desktop_lyrics_.BarHandle(), desktop, "desktop toolbar topmost mismatch");
         if (p.options_window_ && IsWindow(p.options_window_))
             CheckWindow(p.options_window_, main, "options retained a stale owner topmost band");
+        if (p.lyric_search_dialog_ && IsWindow(p.lyric_search_dialog_))
+            CheckWindow(p.lyric_search_dialog_, main, "online search retained a stale owner topmost band");
+        if (p.lyric_service_editor_ && IsWindow(p.lyric_service_editor_))
+            CheckWindow(p.lyric_service_editor_, main, "lyric service editor retained stale topmost state");
     }
     static void Pin(ui::PlayerWindow& p, bool main, bool lyric) {
         using namespace ui::detail;
@@ -193,9 +197,15 @@ struct SkinRebindAccess {
         p.ShowOptions(0);
         Require(p.options_window_ && IsWindow(p.options_window_), "options did not open");
         const HWND original_options = p.options_window_;
+        p.ShowLyricServiceEditor();
+        const HWND service_editor = p.lyric_service_editor_;
+        Require(service_editor && GetWindow(service_editor, GW_OWNER) == original_options &&
+            GetWindow(original_options, GW_OWNER) == p.window_,
+            "service editor must be owned by the disabled options, within the player group");
         constexpr auto identity_key = L"TTPlayer.OptionsLifetimeTest";
         Require(SetPropW(original_options, identity_key, reinterpret_cast<HANDLE>(1)),
             "cannot tag the options HWND");
+        Require(SetPropW(service_editor, identity_key, reinterpret_cast<HANDLE>(1)), "cannot tag editor HWND");
         // Native captioned owned windows model the nested file/color dialogs
         // launched from options; include an initially hidden grandchild.
         HWND nested = CreateWindowExW(0, L"STATIC", L"Owned dialog", WS_POPUP | WS_CAPTION | WS_VISIBLE,
@@ -207,6 +217,13 @@ struct SkinRebindAccess {
         Require(nested && child && lyric_dialog, "cannot create nested dialog fixtures");
         const auto check = [&] {
             Check(p, "options and nested dialog bands");
+            Require(!IsWindowEnabled(original_options) && IsWindowEnabled(service_editor),
+                "skin/mode/pin transition broke editor modality");
+            Require(GetWindow(service_editor, GW_OWNER) == original_options &&
+                Above(service_editor, original_options), "editor lost its native modal owner/order");
+            Require(p.lyric_service_editor_ == service_editor &&
+                GetPropW(service_editor, identity_key) == reinterpret_cast<HANDLE>(1),
+                "skin/mode/topmost transition recreated service editor");
             Require(p.options_window_ == original_options &&
                 GetPropW(original_options, identity_key) == reinterpret_cast<HANDLE>(1),
                 "window transition destroyed/recreated the options sheet");
@@ -240,9 +257,34 @@ struct SkinRebindAccess {
         check();
         for (int mode : {1, 2, 3}) { FullscreenRestore(p, mode); check(); }
         DestroyWindow(child); DestroyWindow(nested); DestroyWindow(lyric_dialog);
+        SendMessageW(service_editor, WM_CLOSE, 0, 0);
+        Require(!IsWindow(service_editor), "service editor close failed");
+        Require(IsWindowEnabled(original_options), "editor close left options disabled");
         const HWND options = p.options_window_;
         SendMessageW(options, WM_COMMAND, IDOK, 0);
         Require(!IsWindow(options), "options Close button did not destroy the sheet");
+        p.ShowOnlineLyricSearch();
+        const HWND search = p.lyric_search_dialog_;
+        Require(search != nullptr, "online search did not open");
+        SendMessageW(search, WM_COMMAND, MAKEWPARAM(2185, BN_CLICKED), 0);
+        const HWND search_editor = p.lyric_service_editor_;
+        Require(search_editor && SetPropW(search_editor, identity_key, reinterpret_cast<HANDLE>(1)),
+            "cannot tag search-owned editor");
+        const auto check_search = [&] {
+            Check(p, "search-owned service editor");
+            Require(p.lyric_search_dialog_ == search && p.lyric_service_editor_ == search_editor &&
+                GetPropW(search_editor, identity_key) == reinterpret_cast<HANDLE>(1),
+                "mode/pin transition recreated search or its editor");
+            Require(GetWindow(search_editor, GW_OWNER) == search && Above(search_editor, search) &&
+                !IsWindowEnabled(search) && IsWindowEnabled(search_editor) && IsWindowEnabled(p.window_),
+                "search editor lost native modality/order or disabled the main player");
+        };
+        for (bool pin : {false, true, false}) { Pin(p, pin, false); check_search(); }
+        Mini(p, true); check_search();
+        Mini(p, false); check_search();
+        SendMessageW(search_editor, WM_CLOSE, 0, 0);
+        Require(IsWindowEnabled(search), "editor close did not restore online search");
+        SendMessageW(search, WM_CLOSE, 0, 0);
         Pin(p, initial_pin, false);
         Check(p, "closing options restored the player group");
     }

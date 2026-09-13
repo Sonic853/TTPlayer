@@ -28,6 +28,8 @@
 #include <shellapi.h>
 #include <mmsystem.h>
 #include <windowsx.h>
+#include <uxtheme.h>
+#include <vsstyle.h>
 
 namespace ttplayer::ui {
 using namespace detail;
@@ -109,6 +111,7 @@ constexpr UINT_PTR kOptionsSheetSubclass = 0x54544f50;
 constexpr UINT_PTR kOptionsImageButtonSubclass = 0x5454494d;
 constexpr UINT_PTR kOptionsAboutSubclass = 0x54544142;
 constexpr UINT_PTR kOptionsSkinPollTimer = 0x5453;
+constexpr UINT_PTR kOptionsLyricServicesTimer = 0x5454;
 constexpr UINT kOptionsSkinPollMilliseconds = 40;
 constexpr UINT_PTR kOptionsDspPollTimer = 0x4453;
 constexpr UINT kOptionsDspPollMilliseconds = 60;
@@ -919,9 +922,69 @@ void MakeOwnerDrawButton(HWND dialog, int control) {
         (style & ~static_cast<LONG_PTR>(BS_TYPEMASK)) | BS_OWNERDRAW);
 }
 
+void DrawImageOnlyButton(HWND button, HDC dc, HIMAGELIST images) {
+    RECT client{};
+    int width{}, height{};
+    if (!GetClientRect(button, &client) || !ImageList_GetIconSize(images, &width, &height)) return;
+    const LRESULT state = SendMessageW(button, BM_GETSTATE, 0, 0);
+    const bool enabled = IsWindowEnabled(button) != FALSE;
+    const bool pressed = enabled && (state & BST_PUSHED);
+    const bool hot = enabled && (state & BST_HOT);
+    const int theme_state = !enabled ? PBS_DISABLED : pressed ? PBS_PRESSED : hot ? PBS_HOT : PBS_NORMAL;
+    const HTHEME theme = GetWindowTheme(button);
+    FillRect(dc, &client, GetSysColorBrush(COLOR_BTNFACE));
+    if (theme && IsThemeBackgroundPartiallyTransparent(theme, BP_PUSHBUTTON, theme_state))
+        DrawThemeParentBackground(button, dc, &client);
+    if (!theme || FAILED(DrawThemeBackground(theme, dc, BP_PUSHBUTTON, theme_state, &client, nullptr))) {
+        const bool flat = (GetWindowLongPtrW(button, GWL_STYLE) & BS_FLAT) != 0;
+        if (!flat || hot || pressed)
+            DrawEdge(dc, &client, pressed ? EDGE_SUNKEN : flat ? BDR_RAISEDINNER : EDGE_RAISED, BF_RECT);
+    }
+    // Port the no-caption branch of 0046E0C9 directly. BCM image layout adds
+    // theme-dependent padding/rounding, so CENTER alone is not pixel-equivalent.
+    const int x = (client.right-width+1)/2 + pressed;
+    const int y = (client.bottom-height+1)/2 + pressed;
+    const RECT image_rect{x, y, x+width, y+height};
+    if (theme && SUCCEEDED(DrawThemeIcon(theme, dc, BP_PUSHBUTTON, theme_state, &image_rect, images, 0))) return;
+    if (!enabled) {
+        if (const HICON icon = ImageList_GetIcon(images, 0, ILD_NORMAL)) {
+            DrawStateW(dc, nullptr, nullptr, reinterpret_cast<LPARAM>(icon), 0,
+                x, y, width, height, DST_ICON | DSS_DISABLED);
+            DestroyIcon(icon);
+        }
+    } else ImageList_Draw(images, 0, dc, x, y, ILD_NORMAL);
+}
+
 LRESULT CALLBACK OptionsImageButtonSubclassProc(
     HWND button, UINT message, WPARAM wparam, LPARAM lparam,
     UINT_PTR subclass, DWORD_PTR data) {
+    if ((message == WM_PAINT || message == WM_PRINTCLIENT || message == WM_ERASEBKGND) &&
+        GetWindowTextLengthW(button) == 0) {
+        BUTTON_IMAGELIST layout{};
+        if (SendMessageW(button, BCM_GETIMAGELIST, 0, reinterpret_cast<LPARAM>(&layout)) &&
+            layout.uAlign == BUTTON_IMAGELIST_ALIGN_CENTER) {
+            if (message == WM_ERASEBKGND) return TRUE; // Paint the full surface once.
+            if (message == WM_PRINTCLIENT) {
+                DrawImageOnlyButton(button, reinterpret_cast<HDC>(wparam), layout.himl);
+            } else {
+                PAINTSTRUCT paint{};
+                const HDC dc = BeginPaint(button, &paint);
+                RECT client{}; GetClientRect(button, &client);
+                const HDC buffer = CreateCompatibleDC(dc);
+                const HBITMAP bitmap = CreateCompatibleBitmap(dc, client.right, client.bottom);
+                if (buffer && bitmap) {
+                    const auto previous = SelectObject(buffer, bitmap);
+                    DrawImageOnlyButton(button, buffer, layout.himl);
+                    BitBlt(dc, 0, 0, client.right, client.bottom, buffer, 0, 0, SRCCOPY);
+                    SelectObject(buffer, previous);
+                } else DrawImageOnlyButton(button, dc, layout.himl);
+                if (bitmap) DeleteObject(bitmap);
+                if (buffer) DeleteDC(buffer);
+                EndPaint(button, &paint);
+            }
+            return 0;
+        }
+    }
     if (message != WM_NCDESTROY)
         return DefSubclassProc(button, message, wparam, lparam);
     RemoveWindowSubclass(button, OptionsImageButtonSubclassProc, subclass);
@@ -931,15 +994,22 @@ LRESULT CALLBACK OptionsImageButtonSubclassProc(
 }
 
 bool InstallButtonBitmap(HWND dialog, int control, HMODULE module,
-                         UINT resource, int width = 16, int height = 16) {
+                         UINT resource, int width = 0, int height = 0) {
     const HWND button = GetDlgItem(dialog, control);
     if (!button || !module) return false;
     const HBITMAP bitmap = static_cast<HBITMAP>(LoadImageW(
         module, MAKEINTRESOURCEW(resource), IMAGE_BITMAP, width, height,
         LR_CREATEDIBSECTION));
     if (!bitmap) return false;
+    // 00434754/00434F8C load the resource at its original size. In particular,
+    // the local-search Add/Delete/Up/Down bitmaps are 16x15, NOT 16x16.
+    BITMAP source{};
+    if (!GetObjectW(bitmap, sizeof(source), &source)) {
+        DeleteObject(bitmap);
+        return false;
+    }
     const HIMAGELIST images = ImageList_Create(
-        width, height, ILC_COLOR24 | ILC_MASK, 1, 0);
+        source.bmWidth, source.bmHeight, ILC_COLOR24 | ILC_MASK, 1, 0);
     if (!images) {
         DeleteObject(bitmap);
         return false;
@@ -952,8 +1022,13 @@ bool InstallButtonBitmap(HWND dialog, int control, HMODULE module,
     }
     BUTTON_IMAGELIST layout{};
     layout.himl = images;
-    layout.margin = {3, 0, 3, 0};
-    layout.uAlign = BUTTON_IMAGELIST_ALIGN_LEFT;
+    if (GetWindowTextLengthW(button) == 0) {
+        // 0046E0C9 centers image-only controls in the client rectangle.
+        layout.uAlign = BUTTON_IMAGELIST_ALIGN_CENTER;
+    } else {
+        layout.margin = {3, 0, 3, 0};
+        layout.uAlign = BUTTON_IMAGELIST_ALIGN_LEFT;
+    }
     if (!SendMessageW(button, BCM_SETIMAGELIST, 0,
                       reinterpret_cast<LPARAM>(&layout))) {
         ImageList_Destroy(images);
@@ -1004,7 +1079,6 @@ void MakeOptionsHyperlink(HWND dialog, int control) {
 bool IsOptionsPageHyperlink(UINT template_id, UINT control) {
     if (template_id == 256)
         return control == 2087 || control == 2089 || control == 2091;
-    if (template_id == 257) return control == 2185;
     if (template_id == 261)
         return control == 1066 || control == 1067 || control == 2109;
     return false;
@@ -2576,7 +2650,21 @@ void PlayerWindow::ShowVisualOptions() {
     ShowOptions(kPageVisual);
 }
 
+void PlayerWindow::InstallLyricServiceEditorButtons(HWND dialog) {
+    // Same resources, image-list mask, native button style and cleanup as
+    // the local-search directory controls on options page 257.
+    const HMODULE resources = ResourceModule();
+    InstallButtonBitmap(dialog, IDC_LYRIC_SERVICES_ADD, resources, 1027);
+    InstallButtonBitmap(dialog, IDC_LYRIC_SERVICES_DELETE, resources, 1039);
+    InstallButtonBitmap(dialog, IDC_LYRIC_SERVICES_UP, resources, 1042);
+    InstallButtonBitmap(dialog, IDC_LYRIC_SERVICES_DOWN, resources, 1045);
+}
+
 void PlayerWindow::ShowOptions(int page, UINT focus_control) {
+    if (lyric_service_editor_ && IsWindow(lyric_service_editor_)) {
+        ShowLyricServiceEditor();
+        return; // Do not replace or activate the sheet behind its editor.
+    }
     const HMODULE resources = ResourceModule();
     if (!resources) return;
     for (const UINT identifier : kOptionTemplates) {
@@ -2587,6 +2675,7 @@ void PlayerWindow::ShowOptions(int page, UINT focus_control) {
     // FUN_0045D531 deliberately destroys the previous sheet object even when
     // it is already visible, then rebuilds it with the requested active page.
     CloseOptions();
+    RefreshLyricServices();
     const bool targeted_entry = page >= 0;
     if (page < 0) page = settings_.history.last_active_page;
     // FUN_0049F4AD only selects LastActivePage when it is inside the sheet's
@@ -2635,6 +2724,7 @@ void PlayerWindow::ShowOptions(int page, UINT focus_control) {
         return;
     }
     options_window_ = reinterpret_cast<HWND>(result);
+    SetTimer(options_window_, kOptionsLyricServicesTimer, 100, nullptr);
     InitializeOptionsShell();
     SelectOptionsPage(page, focus_control);
     BringWindowToTop(options_window_);
@@ -2906,6 +2996,12 @@ LRESULT CALLBACK PlayerWindow::OptionsSheetSubclassProc(
 
 LRESULT PlayerWindow::HandleOptionsSheetMessage(
     HWND sheet, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (sheet == lyric_service_disabled_owner_ && IsWindow(lyric_service_editor_) &&
+        (message == WM_COMMAND || message == WM_CLOSE ||
+         (message == WM_SYSCOMMAND && (wparam & 0xfff0U) == SC_CLOSE))) {
+        ShowLyricServiceEditor();
+        return 0; // Includes close/apply commands queued before disabling.
+    }
     switch (message) {
     case WM_CTLCOLORSTATIC: {
         const HWND control = reinterpret_cast<HWND>(lparam);
@@ -3070,6 +3166,12 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
         break;
     }
     case WM_TIMER:
+        if (wparam == kOptionsLyricServicesTimer) {
+            PollLyricServices();
+            if (!lyric_catalog_job_ && !lyric_catalog_save_job_)
+                KillTimer(sheet, kOptionsLyricServicesTimer);
+            return 0;
+        }
         if (wparam == kOptionsSkinPollTimer) {
             if (PublishReadySkinMenuCatalog(0)) {
                 KillTimer(sheet, kOptionsSkinPollTimer);
@@ -3080,6 +3182,8 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
         }
         break;
     case WM_NCDESTROY:
+        if (lyric_service_disabled_owner_ == sheet) lyric_service_disabled_owner_ = nullptr;
+        KillTimer(sheet, kOptionsLyricServicesTimer);
         KillTimer(sheet, kOptionsSkinPollTimer);
         if (options_window_ == sheet) {
             options_window_ = nullptr;
@@ -3640,23 +3744,8 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetChecked(dialog, 2146, settings_.lyric.save_to_sound_folder);
         SetDlgItemTextW(dialog, 1028,
                         settings_.lyric.download_folder.c_str());
-        const HWND server = GetDlgItem(dialog, 2090);
-        if (server) {
-            // FUN_00497AE5 reads DAT_00547F78: only loaded AddIns can
-            // advertise a lyric service (including their external .ini).
-            SendMessageW(server, CB_RESETCONTENT, 0, 0);
-            if (sound_library_)
-                for (const auto& provider : sound_library_->LyricSearchProviders())
-                    SendMessageW(server, CB_ADDSTRING, 0,
-                        reinterpret_cast<LPARAM>(provider.name.c_str()));
-            const LRESULT count = SendMessageW(server, CB_GETCOUNT, 0, 0);
-            const int selected = count > 0
-                ? (settings_.lyric.add_in_index >= 0 && settings_.lyric.add_in_index < count
-                    ? settings_.lyric.add_in_index : 0) : -1;
-            SendMessageW(server, CB_SETCURSEL, selected, 0);
-            EnableWindow(server, count > 0);
-        }
-        MakeOptionsHyperlink(dialog, 2185);
+        PopulateLyricServices(dialog);
+        InstallLyricServiceEditorButton(dialog);
         UpdateFolderListButtons(dialog, resources, true);
         break;
     }
@@ -4334,8 +4423,7 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         settings_.lyric.same_file_title = IsChecked(dialog, 2147);
         settings_.lyric.save_to_sound_folder = IsChecked(dialog, 2146);
         settings_.lyric.download_folder = GetText(dialog, 1028);
-        settings_.lyric.add_in_index = ComboSelection(
-            dialog, 2090, settings_.lyric.add_in_index);
+        SelectLyricService(ComboSelection(dialog, 2090, settings_.lyric.add_in_index));
         const HWND list = GetDlgItem(dialog, 1038);
         if (list) {
             settings_.lyric.folders.clear();
@@ -4687,7 +4775,7 @@ bool PlayerWindow::CommitOptionsControl(
             const LRESULT selected = SendDlgItemMessageW(
                 dialog, 2090, CB_GETCURSEL, 0, 0);
             if (selected != CB_ERR)
-                settings_.lyric.add_in_index = static_cast<int>(selected);
+                SelectLyricService(static_cast<int>(selected));
             break;
         }
         default: return false;
@@ -5882,11 +5970,8 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 CommitOptionsPage(dialog, template_id);
                 return TRUE;
             }
-            if (control == 2185 && notification == STN_CLICKED) {
-                // FUN_00497F63 sends PSM_SETCURSEL to the existing property
-                // sheet.  Reopening through E140 here destroys the sheet from
-                // its own child DialogProc and is observably different.
-                SelectOptionsPage(kPageNetwork);
+            if (control == 2185 && notification == BN_CLICKED) {
+                ShowLyricServiceEditor(options_window_);
                 return TRUE;
             }
         }

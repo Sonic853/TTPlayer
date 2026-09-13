@@ -1,8 +1,11 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
+#include "../app/resource_ids.h"
 
 #include <iostream>
 #include <stdexcept>
+#include <uxtheme.h>
+#include <vsstyle.h>
 
 namespace fs = std::filesystem;
 
@@ -17,6 +20,104 @@ struct SkinRebindAccess {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+    }
+    struct Surface {
+        HDC dc{CreateCompatibleDC(nullptr)};
+        HBITMAP bitmap{};
+        HGDIOBJ previous{};
+        unsigned* pixels{};
+        int width{}, height{};
+        Surface(int w, int h) : width(w), height(h) {
+            BITMAPINFO info{};
+            info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            info.bmiHeader.biWidth = w; info.bmiHeader.biHeight = -h;
+            info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
+            bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS,
+                reinterpret_cast<void**>(&pixels), nullptr, 0);
+            Require(dc && bitmap, "cannot allocate button capture");
+            previous = SelectObject(dc, bitmap);
+            std::fill_n(pixels, w*h, 0x00123456U);
+        }
+        ~Surface() { SelectObject(dc, previous); DeleteObject(bitmap); DeleteDC(dc); }
+    };
+    static void CheckImageButton(HWND button) {
+        BUTTON_IMAGELIST layout{};
+        Require(button && SendMessageW(button, BCM_GETIMAGELIST, 0,
+            reinterpret_cast<LPARAM>(&layout)), "missing image-only button");
+        int width{}, height{};
+        Require(ImageList_GetIconSize(layout.himl, &width, &height) && width == 16 && height == 15,
+            "original 16x15 bitmap was stretched");
+        Require(layout.uAlign == BUTTON_IMAGELIST_ALIGN_CENTER && IsRectEmpty(&layout.margin),
+            "image-only button uses text/image left padding");
+        RECT bounds{}; GetClientRect(button, &bounds);
+        const bool enabled = IsWindowEnabled(button) != FALSE;
+        for (const int visual_state : {PBS_NORMAL, PBS_PRESSED, PBS_DISABLED}) {
+            const bool pressed = visual_state == PBS_PRESSED;
+            const bool disabled = visual_state == PBS_DISABLED;
+            EnableWindow(button, !disabled);
+            SendMessageW(button, BM_SETSTATE, pressed, 0);
+            Surface reference(width, height);
+            const RECT image_rect{0, 0, width, height};
+            const HTHEME theme = GetWindowTheme(button);
+            if (!disabled) ImageList_Draw(layout.himl, 0, reference.dc, 0, 0, ILD_NORMAL);
+            else if (!theme || FAILED(DrawThemeIcon(theme, reference.dc, BP_PUSHBUTTON,
+                PBS_DISABLED, &image_rect, layout.himl, 0))) {
+                const HICON icon = ImageList_GetIcon(layout.himl, 0, ILD_NORMAL);
+                Require(icon != nullptr, "cannot get disabled reference icon");
+                DrawStateW(reference.dc, nullptr, nullptr, reinterpret_cast<LPARAM>(icon), 0,
+                    0, 0, width, height, DST_ICON | DSS_DISABLED);
+                DestroyIcon(icon);
+            }
+            GdiFlush();
+            Surface capture(bounds.right, bounds.bottom);
+            SendMessageW(button, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(capture.dc), PRF_CLIENT);
+            GdiFlush();
+            const int x = (bounds.right-width+1)/2 + pressed;
+            const int y = (bounds.bottom-height+1)/2 + pressed;
+            const auto matches = [&](int left, int top) {
+                int count = 0;
+                for (int row = 0; row < height; ++row) for (int col = 0; col < width; ++col) {
+                    const unsigned pixel = reference.pixels[row*width+col] & 0xffffff;
+                    if (pixel == 0x123456) continue;
+                    if (left+col >= 0 && left+col < capture.width && top+row >= 0 && top+row < capture.height &&
+                        (capture.pixels[(top+row)*capture.width+left+col] & 0xffffff) == pixel) ++count;
+                }
+                return count;
+            };
+            int opaque = 0;
+            for (int i = 0; i < width*height; ++i)
+                if ((reference.pixels[i] & 0xffffff) != 0x123456) ++opaque;
+            const int exact = matches(x,y);
+            if (exact != opaque) {
+                int best = 0, best_x = 0, best_y = 0;
+                for (int py = 0; py <= bounds.bottom-height; ++py)
+                    for (int px = 0; px <= bounds.right-width; ++px)
+                        if (const int score = matches(px,py); score > best) { best=score; best_x=px; best_y=py; }
+                std::cerr << "button=" << GetDlgCtrlID(button) << " size=" << bounds.right << 'x' << bounds.bottom
+                    << " state=" << visual_state << " expected=" << x << ',' << y << " matches=" << exact << '/' << opaque
+                    << " best=" << best_x << ',' << best_y << " matches=" << best << '\n';
+            }
+            SendMessageW(button, BM_SETSTATE, FALSE, 0);
+            Require(opaque > 0 && exact == opaque, "button pixels do not follow 0046E0C9 placement");
+        }
+        EnableWindow(button, enabled);
+    }
+    static void CheckImageButtonVariants(HWND button) {
+        RECT original{}; GetClientRect(button, &original);
+        CheckImageButton(button);
+        // Different resource/font/DPI mappings produce both odd and even
+        // client extents. Exercise layout on native HWND resize, not a model.
+        for (const bool classic : {false, true}) {
+            SetWindowTheme(button, classic ? L"" : nullptr, classic ? L"" : nullptr);
+            for (const SIZE size : {SIZE{22,20}, SIZE{23,21}, SIZE{30,27}, SIZE{31,28}}) {
+                SetWindowPos(button, nullptr, 0, 0, size.cx, size.cy,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                CheckImageButton(button);
+            }
+        }
+        SetWindowTheme(button, nullptr, nullptr);
+        SetWindowPos(button, nullptr, 0, 0, original.right, original.bottom,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
     struct Events {
         unsigned select{}, activate{}, deactivate{}, position{}, destroy{};
@@ -102,6 +203,18 @@ struct SkinRebindAccess {
             Require(repeated_clean, "same-page clicks reselect/reposition the page");
             Require((GetWindowLongPtrW(sheet, GWL_STYLE) & WS_CLIPCHILDREN) != 0,
                 "sheet paints over child controls (original 004A2F66 sets WS_CLIPCHILDREN)");
+            player.SelectOptionsPage(8);
+            for (int id : {1027, 1039, 1042, 1045}) CheckImageButtonVariants(GetDlgItem(player.options_pages_[8], id));
+            player.ShowLyricServiceEditor();
+            for (int id : {IDC_LYRIC_SERVICES_ADD, IDC_LYRIC_SERVICES_DELETE,
+                           IDC_LYRIC_SERVICES_UP, IDC_LYRIC_SERVICES_DOWN})
+                CheckImageButtonVariants(GetDlgItem(player.lyric_service_editor_, id));
+            player.CloseLyricServiceEditor();
+            BUTTON_IMAGELIST close_image{};
+            Require(SendDlgItemMessageW(sheet, IDOK, BCM_GETIMAGELIST, 0,
+                reinterpret_cast<LPARAM>(&close_image)) && close_image.uAlign == BUTTON_IMAGELIST_ALIGN_LEFT &&
+                close_image.margin.left == 3 && close_image.margin.right == 3,
+                "image-only fix changed the captioned Close button layout");
             // A targeted request on an already active page must still change
             // the nested lyric/network tab rather than returning too early.
             for (const auto target : {std::pair{7,384U}, {7,385U}, {7,384U},

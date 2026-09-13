@@ -3684,7 +3684,9 @@ void PlayerWindow::LoadCurrentLyrics(bool force) {
     const auto* requested_track = PlaybackTrackForUi();
     if (lyric_search_ && (!requested_track ||
         requested_track->path != lyric_search_track_.path ||
-        requested_track->subtrack != lyric_search_track_.subtrack))
+        requested_track->subtrack != lyric_search_track_.subtrack) &&
+        !(lyric_search_dialog_ && IsWindow(lyric_service_editor_) &&
+          GetWindow(lyric_service_editor_, GW_OWNER) == lyric_search_dialog_))
         CloseOnlineLyricSearch();
     ClearLyrics();
     const auto* playback_track = PlaybackTrackForUi();

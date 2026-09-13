@@ -26,6 +26,10 @@ bool WebLink(const std::wstring& text) {
 }
 
 void PlayerWindow::CloseOnlineLyricSearch() {
+    if (lyric_search_dialog_ && IsWindow(lyric_service_editor_) &&
+        GetWindow(lyric_service_editor_, GW_OWNER) == lyric_search_dialog_)
+        CloseLyricServiceEditor(); // Forced teardown: restore owner before destroying either HWND.
+    lyric_services_pending_auto_ = false;
     lyric_search_.reset(); // cancellation only; DLL Release is on its worker
     lyric_download_deadline_ = 0;
     if (lyric_search_dialog_ && IsWindow(lyric_search_dialog_)) DestroyWindow(lyric_search_dialog_);
@@ -40,7 +44,13 @@ void PlayerWindow::CancelOnlineLyricCountdown() {
 }
 
 void PlayerWindow::ShowOnlineLyricSearch(bool automatic_results) {
+    if (!lyric_services_ready_ && !lyric_catalog_job_) RefreshLyricServices();
     if (lyric_search_dialog_ && IsWindow(lyric_search_dialog_)) {
+        if (IsWindow(lyric_service_editor_) &&
+            GetWindow(lyric_service_editor_, GW_OWNER) == lyric_search_dialog_) {
+            ShowLyricServiceEditor();
+            return;
+        }
         ShowWindow(lyric_search_dialog_, SW_SHOWNORMAL);
         SetForegroundWindow(lyric_search_dialog_);
         return;
@@ -83,6 +93,12 @@ void PlayerWindow::ShowOnlineLyricSearch(bool automatic_results) {
 
 void PlayerWindow::StartOnlineLyricSearch(bool automatic) {
     if (!sound_library_ || sound_library_->LyricSearchProviders().empty()) return;
+    if (!lyric_services_ready_) {
+        if (!lyric_catalog_job_) RefreshLyricServices();
+        lyric_services_pending_auto_ = automatic;
+        return;
+    }
+    if (lyric_services_.entries.empty()) return;
     const auto* track = PlaybackTrackForUi();
     if (automatic) {
         if (!track || !settings_.lyric.auto_download || lyric_search_dialog_) return;
@@ -101,7 +117,7 @@ void PlayerWindow::StartOnlineLyricSearch(bool automatic) {
         lyric_search_artist_ = DialogText(lyric_search_dialog_, 1021);
         lyric_search_title_ = DialogText(lyric_search_dialog_, 1009);
         const auto index = SendDlgItemMessageW(lyric_search_dialog_, 2090, CB_GETCURSEL, 0, 0);
-        if (index >= 0) settings_.lyric.add_in_index = static_cast<int>(index);
+        if (index >= 0) SelectLyricService(static_cast<int>(index));
     }
     if (lyric_search_title_.empty()) return;
     lyric_search_.reset();
@@ -113,9 +129,15 @@ void PlayerWindow::StartOnlineLyricSearch(bool automatic) {
     lyric_download_path_.clear();
     if (lyric_search_dialog_) ListView_DeleteAllItems(GetDlgItem(lyric_search_dialog_, 1064));
     try {
-        lyric_search_ = std::make_unique<lyrics::OnlineSearch>(*sound_library_,
-            static_cast<size_t>(std::max(0, settings_.lyric.add_in_index)), settings_.network,
-            lyric_search_artist_, lyric_search_title_);
+        const auto index = static_cast<size_t>(std::clamp(settings_.lyric.add_in_index, 0,
+            static_cast<int>(lyric_services_.entries.size()) - 1));
+        const auto& service = lyric_services_.entries[index];
+        if (!service.url.empty())
+            lyric_search_ = std::make_unique<lyrics::OnlineSearch>(service, index, settings_.network,
+                lyric_search_artist_, lyric_search_title_);
+        else // Other AddIns keep their own private, non-ttp_lrcsh protocol.
+            lyric_search_ = std::make_unique<lyrics::OnlineSearch>(*sound_library_, service.legacy_provider,
+                settings_.network, lyric_search_artist_, lyric_search_title_);
     } catch (...) {
         if (lyric_search_dialog_) SetDlgItemTextW(lyric_search_dialog_, 1052, ResourceText(0x817b).c_str());
     }
@@ -179,6 +201,10 @@ void PlayerWindow::DownloadOnlineLyric(int index) {
 
 void PlayerWindow::PollOnlineLyricSearch() {
     if (!lyric_search_) return;
+    // Network work remains asynchronous, but do not auto-download/close the
+    // modal owner (and discard its editor) while the user edits the service list.
+    if (lyric_search_dialog_ && IsWindow(lyric_service_editor_) &&
+        GetWindow(lyric_service_editor_, GW_OWNER) == lyric_search_dialog_) return;
     if (!lyric_search_track_.path.empty() && !SameTrack(PlaybackTrackForUi(), lyric_search_track_)) {
         CloseOnlineLyricSearch(); return;
     }
@@ -202,7 +228,6 @@ void PlayerWindow::PollOnlineLyricSearch() {
     };
     if (snapshot.revision == lyric_search_revision_) { update_countdown(); return; }
     lyric_search_revision_ = snapshot.revision;
-    settings_.lyric.add_in_index = static_cast<int>(snapshot.provider);
     using Phase = lyrics::SearchPhase;
     if (snapshot.phase == Phase::results && !lyric_search_results_shown_) {
         lyric_search_results_shown_ = true;
@@ -261,7 +286,6 @@ void PlayerWindow::PollOnlineLyricSearch() {
             (snapshot.phase == Phase::results || snapshot.phase == Phase::downloaded) && !snapshot.results.empty());
         if (!snapshot.extra_title.empty()) SetDlgItemTextW(lyric_search_dialog_, 2269, snapshot.extra_title.c_str());
         ShowWindow(GetDlgItem(lyric_search_dialog_, 2269), WebLink(snapshot.extra_url) ? SW_SHOW : SW_HIDE);
-        SendDlgItemMessageW(lyric_search_dialog_, 2090, CB_SETCURSEL, snapshot.provider, 0);
         update_countdown();
     }
 }
@@ -277,18 +301,11 @@ INT_PTR CALLBACK PlayerWindow::OnlineLyricDialogProc(HWND dialog, UINT message, 
         SetDlgItemTextW(dialog, 1009, self->lyric_search_title_.c_str());
         CheckDlgButton(dialog, 2064, self->settings_.lyric.auto_associate ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(dialog, 2067, self->settings_.lyric.auto_select_download ? BST_CHECKED : BST_UNCHECKED);
-        const HWND combo = GetDlgItem(dialog, 2090);
-        if (self->sound_library_)
-            for (const auto& provider : self->sound_library_->LyricSearchProviders())
-                SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(provider.name.c_str()));
-        const auto count = SendMessageW(combo, CB_GETCOUNT, 0, 0);
-        const auto index = self->settings_.lyric.add_in_index;
-        SendMessageW(combo, CB_SETCURSEL, index >= 0 && index < count ? index : 0, 0);
-        EnableWindow(combo, count > 0);
-        EnableWindow(GetDlgItem(dialog, 1046), count > 0);
+        self->PopulateLyricServices(dialog);
+        self->InstallLyricServiceEditorButton(dialog);
         EnableWindow(GetDlgItem(dialog, IDOK), FALSE);
         ShowWindow(GetDlgItem(dialog, 2269), SW_HIDE);
-        for (const int id : {2185, 2269}) {
+        for (const int id : {2269}) {
             const HWND link = GetDlgItem(dialog, id);
             if (link) SetWindowLongPtrW(link, GWL_STYLE, GetWindowLongPtrW(link, GWL_STYLE) | SS_NOTIFY);
         }
@@ -308,12 +325,19 @@ INT_PTR CALLBACK PlayerWindow::OnlineLyricDialogProc(HWND dialog, UINT message, 
         return TRUE;
     }
     if (!self) return FALSE;
+    if (dialog == self->lyric_service_disabled_owner_ && IsWindow(self->lyric_service_editor_) &&
+        (message == WM_COMMAND || message == WM_CLOSE || message == WM_NOTIFY ||
+         (message == WM_SYSCOMMAND && (wparam & 0xfff0U) == SC_CLOSE))) {
+        self->ShowLyricServiceEditor();
+        return TRUE; // Also reject input commands queued before disabling the owner.
+    }
     switch (message) {
     case WM_CLOSE: self->CloseOnlineLyricSearch(); return TRUE;
     case WM_DESTROY:
+        if (self->lyric_service_disabled_owner_ == dialog) self->lyric_service_disabled_owner_ = nullptr;
         KillTimer(dialog, 1); self->lyric_search_dialog_ = nullptr;
         self->lyric_download_deadline_ = 0; return TRUE;
-    case WM_TIMER: self->PollOnlineLyricSearch(); return TRUE;
+    case WM_TIMER: self->PollLyricServices(); self->PollOnlineLyricSearch(); return TRUE;
     case WM_LBUTTONDOWN: case WM_NCLBUTTONDOWN:
         self->CancelOnlineLyricCountdown(); break;
     case WM_NOTIFY: {
@@ -342,14 +366,14 @@ INT_PTR CALLBACK PlayerWindow::OnlineLyricDialogProc(HWND dialog, UINT message, 
         case 2090:
             if (HIWORD(wparam) == CBN_SELCHANGE) {
                 const auto index = SendDlgItemMessageW(dialog, 2090, CB_GETCURSEL, 0, 0);
-                if (index >= 0) self->settings_.lyric.add_in_index = static_cast<int>(index);
+                if (index >= 0) self->SelectLyricService(static_cast<int>(index));
             }
             return TRUE;
         case 2067:
             self->settings_.lyric.auto_select_download = IsDlgButtonChecked(dialog, 2067) == BST_CHECKED; return TRUE;
         case 2064:
             self->settings_.lyric.auto_associate = IsDlgButtonChecked(dialog, 2064) == BST_CHECKED; return TRUE;
-        case 2185: self->ShowOptions(9); return TRUE;
+        case 2185: self->ShowLyricServiceEditor(dialog); return TRUE;
         case 2269:
             if (self->lyric_search_) {
                 const auto snapshot = self->lyric_search_->Snapshot();

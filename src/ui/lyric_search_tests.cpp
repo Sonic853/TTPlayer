@@ -4,6 +4,8 @@
 #include <ws2tcpip.h>
 #include "ttplayer/ui/player_window.h"
 #include "ttplayer/core/text.h"
+#include "ttplayer/lyrics/lyric_http.h"
+#include "../app/resource_ids.h"
 
 #include <fstream>
 #include <iostream>
@@ -107,6 +109,89 @@ private:
 
 namespace ttplayer::testing {
 struct SkinRebindAccess {
+    static void CheckDiscardPrompt(ui::PlayerWindow& player, int answer) {
+        // Drive the REAL nested MessageBox on this UI thread, without sending
+        // global mouse/keyboard input or touching another application's window.
+        struct Probe {
+            ui::PlayerWindow* player;
+            HWND entry;
+            int answer;
+            bool seen{}, blocked{}, retained{};
+        } probe{&player, GetWindow(player.lyric_service_editor_, GW_OWNER), answer};
+        const HWND editor = player.lyric_service_editor_;
+        constexpr auto key = L"TTPlayer.LyricServiceModalProbe";
+        constexpr UINT_PTR timer = 0x4c534d;
+        Require(SetPropW(editor, key, &probe), "cannot install modal test state");
+        Require(SetTimer(editor, timer, 20, [](HWND owner, UINT, UINT_PTR id, DWORD) {
+            auto* state = static_cast<Probe*>(GetPropW(owner, L"TTPlayer.LyricServiceModalProbe"));
+            if (!state || IsWindowEnabled(owner)) return;
+            const HWND prompt = GetWindow(owner, GW_ENABLEDPOPUP);
+            if (prompt == owner || !IsWindowVisible(prompt) || !GetDlgItem(prompt, IDNO)) return;
+            KillTimer(owner, id);
+            auto& p = *state->player;
+            state->seen = GetWindow(prompt, GW_OWNER) == owner;
+            state->blocked = !IsWindowEnabled(state->entry) && !IsWindowEnabled(owner);
+            if (state->entry == p.lyric_search_dialog_) p.ShowOnlineLyricSearch();
+            else p.ShowOptions(0);
+            SendMessageW(state->entry, WM_CLOSE, 0, 0);
+            state->retained = GetActiveWindow() == prompt && p.lyric_service_editor_ == owner &&
+                !IsWindowEnabled(owner) && !IsWindowEnabled(state->entry);
+            PostMessageW(prompt, WM_COMMAND, state->answer, 0);
+        }), "cannot install modal test timer");
+        SendMessageW(editor, WM_CLOSE, 0, 0);
+        KillTimer(editor, timer);
+        if (IsWindow(editor)) RemovePropW(editor, key);
+        Require(probe.seen && probe.blocked && probe.retained,
+            "nested discard prompt lost native ownership, modality or activation");
+        if (answer == IDNO) {
+            Require(IsWindow(editor) && IsWindowEnabled(editor) && player.lyric_service_dirty_ &&
+                !IsWindowEnabled(probe.entry), "cancel discard broke editor modality/draft");
+        } else {
+            Require(!IsWindow(editor) && IsWindowEnabled(probe.entry),
+                "confirm discard failed to restore the entry window");
+        }
+    }
+    static void CheckSearchEditor(ui::PlayerWindow& player, LoopbackServer& server, const fs::path& directory) {
+        const HWND search = player.lyric_search_dialog_;
+        player.ShowOptions(8); // Both entry windows exist: the caller, not existence, determines the owner.
+        Until([&] { return !player.lyric_catalog_job_; });
+        const HWND options = player.options_window_;
+        const auto open = [&] {
+            SendMessageW(search, WM_COMMAND, MAKEWPARAM(2185, BN_CLICKED), 0);
+            const HWND editor = player.lyric_service_editor_;
+            Require(editor && GetWindow(editor, GW_OWNER) == search &&
+                GetWindow(search, GW_ENABLEDPOPUP) == editor,
+                "search entry did not establish the native modal owner/popup relationship");
+            Require(!IsWindowEnabled(search) && IsWindowEnabled(editor) && IsWindowEnabled(options),
+                "search editor disabled the wrong entry window");
+            return editor;
+        };
+        const HWND editor = open();
+        const auto searches = server.searches.load(), downloads = server.downloads.load();
+        for (const int command : {1046, IDOK, IDCANCEL}) SendMessageW(search, WM_COMMAND, command, 0);
+        SendMessageW(search, WM_SYSCOMMAND, SC_CLOSE, 0);
+        SendMessageW(search, WM_CLOSE, 0, 0);
+        player.ShowOnlineLyricSearch();
+        Require(player.lyric_search_dialog_ == search && player.lyric_service_editor_ == editor &&
+            !IsWindowEnabled(search) && server.searches == searches && server.downloads == downloads,
+            "queued search/download/close or repeated entry bypassed search modality");
+
+        const auto saved = Read(directory / L"AddIn/ttp_lrcsh.ini");
+        SendMessageW(editor, WM_COMMAND, IDC_LYRIC_SERVICES_ADD, 0);
+        CheckDiscardPrompt(player, IDNO);
+        CheckDiscardPrompt(player, IDYES);
+        Require(Read(directory / L"AddIn/ttp_lrcsh.ini") == saved, "search editor discard wrote the INI");
+
+        DestroyWindow(open());
+        Require(IsWindowEnabled(search) && !player.lyric_service_disabled_owner_,
+            "forced search editor destruction did not restore its owner");
+        EnableWindow(search, FALSE);
+        player.ShowLyricServiceEditor(search);
+        SendMessageW(player.lyric_service_editor_, WM_CLOSE, 0, 0);
+        Require(!IsWindowEnabled(search), "search editor re-enabled an owner disabled by another dialog");
+        EnableWindow(search, TRUE);
+        player.CloseOptions();
+    }
     static void Ui(HMODULE resources, plugins::PluginManager& library, const fs::path& directory,
                    LoopbackServer& server) {
         settings::Settings settings;
@@ -115,19 +200,191 @@ struct SkinRebindAccess {
         settings.general.fade_windows = false; settings.lyric.auto_download = false;
         settings.hotkey.global = false; settings.network.proxy_type = 0;
         settings.lyric.download_folder = directory / L"downloads";
+        // Emulate a selection saved by the previous INI-first version.
+        settings.lyric.server_key = lyrics::ServiceKey({L"Fixture one", core::Utf8ToWide(server.base), {},
+            directory / L"AddIn/ttp_lrcsh.dll", directory / L"AddIn/ttp_lrcsh.ini", false, 0});
         ui::PlayerWindow player(settings);
         player.instance_ = GetModuleHandleW(nullptr);
         player.SetSkinResourceModule(resources);
         player.SetSoundLibrary(&library);
         player.ShowOptions(8);
+        Require(player.lyric_catalog_job_ != nullptr, "options did not request asynchronous INI refresh");
+        Until([&] { return player.lyric_services_ready_; }); // options timer, not a blocking load
         const HWND combo = GetDlgItem(player.options_pages_[8], 2090);
-        Require(SendMessageW(combo, CB_GETCOUNT, 0, 0) == 2, "options not using DLL registry");
-        wchar_t name[256]{}; SendMessageW(combo, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(name));
+        Require(SendMessageW(combo, CB_GETCOUNT, 0, 0) == 4, "INI and immutable DLL services not merged");
+        Require(player.lyric_services_.entries[0].read_only && player.lyric_services_.entries[1].read_only &&
+            !player.lyric_services_.entries[2].read_only && !player.lyric_services_.entries[3].read_only,
+            "options services must show all DLL entries before INI entries");
+        Require(SendMessageW(combo, CB_GETCURSEL, 0, 0) == 2 &&
+            player.settings_.lyric.server_key == settings.lyric.server_key, "DLL-first sorting changed selected server");
+        wchar_t name[256]{}; SendMessageW(combo, CB_GETLBTEXT, 2, reinterpret_cast<LPARAM>(name));
         Require(std::wstring(name) == L"Fixture one", "options retained hard-coded servers");
+        wchar_t klass[32]{};
+        GetClassNameW(GetDlgItem(player.options_pages_[8], 2185), klass, 32);
+        Require(std::wstring(klass) == L"Button", "edit-list control is not a button");
+        GetDlgItemTextW(player.options_pages_[8], 2185, name, 256);
+        Require(std::wstring(name) == L"编辑列表", "proxy link caption survived");
+        SendMessageW(player.options_pages_[8], WM_COMMAND, MAKEWPARAM(2185, BN_CLICKED), 0);
+        const HWND editor = player.lyric_service_editor_;
+        Require(editor && IsWindow(editor), "edit-list button did not open editor");
+        const HWND blocked_options = player.options_window_;
+        Require(!IsWindowEnabled(blocked_options) && IsWindowEnabled(editor), "options not modal to editor");
+        Require(GetWindow(editor, GW_OWNER) == blocked_options &&
+            GetWindow(blocked_options, GW_ENABLEDPOPUP) == editor,
+            "User32 cannot resolve the editor from disabled options");
+        player.ShowOptions(0);
+        SendMessageW(blocked_options, WM_COMMAND, IDOK, 0);
+        Require(player.options_window_ == blocked_options && player.options_page_index_ == 8 &&
+            IsWindow(editor) && !IsWindowEnabled(blocked_options), "options entry/queued close bypassed editor");
+        RECT editor_bounds{}, options_bounds{};
+        GetWindowRect(editor, &editor_bounds); GetWindowRect(player.options_window_, &options_bounds);
+        std::cout << "service editor=" << editor_bounds.right-editor_bounds.left << 'x'
+            << editor_bounds.bottom-editor_bounds.top << " options=" << options_bounds.right-options_bounds.left
+            << 'x' << options_bounds.bottom-options_bounds.top << '\n';
+        Require(editor_bounds.right-editor_bounds.left < options_bounds.right-options_bounds.left &&
+            editor_bounds.bottom-editor_bounds.top < options_bounds.bottom-options_bounds.top,
+            "service editor must be smaller than options");
+        const HWND services = GetDlgItem(editor, IDC_LYRIC_SERVICES_LIST);
+        RECT list_rect{}, prior_button{}; GetWindowRect(services, &list_rect);
+        for (const auto [button, local] : {std::pair{IDC_LYRIC_SERVICES_ADD, 1027},
+            {IDC_LYRIC_SERVICES_DELETE, 1039}, {IDC_LYRIC_SERVICES_UP, 1042}, {IDC_LYRIC_SERVICES_DOWN, 1045}}) {
+            RECT rect{}; GetWindowRect(GetDlgItem(editor, button), &rect);
+            Require(rect.left > list_rect.right && rect.top >= list_rect.top && rect.bottom <= list_rect.bottom &&
+                (IsRectEmpty(&prior_button) || rect.top >= prior_button.bottom), "buttons must form a right-hand column");
+            prior_button = rect;
+            BUTTON_IMAGELIST image{}, local_image{};
+            Require(SendDlgItemMessageW(editor, button, BCM_GETIMAGELIST, 0, reinterpret_cast<LPARAM>(&image)) &&
+                SendDlgItemMessageW(player.options_pages_[8], local, BCM_GETIMAGELIST, 0, reinterpret_cast<LPARAM>(&local_image)),
+                "server/local search button image missing");
+            Require(image.himl && ImageList_GetImageCount(image.himl) == 1 &&
+                image.uAlign == local_image.uAlign && EqualRect(&image.margin, &local_image.margin),
+                "server button image style differs from local search");
+            int image_width{}, image_height{};
+            Require(image.uAlign == BUTTON_IMAGELIST_ALIGN_CENTER && IsRectEmpty(&image.margin) &&
+                ImageList_GetIconSize(image.himl, &image_width, &image_height) && image_width == 16 && image_height == 15,
+                "server icon must be centered without stretching the original 16x15 bitmap");
+        }
+        Require(ListView_GetItemCount(services) == 4, "editor list incomplete");
+        ListView_GetItemText(services, 0, 2, name, 256);
+        Require(std::filesystem::path(name).extension() == L".dll", "editor first row not from DLL");
+        ListView_GetItemText(services, 2, 2, name, 256);
+        Require(std::filesystem::path(name).extension() == L".ini", "editor INI rows not below DLL rows");
+        ListView_SetItemState(services, 0, LVIS_SELECTED, LVIS_SELECTED);
+        Require(GetWindowLongW(GetDlgItem(editor, IDC_LYRIC_SERVICES_NAME), GWL_STYLE) & ES_READONLY,
+            "DLL name editable");
+        Require(GetWindowLongW(GetDlgItem(editor, IDC_LYRIC_SERVICES_URL), GWL_STYLE) & ES_READONLY,
+            "DLL URL editable");
+        Require(!IsWindowEnabled(GetDlgItem(editor, IDC_LYRIC_SERVICES_DELETE)), "DLL delete enabled");
+        Require(!IsWindowEnabled(GetDlgItem(editor, IDC_LYRIC_SERVICES_UP)) &&
+            !IsWindowEnabled(GetDlgItem(editor, IDC_LYRIC_SERVICES_DOWN)), "DLL ordering buttons enabled");
+        const auto original_draft = player.lyric_service_draft_;
+        SendMessageW(editor, WM_COMMAND, IDC_LYRIC_SERVICES_UP, 0);
+        SendMessageW(editor, WM_COMMAND, IDC_LYRIC_SERVICES_DOWN, 0);
+        Require(player.lyric_service_draft_ == original_draft && !player.lyric_service_dirty_, "DLL move command changed draft");
+        SendMessageW(editor, WM_COMMAND, IDC_LYRIC_SERVICES_DELETE, 0);
+        Require(player.lyric_service_draft_.size() == 4, "DLL removed through command route");
+        ListView_SetItemState(services, 2, LVIS_SELECTED, LVIS_SELECTED);
+        Require(!IsWindowEnabled(GetDlgItem(editor, IDC_LYRIC_SERVICES_UP)) &&
+            IsWindowEnabled(GetDlgItem(editor, IDC_LYRIC_SERVICES_DOWN)), "first INI boundary buttons incorrect");
+        SendMessageW(editor, WM_COMMAND, IDC_LYRIC_SERVICES_UP, 0);
+        Require(player.lyric_service_draft_ == original_draft, "INI moved across DLL boundary");
+        SendMessageW(editor, WM_COMMAND, IDC_LYRIC_SERVICES_DOWN, 0);
+        Require(player.lyric_service_selection_ == 3 && player.lyric_service_draft_[3].name == L"Fixture one" &&
+            !IsWindowEnabled(GetDlgItem(editor, IDC_LYRIC_SERVICES_DOWN)), "INI move/last-row selection incorrect");
+        const auto moved_draft = player.lyric_service_draft_;
+        SendMessageW(editor, WM_COMMAND, IDC_LYRIC_SERVICES_DOWN, 0);
+        Require(player.lyric_service_draft_ == moved_draft, "last INI moved out of bounds");
+        SendMessageW(editor, WM_COMMAND, IDOK, 0);
+        Require(!IsWindowEnabled(GetDlgItem(editor, IDC_LYRIC_SERVICES_UP)), "reorder allowed during save");
+        Until([&] { return !player.lyric_catalog_save_job_; });
+        Require(player.lyric_services_.error.empty() && player.settings_.lyric.add_in_index == 3 &&
+            lyrics::ReadServiceCatalog(library.LyricSearchProviders()).entries[3].name == L"Fixture one",
+            "INI order or selected service not preserved on disk");
+        // Return to the original INI order for the remaining import tests.
+        SendMessageW(editor, WM_COMMAND, IDC_LYRIC_SERVICES_UP, 0);
+        SendMessageW(editor, WM_COMMAND, IDOK, 0);
+        Until([&] { return !player.lyric_catalog_save_job_; });
+        Require(player.lyric_services_.error.empty() && player.settings_.lyric.add_in_index == 2, "INI move-up save failed");
+        ListView_SetItemState(services, -1, 0, LVIS_SELECTED);
+        Require(player.lyric_service_selection_ == -1 && !IsWindowEnabled(GetDlgItem(editor, IDC_LYRIC_SERVICES_UP)) &&
+            !IsWindowEnabled(GetDlgItem(editor, IDC_LYRIC_SERVICES_DOWN)), "cleared selection left stale reorder target");
+        ListView_SetItemState(services, 0, LVIS_SELECTED, LVIS_SELECTED);
+        SendMessageW(editor, WM_COMMAND, IDC_LYRIC_SERVICES_ADD, 0);
+        Require(player.lyric_service_selection_ == 4, "new row not selected");
+        Require(GetWindowLongW(GetDlgItem(editor, IDC_LYRIC_SERVICES_STORAGE), GWL_STYLE) & ES_READONLY,
+            "storage location editable");
+        Require(player.lyric_service_draft_.back().storage == directory / L"AddIn/ttp_lrcsh.ini", "new row storage mismatch");
+        SetDlgItemTextW(editor, IDC_LYRIC_SERVICES_NAME, L"Third edited service");
+        SetDlgItemTextW(editor, IDC_LYRIC_SERVICES_URL, core::Utf8ToWide(server.base).c_str());
+        SendMessageW(editor, WM_COMMAND, IDOK, 0);
+        Require(player.lyric_catalog_save_job_ && !IsWindowEnabled(GetDlgItem(editor, IDOK)), "save not asynchronous");
+        Until([&] { return !player.lyric_catalog_save_job_; });
+        Require(player.lyric_services_.error.empty() && !player.lyric_service_dirty_, "editor save failed");
+        Require(SendMessageW(combo, CB_GETCOUNT, 0, 0) == 5, "save did not refresh options combo");
+        player.SelectLyricService(4);
+        // Repeat atomic replacement and backup creation, including an HTTPS URL.
+        SetDlgItemTextW(editor, IDC_LYRIC_SERVICES_URL, L"https://example.test/lyrics");
+        SendMessageW(editor, WM_COMMAND, IDOK, 0);
+        Until([&] { return !player.lyric_catalog_save_job_; });
+        Require(player.lyric_services_.error.empty(), "second save/HTTPS validation failed");
+        Require(player.settings_.lyric.add_in_index == 4 &&
+            player.settings_.lyric.server_key == player.lyric_services_.entries[4].key,
+            "editing selected URL changed selected server");
+        SetDlgItemTextW(editor, IDC_LYRIC_SERVICES_URL, core::Utf8ToWide(server.base).c_str());
+        SendMessageW(editor, WM_COMMAND, IDOK, 0);
+        Until([&] { return !player.lyric_catalog_save_job_; });
+        Require(player.lyric_services_.error.empty(), "third save/backup replacement failed");
+        SetDlgItemTextW(editor, IDC_LYRIC_SERVICES_NAME, L"Third renamed service");
+        SendMessageW(editor, WM_COMMAND, IDOK, 0);
+        Until([&] { return !player.lyric_catalog_save_job_; });
+        Require(player.lyric_services_.error.empty() && player.settings_.lyric.add_in_index == 4 &&
+            player.settings_.lyric.server_key == player.lyric_services_.entries[4].key,
+            "renaming selected service lost selection");
+        player.SelectLyricService(4);
+        const auto selected_key = player.settings_.lyric.server_key;
+        Require(!IsWindowEnabled(blocked_options), "saving re-enabled options before editor closed");
+        bool owner_restored_before_destroy = false;
+        Require(SetWindowSubclass(editor, [](HWND window, UINT message, WPARAM wp, LPARAM lp,
+                                             UINT_PTR, DWORD_PTR data) -> LRESULT {
+            if (message == WM_DESTROY)
+                *reinterpret_cast<bool*>(data) = IsWindowEnabled(GetWindow(window, GW_OWNER)) != FALSE;
+            return DefSubclassProc(window, message, wp, lp);
+        }, 0x4c5352, reinterpret_cast<DWORD_PTR>(&owner_restored_before_destroy)),
+            "cannot observe editor destruction order");
+        SendMessageW(editor, WM_CLOSE, 0, 0);
+        Require(!IsWindow(editor) && IsWindowEnabled(blocked_options), "editor close did not restore options");
+        Require(owner_restored_before_destroy, "editor destroyed before restoring its modal owner");
+        const auto saved_ini = Read(directory / L"AddIn/ttp_lrcsh.ini");
+        player.ShowLyricServiceEditor();
+        SendMessageW(player.lyric_service_editor_, WM_COMMAND, IDC_LYRIC_SERVICES_ADD, 0);
+        CheckDiscardPrompt(player, IDNO);
+        CheckDiscardPrompt(player, IDYES);
+        Require(Read(directory / L"AddIn/ttp_lrcsh.ini") == saved_ini,
+            "discarding a draft changed the saved INI");
+        player.CloseOptions();
+        // Reopening preserves both the DLL prefix and the appended INI row.
+        player.ShowOptions(8);
+        Until([&] { return !player.lyric_catalog_job_; });
+        Require(player.settings_.lyric.server_key == selected_key && player.settings_.lyric.add_in_index == 4,
+            "INI ordering changed selected service identity");
+        auto externally_edited = Read(directory / L"AddIn/ttp_lrcsh.ini");
+        const auto at = externally_edited.find("Fixture one");
+        externally_edited.replace(at, 11, "Changed externally");
+        Write(directory / L"AddIn/ttp_lrcsh.ini", externally_edited);
+        player.SelectOptionsPage(0); player.SelectOptionsPage(8);
+        Require(!player.lyric_catalog_job_ && player.lyric_services_.entries[2].name == L"Fixture one",
+            "page activation unexpectedly reread INI");
+        player.CloseOptions(); player.ShowOptions(8);
+        Until([&] { return !player.lyric_catalog_job_; });
+        Require(player.lyric_services_.entries[2].name == L"Changed externally", "options reopening did not reread INI");
         player.CloseOptions();
         player.ShowOnlineLyricSearch();
         HWND dialog = player.lyric_search_dialog_;
         Require(dialog && GetDlgItem(dialog, 1046), "original dialog 209 missing");
+        CheckSearchEditor(player, server, directory);
+        SendDlgItemMessageW(dialog, 2090, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(name));
+        Require(std::wstring(name) == player.lyric_services_.entries[0].name &&
+            player.lyric_services_.entries[0].read_only, "manual search combo lost DLL-first ordering");
         SetWindowPos(dialog, nullptr, -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         SetDlgItemTextW(dialog, 1021, L"陈慧娴"); SetDlgItemTextW(dialog, 1009, L"千千阙歌");
         SendMessageW(dialog, WM_COMMAND, 1046, 0);
@@ -135,6 +392,19 @@ struct SkinRebindAccess {
         HWND list = GetDlgItem(dialog, 1064);
         Require(ListView_GetItemCount(list) == 2, "results not populated");
         Require(ListView_GetNextItem(list, -1, LVNI_SELECTED) == 1, "best match selection");
+        // A track change/network timer must not destroy an active service draft.
+        SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(2185, BN_CLICKED), 0);
+        const HWND live_editor = player.lyric_service_editor_;
+        SendMessageW(live_editor, WM_COMMAND, IDC_LYRIC_SERVICES_ADD, 0);
+        const auto search_track = player.lyric_search_track_;
+        player.lyric_search_track_.path = directory / L"previous-track.flac";
+        player.LoadCurrentLyrics(false);
+        player.PollOnlineLyricSearch();
+        Require(player.lyric_search_ && player.lyric_search_dialog_ == dialog &&
+            player.lyric_service_editor_ == live_editor && player.lyric_service_dirty_,
+            "track change or background result destroyed the modal service draft");
+        player.lyric_search_track_ = search_track;
+        CheckDiscardPrompt(player, IDYES);
         wchar_t heading[256]{}; LVCOLUMNW column{}; column.mask = LVCF_TEXT;
         column.pszText = heading; column.cchTextMax = 256;
         Require(ListView_GetColumn(list, 0, &column) && *heading, "resource column caption missing");
@@ -150,6 +420,15 @@ struct SkinRebindAccess {
         Require(IsWindowEnabled(GetDlgItem(dialog, IDOK)), "cannot download another candidate after success");
         SendMessageW(dialog, WM_CLOSE, 0, 0);
         Require(!IsWindow(dialog) && !player.lyric_search_, "close leaked UI/session");
+        // Remove the custom third row through the editor and retain DLL rows.
+        player.ShowLyricServiceEditor();
+        player.SelectLyricServiceEditorRow(4);
+        SendMessageW(player.lyric_service_editor_, WM_COMMAND, IDC_LYRIC_SERVICES_DELETE, 0);
+        SendMessageW(player.lyric_service_editor_, WM_COMMAND, IDOK, 0);
+        Until([&] { return !player.lyric_catalog_save_job_; });
+        Require(player.lyric_services_.error.empty() && player.lyric_services_.entries.size() == 4, "custom delete failed");
+        SendMessageW(player.lyric_service_editor_, WM_CLOSE, 0, 0);
+        player.SelectLyricService(2); // loopback INI only; never contact a historical DLL endpoint
 
         // Auto-search policy, silent best match, and stale-track cancellation.
         player.settings_.lyric.auto_download = true;
@@ -195,10 +474,27 @@ struct SkinRebindAccess {
 
         // No DLLs -> no pretend server names and no enabled search button.
         player.SetSoundLibrary(nullptr); player.ShowOptions(8);
+        Until([&] { return !player.lyric_catalog_job_; });
         Require(SendDlgItemMessageW(player.options_pages_[8], 2090, CB_GETCOUNT, 0, 0) == 0, "empty registry fabricated servers");
+        player.ShowLyricServiceEditor();
+        Require(!IsWindowEnabled(player.options_window_), "empty editor failed to disable options");
+        DestroyWindow(player.lyric_service_editor_);
+        Require(IsWindowEnabled(player.options_window_) && !player.lyric_service_disabled_owner_,
+            "forced editor destruction did not restore options");
+        EnableWindow(player.options_window_, FALSE);
+        player.ShowLyricServiceEditor();
+        SendMessageW(player.lyric_service_editor_, WM_COMMAND, IDCANCEL, 0);
+        Require(!IsWindowEnabled(player.options_window_), "editor re-enabled options disabled by another owner");
+        EnableWindow(player.options_window_, TRUE);
         player.CloseOptions(); player.ShowOnlineLyricSearch();
         Require(!IsWindowEnabled(GetDlgItem(player.lyric_search_dialog_, 1046)), "search enabled without plugins");
+        SendMessageW(player.lyric_search_dialog_, WM_COMMAND, MAKEWPARAM(2185, BN_CLICKED), 0);
+        const HWND closing_editor = player.lyric_service_editor_;
+        Require(GetWindow(closing_editor, GW_OWNER) == player.lyric_search_dialog_,
+            "search entry without options fell back to the main player");
         player.CloseOnlineLyricSearch();
+        Require(!IsWindow(closing_editor) && !player.lyric_service_editor_ && !player.lyric_service_disabled_owner_,
+            "forced search teardown leaked its modal editor or disabled-owner state");
         Require(!fs::exists(settings.source_path), "test saved user settings");
     }
 };
@@ -248,18 +544,46 @@ int wmain(int argc, wchar_t** argv) {
             Require(server.requests[1].find("Artist=") != std::string::npos &&
                 server.requests[1].find("Title=") != std::string::npos &&
                 server.requests[2].find("Id=101&Code=") != std::string::npos, "native protocol/index mapping");
+            const auto search_url = core::WideToUtf8(lyrics::LyricSearchUrl(L"/lyrics", L"陈慧娴", L"千千阙歌"));
+            const auto download_url = core::WideToUtf8(lyrics::LyricDownloadUrl(L"/lyrics", {101,L"陈慧娴",L"千千阙歌"}));
+            Require(server.requests[1].find(search_url) != std::string::npos, "host search encoding differs from actual DLL");
+            Require(server.requests[2].find(download_url) != std::string::npos, "host download Code differs from actual DLL");
         }
         const auto resources = LoadLibraryExW((fs::path(argv[1]) / L"ttpres.dll").c_str(), nullptr,
             LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
         Require(resources != nullptr, "5.7.9 resources");
         testing::SkinRebindAccess::Ui(resources, library, directory, server);
         FreeLibrary(resources);
+        // Exercise the native normalizer against punctuation, number prefixes,
+        // bracketed version text and traditional Chinese, not just plain ASCII.
+        for (const auto& [artist, title] : std::vector<std::pair<std::wstring,std::wstring>>{
+            {L"01. ARTIST (Live)", L"02. Song [Demo]"}, {L"陳慧嫻", L"千千闕歌"},
+            {L"A.B & C", L"1234 Track《现场》"}}) {
+            lyrics::OnlineSearch native(library, 0, network, artist, title);
+            Until([&] { return native.Snapshot().phase == lyrics::SearchPhase::results; });
+            const auto expected = core::WideToUtf8(lyrics::LyricSearchUrl(L"/lyrics", artist, title));
+            std::lock_guard lock(server.mutex);
+            Require(server.requests.back().find(expected) != std::string::npos, "normalized host request differs from DLL");
+        }
+        lyrics::LyricService http{L"Host fixture", core::Utf8ToWide(server.base)};
+        {
+            lyrics::OnlineSearch search(http, 0, network, L"", L"error");
+            Until([&] { return search.Snapshot().phase == lyrics::SearchPhase::failed; });
+            Require(search.Snapshot().error == L"Fixture error", "host protocol error not surfaced");
+        }
         {
             lyrics::OnlineSearch search(library, 99, network, L"", L"error");
             Until([&] { return search.Snapshot().phase == lyrics::SearchPhase::failed; });
             Require(search.Snapshot().provider == 0, "invalid provider did not fall back to zero");
         }
         server.slow = true;
+        {
+            const auto requests = server.searches.load();
+            auto slow_http = std::make_unique<lyrics::OnlineSearch>(http, 0, network, L"", L"slow");
+            Until([&] { return server.searches > requests; });
+            const auto canceled_at = GetTickCount64(); slow_http.reset();
+            Require(GetTickCount64() - canceled_at < 100, "host cancel waited for HTTP response");
+        }
         const auto before = server.searches.load();
         auto slow = std::make_unique<lyrics::OnlineSearch>(library, 0, network, L"", L"slow");
         Until([&] { return server.searches > before; });

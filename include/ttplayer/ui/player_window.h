@@ -57,6 +57,9 @@ public:
     }
     void SetSoundLibrary(const plugins::PluginManager* manager) {
         sound_library_ = manager;
+        lyric_catalog_job_.reset();
+        lyric_services_ = {};
+        lyric_services_ready_ = false;
         playlist_info_unavailable_sources_.clear();
         reader_formats_ = manager ? manager->ReaderFormats()
                                   : std::vector<plugins::ReaderFormat>{};
@@ -206,6 +209,18 @@ private:
     void StartOnlineLyricSearch(bool automatic);
     void PollOnlineLyricSearch();
     void CloseOnlineLyricSearch();
+    void RefreshLyricServices();
+    void PollLyricServices();
+    void PopulateLyricServices(HWND dialog);
+    void SelectLyricService(int index);
+    void ShowLyricServiceEditor(HWND owner = nullptr);
+    void PopulateLyricServiceEditor(int selected = -1);
+    void SelectLyricServiceEditorRow(int index);
+    void SaveLyricServiceEditor();
+    void CloseLyricServiceEditor();
+    void InstallLyricServiceEditorButtons(HWND dialog);
+    static void InstallLyricServiceEditorButton(HWND dialog);
+    static INT_PTR CALLBACK LyricServiceEditorProc(HWND, UINT, WPARAM, LPARAM);
     void DownloadOnlineLyric(int index);
     void UpdateOnlineLyricSelection();
     void CancelOnlineLyricCountdown();
@@ -879,6 +894,14 @@ private:
     std::filesystem::path lyric_path_;
     std::filesystem::path associated_lyric_path_;
     HWND lyric_search_dialog_{};
+    lyrics::ServiceCatalog lyric_services_, lyric_editor_baseline_;
+    std::shared_ptr<lyrics::CatalogJob> lyric_catalog_job_, lyric_catalog_save_job_;
+    bool lyric_services_ready_{}, lyric_services_pending_auto_{}, lyric_catalog_refresh_pending_{};
+    HWND lyric_service_editor_{};
+    HWND lyric_service_disabled_owner_{};
+    std::vector<lyrics::LyricService> lyric_service_draft_;
+    int lyric_service_selection_{-1};
+    bool lyric_service_dirty_{}, lyric_service_populating_{};
     std::unique_ptr<lyrics::OnlineSearch> lyric_search_;
     playlist::Track lyric_search_track_;
     std::wstring lyric_search_artist_, lyric_search_title_;
