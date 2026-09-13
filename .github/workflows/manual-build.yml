@@ -13,6 +13,11 @@ on:
           - Release
           - RelWithDebInfo
           - Debug
+      release_a_version:
+        description: Release a Version
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -27,12 +32,28 @@ jobs:
         shell: pwsh
     env:
       BUILD_CONFIGURATION: ${{ inputs.configuration }}
+    outputs:
+      release_date: ${{ steps.release_date.outputs.value }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+
+      - name: Test release workflow
+        run: ./cmake/test_manual_release.ps1
+
+      - name: Validate release configuration and capture Beijing date
+        id: release_date
+        if: inputs.release_a_version
+        run: |
+          if ($env:BUILD_CONFIGURATION -ne 'Release') {
+            throw 'Release a Version requires the Release build configuration.'
+          }
+          $releaseDate = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString(
+            'yyyy.MM.dd', [Globalization.CultureInfo]::InvariantCulture)
+          "value=$releaseDate" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Verify VS 2026 toolchain
         run: |
@@ -107,3 +128,90 @@ jobs:
           path: build/CMakeFiles/CMakeConfigureLog.yaml
           if-no-files-found: ignore
           retention-days: 7
+
+  release:
+    name: Release a Version
+    needs: build
+    if: inputs.release_a_version
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      # Allocate versions only after acquiring the shared publication slot.
+      group: manual-player-release
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_DATE: ${{ needs.build.outputs.release_date }}
+    steps:
+      - name: Download built player
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: TTPlayer-Windows-x86-${{ inputs.configuration }}-${{ github.run_number }}
+          path: artifact
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_INSTALL_NOTES: |
+            使用该程序前确保本地已安装有 5.7.9 版本的千千静听，请按照以下步骤安装重建版：
+            1. 下载 TTPlayerRebuild.exe 文件。
+            2. 打开开始菜单。
+            3. 打开所有程序——千千静听——右键千千静听程序图标。
+            4. 在菜单选择“打开文件位置”
+            5. 复制 TTPlayerRebuild.exe 到与 TTPlayer.exe 同一路径。
+            6. 启动 TTPlayerRebuild.exe
+            7. 享受重建版千千静听。
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $info = Get-Content -LiteralPath artifact/build-info.json -Raw | ConvertFrom-Json
+          if ($info.commit -ne $env:GITHUB_SHA -or $info.configuration -ne 'Release') {
+            throw 'The downloaded artifact does not match this Release build.'
+          }
+          $hash = (Get-FileHash -LiteralPath artifact/TTPlayerRebuild.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expectedHash = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw).Trim()
+          if ($expectedHash -cne "$hash  TTPlayerRebuild.exe") { throw 'Player SHA-256 verification failed.' }
+
+          function Read-VersionTag([string]$name) {
+            $match = [regex]::Match($name, '^(?<date>[0-9]{4}\.[0-9]{2}\.[0-9]{2})(?:p(?<patch>[1-9][0-9]*))?$')
+            if (-not $match.Success) { return }
+            $date = [datetime]::MinValue
+            if (-not [datetime]::TryParseExact($match.Groups['date'].Value, 'yyyy.MM.dd',
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::None, [ref]$date)) { return }
+            $patch = 0L
+            if ($match.Groups['patch'].Success -and -not [long]::TryParse($match.Groups['patch'].Value, [ref]$patch)) {
+              throw 'Version patch number is too large.'
+            }
+            [pscustomobject]@{ Name = $name; Date = $date; Patch = $patch }
+          }
+          $base = Read-VersionTag $env:RELEASE_DATE
+          if (-not $base -or $base.Patch -ne 0) { throw 'Missing or invalid Beijing build date.' }
+          $tags = @(gh api "repos/$env:GITHUB_REPOSITORY/tags?per_page=100" --paginate --jq '.[].name')
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read repository tags.' }
+          # A failed upload may leave a draft release without a tag: reserve its name too.
+          $releaseTags = @(gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --paginate --jq '.[].tag_name')
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read existing releases.' }
+          $versions = @($tags | ForEach-Object { Read-VersionTag $_ })
+          $occupied = @($versions) + @($releaseTags | ForEach-Object { Read-VersionTag $_ })
+          $sameDay = @($occupied | Where-Object { $_.Date -eq $base.Date } | Sort-Object Patch -Descending)
+          $version = $base.Name
+          if ($sameDay.Count) {
+            if ($sameDay[0].Patch -eq [long]::MaxValue) { throw 'Version patch number is exhausted.' }
+            $version += 'p' + ($sameDay[0].Patch + 1).ToString([Globalization.CultureInfo]::InvariantCulture)
+          }
+          # Compare real version tags, sorted by date and numeric patch, never API ordering.
+          $previous = $versions | Sort-Object Date, Patch -Descending | Select-Object -First 1
+          $repoUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          $logUrl = if ($previous) { "$repoUrl/compare/$($previous.Name)...$version" }
+                    else { "$repoUrl/commits/$version" }
+          $notes = "**完整更新日志**: $logUrl`n`n" + $env:RELEASE_INSTALL_NOTES
+          Write-Output "Publishing $version; changelog: $logUrl"
+          # Create only: never edit an existing release or overwrite its assets.
+          gh release create "$version" artifact/TTPlayerRebuild.exe artifact/SHA256SUMS.txt `
+            --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" `
+            --title "$version" --notes "$notes"
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed; existing releases are not overwritten.' }

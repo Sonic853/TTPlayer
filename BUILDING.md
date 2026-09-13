@@ -4,7 +4,7 @@
 
 本地 `rebuild` 是独立 Git 仓库；它在 GitHub 上就是仓库根目录。
 工作流位于 `.github/workflows/manual-build.yml`，不配置 push/PR 自动触发，
-也不创建 Release 或推送代码。
+默认只构建；可勾选 **Release a Version** 在构建成功后发布版本，不推送源码。
 
 1. 将工作流及配套构建文件提交到远程仓库的默认分支。
 2. 打开 **Actions → Manual Windows Build → Run workflow**。
@@ -12,12 +12,31 @@
 4. 构建完成后，从该次运行的 **Artifacts** 下载
    `TTPlayer-Windows-x86-配置-运行编号`，产物保留 14 天。
 
+如需发布，选择 `Release` 配置并勾选 **Release a Version**，不需要输入版本号。
+在构建任务开始时记录北京时间（UTC+08:00）的日期，版本号和 Release 标题使用
+`yyyy.MM.dd`（例如 `2026.09.05`，不加 `v`）。同一天已有 tag 或 Release 时，按当天
+最大补丁号加一：`2026.09.05` → `2026.09.05p1` → `2026.09.05p2`，不复用中间空号。
+草稿 Release 也占用版本号。发布任务串行执行，在获得发布名额后重新分页读取全部
+tag/Release；新标签始终指向本次构建提交，不移动旧标签、不覆盖已有 Release。
+Debug / RelWithDebInfo 仍可只构建，不用于发布。
+附件为可直接下载的 `TTPlayerRebuild.exe` 与 `SHA256SUMS.txt`，原 Actions 产物也会保留。
+完整更新日志链接自动使用仓库中最近的版本 tag 与本次新 tag 对比，例如
+`compare/2026.09.05...2026.09.05p1`。历史版本 tag 必须符合 `yyyy.MM.dd` 或
+`yyyy.MM.ddpN`，按日期和数值补丁号排序（`p10` 晚于 `p2`），不依赖 API 返回顺序。
+若还没有符合规则的历史 tag，则链接到 `commits/本次版本`，不生成无效对比链接。
+正文其余七步安装说明保持不变，不自动追加 GitHub 生成的说明。
+
+工作流会先运行 `cmake/test_manual_release.ps1`，离线检查北京时间边界、同日补丁号、
+动态对比链接、安装说明和模拟发布保护逻辑。
+本地也可运行该脚本；测试不调用远程 API，不创建标签或 Release。
+
 工作流必须先存在于默认分支，手动运行入口才会显示，见
 [GitHub 手动运行工作流说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。
 
 使用 `windows-2025-vs2026`、Visual Studio 2026、Win32/x86；不构建 x64，
-因为现有 DLL/AddIn ABI 为 32 位。工作流只有 `contents: read` 权限，
-官方 checkout/upload-artifact 动作固定到提交 SHA，不需要额外 secrets。
+因为现有 DLL/AddIn ABI 为 32 位。构建任务只有 `contents: read` 权限，
+仅勾选发布时运行的独立发布任务使用 `contents: write`，通过内置 `GITHUB_TOKEN` 发布。
+官方 checkout/upload-artifact/download-artifact 动作固定到提交 SHA，不需要额外 secrets。
 
 `windows-2025` 已迁移到 VS 2026 镜像，因此不能再配合写死的
 `Visual Studio 17 2022` 生成器。工作流明确选择 VS 2026 镜像和
