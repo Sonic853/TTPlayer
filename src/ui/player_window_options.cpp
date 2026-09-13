@@ -2030,7 +2030,60 @@ void SwapListRows(HWND list, int first, int second, int columns) {
     ListView_EnsureVisible(list, second, FALSE);
 }
 
-HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source) {
+void DrawPreviewSlider(HDC dc, const skin::SkinElement& element, COLORREF key) {
+    // 00467F8B..00467F9E sets range 0..100 and EAX=0x50 before 00428DCD.
+    // Ghidra omits the register argument: the preview volume is fixed at 80,
+    // NOT the current setting or 100. Progress retains its constructor zero.
+    const int width = element.bounds.right - element.bounds.left;
+    const int height = element.bounds.bottom - element.bounds.top;
+    if (width <= 0 || height <= 0) return;
+    const int value = element.name == L"volume" ? 80 : 0;
+    const int thumb_width = element.thumb_image ? element.thumb_size.cx / 4 : 0;
+    const int thumb_height = element.thumb_image ? element.thumb_size.cy : 0;
+    const int extent = std::max(1, element.vertical ? thumb_height : thumb_width);
+    // 00428F41: one-pixel inset, value direction reversed for vertical sliders.
+    const int travel = (element.vertical ? height : width) - 2 - extent;
+    const int offset = 1 + MulDiv(element.vertical ? 100 - value : value, travel, 100);
+    const int x = element.bounds.left + (element.vertical ? (width - thumb_width) / 2 : offset);
+    const int y = element.bounds.top + (element.vertical ? offset : (height - thumb_height) / 2);
+    const int saved = SaveDC(dc);
+    if (!saved) return;
+    IntersectClipRect(dc, element.bounds.left, element.bounds.top,
+                      element.bounds.right, element.bounds.bottom);
+    if (element.bar_image) {
+        // 00451E07 copies the slider's backing, not a sprite-strip frame.
+        element.bar_image.Draw(dc, element.bounds.left, element.bounds.top,
+            element.bar_size.cx, element.bar_size.cy, 0, 0,
+            element.bar_size.cx, element.bar_size.cy);
+    }
+    // 00451E07 / 0045287B derive fill from the thumb's rounded centre,
+    // including the small filled part at position zero. The extra buffered
+    // fill_image2 layer has length zero in the preview (004525CB).
+    if (element.fill_image) {
+        const int left = element.bounds.left + (width - element.fill_size.cx) / 2;
+        const int top = element.bounds.top + (height - element.fill_size.cy) / 2;
+        if (element.vertical) {
+            const int start = element.bounds.top + offset + extent / 2;
+            const int source_y = std::clamp(start - top, 0, static_cast<int>(element.fill_size.cy));
+            const int filled = element.fill_size.cy - source_y;
+            if (filled > 0) element.fill_image.Draw(dc, left, start,
+                element.fill_size.cx, filled, 0, source_y, element.fill_size.cx, filled, key);
+        } else {
+            const int filled = std::clamp<int>(element.bounds.left + offset + extent / 2 - left,
+                                          0, static_cast<int>(element.fill_size.cx));
+            if (filled > 0) element.fill_image.Draw(dc, left, top, filled,
+                element.fill_size.cy, 0, 0, filled, element.fill_size.cy, key);
+        }
+    }
+    if (thumb_width > 0 && thumb_height > 0 && offset >= 0) {
+        element.thumb_image.Draw(dc, x, y, thumb_width, thumb_height,
+            0, 0, thumb_width, thumb_height, key);
+    }
+    RestoreDC(dc, saved);
+}
+
+HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source,
+                               HMODULE resources, HICON fallback_icon) {
     if (!source.Valid()) return nullptr;
     BITMAP background{};
     if (!GetObjectW(source.Background(), sizeof(background), &background) ||
@@ -2124,10 +2177,54 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source) {
             }
         }
     }
+    // 00467B9B creates these child windows with their initial strings.
+    // Status is empty; info is the program/version string, NOT the selected
+    // track or skin name. Both strings come from this executable's ttpres.
+    auto caption = LoadResourceText(resources, 0x80);
+    const auto version = LoadResourceText(resources, 0x8299);
+    if (!caption.empty() && !version.empty()) caption += L" ";
+    caption += version;
+    const auto channel = LoadResourceText(resources, 0x81b7);
     for (const auto& element : source.Elements()) {
         if (IsSuppressedSkinControl(element.name)) continue;
         if (element.name == L"pause") continue;
         if (element.name.starts_with(L"mode_") && element.name != L"mode_single") continue;
+        if (element.name == L"info") {
+            DrawScrollingSkinInfo(target, element, caption.c_str(), nullptr, 0, 0);
+            continue;
+        }
+        if (element.name == L"stereo" || element.name == L"status") {
+            DrawSkinText(target, element, element.name == L"stereo" ? channel.c_str() : L"");
+            continue;
+        }
+        if (element.name == L"icon") {
+            const HICON icon = source.Icon() ? source.Icon() : fallback_icon;
+            ICONINFO info{};
+            if (icon && GetIconInfo(icon, &info)) {
+                BITMAP icon_bitmap{};
+                GetObjectW(info.hbmColor ? info.hbmColor : info.hbmMask, sizeof(icon_bitmap), &icon_bitmap);
+                if (!info.hbmColor) icon_bitmap.bmHeight /= 2;
+                if (info.hbmColor) DeleteObject(info.hbmColor);
+                if (info.hbmMask) DeleteObject(info.hbmMask);
+                // 00415D3D / 0041606F: native icon size, centred in the XML
+                // child client rectangle (Let's Vista has a 16x26 icon slot).
+                const int saved = SaveDC(target);
+                if (saved) {
+                    IntersectClipRect(target, element.bounds.left, element.bounds.top,
+                        element.bounds.right, element.bounds.bottom);
+                    DrawIconEx(target,
+                        element.bounds.left + (element.bounds.right - element.bounds.left - icon_bitmap.bmWidth) / 2,
+                        element.bounds.top + (element.bounds.bottom - element.bounds.top - icon_bitmap.bmHeight) / 2,
+                        icon, icon_bitmap.bmWidth, icon_bitmap.bmHeight, 0, nullptr, DI_NORMAL);
+                    RestoreDC(target, saved);
+                }
+            }
+            continue;
+        }
+        if (element.name == L"progress" || element.name == L"volume") {
+            DrawPreviewSlider(target, element, source.TransparentColor());
+            continue;
+        }
         if (element.name == L"led") {
             // The strip contains twelve glyphs, not one static decoration.
             DrawSkinLed(target, element, FormatLedTime(std::chrono::milliseconds(0)),
@@ -2138,35 +2235,12 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source) {
             element.image_size.cy > 0) {
             const int frames = std::max(1, element.frames);
             const int width = element.image_size.cx / frames;
+            // 004710FD disables minimode when the package has no mini_window.
+            const int state = element.four_state && element.name == L"minimode" &&
+                !source.SupportsMiniMode() ? 3 : 0;
             element.image.Draw(target, element.bounds.left, element.bounds.top,
-                width, element.image_size.cy, 0, 0, width,
+                width, element.image_size.cy, state * width, 0, width,
                 element.image_size.cy, source.TransparentColor());
-        }
-        if (element.bar_image && element.bar_size.cx > 0 &&
-            element.bar_size.cy > 0) {
-            const int x = element.bounds.left +
-                (element.bounds.right - element.bounds.left -
-                 element.bar_size.cx) / 2;
-            const int y = element.bounds.top +
-                (element.bounds.bottom - element.bounds.top -
-                 element.bar_size.cy) / 2;
-            element.bar_image.Draw(target, x, y, element.bar_size.cx,
-                element.bar_size.cy, 0, 0, element.bar_size.cx,
-                element.bar_size.cy, source.TransparentColor());
-        }
-        if (element.thumb_image && element.thumb_size.cx >= 4 &&
-            element.thumb_size.cy > 0) {
-            const int width = element.thumb_size.cx / 4;
-            const int x = element.name == L"volume"
-                ? std::max(element.bounds.left,
-                    element.bounds.right - width - 1)
-                : element.bounds.left + 1;
-            const int y = element.bounds.top +
-                (element.bounds.bottom - element.bounds.top -
-                 element.thumb_size.cy) / 2;
-            element.thumb_image.Draw(target, x, y, width, element.thumb_size.cy,
-                0, 0, width, element.thumb_size.cy,
-                source.TransparentColor());
         }
     }
 
@@ -2260,8 +2334,9 @@ LRESULT CALLBACK OptionsSkinPreviewSubclassProc(
 
 } // namespace
 
-HBITMAP detail::RenderSkinPreview(const skin::LegacySkin& source) {
-    return RenderLegacySkinPreview(source);
+HBITMAP detail::RenderSkinPreview(const skin::LegacySkin& source,
+                                HMODULE resources, HICON fallback_icon) {
+    return RenderLegacySkinPreview(source, resources, fallback_icon);
 }
 
 bool detail::ShowLegacyPresetColor(
@@ -5254,7 +5329,8 @@ void PlayerWindow::UpdateOptionsSkinDetails(HWND dialog) {
             package.ExtractTo(cache, ttpcomm_module_);
             auto preview = skin::LegacySkin::Load(cache);
             if (preview.Valid()) {
-                options_skin_preview_ = RenderSkinPreview(preview);
+                options_skin_preview_ = RenderSkinPreview(preview,
+                    ResourceModule(), window_icon_small_);
             }
         } catch (const std::exception&) {
             options_skin_preview_ = nullptr;

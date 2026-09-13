@@ -277,6 +277,91 @@ void LayoutTests(const fs::path& directory) {
         Require(GetPixel(actual.dc,x,y)==GetPixel(expected.dc,x,y),
                 "preview drew the full LED sprite strip across the progress bar");
 }
+
+void PreviewTests(const fs::path& output, const fs::path& root) {
+    const auto directory = output / L"preview";
+    fs::create_directories(directory);
+    Canvas backing(200,160), strip(32,8), fill(98,4), vertical_fill(4,48), bar(120,20);
+    GdiFlush();
+    std::fill_n(backing.pixels,200*160,0x00204060);
+    std::fill_n(strip.pixels,32*8,0x00ff00ff); // keyed normal thumb, opaque disabled button
+    for (int y=0;y<8;++y) for (int x=24;x<32;++x) strip.pixels[y*32+x]=0x0000ff00;
+    strip.pixels[3*32+3]=0x00ffffff;
+    std::fill_n(fill.pixels,98*4,0x0000c0ff);
+    std::fill_n(vertical_fill.pixels,4*48,0x0000c0ff);
+    std::fill_n(bar.pixels,120*20,0x000000ff);
+    backing.Save(directory/L"back.bmp"); strip.Save(directory/L"thumb.bmp");
+    fill.Save(directory/L"fill.bmp"); vertical_fill.Save(directory/L"vertical.bmp");
+    bar.Save(directory/L"bar.bmp");
+    const HMODULE resources=LoadLibraryExW((root/L"ttpres.dll").c_str(),nullptr,
+        LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+    for (const bool vertical:{false,true}) {
+        {
+            std::ofstream xml(directory/L"Skin.xml",std::ios::binary);
+            xml<<"<skin transparent_color=\"#ff00ff\"><player_window image=\"back.bmp\">"
+                "<minimode image=\"thumb.bmp\" position=\"180,10,188,18\"/>"
+                "<info position=\"4,4,170,24\" color=\"#ffffff\" font=\"Tahoma\" font_size=\"12\"/>"
+                "<stereo position=\"4,24,170,38\" color=\"#ffffff\"/>"
+                "<status position=\"140,120,180,140\" bkgnd=\"#112233\"/>"
+                "<icon position=\"158,40,174,66\"/>"
+                "<progress position=\"50,100,150,120\" thumb_image=\"thumb.bmp\" "
+                "fill_image=\"fill.bmp\" fill_image2=\"bar.bmp\"/>";
+            if (vertical) xml<<"<volume position=\"10,40,22,100\" vertical=\"true\" "
+                "thumb_image=\"thumb.bmp\" fill_image=\"vertical.bmp\"/>";
+            else xml<<"<volume position=\"50,40,150,60\" bar_image=\"bar.bmp\" "
+                "thumb_image=\"thumb.bmp\" fill_image=\"fill.bmp\"/>";
+            xml<<"</player_window></skin>";
+        }
+        const auto layout=skin::LegacySkin::Load(directory);
+        // Do not use LR_SHARED: an earlier system-icon request can reuse a
+        // cached 32px icon even when this test asks for 16px.
+        const HICON icon=static_cast<HICON>(LoadImageW(nullptr,IDI_APPLICATION,
+            IMAGE_ICON,16,16,0));
+        const HBITMAP preview=ui::detail::RenderSkinPreview(layout,resources,icon);
+        Require(preview!=nullptr,"preview fixture missing");
+        Canvas actual(200,160);
+        skin::SkinImage(preview).Draw(actual.dc,0,0,200,160,0,0,200,160);
+        DeleteObject(preview);
+        const auto pixel=[&](int x,int y){return GetPixel(actual.dc,x,y);};
+        Require(pixel(180,10)==RGB(0,255,0),"preview minimode must be disabled without mini layout");
+        Require(pixel(140,120)==RGB(17,34,51),"empty status must still paint its configured backing");
+        // 00467F9B: initial volume 80, independently of live settings.
+        if (vertical) {
+            Require(pixel(15,54)==RGB(255,255,255),"vertical preview volume is not at 80 percent");
+            Require(pixel(15,50)==RGB(32,64,96),"vertical preview fill extends above thumb centre");
+            Require(pixel(15,60)==RGB(0,192,255),"vertical preview volume fill missing");
+        } else {
+            Require(pixel(126,49)==RGB(255,255,255),"horizontal preview volume is not at 80 percent");
+            Require(pixel(100,49)==RGB(0,192,255),"horizontal preview volume fill missing");
+            Require(pixel(151,49)==RGB(32,64,96),"preview slider overpainted outside child bounds");
+        }
+        Require(pixel(54,109)==RGB(255,255,255),"preview progress thumb must stay at zero");
+        Require(pixel(51,109)==RGB(0,192,255),"zero progress fill must end at rounded thumb centre");
+        Require(pixel(70,109)==RGB(32,64,96),"preview must not draw buffered fill_image2");
+        {
+            Canvas expected(200,160);
+            layout.Background().Draw(expected.dc,0,0,200,160,0,0,200,160);
+            DrawIconEx(expected.dc,158,45,icon,16,16,0,nullptr,DI_NORMAL);
+            for (int y=40;y<66;++y) for (int x=158;x<174;++x)
+                Require(pixel(x,y)==GetPixel(expected.dc,x,y),"preview icon is not centred at native size");
+        }
+        if(icon)DestroyIcon(icon);
+        if (resources) {
+            auto caption=ui::detail::LoadResourceText(resources,0x80)+L" "+
+                ui::detail::LoadResourceText(resources,0x8299);
+            const auto channel=ui::detail::LoadResourceText(resources,0x81b7);
+            Require(!caption.empty()&&!channel.empty(),"preview resource strings absent");
+            Canvas expected(200,160);
+            layout.Background().Draw(expected.dc,0,0,200,160,0,0,200,160);
+            ui::detail::DrawScrollingSkinInfo(expected.dc,*layout.Find(L"info"),caption.c_str(),nullptr,0,0);
+            ui::detail::DrawSkinText(expected.dc,*layout.Find(L"stereo"),channel.c_str());
+            for (int y=4;y<38;++y) for (int x=4;x<170;++x)
+                Require(pixel(x,y)==GetPixel(expected.dc,x,y),"preview info/channel text differs from resource rendering");
+        }
+        actual.Save(directory/(vertical?L"preview-vertical.bmp":L"preview-horizontal.bmp"));
+    }
+    if(resources)FreeLibrary(resources);
+}
 } // namespace
 
 namespace ttplayer::testing {
@@ -768,6 +853,7 @@ int wmain(int argc,wchar_t** argv) {
         testing::SkinRebindAccess::PngPlaylist(output);
         testing::SkinRebindAccess::PngBackgrounds(output);
         const fs::path root=argc>1?argv[1]:L".";
+        PreviewTests(output,root);
         const auto directory=root/L"TTPlayer6120/reverse/resources/ttpres.dll/ZIP__DEFAULT_SKIN__2052";
         if(fs::exists(directory/L"Skin.xml")) {
             int png=0,bmp=0;
@@ -797,7 +883,15 @@ int wmain(int argc,wchar_t** argv) {
                     const auto target=output/(L"package-"+std::to_wstring(packages));
                     auto package=skin::SkinPackage::Open(entry.path());
                     package.ExtractTo(target,comm);
-                    Require(skin::LegacySkin::Load(target).Valid(),"BMP package no longer loads");
+                    const auto layout=skin::LegacySkin::Load(target);
+                    Require(layout.Valid(),"BMP package no longer loads");
+                    const HBITMAP preview=ui::detail::RenderSkinPreview(layout);
+                    Require(preview!=nullptr,"package preview failed");
+                    BITMAP size{};
+                    Require(GetObjectW(preview,sizeof(size),&size)!=0 &&
+                        size.bmWidth==layout.WindowSize().cx&&size.bmHeight==layout.WindowSize().cy,
+                        "preview changed package native size");
+                    DeleteObject(preview);
                     ++packages;
                 }
             }

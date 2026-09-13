@@ -1,5 +1,18 @@
 # Reconstruction status
 
+2026-09-13: restore the independent skin preview's initial control state from
+5.7.9's 0049A6EF/00467B9B, including resource info/channel strings, empty status
+backing, fixed 80% volume (EAX=0x50 at 00467F9B), horizontal/vertical slider
+fill and clipping, disabled mini button, and native-size centred icons.
+Host screenshot comparisons have zero differing pixels for the embedded
+default, LX-iPlay and all three Let's Vista variants. TT2012 differences are
+confined to the intentionally supported set/mode skin extensions. Add pixel
+regressions and render all 182 local packages; retain the PNG/LED fixes.
+All six targeted host regressions pass. The verified Release executable was
+deployed with an executable-only backup; skin packages and user XML were unchanged.
+See SKIN_PREVIEW.md for evidence, test scope and the unrelated full-screen
+options mismatch in the broader settings probe.
+
 2026-09-13: fix DEFAULT_SKIN__6120 LED/progress overlap. Follow
 0045127C/004512E8's glyph-sized, left/right-anchored LED child extent for
 both painting and mouse hit testing, instead of retaining the full XML

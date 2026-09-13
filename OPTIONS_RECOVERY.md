@@ -265,7 +265,9 @@ Windows Sandbox 证据及当前宿主机双版本对照确认的选项窗口行�
   确认并删除对应包。下载链接为
   `http://ttplayer.qianqian.com/skin.htm`。
 - 预览不是只拉伸背景图。`FUN_0049A6EF` 创建临时皮肤主窗口、绘制父窗口，
-  枚举可见子窗口并向它们发送 `WM_PRINT(0x317, PRF_CLIENT)` 后再缩放。
+  枚举可见子窗口并向它们发送 `WM_PRINTCLIENT(0x317, PRF_CLIENT)` 后再缩放。
+  已补回初始资源文字、固定 80% 音量、滑条填充、图标居中和 minimode 禁用帧；
+  伪代码丢失的音量寄存器参数以 `00467F9B` 汇编校正，详见 [SKIN_PREVIEW.md](SKIN_PREVIEW.md)。
 - `FUN_0049A372` 为默认项和每个外部包各持有独立的皮肤管理对象；预览不能
   借用正在显示的主窗口皮肤位图。`FUN_0049A6EF` 在合成后调用
   `FUN_00445709`，以 `GetSysColor(COLOR_WINDOW)` 替换包透明色，再由
