@@ -684,10 +684,12 @@ private:
     HWND options_window_{};
     HWND options_navigation_{};
     HWND options_header_{};
+    RECT options_page_bounds_{};
     std::array<HWND, 15> options_pages_{};
     HWND options_lyric_child_{};
     HWND options_network_child_{};
     int options_page_index_{};
+    bool options_registration_mode_{};
     UINT options_focus_control_{};
     UINT options_deferred_apply_mask_{};
     int options_hotkey_selection_{-1};

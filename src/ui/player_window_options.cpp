@@ -58,6 +58,13 @@ constexpr int kPageSkin = 12;
 constexpr int kPageFullscreen = 13;
 constexpr int kPageAssociation = 14;
 
+// /reg has the same sheet chrome, but only logical pages 0 and 14. Keep
+// page storage/notification IDs separate from the two native tab indices.
+int OptionsSheetIndex(int page, bool registration) {
+    return registration && page == kPageAssociation ? 1 : page;
+}
+thread_local PlayerWindow* registration_sheet_initializing{};
+
 constexpr int kOptionsNavigation = 0xe910;
 constexpr int kOptionsHeader = 0xe911;
 constexpr int kOptionsRelated = 0xe912;
@@ -110,6 +117,9 @@ constexpr UINT kSaveAllOptions = 0x04d2;
 constexpr UINT kResetAllOptions = 0x04d3;
 constexpr UINT_PTR kOptionsSheetSubclass = 0x54544f50;
 constexpr UINT_PTR kOptionsImageButtonSubclass = 0x5454494d;
+constexpr UINT_PTR kOptionsAssociationButtonSubclass = 0x54544149;
+constexpr UINT_PTR kOptionsNavigationSubclass = 0x54544e41;
+LRESULT CALLBACK OptionsImageButtonSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 constexpr UINT_PTR kOptionsAboutSubclass = 0x54544142;
 constexpr UINT_PTR kOptionsSkinPollTimer = 0x5453;
 constexpr UINT_PTR kOptionsLyricServicesTimer = 0x5454;
@@ -120,6 +130,7 @@ constexpr ULONGLONG kOptionsDspScanTimeoutMilliseconds = 120000;
 constexpr DWORD kOptionsDeviceProbeTimeoutMilliseconds = 4000;
 constexpr UINT kSwitchNestedOptionsPage = WM_APP + 0x311;
 constexpr UINT kExportSkinPreview = WM_APP + 0x312;
+constexpr UINT kInitializeRegistrationSheet = WM_APP + 0x313;
 constexpr UINT_PTR kOptionsSkinPreviewSubclass = 0x54545056;
 constexpr wchar_t kPageTemplateProperty[] = L"TTPlayer.Options.Template";
 constexpr wchar_t kPageReadyProperty[] = L"TTPlayer.Options.Ready";
@@ -421,6 +432,25 @@ HIMAGELIST ButtonIconImageList(HICON icon, int width, int height) {
     return images;
 }
 
+HIMAGELIST AssociationBitmapImageList(HMODULE resources, UINT identifier) {
+    // 0049D2FA -> 00434754 -> 00434F8C: one whole bitmap, ILC_COLOR32 |
+    // ILC_MASK (0x21), C0C0C0 transparent. ImageList_LoadImage's default
+    // colour format loses the palette of 0x162 (the Windows program icon).
+    const auto bitmap = static_cast<HBITMAP>(LoadImageW(resources,
+        MAKEINTRESOURCEW(identifier), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION | LR_DEFAULTSIZE));
+    if (!bitmap) return nullptr;
+    BITMAP source{};
+    HIMAGELIST images{};
+    if (GetObjectW(bitmap, sizeof(source), &source))
+        images = ImageList_Create(source.bmWidth, source.bmHeight, ILC_COLOR32 | ILC_MASK, 1, 0);
+    if (images && ImageList_AddMasked(images, bitmap, RGB(192,192,192)) < 0) {
+        ImageList_Destroy(images);
+        images = nullptr;
+    }
+    DeleteObject(bitmap);
+    return images;
+}
+
 void AttachButtonImage(HWND button, HIMAGELIST images) {
     if (!button || !images) return;
     BUTTON_IMAGELIST image{};
@@ -428,6 +458,9 @@ void AttachButtonImage(HWND button, HIMAGELIST images) {
     image.margin = RECT{4, 0, 4, 0};
     image.uAlign = BUTTON_IMAGELIST_ALIGN_LEFT;
     Button_SetImageList(button, &image);
+    // The original uses 0046E0C9, not the native BCM left-edge layout.
+    // Ownership remains with options_association_button_images_.
+    SetWindowSubclass(button, OptionsImageButtonSubclassProc, kOptionsAssociationButtonSubclass, 0);
 }
 
 bool ReadDspBytes(HANDLE file, void* destination, DWORD bytes) {
@@ -783,7 +816,8 @@ int LyricFadeValue(HWND dialog, int fallback) {
 
 void DrawAboutText(const DRAWITEMSTRUCT& item, HWND dialog,
                    std::wstring_view text, bool edition) {
-    FillRect(item.hDC, &item.rcItem, GetSysColorBrush(COLOR_WINDOW));
+    // 004920AB / 004921CE draw transparently over the already painted page.
+    // Filling the hidden STATIC placeholders produces two white rectangles.
     LOGFONTW font{};
     const HFONT dialog_font = reinterpret_cast<HFONT>(
         SendMessageW(dialog, WM_GETFONT, 0, 0));
@@ -819,6 +853,244 @@ void DrawAboutText(const DRAWITEMSTRUCT& item, HWND dialog,
     if (created) DeleteObject(created);
 }
 
+constexpr COLORREF kOptionsSelection = RGB(48,106,198);
+constexpr COLORREF kOptionsAccent = RGB(192,192,255);
+
+COLORREF OptionsBlend(COLORREF first, COLORREF second, int position, int extent) {
+    if (extent <= 0) return first;
+    // 00408852 uses integer division by extent, not extent-1.
+    const auto component = [&](int a, int b) { return (a*(extent-position)+b*position)/extent; };
+    return RGB(component(GetRValue(first),GetRValue(second)),
+               component(GetGValue(first),GetGValue(second)),
+               component(GetBValue(first),GetBValue(second)));
+}
+
+void FillOptionsColor(HDC dc, const RECT& rect, COLORREF color) {
+    const COLORREF previous = SetDCBrushColor(dc, color);
+    FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    SetDCBrushColor(dc, previous);
+}
+
+void DrawOptionsGradient(HDC dc, const RECT& rect, COLORREF first,
+                         COLORREF last, bool symmetric = false) {
+    const int width = rect.right-rect.left;
+    if (width <= 0 || rect.bottom <= rect.top) return;
+    std::vector<DWORD> pixels(static_cast<size_t>(width));
+    const int half = width/2;
+    for (int x=0; x<width; ++x) {
+        const COLORREF color = !symmetric ? OptionsBlend(first,last,x,width) :
+            x < half ? OptionsBlend(first,last,x,half) : OptionsBlend(last,first,x-half,width-half);
+        pixels[static_cast<size_t>(x)] = (GetRValue(color)<<16) | (GetGValue(color)<<8) | GetBValue(color);
+    }
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -1;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    StretchDIBits(dc, rect.left, rect.top, width, rect.bottom-rect.top, 0,0,width,1,
+                  pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+}
+
+void DrawOptionsItemFrame(HDC dc, RECT rect, COLORREF first, COLORREF second) {
+    // 00413320 -> 004139D7: top/left then right/bottom, including corners.
+    FillOptionsColor(dc, RECT{rect.left,rect.top,rect.right-1,rect.top+1}, first);
+    FillOptionsColor(dc, RECT{rect.left,rect.top,rect.left+1,rect.bottom-1}, first);
+    FillOptionsColor(dc, RECT{rect.right-1,rect.top,rect.right,rect.bottom}, second);
+    FillOptionsColor(dc, RECT{rect.left,rect.bottom-1,rect.right,rect.bottom}, second);
+}
+
+struct OptionsNavigationState { int hot{-1}; bool tracking{}; };
+
+int OptionsNavigationHit(HWND list, POINT point) {
+    RECT client{}; GetClientRect(list, &client);
+    if (!PtInRect(&client, point)) return -1;
+    const auto count = SendMessageW(list, LB_GETCOUNT, 0, 0);
+    for (int row=0; row<count; ++row) {
+        RECT rect{};
+        if (SendMessageW(list, LB_GETITEMRECT, row, reinterpret_cast<LPARAM>(&rect)) != LB_ERR &&
+            PtInRect(&rect, point)) return row;
+    }
+    return -1;
+}
+
+LRESULT CALLBACK OptionsNavigationSubclassProc(HWND list, UINT message, WPARAM wp, LPARAM lp,
+                                               UINT_PTR subclass, DWORD_PTR data) {
+    auto* state = reinterpret_cast<OptionsNavigationState*>(data);
+    const auto invalidate = [&](int row) {
+        RECT rect{};
+        if (row >= 0 && SendMessageW(list, LB_GETITEMRECT, row, reinterpret_cast<LPARAM>(&rect)) != LB_ERR)
+            InvalidateRect(list, &rect, FALSE);
+    };
+    if (message == WM_MOUSEMOVE && GetCapture() != list) {
+        const int hot = OptionsNavigationHit(list, POINT{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)});
+        if (hot != state->hot) {
+            invalidate(state->hot);
+            state->hot = hot;
+            invalidate(hot);
+        }
+        if (!state->tracking) {
+            TRACKMOUSEEVENT event{sizeof(event),TME_LEAVE,list,HOVER_DEFAULT};
+            state->tracking = TrackMouseEvent(&event) != FALSE;
+        }
+        return 0;
+    }
+    if (message == WM_MOUSELEAVE) {
+        const int previous = state->hot;
+        state->hot = -1;
+        state->tracking = false;
+        invalidate(previous);
+        return 0;
+    }
+    if (message == WM_LBUTTONDOWN) {
+        const int hit = OptionsNavigationHit(list, POINT{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)});
+        // 0048D8F0 ignores blank space and the already active row.
+        if (hit < 0 || hit == SendMessageW(list, LB_GETCURSEL, 0, 0)) return 0;
+    }
+    if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(list, OptionsNavigationSubclassProc, subclass);
+        delete state;
+    }
+    return DefSubclassProc(list, message, wp, lp);
+}
+
+void DrawOptionsNavigation(const DRAWITEMSTRUCT& item) {
+    if (item.itemID == static_cast<UINT>(-1)) return;
+    DWORD_PTR data{};
+    GetWindowSubclass(item.hwndItem, OptionsNavigationSubclassProc, kOptionsNavigationSubclass, &data);
+    const auto* state = reinterpret_cast<const OptionsNavigationState*>(data);
+    const bool selected = (item.itemState & ODS_SELECTED) != 0;
+    const bool hot = state && state->hot == static_cast<int>(item.itemID);
+    const COLORREF background = GetSysColor(COLOR_WINDOW);
+    const COLORREF edge = OptionsBlend(kOptionsSelection,kOptionsAccent,1,2);
+    const int saved = SaveDC(item.hDC);
+    if (!selected && !hot) {
+        FillOptionsColor(item.hDC, item.rcItem, background);
+        RECT line = item.rcItem; line.top = line.bottom-1;
+        DrawOptionsGradient(item.hDC, line, background, kOptionsAccent, true);
+    } else {
+        FillOptionsColor(item.hDC, item.rcItem,
+            hot ? OptionsBlend(kOptionsSelection,background,1,2) : kOptionsSelection);
+        DrawOptionsItemFrame(item.hDC,item.rcItem,selected ? edge : kOptionsAccent, selected ? kOptionsAccent : edge);
+        if (selected) {
+            // 0048D596: pale triangle at (7,7),(7,17),(12,12), with the
+            // blended-colour silhouette first at (+1,+1). Never a black pen.
+            for (const int offset : {1,0}) {
+                POINT points[]{{item.rcItem.left+7+offset,item.rcItem.top+7+offset},
+                               {item.rcItem.left+7+offset,item.rcItem.top+17+offset},
+                               {item.rcItem.left+12+offset,item.rcItem.top+12+offset}};
+                const COLORREF color = offset ? edge : kOptionsAccent;
+                const auto pen = CreatePen(PS_SOLID,1,color);
+                const auto brush = CreateSolidBrush(color);
+                const auto old_pen = SelectObject(item.hDC,pen);
+                const auto old_brush = SelectObject(item.hDC,brush);
+                Polygon(item.hDC,points,3);
+                SelectObject(item.hDC,old_brush); SelectObject(item.hDC,old_pen);
+                DeleteObject(brush); DeleteObject(pen);
+            }
+        }
+    }
+    RECT text = item.rcItem; text.left += 22;
+    SetBkMode(item.hDC,TRANSPARENT);
+    SetTextColor(item.hDC, GetSysColor(selected || hot ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
+    const auto font = reinterpret_cast<HFONT>(SendMessageW(item.hwndItem,WM_GETFONT,0,0));
+    if (font) SelectObject(item.hDC,font);
+    const auto length = SendMessageW(item.hwndItem,LB_GETTEXTLEN,item.itemID,0);
+    if (length != LB_ERR) {
+        std::wstring caption(static_cast<size_t>(length)+1,L'\0');
+        SendMessageW(item.hwndItem,LB_GETTEXT,item.itemID,reinterpret_cast<LPARAM>(caption.data()));
+        DrawTextW(item.hDC,caption.c_str(),-1,&text,DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+    RestoreDC(item.hDC,saved);
+}
+
+void DrawOptionsHeaderContent(const DRAWITEMSTRUCT& item) {
+    const int saved = SaveDC(item.hDC);
+    FillRect(item.hDC,&item.rcItem,GetSysColorBrush(COLOR_3DFACE));
+    const HWND sheet = GetParent(item.hwndItem);
+    if (const auto theme = OpenThemeData(sheet, L"Tab")) {
+        // The 8px separator strip belongs to the themed right-hand pane,
+        // not COLOR_3DFACE (F9F9F9 vs F0F0F0 on the default host theme).
+        RECT pane = item.rcItem;
+        if (const HWND page = PropSheet_GetCurrentPageHwnd(sheet)) {
+            RECT bounds{}; GetWindowRect(page, &bounds);
+            MapWindowPoints(nullptr, item.hwndItem, reinterpret_cast<POINT*>(&bounds), 2);
+            pane.bottom = bounds.bottom;
+        }
+        InflateRect(&pane, 4, 4);
+        IntersectClipRect(item.hDC, item.rcItem.left, item.rcItem.top,
+                          item.rcItem.right, item.rcItem.bottom);
+        DrawThemeBackground(theme, item.hDC, TABP_PANE, 0, &pane, nullptr);
+        CloseThemeData(theme);
+    }
+    RECT gradient = item.rcItem;
+    gradient.bottom -= 8; // 004A3209's 4px gap, 2px sunken line, 2px gap.
+    DrawOptionsGradient(item.hDC,gradient,kOptionsSelection,GetSysColor(COLOR_WINDOW));
+    RECT separator{gradient.left,gradient.bottom+4,gradient.right,gradient.bottom+6};
+    DrawEdge(item.hDC,&separator,BDR_SUNKENOUTER,BF_RECT);
+    LOGFONTW font{};
+    const auto original = reinterpret_cast<HFONT>(SendMessageW(item.hwndItem,WM_GETFONT,0,0));
+    if (original) GetObjectW(original,sizeof(font),&font);
+    font.lfHeight = 14; // 004A3209 overrides only height; keeps face/weight.
+    const auto created = CreateFontIndirectW(&font);
+    if (created) SelectObject(item.hDC,created);
+    wchar_t caption[1024]{}; GetWindowTextW(item.hwndItem,caption,1024);
+    gradient.left += 4;
+    SetBkMode(item.hDC,TRANSPARENT);
+    OffsetRect(&gradient,1,1);
+    SetTextColor(item.hDC,RGB(32,32,32));
+    DrawTextW(item.hDC,caption,-1,&gradient,DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    OffsetRect(&gradient,-1,-1);
+    SetTextColor(item.hDC,GetSysColor(COLOR_WINDOW));
+    DrawTextW(item.hDC,caption,-1,&gradient,DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    RestoreDC(item.hDC,saved);
+    if (created) DeleteObject(created);
+}
+
+void DrawOptionsHeader(const DRAWITEMSTRUCT& item) {
+    // 004A3209 paints through 004086B1's compatible memory DC. Besides
+    // avoiding intermediate gradient/text passes on screen, this preserves
+    // GDI's text compositing rather than the STATIC's themed target format.
+    const int width = item.rcItem.right - item.rcItem.left;
+    const int height = item.rcItem.bottom - item.rcItem.top;
+    const HDC memory = CreateCompatibleDC(item.hDC);
+    const HBITMAP bitmap = CreateCompatibleBitmap(item.hDC, width, height);
+    if (memory && bitmap) {
+        const auto previous = SelectObject(memory, bitmap);
+        SetViewportOrgEx(memory, -item.rcItem.left, -item.rcItem.top, nullptr);
+        auto buffered = item;
+        buffered.hDC = memory;
+        DrawOptionsHeaderContent(buffered);
+        BitBlt(item.hDC, item.rcItem.left, item.rcItem.top, width, height,
+               memory, item.rcItem.left, item.rcItem.top, SRCCOPY);
+        SelectObject(memory, previous);
+    } else {
+        DrawOptionsHeaderContent(item);
+    }
+    if (bitmap) DeleteObject(bitmap);
+    if (memory) DeleteDC(memory);
+}
+
+void DrawOptionsShellFrames(HWND sheet, HDC dc, HWND navigation, RECT page) {
+    if (!navigation || IsRectEmpty(&page)) return;
+    RECT nav{}; GetWindowRect(navigation,&nav);
+    MapWindowPoints(nullptr,sheet,reinterpret_cast<POINT*>(&nav),2);
+    page.top = nav.top;
+    const int saved = SaveDC(dc);
+    // PrintWindow does not necessarily clip child HWNDs as GetDC does.
+    // Paint only the frame rings, never over the page or owner-drawn header.
+    ExcludeClipRect(dc,nav.left,nav.top,nav.right,nav.bottom);
+    ExcludeClipRect(dc,page.left,page.top,page.right,page.bottom);
+    InflateRect(&nav,4,4); InflateRect(&page,4,4);
+    const auto theme = OpenThemeData(sheet,L"Tab");
+    for (auto rect : {nav,page}) {
+        if (!theme || FAILED(DrawThemeBackground(theme,dc,TABP_PANE,0,&rect,nullptr)))
+            DrawEdge(dc,&rect,EDGE_ETCHED,BF_RECT);
+    }
+    if (theme) CloseThemeData(theme);
+    RestoreDC(dc,saved);
+}
+
 void PaintAboutPage(HWND dialog, HDC dc) {
     if (!dialog || !dc) return;
     const HICON icon = static_cast<HICON>(LoadImageW(
@@ -849,12 +1121,18 @@ LRESULT CALLBACK OptionsAboutSubclassProc(
         RemoveWindowSubclass(dialog, OptionsAboutSubclassProc, subclass);
         return DefSubclassProc(dialog, message, wparam, lparam);
     }
-    const LRESULT result = DefSubclassProc(dialog, message, wparam, lparam);
     if (message == WM_PAINT) {
-        const HDC dc = GetDC(dialog);
+        // 00492512 uses BeginPaint's update-region clipping. A GetDC overlay
+        // on every child repaint repeatedly darkens the anti-aliased shadow.
+        PAINTSTRUCT paint{};
+        const HDC dc = BeginPaint(dialog, &paint);
         PaintAboutPage(dialog, dc);
-        ReleaseDC(dialog, dc);
-    } else if ((message == WM_PRINT || message == WM_PRINTCLIENT) && wparam) {
+        EndPaint(dialog, &paint);
+        return 0;
+    }
+    const LRESULT result = DefSubclassProc(dialog, message, wparam, lparam);
+    // WM_PRINT already delegates to WM_PRINTCLIENT; do not overlay twice.
+    if (message == WM_PRINTCLIENT && wparam) {
         PaintAboutPage(dialog, reinterpret_cast<HDC>(wparam));
     }
     return result;
@@ -923,7 +1201,7 @@ void MakeOwnerDrawButton(HWND dialog, int control) {
         (style & ~static_cast<LONG_PTR>(BS_TYPEMASK)) | BS_OWNERDRAW);
 }
 
-void DrawImageOnlyButton(HWND button, HDC dc, HIMAGELIST images) {
+void DrawOptionsImageButton(HWND button, HDC dc, HIMAGELIST images, bool captioned) {
     RECT client{};
     int width{}, height{};
     if (!GetClientRect(button, &client) || !ImageList_GetIconSize(images, &width, &height)) return;
@@ -943,30 +1221,62 @@ void DrawImageOnlyButton(HWND button, HDC dc, HIMAGELIST images) {
     }
     // Port the no-caption branch of 0046E0C9 directly. BCM image layout adds
     // theme-dependent padding/rounding, so CENTER alone is not pixel-equivalent.
-    const int x = (client.right-width+1)/2 + pressed;
+    wchar_t caption[1024]{};
+    const int length = captioned ? GetWindowTextW(button, caption, static_cast<int>(std::size(caption))) : 0;
+    const HFONT font = reinterpret_cast<HFONT>(SendMessageW(button, WM_GETFONT, 0, 0));
+    const HGDIOBJ old_font = font ? SelectObject(dc, font) : nullptr;
+    RECT text_size{};
+    if (length) DrawTextW(dc, caption, length, &text_size, DT_CALCRECT | DT_SINGLELINE);
+    // Captioned horizontal branch of 0046E0C9: divide the remaining width
+    // into three equal gaps (before image, between image/text, after text).
+    const int gap = (client.right-width-text_size.right)/3;
+    const int x = (length ? gap : (client.right-width+1)/2) + pressed;
     const int y = (client.bottom-height+1)/2 + pressed;
     const RECT image_rect{x, y, x+width, y+height};
-    if (theme && SUCCEEDED(DrawThemeIcon(theme, dc, BP_PUSHBUTTON, theme_state, &image_rect, images, 0))) return;
-    if (!enabled) {
+    const bool themed_icon = theme && SUCCEEDED(DrawThemeIcon(theme, dc, BP_PUSHBUTTON, theme_state, &image_rect, images, 0));
+    if (!themed_icon && !enabled) {
         if (const HICON icon = ImageList_GetIcon(images, 0, ILD_NORMAL)) {
             DrawStateW(dc, nullptr, nullptr, reinterpret_cast<LPARAM>(icon), 0,
                 x, y, width, height, DST_ICON | DSS_DISABLED);
             DestroyIcon(icon);
         }
-    } else ImageList_Draw(images, 0, dc, x, y, ILD_NORMAL);
+    } else if (!themed_icon) ImageList_Draw(images, 0, dc, x, y, ILD_NORMAL);
+    if (length) {
+        const int text_x = gap*2 + width + pressed;
+        const int text_y = (client.bottom-text_size.bottom+1)/2 + pressed;
+        RECT text{text_x, text_y, text_x+text_size.right, text_y+text_size.bottom};
+        SetBkMode(dc, TRANSPARENT);
+        if (!theme || FAILED(DrawThemeText(theme, dc, BP_PUSHBUTTON, theme_state,
+                                           caption, length, 0, 0, &text))) {
+            if (!enabled)
+                DrawStateW(dc, nullptr, nullptr, reinterpret_cast<LPARAM>(caption), length,
+                    text.left, text.top, text_size.right, text_size.bottom, DST_TEXT | DSS_DISABLED);
+            else {
+                SetTextColor(dc, GetSysColor(hot ? COLOR_HIGHLIGHT : COLOR_BTNTEXT));
+                DrawTextW(dc, caption, length, &text, 0);
+            }
+        }
+        if (GetFocus() == button && (GetWindowLongPtrW(button, GWL_STYLE) & WS_TABSTOP)) {
+            RECT focus = client;
+            InflateRect(&focus, -3, -3);
+            DrawFocusRect(dc, &focus);
+        }
+    }
+    if (old_font) SelectObject(dc, old_font);
 }
 
 LRESULT CALLBACK OptionsImageButtonSubclassProc(
     HWND button, UINT message, WPARAM wparam, LPARAM lparam,
     UINT_PTR subclass, DWORD_PTR data) {
+    const bool captioned = subclass == kOptionsAssociationButtonSubclass;
     if ((message == WM_PAINT || message == WM_PRINTCLIENT || message == WM_ERASEBKGND) &&
-        GetWindowTextLengthW(button) == 0) {
+        (captioned || GetWindowTextLengthW(button) == 0)) {
         BUTTON_IMAGELIST layout{};
         if (SendMessageW(button, BCM_GETIMAGELIST, 0, reinterpret_cast<LPARAM>(&layout)) &&
-            layout.uAlign == BUTTON_IMAGELIST_ALIGN_CENTER) {
+            (captioned || layout.uAlign == BUTTON_IMAGELIST_ALIGN_CENTER)) {
             if (message == WM_ERASEBKGND) return TRUE; // Paint the full surface once.
             if (message == WM_PRINTCLIENT) {
-                DrawImageOnlyButton(button, reinterpret_cast<HDC>(wparam), layout.himl);
+                DrawOptionsImageButton(button, reinterpret_cast<HDC>(wparam), layout.himl, captioned);
             } else {
                 PAINTSTRUCT paint{};
                 const HDC dc = BeginPaint(button, &paint);
@@ -975,10 +1285,10 @@ LRESULT CALLBACK OptionsImageButtonSubclassProc(
                 const HBITMAP bitmap = CreateCompatibleBitmap(dc, client.right, client.bottom);
                 if (buffer && bitmap) {
                     const auto previous = SelectObject(buffer, bitmap);
-                    DrawImageOnlyButton(button, buffer, layout.himl);
+                    DrawOptionsImageButton(button, buffer, layout.himl, captioned);
                     BitBlt(dc, 0, 0, client.right, client.bottom, buffer, 0, 0, SRCCOPY);
                     SelectObject(buffer, previous);
-                } else DrawImageOnlyButton(button, dc, layout.himl);
+                } else DrawOptionsImageButton(button, dc, layout.himl, captioned);
                 if (bitmap) DeleteObject(bitmap);
                 if (buffer) DeleteDC(buffer);
                 EndPaint(button, &paint);
@@ -2686,6 +2996,7 @@ void PlayerWindow::ShowOptions(int page, UINT focus_control) {
     // FUN_0045D531 deliberately destroys the previous sheet object even when
     // it is already visible, then rebuilds it with the requested active page.
     CloseOptions();
+    options_registration_mode_ = false;
     RefreshLyricServices();
     const bool targeted_entry = page >= 0;
     if (page < 0) page = settings_.history.last_active_page;
@@ -2720,8 +3031,7 @@ void PlayerWindow::ShowOptions(int page, UINT focus_control) {
         title += suffix;
     }
     PROPSHEETHEADERW header{sizeof(header)};
-    header.dwFlags = PSH_PROPSHEETPAGE | PSH_MODELESS |
-                     PSH_NOAPPLYNOW | PSH_NOCONTEXTHELP;
+    header.dwFlags = PSH_PROPSHEETPAGE | PSH_MODELESS | PSH_NOAPPLYNOW;
     header.hwndParent = window_;
     header.hInstance = resources;
     header.pszCaption = title.c_str();
@@ -2750,6 +3060,7 @@ int PlayerWindow::ShowRegistrationOptions(HINSTANCE instance) {
         return -1;
     }
     instance_ = instance;
+    options_registration_mode_ = true;
     ReloadApplicationIcons();
     options_pages_.fill(nullptr);
     options_page_index_ = kPageAssociation;
@@ -2771,8 +3082,7 @@ int PlayerWindow::ShowRegistrationOptions(HINSTANCE instance) {
         title += suffix;
     }
     PROPSHEETHEADERW header{sizeof(header)};
-    header.dwFlags = PSH_PROPSHEETPAGE | PSH_NOAPPLYNOW |
-                     PSH_NOCONTEXTHELP;
+    header.dwFlags = PSH_PROPSHEETPAGE | PSH_NOAPPLYNOW | PSH_USECALLBACK;
     header.hInstance = resources;
     header.pszCaption = title.c_str();
     header.nPages = static_cast<UINT>(pages.size());
@@ -2780,9 +3090,33 @@ int PlayerWindow::ShowRegistrationOptions(HINSTANCE instance) {
     // two-page About + System Association sheet constructed by 0049F4AD.
     header.nStartPage = 1;
     header.ppsp = pages.data();
+    // 00434572 keeps this a native modal property sheet. 004A2F66 still
+    // installs the same custom shell as the modeless options entry.
+    header.pfnCallback = [](HWND sheet, UINT message, LPARAM) -> int {
+        if (message == PSCB_INITIALIZED && registration_sheet_initializing) {
+            auto* self = registration_sheet_initializing;
+            self->options_window_ = sheet;
+            SetWindowSubclass(sheet, OptionsSheetSubclassProc, kOptionsSheetSubclass,
+                              reinterpret_cast<DWORD_PTR>(self));
+            // Comctl32 still sizes/repositions buttons after this callback.
+            // Install the common chrome once its native initialization has
+            // unwound, inside the modal loop, or it overwrites our layout.
+            PostMessageW(sheet, kInitializeRegistrationSheet, 0, 0);
+        }
+        return 0;
+    };
+    struct InitializingScope {
+        PlayerWindow* previous{registration_sheet_initializing};
+        ~InitializingScope() { registration_sheet_initializing = previous; }
+    } initializing;
+    registration_sheet_initializing = this;
     const INT_PTR result = PropertySheetW(&header);
     options_window_ = nullptr;
     CloseOptions();
+    options_registration_mode_ = false;
+    // 004C0900 serializes settings after the modal /reg sheet returns; do
+    // not capture nonexistent player HWNDs over the stored window geometry.
+    if (result != -1) settings::SaveWindowState(settings_.source_path, settings_);
     return static_cast<int>(result);
 }
 
@@ -2885,6 +3219,7 @@ void PlayerWindow::CloseOptions() {
     options_window_ = nullptr;
     options_navigation_ = nullptr;
     options_header_ = nullptr;
+    options_page_bounds_ = {};
     options_pages_.fill(nullptr);
     options_lyric_child_ = nullptr;
     options_network_child_ = nullptr;
@@ -2996,6 +3331,14 @@ LRESULT CALLBACK PlayerWindow::OptionsSheetSubclassProc(
         sheet, message, wparam, lparam);
     if (handled != -1) return handled;
     const LRESULT result = DefSubclassProc(sheet, message, wparam, lparam);
+    if (message == WM_PAINT) {
+        const HDC dc = GetDC(sheet);
+        DrawOptionsShellFrames(sheet, dc, self->options_navigation_, self->options_page_bounds_);
+        ReleaseDC(sheet, dc);
+    } else if ((message == WM_PRINT || message == WM_PRINTCLIENT) && wparam) {
+        DrawOptionsShellFrames(sheet, reinterpret_cast<HDC>(wparam),
+                               self->options_navigation_, self->options_page_bounds_);
+    }
     if (message == PSM_SETCURSEL || message == PSM_SETCURSELID) {
         const HWND current = PropSheet_GetCurrentPageHwnd(sheet);
         if (current) self->PositionOptionsPage(current);
@@ -3014,6 +3357,27 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
         return 0; // Includes close/apply commands queued before disabling.
     }
     switch (message) {
+    case WM_NCCALCSIZE:
+        if (lparam && !IsRectEmpty(&options_page_bounds_)) {
+            auto* rect = wparam ? &reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam)->rgrc[0]
+                                : reinterpret_cast<RECT*>(lparam);
+            const LONG proposed_top = rect->top;
+            const LRESULT result = DefSubclassProc(sheet, message, wparam, lparam);
+            // The 5.7.9 PE targets subsystem 4.0: Windows excludes the newer
+            // padded border from its fixed-dialog caption. Our modern PE adds
+            // it to the title bar. Adapt only this sheet, not the executable's
+            // subsystem/compatibility mode (which also affects other windows).
+            rect->top = std::min(rect->top, proposed_top +
+                GetSystemMetrics(SM_CYCAPTION) + GetSystemMetrics(SM_CYDLGFRAME));
+            return result;
+        }
+        break;
+    case kInitializeRegistrationSheet:
+        if (options_registration_mode_ && !options_navigation_) {
+            InitializeOptionsShell();
+            SelectOptionsPage(kPageAssociation);
+        }
+        return 0;
     case WM_CTLCOLORSTATIC: {
         const HWND control = reinterpret_cast<HWND>(lparam);
         const UINT identifier = control ? GetDlgCtrlID(control) : 0;
@@ -3042,8 +3406,8 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
         if (control == kOptionsNavigation && HIWORD(wparam) == LBN_SELCHANGE) {
             const LRESULT selected = SendMessageW(options_navigation_,
                                                    LB_GETCURSEL, 0, 0);
-            if (selected != LB_ERR) SelectOptionsPage(
-                static_cast<int>(selected));
+            if (selected != LB_ERR) SelectOptionsPage(static_cast<int>(
+                SendMessageW(options_navigation_, LB_GETITEMDATA, selected, 0)));
             return 0;
         }
         if (control >= kLinkFirst && control < kLinkFirst + kProjectLinks.size() &&
@@ -3051,6 +3415,10 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
             OpenProjectLink(sheet, kProjectLinks[control - kLinkFirst].command);
             return 0;
         }
+        // 0049FE39's command overrides are guarded by PSH_MODELESS. /reg
+        // must let PropertySheet end its own modal loop (IDOK/Cancel/Esc),
+        // and must not post player-window messages or DestroyWindow it.
+        if (options_registration_mode_) break;
         if (control == kSaveAllOptions) {
             // FUN_0049FE39/0x4D2 only invokes the settings serializer.  Every
             // page has already updated the shared settings object from its
@@ -3099,7 +3467,7 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
         break;
     }
     case WM_SYSCOMMAND:
-        if ((wparam & 0xfff0U) == SC_CLOSE) {
+        if (!options_registration_mode_ && (wparam & 0xfff0U) == SC_CLOSE) {
             // COptionsSheet::FUN_0049FF9B does not let the stock modeless
             // property sheet process its disabled/hidden Cancel path.  A
             // title-bar close is translated asynchronously to IDCANCEL, and
@@ -3115,63 +3483,11 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
         const auto* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
         if (!item) break;
         if (item->CtlID == kOptionsHeader) {
-            TRIVERTEX vertices[2]{};
-            vertices[0].x = item->rcItem.left;
-            vertices[0].y = item->rcItem.top;
-            vertices[0].Red = static_cast<COLOR16>(48 << 8);
-            vertices[0].Green = static_cast<COLOR16>(106 << 8);
-            vertices[0].Blue = static_cast<COLOR16>(198 << 8);
-            vertices[0].Alpha = 0xff00;
-            vertices[1].x = item->rcItem.right;
-            vertices[1].y = item->rcItem.bottom;
-            vertices[1].Red = static_cast<COLOR16>(248 << 8);
-            vertices[1].Green = static_cast<COLOR16>(248 << 8);
-            vertices[1].Blue = static_cast<COLOR16>(248 << 8);
-            vertices[1].Alpha = 0xff00;
-            GRADIENT_RECT gradient{0, 1};
-            GradientFill(item->hDC, vertices, 2, &gradient, 1,
-                         GRADIENT_FILL_RECT_H);
-            RECT text = item->rcItem;
-            text.left += 5;
-            SetBkMode(item->hDC, TRANSPARENT);
-            SetTextColor(item->hDC, RGB(255, 255, 255));
-            std::array<wchar_t, 256> caption{};
-            GetWindowTextW(options_header_, caption.data(),
-                           static_cast<int>(caption.size()));
-            DrawTextW(item->hDC, caption.data(), -1, &text,
-                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawOptionsHeader(*item);
             return TRUE;
         }
         if (item->CtlID == kOptionsNavigation) {
-            const bool selected = (item->itemState & ODS_SELECTED) != 0;
-            const HBRUSH selected_brush = selected
-                ? CreateSolidBrush(RGB(48, 106, 198)) : nullptr;
-            FillRect(item->hDC, &item->rcItem, selected
-                ? selected_brush : GetSysColorBrush(COLOR_WINDOW));
-            if (selected_brush) DeleteObject(selected_brush);
-            RECT text = item->rcItem;
-            text.left += 20;
-            SetBkMode(item->hDC, TRANSPARENT);
-            SetTextColor(item->hDC, selected ? RGB(255, 255, 255)
-                                             : GetSysColor(COLOR_WINDOWTEXT));
-            wchar_t caption[128]{};
-            SendMessageW(options_navigation_, LB_GETTEXT, item->itemID,
-                         reinterpret_cast<LPARAM>(caption));
-            DrawTextW(item->hDC, caption, -1, &text,
-                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            if (selected) {
-                POINT triangle[3]{{6, item->rcItem.top + 6},
-                                  {6, item->rcItem.bottom - 6},
-                                  {11, (item->rcItem.top + item->rcItem.bottom) / 2}};
-                const HBRUSH brush = CreateSolidBrush(RGB(255, 255, 255));
-                const HGDIOBJ old = SelectObject(item->hDC, brush);
-                Polygon(item->hDC, triangle, 3);
-                SelectObject(item->hDC, old);
-                DeleteObject(brush);
-            }
-            RECT line = item->rcItem;
-            line.top = line.bottom - 1;
-            FillRect(item->hDC, &line, GetSysColorBrush(COLOR_3DFACE));
+            DrawOptionsNavigation(*item);
             return TRUE;
         }
         break;
@@ -3200,6 +3516,7 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
             options_window_ = nullptr;
             options_navigation_ = nullptr;
             options_header_ = nullptr;
+            options_page_bounds_ = {};
             options_pages_.fill(nullptr);
             options_lyric_child_ = nullptr;
             options_network_child_ = nullptr;
@@ -3231,7 +3548,7 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
 }
 
 void PlayerWindow::InitializeOptionsShell() {
-    if (!options_window_) return;
+    if (!options_window_ || options_navigation_) return;
     // COptionsSheet::004A2F66 adds 0x02000000 through 004053CD.
     // The sheet background must not paint over the navigation/page HWNDs.
     SetWindowLongPtrW(options_window_, GWL_STYLE,
@@ -3240,21 +3557,54 @@ void PlayerWindow::InitializeOptionsShell() {
                       kOptionsSheetSubclass,
                       reinterpret_cast<DWORD_PTR>(this));
 
-    const UINT dpi = GetDpiForWindow(options_window_);
-    const auto scale = [dpi](int value) { return MulDiv(value, dpi, 96); };
-    SetWindowPos(options_window_, nullptr, 0, 0, scale(558), scale(458),
-                 SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER);
     const HWND tab = PropSheet_GetTabControl(options_window_);
-    if (tab) {
-        EnableWindow(tab, FALSE);
-        ShowWindow(tab, SW_HIDE);
+    if (!tab) return;
+    // 004A2F66 extends the actual native property sheet, not a hard-coded
+    // 558x458 rectangle. In particular, the stock tab can have several rows.
+    RECT bounds{}, tab_bounds{};
+    GetWindowRect(options_window_, &bounds);
+    POINT client_origin{};
+    ClientToScreen(options_window_, &client_origin);
+    const LONG caption_padding = std::max(0L, client_origin.y - bounds.top -
+        GetSystemMetrics(SM_CYCAPTION) - GetSystemMetrics(SM_CYDLGFRAME));
+    GetWindowRect(tab, &tab_bounds);
+    MapWindowPoints(nullptr, options_window_, reinterpret_cast<POINT*>(&tab_bounds), 2);
+    RECT page = tab_bounds;
+    TabCtrl_AdjustRect(tab, FALSE, &page);
+    const int dy = (page.bottom - page.top) - (tab_bounds.bottom - tab_bounds.top) + 50;
+    constexpr int dx = 110;
+    OffsetRect(&page, dx, dy);
+    options_page_bounds_ = page;
+    EnableWindow(tab, FALSE);
+    ShowWindow(tab, SW_HIDE);
+    for (HWND child = GetWindow(options_window_, GW_CHILD); child;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        RECT rect{};
+        GetWindowRect(child, &rect);
+        MapWindowPoints(nullptr, options_window_, reinterpret_cast<POINT*>(&rect), 2);
+        SetWindowPos(child, nullptr, rect.left + dx, rect.top + dy, 0, 0,
+                     SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
     }
+    SetWindowPos(options_window_, nullptr, 0, 0,
+                 bounds.right - bounds.left + dx, bounds.bottom - bounds.top + dy - caption_padding,
+                 SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER);
+    // 0049F9BE removes the help-button extended style only after the native
+    // dialog has been laid out. PSH_NOCONTEXTHELP selects a different system
+    // template/non-client frame and changes the usable size on Windows 11.
+    SetWindowLongPtrW(options_window_, GWL_EXSTYLE,
+        GetWindowLongPtrW(options_window_, GWL_EXSTYLE) & ~WS_EX_CONTEXTHELP);
     // FUN_004A1427 sends PSM_CANCELTOCLOSE before hiding Cancel.  Besides
     // matching the stock sheet state this prevents hidden-tab keyboard paths
     // from reviving Apply/Cancel semantics behind the custom shell.
     SendMessageW(options_window_, PSM_CANCELTOCLOSE, 0, 0);
 
     const HWND close = GetDlgItem(options_window_, IDOK);
+    const HWND cancel = GetDlgItem(options_window_, IDCANCEL);
+    RECT close_bounds{};
+    GetWindowRect(cancel ? cancel : close, &close_bounds);
+    MapWindowPoints(nullptr, options_window_, reinterpret_cast<POINT*>(&close_bounds), 2);
+    const int button_width = close_bounds.right - close_bounds.left;
+    const int button_height = close_bounds.bottom - close_bounds.top;
     const HFONT font = close ? reinterpret_cast<HFONT>(
         SendMessageW(close, WM_GETFONT, 0, 0)) : nullptr;
     for (const int identifier : {IDCANCEL, kPropertySheetApply, IDHELP}) {
@@ -3264,8 +3614,8 @@ void PlayerWindow::InitializeOptionsShell() {
     if (close) {
         const auto text = ResourceText(8);
         if (!text.empty()) SetWindowTextW(close, text.c_str());
-        SetWindowPos(close, nullptr, scale(453), scale(385), scale(88),
-                     scale(30), SWP_NOACTIVATE | SWP_NOZORDER);
+        SetWindowPos(close, nullptr, close_bounds.left, close_bounds.top,
+                     button_width, button_height, SWP_NOACTIVATE | SWP_NOZORDER);
         InstallButtonBitmap(options_window_, IDOK, ResourceModule(), 1);
     }
 
@@ -3274,67 +3624,84 @@ void PlayerWindow::InitializeOptionsShell() {
         const HWND button = CreateWindowExW(
             0, WC_BUTTONW, text.c_str(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            scale(x), scale(385), scale(88), scale(30), options_window_,
+            x, close_bounds.top, button_width, button_height, options_window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
         if (button && font) SendMessageW(button, WM_SETFONT,
                                          reinterpret_cast<WPARAM>(font), TRUE);
     };
-    make_button(kSaveAllOptions, 0x8141, 265);
-    make_button(kResetAllOptions, 0x8140, 359);
+    make_button(kSaveAllOptions, 0x8141, close_bounds.left - 2 * (button_width + 6));
+    make_button(kResetAllOptions, 0x8140, close_bounds.left - button_width - 6);
 
     options_navigation_ = CreateWindowExW(
-        WS_EX_CLIENTEDGE, WC_LISTBOXW, nullptr,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY |
+        0, WC_LISTBOXW, nullptr,
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY |
             LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
-        scale(9), scale(9), scale(96), scale(365), options_window_,
+        14, 14, page.left - 12 - 14, page.bottom - 14, options_window_,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOptionsNavigation)),
         instance_, nullptr);
     if (options_navigation_) {
+        auto state = std::make_unique<OptionsNavigationState>();
+        if (SetWindowSubclass(options_navigation_, OptionsNavigationSubclassProc,
+                kOptionsNavigationSubclass, reinterpret_cast<DWORD_PTR>(state.get()))) state.release();
         if (font) SendMessageW(options_navigation_, WM_SETFONT,
                                reinterpret_cast<WPARAM>(font), TRUE);
-        SendMessageW(options_navigation_, LB_SETITEMHEIGHT, 0, scale(24));
+        SendMessageW(options_navigation_, LB_SETITEMHEIGHT, 0, 24);
         for (const UINT identifier : kOptionTemplates) {
+            if (options_registration_mode_ && identifier != 200 && identifier != 262) continue;
             const auto caption = DialogCaption(ResourceModule(), identifier);
-            SendMessageW(options_navigation_, LB_ADDSTRING, 0,
+            const auto row = SendMessageW(options_navigation_, LB_ADDSTRING, 0,
                          reinterpret_cast<LPARAM>(caption.c_str()));
+            if (row != LB_ERR && row != LB_ERRSPACE)
+                SendMessageW(options_navigation_, LB_SETITEMDATA, row, TemplateIndex(identifier));
         }
     }
     options_header_ = CreateWindowExW(
         0, WC_STATICW, nullptr, WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
-        scale(116), scale(9), scale(420), scale(33), options_window_,
+        page.left, 14, page.right - page.left, page.top - 14, options_window_,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOptionsHeader)),
         instance_, nullptr);
     if (options_header_ && font) SendMessageW(options_header_, WM_SETFONT,
         reinterpret_cast<WPARAM>(font), TRUE);
 
     const auto related = ResourceText(0x8142);
+    const HDC dc = GetDC(options_window_);
+    const auto previous_font = font ? SelectObject(dc, font) : nullptr;
+    const auto text_width = [dc](std::wstring_view text) {
+        SIZE size{};
+        GetTextExtentPoint32W(dc, text.data(), static_cast<int>(text.size()), &size);
+        return size.cx;
+    };
+    const int related_width = text_width(related);
     const HWND related_label = CreateWindowExW(
         0, WC_STATICW, related.c_str(), WS_CHILD | WS_VISIBLE,
-        scale(3), scale(394), scale(52), scale(18), options_window_,
+        8, close_bounds.top + 6, related_width, button_height - 6, options_window_,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOptionsRelated)),
         instance_, nullptr);
     if (related_label && font) SendMessageW(related_label, WM_SETFONT,
         reinterpret_cast<WPARAM>(font), TRUE);
-    int link_x = 58;
+    int link_x = 8 + related_width + 4;
     for (size_t index = 0; index < kProjectLinks.size(); ++index) {
         const std::wstring_view label{kProjectLinks[index].label};
-        const int width = static_cast<int>(label.size()) * 12;
+        const int width = text_width(label);
         const HWND link = CreateWindowExW(
             0, WC_STATICW, kProjectLinks[index].label,
             WS_CHILD | WS_VISIBLE | SS_NOTIFY,
-            scale(link_x), scale(394), scale(width), scale(18), options_window_,
+            link_x, close_bounds.top + 6, width, button_height - 6, options_window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLinkFirst + index)),
             instance_, nullptr);
         if (link && font) SendMessageW(link, WM_SETFONT,
                                        reinterpret_cast<WPARAM>(font), TRUE);
         link_x += width + 8;
     }
+    if (previous_font) SelectObject(dc, previous_font);
+    ReleaseDC(options_window_, dc);
 
-    StartSkinMenuCatalogLoad();
-    SetTimer(options_window_, kOptionsSkinPollTimer,
-             kOptionsSkinPollMilliseconds, nullptr);
+    if (!options_registration_mode_) {
+        StartSkinMenuCatalogLoad();
+        SetTimer(options_window_, kOptionsSkinPollTimer,
+                 kOptionsSkinPollMilliseconds, nullptr);
+    }
 
-    RECT bounds{};
     GetWindowRect(options_window_, &bounds);
     HMONITOR monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
     MONITORINFO info{sizeof(info)};
@@ -3345,14 +3712,12 @@ void PlayerWindow::InitializeOptionsShell() {
     const int y = info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - height) / 2;
     SetWindowPos(options_window_, HWND_TOP, x, y, 0, 0,
                  SWP_NOSIZE | SWP_NOACTIVATE);
+    RedrawWindow(options_window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
 void PlayerWindow::PositionOptionsPage(HWND page) {
-    if (!options_window_ || !page) return;
-    const UINT dpi = GetDpiForWindow(options_window_);
-    const auto scale = [dpi](int value) { return MulDiv(value, dpi, 96); };
-    const RECT target{scale(116), scale(50), scale(116) + scale(420),
-                      scale(50) + scale(323)};
+    if (!options_window_ || !page || IsRectEmpty(&options_page_bounds_)) return;
+    const RECT target = options_page_bounds_;
     RECT current{};
     GetWindowRect(page, &current);
     MapWindowPoints(nullptr, options_window_, reinterpret_cast<POINT*>(&current), 2);
@@ -3369,6 +3734,7 @@ void PlayerWindow::PositionOptionsPage(HWND page) {
 void PlayerWindow::SelectOptionsPage(int page, UINT focus_control) {
     if (!options_window_) return;
     page = std::clamp(page, 0, static_cast<int>(kOptionTemplates.size()) - 1);
+    if (options_registration_mode_ && page != kPageAbout && page != kPageAssociation) return;
     options_focus_control_ = focus_control;
     const HWND active = PropSheet_GetCurrentPageHwnd(options_window_);
     // 004A3651 compares LB_GETCURSEL with the active property-sheet index
@@ -3377,7 +3743,8 @@ void PlayerWindow::SelectOptionsPage(int page, UINT focus_control) {
     // stock tab origin. Still honour 0049FD89's targeted nested-page focus.
     const bool different_page = !active ||
         active != options_pages_[static_cast<size_t>(page)];
-    if (different_page && !PropSheet_SetCurSel(options_window_, nullptr, page)) {
+    if (different_page && !PropSheet_SetCurSel(options_window_, nullptr,
+            OptionsSheetIndex(page, options_registration_mode_))) {
         const HWND current = PropSheet_GetCurrentPageHwnd(options_window_);
         const auto found = std::find(options_pages_.begin(),
                                      options_pages_.end(), current);
@@ -3387,9 +3754,10 @@ void PlayerWindow::SelectOptionsPage(int page, UINT focus_control) {
         options_focus_control_ = 0;
     }
     options_page_index_ = page;
+    const int row = OptionsSheetIndex(page, options_registration_mode_);
     if (options_navigation_ &&
-        SendMessageW(options_navigation_, LB_GETCURSEL, 0, 0) != page)
-        SendMessageW(options_navigation_, LB_SETCURSEL, page, 0);
+        SendMessageW(options_navigation_, LB_GETCURSEL, 0, 0) != row)
+        SendMessageW(options_navigation_, LB_SETCURSEL, row, 0);
     const HWND current = PropSheet_GetCurrentPageHwnd(options_window_);
     if (current) PositionOptionsPage(current);
     if (options_header_) {
@@ -4192,12 +4560,8 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             instance_, MAKEINTRESOURCEW(128), IMAGE_ICON, 16, 16, LR_SHARED));
         options_association_button_images_[0] =
             ButtonIconImageList(shortcut_icon, 16, 16);
-        options_association_button_images_[1] = ImageList_LoadImageW(
-            ResourceModule(), MAKEINTRESOURCEW(0x162), 16, 1,
-            RGB(192, 192, 192), IMAGE_BITMAP, LR_CREATEDIBSECTION);
-        options_association_button_images_[2] = ImageList_LoadImageW(
-            ResourceModule(), MAKEINTRESOURCEW(0x163), 16, 1,
-            RGB(192, 192, 192), IMAGE_BITMAP, LR_CREATEDIBSECTION);
+        options_association_button_images_[1] = AssociationBitmapImageList(resources, 0x162);
+        options_association_button_images_[2] = AssociationBitmapImageList(resources, 0x163);
         options_association_button_images_[3] = ButtonIconImageList(
             window_icon_big_ ? window_icon_big_ : shortcut_icon, 32, 32);
         AttachButtonImage(GetDlgItem(dialog, 2030),
@@ -6697,7 +7061,8 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
             if (index >= 0) {
                 options_page_index_ = index;
                 if (options_navigation_)
-                    SendMessageW(options_navigation_, LB_SETCURSEL, index, 0);
+                    SendMessageW(options_navigation_, LB_SETCURSEL,
+                        OptionsSheetIndex(index, options_registration_mode_), 0);
                 if (options_header_) {
                     auto description = ResourceText(template_id);
                     if (description.empty())
