@@ -45,6 +45,7 @@ namespace ttplayer::testing { struct SkinRebindAccess; }
 
 namespace ttplayer::ui {
 class VisualRuntime;
+struct LyricUploadData;
 class PlayerWindow {
 public:
     explicit PlayerWindow(settings::Settings settings);
@@ -208,6 +209,9 @@ private:
     void ShowOptions(int page = -1, UINT focus_control = 0);
     void CloseOptions();
     void ShowOnlineLyricSearch(bool automatic_results = false);
+    void ShowLyricUpload();
+    void ContinueLyricUpload();
+    void LyricDocumentChanged();
     void EnsureLyricAssociationsLoaded();
     void ShowLyricAssociation();
     void CancelLocalLyricSearch();
@@ -910,6 +914,8 @@ private:
     POINT lyric_line_drag_origin_{};
     int lyric_line_drag_offset_{};
     lyrics::Lyrics lyrics_;
+    bool lyric_document_modified_{};
+    std::unique_ptr<LyricUploadData> lyric_upload_pending_;
     std::filesystem::path lyric_path_;
     std::filesystem::path associated_lyric_path_;
     lyrics::AssociationStore lyric_associations_;
@@ -947,7 +953,7 @@ private:
     LONG lyric_editor_edit_begin_{};
     LONG lyric_editor_edit_end_{};
     bool lyrics_embedded_{};
-    int lyric_adjustment_ms_{};
+    int lyric_adjustment_ms_{1000}; // 0053B9A0 initial adjustment-dialog value.
     FINDREPLACEW lyric_find_{};
     wchar_t lyric_find_text_[256]{};
     wchar_t lyric_replace_text_[256]{};

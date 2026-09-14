@@ -140,6 +140,7 @@ void PlayerWindow::PollLyricServices() {
         lyric_services_pending_auto_ = false;
         if (lyric_path_.empty() && !lyric_editor_) StartOnlineLyricSearch(true);
     }
+    if (lyric_upload_pending_ && lyric_services_ready_) ContinueLyricUpload();
 }
 
 void PlayerWindow::ShowLyricServiceEditor(HWND owner_window) {

@@ -3,6 +3,8 @@
 #include "modern_file_dialog.h"
 #include "lyric_association_dialog.h"
 #include "lyric_alpha_mask.h"
+#include "lyric_menu_contract.h"
+#include "lyric_upload_window.h"
 #include "../app/resource_ids.h"
 
 #include "ttplayer/core/text.h"
@@ -167,7 +169,9 @@ INT_PTR CALLBACK LyricAdjustmentDialogProc(HWND dialog, UINT message,
 
 std::optional<int> PromptLyricAdjustment(HMODULE resources, HWND owner,
                                          int previous) {
-    if (!resources) return std::nullopt;
+    static bool dialog_open{}; // 0044C471 / DAT_00548E9C reentrancy guard.
+    if (!resources || dialog_open) return std::nullopt;
+    struct Guard { bool& value; Guard(bool& v) : value(v) { value = true; } ~Guard() { value = false; } } guard(dialog_open);
     INITCOMMONCONTROLSEX common{sizeof(common), ICC_UPDOWN_CLASS};
     InitCommonControlsEx(&common);
     LyricAdjustmentDialogState state{previous};
@@ -349,32 +353,6 @@ std::wstring NormalizeEditorNewlines(std::wstring text) {
     return result;
 }
 
-std::wstring CanonicalEditorText(const lyrics::Lyrics& lyrics,
-                                 bool apply_offset = false) {
-    std::wstring text;
-    const auto append_tag = [&text](std::wstring_view tag,
-                                    const std::string& value) {
-        text += L"[";
-        text += tag;
-        text += L":";
-        try { text += core::Utf8ToWide(value); }
-        catch (const std::exception&) {}
-        text += L"]\r\n";
-    };
-    append_tag(L"ti", lyrics.title);
-    append_tag(L"ar", lyrics.artist);
-    append_tag(L"al", lyrics.album);
-    append_tag(L"by", lyrics.author);
-    text += L"\r\n";
-    for (const auto& line : lyrics.lines) {
-        text += FormatEditorTimestamp(line.time - (apply_offset
-            ? lyrics.offset : std::chrono::milliseconds::zero()));
-        try { text += core::Utf8ToWide(line.text); }
-        catch (const std::exception&) {}
-        text += L"\r\n";
-    }
-    return text;
-}
 } // namespace
 
 LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
@@ -553,7 +531,7 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
             // delta to +500 ms.  0043E92C -> 0043D7D0 moves every lyric line;
             // playback itself remains at the same position.
             lyrics_.ShiftLines(-std::chrono::milliseconds(steps * 500));
-            InvalidateRect(control, nullptr, FALSE);
+            if (steps && !lyrics_.lines.empty()) LyricDocumentChanged();
             return 0;
         }
         break;
@@ -2571,7 +2549,8 @@ bool PlayerWindow::EnterLyricEditor() {
         std::filesystem::exists(lyric_editor_path_, error) && !error;
     const bool have_pending_offset = lyrics_.offset !=
         std::chrono::milliseconds::zero();
-    if (have_source && !have_pending_offset) {
+    const bool modified = have_pending_offset || lyric_document_modified_;
+    if (have_source && !modified) {
         // 0044CB58 -> 004431A0 -> 0043E237 streams an ordinary local lyric
         // file into RichEdit verbatim.  This is why the reference 千千阙歌
         // editor begins at [00:00.00], without synthesized ti/ar/al/by rows,
@@ -2582,12 +2561,13 @@ bool PlayerWindow::EnterLyricEditor() {
         // A pending [offset:] cannot remain as a separate tag in edit mode:
         // CLyric serializes adjusted timestamps, removes the offset tag and
         // marks the control modified so LeaveLyricEditor offers to save it.
-        SetLyricEditorText(CanonicalEditorText(lyrics_, have_pending_offset),
-                           have_pending_offset);
+        SetLyricEditorText(SerializeLyricDocument(lyrics_, false), modified);
     }
 
-    const LOGFONTW font = settings_.lyric.font_valid
+    LOGFONTW font = settings_.lyric.font_valid
         ? settings_.lyric.font : skin_->Lyric().font;
+    if (settings_.lyric.charset != 0)
+        font.lfCharSet = static_cast<BYTE>(settings_.lyric.charset);
     SetLyricEditorFont(font);
     const COLORREF background = settings_.lyric.background_color != CLR_INVALID
         ? settings_.lyric.background_color : skin_->Lyric().background_color;
@@ -2598,7 +2578,8 @@ bool PlayerWindow::EnterLyricEditor() {
     if (lyric_editor_document_)
         lyric_editor_document_->Undo(tomResume, nullptr);
     FormatLyricEditorAll();
-    SendMessageW(lyric_editor_, EM_SETMODIFY, have_pending_offset, 0);
+    SendMessageW(lyric_editor_, EM_SETMODIFY, modified, 0);
+    lyric_document_modified_ = false; // 0044CB58 transfers dirty state to RichEdit.
 
     ShowWindow(lyric_control_, SW_HIDE);
     EnableWindow(lyric_desklrc_, FALSE);
@@ -3012,7 +2993,12 @@ void PlayerWindow::ReflowLyricEditor(bool expand) {
 }
 
 void PlayerWindow::ConvertLyricEditorText(DWORD mapping) {
-    if (!lyric_editor_) return;
+    if (!lyric_editor_) {
+        // 0044DCCF/0044DD4E -> 00446125 -> 0043D803: the ordinary
+        // display converts every lyric row, then refreshes desktop lyrics.
+        if (ConvertLyricDocument(lyrics_, mapping)) LyricDocumentChanged();
+        return;
+    }
     CHARRANGE selection{};
     SendMessageW(lyric_editor_, EM_EXGETSEL, 0,
                  reinterpret_cast<LPARAM>(&selection));
@@ -3022,11 +3008,12 @@ void PlayerWindow::ConvertLyricEditorText(DWORD mapping) {
     const size_t end = static_cast<size_t>(selection.cpMax);
     if (begin >= end || end > all.size()) return;
     const std::wstring_view source(all.data() + begin, end - begin);
-    const int count = LCMapStringW(LOCALE_SYSTEM_DEFAULT, mapping,
+    const LCID locale = GetThreadLocale();
+    const int count = LCMapStringW(locale, mapping,
         source.data(), static_cast<int>(source.size()), nullptr, 0);
     if (count <= 0) return;
     std::wstring converted(static_cast<size_t>(count), L'\0');
-    LCMapStringW(LOCALE_SYSTEM_DEFAULT, mapping, source.data(),
+    LCMapStringW(locale, mapping, source.data(),
                  static_cast<int>(source.size()), converted.data(), count);
     CHARRANGE replace{static_cast<LONG>(begin), static_cast<LONG>(end)};
     SendMessageW(lyric_editor_, EM_EXSETSEL, 0,
@@ -3169,22 +3156,33 @@ bool PlayerWindow::WriteEmbeddedLyrics(std::wstring_view text,
     const auto* track = PlaybackTrackForUi();
     if (!sound_library_ || !track)
         return false;
+    if (!deleting && text.empty()) return false;
     const auto path = track->path;
-    const bool was_active = audio_.State() != audio::PlaybackState::stopped;
-    if (was_active) {
-        audio_.Stop();
-        playback_was_active_ = false;
-        playback_source_open_ = false;
+    // 0044C708 -> 004C80AC clears read-only before writing; deletion does
+    // not. Neither original command issues Stop/Pause/Seek. A busy file
+    // must fail without interrupting the current playback session.
+    HRESULT result = S_OK;
+    if (!deleting) {
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) &&
+            !SetFileAttributesW(path.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY))
+            result = HRESULT_FROM_WIN32(GetLastError());
     }
-    HRESULT result{};
-    const auto reader = sound_library_->OpenReader(path, &result);
-    if (reader)
-        result = reader->SetMetadataValue("Lyrics", deleting
-            ? std::wstring_view{} : text);
+    std::unique_ptr<plugins::LegacyReaderSession> reader;
+    if (SUCCEEDED(result)) {
+        reader = sound_library_->OpenReaderForMetadata(path, &result);
+        if (!reader && SUCCEEDED(result)) result = E_NOINTERFACE;
+    }
+    if (reader) {
+        // 004AD3E9 calls metadata slot 6 directly, without the file-info
+        // capability-bit guard (FLAC can report bit 4 clear yet write tags).
+        result = reader->SetMetadataValueDirect("Lyrics", deleting ? std::wstring_view{} : text);
+        if (SUCCEEDED(result)) reader->SetMetadataValueDirect("Lyric", {});
+        reader.reset(); // Some AddIns flush tags on final reader Release.
+    }
     if (FAILED(result)) {
         if (!deleting) {
-            const UINT resource = !reader || result == E_NOINTERFACE ||
-                    result == E_ACCESSDENIED ? 0x817f : 0x8180;
+            const UINT resource = result == E_NOINTERFACE ? 0x817f : 0x8180;
             const auto message = ResourceText(resource);
             wchar_t caption[128]{};
             GetWindowTextW(window_, caption,
@@ -3196,10 +3194,70 @@ bool PlayerWindow::WriteEmbeddedLyrics(std::wstring_view text,
         return false;
     }
     lyrics_embedded_ = !deleting;
-    if (lyric_editor_)
+    // Update the playback-item cache: LoadCurrentLyrics checks it before disk.
+    if (opened_track_ && opened_track_->path == path) {
+        std::erase_if(opened_track_->metadata, [](const auto& pair) {
+            return !_stricmp(pair.first.c_str(), "Lyrics") || !_stricmp(pair.first.c_str(), "Lyric");
+        });
+        if (!deleting) opened_track_->metadata.emplace_back("Lyrics", core::WideToUtf8(text));
+    }
+    if (lyric_editor_ && !deleting)
         SendMessageW(lyric_editor_, EM_SETMODIFY, FALSE, 0);
     RefreshPlaybackUi();
     return true;
+}
+
+void PlayerWindow::LyricDocumentChanged() {
+    lyric_document_modified_ = true;
+    // 004460B7/004460EC/0043E92C refresh both CLyricCtrl and CDesktopLyric.
+    // Desktop lyrics cache their glyph masks even though the model address
+    // stays the same; an InvalidateRect on the normal window is not enough.
+    desktop_lyrics_.SetLyrics(&lyrics_);
+    if (lyric_control_) InvalidateRect(lyric_control_, nullptr, FALSE);
+}
+
+void PlayerWindow::ShowLyricUpload() {
+    const auto* track = PlaybackTrackForUi();
+    if (!track || lyrics_.lines.empty()) return;
+    if (fullscreen_mode_) LeaveFullScreen(); // 0044CF5E -> 0044AB8F
+    auto data = std::make_unique<LyricUploadData>();
+    data->artist = core::Utf8ToWide(track->artist);
+    data->title = track->title.empty() ? track->path.stem().wstring() : core::Utf8ToWide(track->title);
+    data->album = core::Utf8ToWide(track->album);
+    data->lyrics = SerializeLyricDocument(lyrics_, settings_.lyric.save_compress);
+    if (data->lyrics.empty()) return;
+    // Capture now: the catalog may finish after playback has changed tracks.
+    lyric_upload_pending_ = std::move(data);
+    if (!lyric_services_ready_) {
+        if (!lyric_catalog_job_) RefreshLyricServices();
+        return;
+    }
+    ContinueLyricUpload();
+}
+
+void PlayerWindow::ContinueLyricUpload() {
+    if (!lyric_upload_pending_ || !lyric_services_ready_) return;
+    auto data = std::move(lyric_upload_pending_);
+    const auto found = std::find_if(lyric_services_.entries.begin(), lyric_services_.entries.end(),
+        [&](const auto& service) { return service.key == settings_.lyric.server_key; });
+    const int index = found != lyric_services_.entries.end()
+        ? static_cast<int>(found - lyric_services_.entries.begin())
+        : (settings_.lyric.server_key.empty() ? settings_.lyric.add_in_index : 0);
+    std::wstring url;
+    if (index >= 0 && static_cast<size_t>(index) < lyric_services_.entries.size())
+        url = LyricUploadUrl(lyric_services_.entries[index].url);
+    const HWND owner = lyric_window_ ? lyric_window_ : window_;
+    const auto caption = ResourceText(0x8183);
+    if (url.empty()) {
+        MessageBoxW(owner, LoadResourceText(GetModuleHandleW(nullptr), IDS_LYRIC_UPLOAD_NO_SERVER).c_str(),
+            caption.c_str(), MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (!ShowLyricUploadWindow(owner, caption, *data, url)) {
+        MessageBoxW(owner, LoadResourceText(GetModuleHandleW(nullptr), IDS_LYRIC_UPLOAD_UNAVAILABLE).c_str(),
+            caption.c_str(), MB_OK | MB_ICONERROR);
+    }
+    ApplySkinWindowTopMost();
 }
 
 void PlayerWindow::ShowLyricContextMenu(POINT screen_point) {
@@ -3273,6 +3331,7 @@ void PlayerWindow::PrepareLyricMenu(HMENU menu, bool fullscreen_popup) const {
         }
     }
     const bool have_lyrics = !lyrics_.lines.empty();
+    const bool have_track = PlaybackTrackForUi() != nullptr;
     CheckCommand(menu, kCmdLyricTopMost, ActiveLyricTopMost());
     // CPlayerWnd's menu refresh at 0045Axxx changes command 0x409 into the
     // action that will be performed, rather than placing a check beside the
@@ -3293,9 +3352,28 @@ void PlayerWindow::PrepareLyricMenu(HMENU menu, bool fullscreen_popup) const {
     CheckCommand(menu, kCmdLyricMouseWheel,
                  settings_.lyric.mouse_wheel_adjust);
     EnableCommand(menu, kCmdLyricCopy, have_lyrics);
-    EnableCommand(menu, kCmdLyricEdit,
-                  PlaybackTrackForUi() || !lyric_path_.empty());
-    EnableCommand(menu, kCmdLyricReload, !lyric_path_.empty());
+    EnableCommand(menu, kCmdLyricEdit, have_track);
+    EnableCommand(menu, kCmdLyricReload, have_track);
+    EnableCommand(menu, kCmdLyricUpload, have_lyrics);
+    EnableCommand(menu, kCmdLyricAssociate, have_track);
+    EnableCommand(menu, kCmdLyricDownload, have_track);
+    EnableCommand(menu, kCmdLyricEmbeddedRead, have_track);
+    EnableCommand(menu, kCmdLyricEmbeddedDelete, have_track);
+    EnableCommand(menu, kCmdLyricEmbeddedWrite, have_track && have_lyrics);
+    EnableCommand(menu, kCmdChineseTraditional, have_lyrics);
+    EnableCommand(menu, kCmdChineseSimplified, have_lyrics);
+    // 0044AAB2: resource 143 has only "system default" and a separator.
+    // Read localized labels from 0x8171, with the EXE table as fallback.
+    if (const auto charsets = FindCommandMenu(menu, 0x805c)) {
+        while (GetMenuItemCount(charsets) > 2) DeleteMenu(charsets, 2, MF_BYPOSITION);
+        for (UINT index = 0; index < kLyricCharsetNames.size(); ++index) {
+            const auto label = ResourceListItem(ResourceModule(), 0x8171, index);
+            AppendMenuW(charsets, MF_STRING, 0x805d + index,
+                label.empty() ? kLyricCharsetNames[index] : label.c_str());
+        }
+    }
+    for (UINT index = 0; index < kLyricCharsets.size(); ++index)
+        CheckCommand(menu, 0x805c + index, settings_.lyric.charset == kLyricCharsets[index]);
     // FUN_00449E98 gates 0x802E on CLyricWnd+0x2C4 (the active lyric
     // document), not on the separately remembered association string.
     EnableCommand(menu, kCmdLyricUnassociate, have_lyrics);
@@ -3402,7 +3480,21 @@ void PlayerWindow::PrepareLyricEditorMenu(HMENU menu) const {
 }
 
 bool PlayerWindow::HandleLyricCommand(UINT command) {
+    if (command >= 0x805c && command <= 0x806f) {
+        const auto index = command - 0x805c;
+        if (!lyric_editor_ && index < kLyricCharsets.size()) {
+            settings_.lyric.charset = kLyricCharsets[index];
+            // 0044D601 posts the lyric-font settings notification (0x40C).
+            // It does NOT reload bytes, change saved encoding or lose edits.
+            RebuildLyricFont(false);
+            if (lyric_control_) InvalidateRect(lyric_control_, nullptr, FALSE);
+        }
+        return true;
+    }
     switch (command) {
+    case kCmdLyricUpload:
+        if (!lyric_editor_) ShowLyricUpload();
+        return true;
     case kCmdLyricEdit:
         EnterLyricEditor();
         return true;
@@ -3467,6 +3559,7 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
         if (lyric_editor_) SendMessageW(lyric_editor_, EM_REDO, 0, 0);
         return true;
     case kCmdLyricEmbeddedRead: {
+        if (!PlaybackTrackForUi()) return true;
         CancelLocalLyricSearch();
         const auto embedded = ReadEmbeddedLyrics();
         if (!embedded) {
@@ -3478,21 +3571,24 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
                         MB_ICONERROR);
             return true;
         }
+        if (lyric_editor_) {
+            lyric_editor_path_.clear();
+            lyrics_embedded_ = true;
+            // 0044C648 -> 0044311E: stream the raw embedded text directly,
+            // without parsing/replacing the ordinary display document.
+            SetLyricEditorText(*embedded, false);
+            SetFocus(lyric_editor_);
+            return true;
+        }
         try {
             lyrics_ = lyrics::ParseLrc(core::WideToUtf8(*embedded));
+            lyric_document_modified_ = false;
             ApplyLyricTrimSpaces(lyrics_, settings_.lyric.trim_spaces);
             desktop_lyrics_.SetLyrics(&lyrics_);
             lyric_path_.clear();
             associated_lyric_path_.clear();
             lyrics_embedded_ = true;
-            if (lyric_editor_) {
-                lyric_editor_path_.clear();
-                // 0044C648 calls 0044311E directly when RichEdit already
-                // exists: embedded text is shown exactly as returned by the
-                // reader rather than being normalized through CLyric.
-                SetLyricEditorText(*embedded, false);
-                SetFocus(lyric_editor_);
-            } else if (lyric_control_) {
+            if (lyric_control_) {
                 InvalidateRect(lyric_control_, nullptr, FALSE);
             }
         } catch (const std::exception&) {
@@ -3501,7 +3597,7 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
     }
     case kCmdLyricEmbeddedWrite:
         WriteEmbeddedLyrics(lyric_editor_
-            ? LyricEditorText() : CanonicalEditorText(lyrics_), false);
+            ? LyricEditorText() : SerializeLyricDocument(lyrics_, true), false);
         return true;
     case kCmdLyricEmbeddedDelete:
         WriteEmbeddedLyrics({}, true);
@@ -3572,29 +3668,12 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
     case kCmdLyricAdjustFollowingLater:
     case kCmdLyricAdjustAllEarlier:
     case kCmdLyricAdjustAllLater: {
-        if (lyrics_.lines.empty()) return true;
-        const auto current = lyrics_.LineAt(audio_.Position()).value_or(0);
-        const auto delta = (command == kCmdLyricAdjustCurrentEarlier ||
-                            command == kCmdLyricAdjustFollowingEarlier ||
-                            command == kCmdLyricAdjustAllEarlier)
-            ? std::chrono::milliseconds(-500)
-            : std::chrono::milliseconds(500);
-        size_t begin = 0;
-        size_t end = lyrics_.lines.size();
-        if (command == kCmdLyricAdjustCurrentEarlier ||
-            command == kCmdLyricAdjustCurrentLater) {
-            begin = current;
-            end = std::min(lyrics_.lines.size(), current + 1);
-        } else if (command == kCmdLyricAdjustFollowingEarlier ||
-                   command == kCmdLyricAdjustFollowingLater) {
-            begin = current;
-        }
-        for (size_t index = begin; index < end; ++index)
-            lyrics_.lines[index].time += delta;
-        if (lyric_control_) InvalidateRect(lyric_control_, nullptr, FALSE);
+        if (!lyric_editor_ && AdjustLyricDocument(lyrics_, command, audio_.Position()))
+            LyricDocumentChanged();
         return true;
     }
     case kCmdLyricAdjustAllDialog: {
+        if (!lyric_editor_ && lyrics_.lines.empty()) return true;
         const auto value = PromptLyricAdjustment(
             ResourceModule(), lyric_window_, lyric_adjustment_ms_);
         if (!value) return true;
@@ -3604,8 +3683,7 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
                 std::chrono::milliseconds(*value));
         } else if (!lyrics_.lines.empty()) {
             lyrics_.ShiftLines(std::chrono::milliseconds(*value));
-            if (lyric_control_)
-                InvalidateRect(lyric_control_, nullptr, FALSE);
+            if (*value) LyricDocumentChanged();
         }
         return true;
     }
@@ -3657,6 +3735,7 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
 void PlayerWindow::ClearLyrics() {
     CancelLocalLyricSearch();
     lyrics_ = {};
+    lyric_document_modified_ = false;
     desktop_lyrics_.SetLyrics(&lyrics_);
     lyric_path_.clear();
     lyrics_embedded_ = false;
@@ -3688,6 +3767,7 @@ void PlayerWindow::LoadLyricsFrom(const std::filesystem::path& path,
                                   bool associated) {
     CancelLocalLyricSearch();
     lyrics_embedded_ = false;
+    lyric_document_modified_ = false;
     try {
         auto loaded = lyrics::LoadLrc(path);
         if (loaded.lines.empty()) throw std::runtime_error("no synchronized lyric lines");

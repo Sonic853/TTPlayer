@@ -1,6 +1,7 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "project_links.h"
+#include "lyric_upload_window.h"
 
 #include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/core/text.h"

@@ -3165,6 +3165,7 @@ void PlayerWindow::AddToolTipTool(HWND owner, UINT_PTR identifier,
 }
 
 bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
+    if (TranslateLyricUploadMessage(message)) return true;
     auto* queued = const_cast<MSG*>(&message);
     if (lyric_service_editor_ && IsWindow(lyric_service_editor_) && IsWindowEnabled(lyric_service_editor_) &&
         IsDialogMessageW(lyric_service_editor_, queued)) return true;

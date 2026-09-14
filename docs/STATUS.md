@@ -1,5 +1,18 @@
 # Reconstruction status
 
+2026-09-15: restore the 5.7.9 lyric upload form (0044CF5E / 0044895B /
+004487A5), using the selected search server origin + /dll/lrcup.php per
+user request. Fill artist/title/album/lyrics without submitting automatically;
+SDK-only OLE browser, status/progress, resize/close and keyboard handling.
+Fix following-line adjustment (exclude current), display-mode Chinese conversion,
+desktop cache invalidation and dirty editor handoff. Restore charset menu 0x8171
+and 15-entry font-charset routing. Embedded lyrics now use writable metadata
+streams/direct slot 6, clear obsolete Lyric and release the reader before returning.
+Host local-form and generated FLAC tests pass; no external uploads or user-media edits.
+Still incomplete: live shared-reader tag editing, full LyricSaveMode leave-document
+transactions, and CUE/automatic tag-write lifecycle. See
+[LYRIC_MENU_RECOVERY.md](LYRIC_MENU_RECOVERY.md) for evidence and test boundaries.
+
 2026-09-14: recover the lyric context-menu association workflow from 5.7.9
 0044C930 and original resources 206/205. Restore search/partial search,
 browse (modern picker retained), associate/double-click, rename/recycle,

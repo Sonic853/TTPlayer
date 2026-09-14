@@ -117,5 +117,6 @@ ctest --test-dir out/png-6120 -C Release -R '^lyric_search_tests$' --output-on-f
 不是逐字复制原版 `DialogBoxParamW` 的内部对象/消息循环。
 2026-09-14 已补上手动关联窗口和跨会话关联表，详见
 [LYRIC_ASSOCIATION_RECOVERY.md](LYRIC_ASSOCIATION_RECOVERY.md)。
-歌词上传及原版广告/提示链接业务不在已恢复范围；
+2026-09-15 已补上上传浏览器表单，并按用户要求使用选中的搜索服务器 origin + `/dll/lrcup.php`；
+详见 [LYRIC_MENU_RECOVERY.md](LYRIC_MENU_RECOVERY.md)。未验证服务器上传后台；原版广告/提示链接业务仍不在已恢复范围。
 不能将本次结果描述为整个歌词网络系统已实现逐字或二进制等价。

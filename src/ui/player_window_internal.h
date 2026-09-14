@@ -1,4 +1,5 @@
 #pragma once
+#include "lyric_upload_window.h"
 
 // Shared implementation details for the split PlayerWindow translation units.
 // These declarations do not alter the public PlayerWindow ABI.
