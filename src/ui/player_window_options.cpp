@@ -298,25 +298,19 @@ bool IsChecked(HWND dialog, int control) {
 
 int TreeCheckState(HWND tree, HTREEITEM item) {
     TVITEMW value{};
-    value.mask = TVIF_STATE;
+    value.mask = TVIF_IMAGE;
     value.hItem = item;
-    value.stateMask = TVIS_STATEIMAGEMASK;
     if (!TreeView_GetItem(tree, &value)) return 0;
-    const int image = static_cast<int>(value.state >> 12);
-    // Bitmap 0x164 uses the original COptionsAsso order: checked,
-    // unchecked, mixed.  This differs from the built-in tree checkbox order.
-    if (image == 1) return 1;
-    if (image == 3) return 2;
-    return 0;
+    // 004A4BC0 sets TVIF_IMAGE | TVIF_SELECTEDIMAGE (0x22), not a
+    // one-based state-image mask. Resource 356 is unchecked/checked/mixed.
+    return std::clamp(value.iImage, 0, 2);
 }
 
 void SetTreeCheckState(HWND tree, HTREEITEM item, int state) {
     TVITEMW value{};
-    value.mask = TVIF_STATE;
+    value.mask = TVIF_IMAGE | TVIF_SELECTEDIMAGE;
     value.hItem = item;
-    value.stateMask = TVIS_STATEIMAGEMASK;
-    const int image = state == 1 ? 1 : state == 2 ? 3 : 2;
-    value.state = INDEXTOSTATEIMAGEMASK(image);
+    value.iImage = value.iSelectedImage = std::clamp(state, 0, 2);
     TreeView_SetItem(tree, &value);
 }
 
@@ -1273,6 +1267,7 @@ LRESULT CALLBACK OptionsImageButtonSubclassProc(
         (captioned || GetWindowTextLengthW(button) == 0)) {
         BUTTON_IMAGELIST layout{};
         if (SendMessageW(button, BCM_GETIMAGELIST, 0, reinterpret_cast<LPARAM>(&layout)) &&
+            layout.himl && layout.himl != BCCL_NOGLYPH &&
             (captioned || layout.uAlign == BUTTON_IMAGELIST_ALIGN_CENTER)) {
             if (message == WM_ERASEBKGND) return TRUE; // Paint the full surface once.
             if (message == WM_PRINTCLIENT) {
@@ -3128,16 +3123,7 @@ bool PlayerWindow::UnregisterAllAssociations() {
     const auto formats = BuildAssociationFormatSource(
         ResourceModule(), reader_formats_);
     const auto extensions = settings::BuildAssociableExtensions(formats);
-    std::set<std::wstring> visited;
-    bool succeeded = true;
-    for (const auto& extension : extensions) {
-        auto normalized = extension.extension;
-        std::ranges::transform(normalized, normalized.begin(), towlower);
-        if (!visited.insert(normalized).second) continue;
-        const auto result = backend.SetExtensionAssociation(
-            extension.extension, false);
-        succeeded = succeeded && result.Succeeded();
-    }
+    bool succeeded = backend.UnregisterApplication(extensions).Succeeded();
     for (const auto target : {settings::ShellIntegrationTarget::audio_cd,
                               settings::ShellIntegrationTarget::directory}) {
         const auto result = backend.SetShellIntegration(target, false);
@@ -3166,10 +3152,11 @@ void PlayerWindow::CheckStartupAssociations() {
             });
         if (found == extensions.end()) continue;
         const auto query = backend.QueryExtension(required);
-        if (!query.result || !query.associated) mismatch = true;
+        if (!query.result || !query.effective) mismatch = true;
     }
     if (!mismatch) return;
 
+    const bool user_confirmed = !settings_.player.auto_associate;
     if (!settings_.player.auto_associate) {
         AssociationPromptState prompt{&settings_.player.auto_associate};
         const INT_PTR answer = DialogBoxParamW(
@@ -3190,6 +3177,7 @@ void PlayerWindow::CheckStartupAssociations() {
         ResourceText(0x81a8), ResourceText(0x81a9)};
     std::set<std::wstring> visited;
     bool changed = false;
+    bool requires_choice = false;
     for (const auto& extension : extensions) {
         auto normalized = extension.extension;
         std::ranges::transform(normalized, normalized.begin(), towlower);
@@ -3198,6 +3186,7 @@ void PlayerWindow::CheckStartupAssociations() {
             extension.extension, true,
             AssociationTypeLabel(extension.description), {}, labels);
         changed = changed || (result && result.changed);
+        requires_choice = requires_choice || (result && result.requires_user_choice);
     }
     for (const auto target : {settings::ShellIntegrationTarget::audio_cd,
                               settings::ShellIntegrationTarget::directory}) {
@@ -3206,6 +3195,311 @@ void PlayerWindow::CheckStartupAssociations() {
     }
     if (changed)
         settings::FileAssociationBackend::NotifyShellAssociationsChanged();
+    // Do not launch Settings on every startup just because another app is
+    // the current default. Only follow a fresh affirmative user response.
+    if (requires_choice && user_confirmed) {
+        const auto result = batch.OpenDefaultPrograms(window_);
+        if (!result) {
+            const auto error_text = result.operation + L"\n" + result.message;
+            MessageBoxW(window_, error_text.c_str(), ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
+        }
+    }
+}
+
+bool PlayerWindow::CommitOptionsAssociations(HWND dialog, bool show_errors, bool open_requested_defaults) {
+    if (options_association_committing_) return false;
+    struct CommitScope {
+        bool& busy;
+        explicit CommitScope(bool& value) : busy(value) { busy = true; }
+        ~CommitScope() { busy = false; }
+    } commit_scope(options_association_committing_);
+    options_association_commit_pending_ = false;
+    settings::FileAssociationBackendOptions options;
+    options.notify_shell = false;
+    settings::FileAssociationBackend backend(CurrentExecutablePath(), ResourceText(0x80), options);
+    const settings::ShellVerbLabels labels{ResourceText(0x81a8), ResourceText(0x81a9)};
+    bool changed = false, requires_choice = false, success = true;
+    std::wstring errors;
+    for (auto& node : options_association_nodes_) {
+        if (node->current == node->desired && !node->icon_dirty) continue;
+        settings::FileAssociationResult result;
+        if (node->current != node->desired) {
+            result = backend.SetExtensionAssociation(
+                node->extension, node->desired, node->description,
+                node->desired ? node->icon : std::wstring{}, labels);
+        }
+        if (result && node->icon_dirty) {
+            auto update = backend.RegisterApplication({{node->extension, node->description, {}}});
+            if (update) {
+                const auto icon = backend.SetExtensionIcon(node->extension, node->icon);
+                update.changed = update.changed || icon.changed;
+                if (!icon) update = icon;
+            }
+            result.changed = result.changed || update.changed;
+            if (!update) result = update;
+        }
+        if (!result) {
+            success = false;
+            if (errors.empty()) errors = result.operation + L"\n" + result.message;
+            continue;
+        }
+        changed = changed || result.changed;
+        requires_choice = requires_choice || result.requires_user_choice;
+        const auto query = backend.QueryExtension(node->extension);
+        // Never show 'checked' merely because candidate registration worked.
+        node->current = query.result && query.effective;
+        node->desired = node->current;
+        node->icon_dirty = false;
+    }
+    if (changed) settings::FileAssociationBackend::NotifyShellAssociationsChanged();
+    RefreshOptionsAssociations(dialog);
+    if (!success) {
+        if (show_errors) MessageBoxW(dialog, errors.c_str(), ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
+        else OutputDebugStringW((L"TTPlayer association: " + errors + L"\n").c_str());
+    } else if (requires_choice && show_errors && open_requested_defaults &&
+               ShowOptionsAssociationReminder(dialog)) {
+        const auto launched = backend.OpenDefaultPrograms(dialog);
+        if (!launched) {
+            const auto error = launched.operation + L"\n" + launched.message;
+            MessageBoxW(dialog, error.c_str(), ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
+            return false;
+        }
+    }
+    return success;
+}
+
+bool PlayerWindow::ShowOptionsAssociationReminder(HWND dialog) {
+    if (settings_.player.suppress_association_reminder) return false;
+    const auto title = ResourceText(0x80);
+    const auto content = AlbumOptionText(IDS_ASSOCIATION_USER_CHOICE);
+    const auto suppress = AlbumOptionText(IDS_ASSOCIATION_SUPPRESS);
+    const auto open = AlbumOptionText(IDS_ASSOCIATION_OPEN_SETTINGS);
+    const TASKDIALOG_BUTTON button{IDOK, open.c_str()};
+    TASKDIALOGCONFIG config{sizeof(config)};
+    config.hwndParent = GetAncestor(dialog, GA_ROOT);
+    config.hInstance = instance_;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+    config.dwCommonButtons = TDCBF_CLOSE_BUTTON;
+    config.pszWindowTitle = title.c_str();
+    config.pszContent = content.c_str();
+    config.pszMainIcon = TD_INFORMATION_ICON;
+    config.pszVerificationText = suppress.c_str();
+    config.cButtons = 1; config.pButtons = &button; config.nDefaultButton = IDOK;
+    int selected{}; BOOL checked{};
+    const HRESULT result = TaskDialogIndirect(&config, &selected, nullptr, &checked);
+    if (FAILED(result)) {
+        // The permanent page checkbox remains available even if the common
+        // controls task dialog cannot be created on the user's installation.
+        return MessageBoxW(config.hwndParent, content.c_str(), title.c_str(),
+                           MB_OKCANCEL | MB_ICONINFORMATION) == IDOK;
+    }
+    settings_.player.suppress_association_reminder = checked != FALSE;
+    SetChecked(dialog, IDC_ASSOCIATION_SUPPRESS, checked != FALSE);
+    return selected == IDOK;
+}
+
+void PlayerWindow::InitializeOptionsAssociationActions(HWND dialog) {
+    SetChecked(dialog, IDC_ASSOCIATION_SUPPRESS, settings_.player.suppress_association_reminder);
+    if (GetDlgItem(dialog, IDC_ASSOCIATION_SUPPRESS)) return;
+    const HWND tree = GetDlgItem(dialog, 2038);
+    if (!tree) return;
+    const auto bounds = [dialog](HWND control) {
+        RECT rect{}; GetWindowRect(control, &rect);
+        MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&rect), 2);
+        return rect;
+    };
+    const auto move = [](HWND control, const RECT& rect) {
+        SetWindowPos(control, nullptr, rect.left, rect.top, rect.right-rect.left, rect.bottom-rect.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    };
+    RECT units{0,0,14,12}; MapDialogRect(dialog, &units);
+    const auto tree_bounds = bounds(tree);
+    const auto label_bounds = bounds(GetDlgItem(dialog,2282));
+    const int row = units.bottom + 2;
+    auto shortened = tree_bounds; shortened.bottom -= row; move(tree, shortened);
+    for (const int id : {2281,2282}) {
+        auto rect = bounds(GetDlgItem(dialog,id)); OffsetRect(&rect,0,-row);
+        move(GetDlgItem(dialog,id),rect);
+    }
+    const HFONT font = reinterpret_cast<HFONT>(SendMessageW(dialog,WM_GETFONT,0,0));
+    const auto suppress = AlbumOptionText(IDS_ASSOCIATION_SUPPRESS);
+    const HWND checkbox = CreateWindowExW(0, WC_BUTTONW, suppress.c_str(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        tree_bounds.left,label_bounds.top,tree_bounds.right-tree_bounds.left,units.bottom,
+        dialog,reinterpret_cast<HMENU>(IDC_ASSOCIATION_SUPPRESS),instance_,nullptr);
+    SendMessageW(checkbox,WM_SETFONT,reinterpret_cast<WPARAM>(font),FALSE);
+    SetChecked(dialog,IDC_ASSOCIATION_SUPPRESS,settings_.player.suppress_association_reminder);
+    const int side = std::max(20L,units.right);
+    const RECT refresh_bounds{tree_bounds.right-side,tree_bounds.top-side-1,tree_bounds.right,tree_bounds.top-1};
+    // Original heading statics have anonymous IDs. Shorten only the label
+    // immediately above the tree, leaving room for the refresh glyph.
+    for (HWND child = GetWindow(dialog,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) {
+        wchar_t type[32]{}; GetClassNameW(child,type,32);
+        auto rect = bounds(child);
+        if (_wcsicmp(type,L"Static")==0 && rect.left==tree_bounds.left &&
+            rect.top<tree_bounds.top && rect.bottom<=tree_bounds.top && rect.right>refresh_bounds.left) {
+            rect.right=refresh_bounds.left-2; move(child,rect);
+        }
+    }
+    const HWND refresh = CreateWindowExW(0,WC_BUTTONW,L"",WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        refresh_bounds.left,refresh_bounds.top,side,side,dialog,
+        reinterpret_cast<HMENU>(IDC_ASSOCIATION_REFRESH),instance_,nullptr);
+    SendMessageW(refresh,WM_SETFONT,reinterpret_cast<WPARAM>(font),FALSE);
+    // Reuse the original lyric Reload toolbar glyph and the common options
+    // button renderer instead of introducing a different icon style.
+    EnsurePopupMenuImages();
+    const auto found = std::ranges::find_if(popup_menu_image_commands_,[](const auto& entry) {
+        return entry.first==kCmdLyricReload;
+    });
+    HICON icon = found!=popup_menu_image_commands_.end() && popup_menu_images_
+        ? ImageList_GetIcon(popup_menu_images_,found->second,ILD_NORMAL) : nullptr;
+    const auto images = ButtonIconImageList(icon,16,16);
+    if (icon) DestroyIcon(icon);
+    if (images) {
+        BUTTON_IMAGELIST layout{}; layout.himl=images; layout.uAlign=BUTTON_IMAGELIST_ALIGN_CENTER;
+        if (Button_SetImageList(refresh,&layout))
+            SetWindowSubclass(refresh,OptionsImageButtonSubclassProc,kOptionsImageButtonSubclass,
+                              reinterpret_cast<DWORD_PTR>(images));
+        else ImageList_Destroy(images);
+    } else SetWindowTextW(refresh,AlbumOptionText(IDS_ASSOCIATION_REFRESH).c_str());
+    const HWND tips = CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,
+        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,
+        dialog,nullptr,instance_,nullptr);
+    TTTOOLINFOW tip{sizeof(tip)}; tip.hwnd=dialog; tip.uFlags=TTF_IDISHWND | TTF_SUBCLASS;
+    tip.uId=reinterpret_cast<UINT_PTR>(refresh); tip.hinst=instance_;
+    tip.lpszText=MAKEINTRESOURCEW(IDS_ASSOCIATION_REFRESH);
+    SendMessageW(tips,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&tip));
+}
+
+bool PlayerWindow::ToggleOptionsAssociationAt(HWND dialog, POINT point) {
+    if (options_association_committing_) return true;
+    const HWND tree = GetDlgItem(dialog,2038);
+    TVHITTESTINFO hit{}; hit.pt=point; TreeView_HitTest(tree,&hit);
+    if (!hit.hItem || !(hit.flags & TVHT_ONITEMICON)) return false;
+    const int requested = TreeCheckState(tree,hit.hItem)==1 ? 0 : 1;
+    std::vector<HTREEITEM> pending{hit.hItem};
+    while (!pending.empty()) {
+        const auto item=pending.back(); pending.pop_back();
+        SetTreeCheckState(tree,item,requested);
+        TVITEMW value{}; value.mask=TVIF_PARAM; value.hItem=item;
+        if (TreeView_GetItem(tree,&value) && value.lParam)
+            reinterpret_cast<AssociationOptionNode*>(value.lParam)->desired=requested!=0;
+        for (auto child=TreeView_GetChild(tree,item); child; child=TreeView_GetNextSibling(tree,child))
+            pending.push_back(child);
+    }
+    for (auto parent=TreeView_GetParent(tree,hit.hItem); parent; parent=TreeView_GetParent(tree,parent))
+        SetTreeCheckState(tree,parent,AggregateTreeChildren(tree,parent));
+    // One commit/prompt per click (including category/root recursion), after
+    // the native click handler has released its internal TreeView state.
+    if (!options_association_commit_pending_) {
+        options_association_commit_pending_=true;
+        if (!PostMessageW(dialog,kApplyOptionsAssociations,0,0)) {
+            options_association_commit_pending_=false;
+            CommitOptionsAssociations(dialog,true);
+        }
+    }
+    return true;
+}
+
+void PlayerWindow::RefreshOptionsAssociations(HWND dialog) {
+    const HWND tree = GetDlgItem(dialog, 2038);
+    if (!tree || !GetPropW(dialog, kPageReadyProperty)) return;
+    settings::FileAssociationBackend backend(CurrentExecutablePath(), ResourceText(0x80));
+    for (auto& node : options_association_nodes_) {
+        if (node->current != node->desired || node->icon_dirty) continue; // Keep unsaved edits.
+        const auto query = backend.QueryExtension(node->extension);
+        if (query.result) node->current = node->desired = query.effective;
+    }
+    const HTREEITEM root = TreeView_GetRoot(tree);
+    for (HTREEITEM category = TreeView_GetChild(tree, root); category;
+         category = TreeView_GetNextSibling(tree, category)) {
+        for (HTREEITEM item = TreeView_GetChild(tree, category); item;
+             item = TreeView_GetNextSibling(tree, item)) {
+            TVITEMW value{};
+            value.hItem = item; value.mask = TVIF_PARAM;
+            if (TreeView_GetItem(tree, &value) && value.lParam) {
+                const auto* node = reinterpret_cast<const AssociationOptionNode*>(value.lParam);
+                SetTreeCheckState(tree, item, node->desired ? 1 : 0);
+            }
+        }
+        SetTreeCheckState(tree, category, AggregateTreeChildren(tree, category));
+    }
+    if (root) SetTreeCheckState(tree, root, AggregateTreeChildren(tree, root));
+}
+
+std::wstring PlayerWindow::OptionsAssociationIcon(HWND dialog) const {
+    const HWND tree = GetDlgItem(dialog, 2038);
+    const auto selected = tree ? TreeView_GetSelection(tree) : nullptr;
+    if (!selected) return {};
+    // 0049D011: a category/root only has a preview when its descendant
+    // extensions have a common icon location (case-insensitive comparison).
+    const auto common = [&](auto&& self, HTREEITEM item, std::wstring& icon) -> bool {
+        const auto child = TreeView_GetChild(tree, item);
+        if (!child) {
+            TVITEMW value{}; value.mask = TVIF_PARAM; value.hItem = item;
+            if (!TreeView_GetItem(tree, &value) || !value.lParam) return false;
+            icon = reinterpret_cast<const AssociationOptionNode*>(value.lParam)->icon;
+            return true;
+        }
+        for (auto next = child; next; next = TreeView_GetNextSibling(tree, next)) {
+            std::wstring candidate;
+            if (!self(self, next, candidate)) continue;
+            if (icon.empty()) icon = candidate;
+            if (_wcsicmp(icon.c_str(), candidate.c_str()) != 0) { icon.clear(); break; }
+        }
+        return true;
+    };
+    std::wstring icon;
+    common(common, selected, icon);
+    return icon;
+}
+
+void PlayerWindow::RefreshOptionsAssociationIcon(HWND dialog) {
+    const HWND button = GetDlgItem(dialog, 2108);
+    if (!button) return;
+    // 0049EB86 -> 0049D1A2: replace the previous large icon on every
+    // selection change. Detach before freeing the caller-owned image list.
+    BUTTON_IMAGELIST empty{};
+    empty.himl = BCCL_NOGLYPH;
+    Button_SetImageList(button, &empty);
+    auto& images = options_association_button_images_[4];
+    if (images) ImageList_Destroy(images);
+    images = nullptr;
+    const auto selection = ParseIconSelection(OptionsAssociationIcon(dialog));
+    HICON icon{};
+    if (!selection.path.empty()) {
+        ExtractIconExW(selection.path.c_str(), selection.index, &icon, nullptr, 1);
+        if (icon) {
+            images = ButtonIconImageList(icon, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+            DestroyIcon(icon); // ImageList_AddIcon copied it.
+        }
+    }
+    if (images) AttachButtonImage(button, images);
+    // Mixed/invalid paths hide the old image rather than leaving a stale
+    // preview. The icon picker remains enabled for category/root selections.
+    InvalidateRect(button, nullptr, FALSE);
+}
+
+void PlayerWindow::SetOptionsAssociationIcon(HWND dialog, const std::wstring& icon) {
+    const HWND tree = GetDlgItem(dialog, 2038);
+    const auto selected = tree ? TreeView_GetSelection(tree) : nullptr;
+    if (!selected) return;
+    // 0049D125 recursively applies a chosen icon to category/root leaves.
+    std::vector<HTREEITEM> pending{selected};
+    while (!pending.empty()) {
+        const auto item = pending.back(); pending.pop_back();
+        const auto child = TreeView_GetChild(tree, item);
+        if (child) {
+            for (auto next = child; next; next = TreeView_GetNextSibling(tree, next)) pending.push_back(next);
+        } else {
+            TVITEMW value{}; value.mask = TVIF_PARAM; value.hItem = item;
+            if (TreeView_GetItem(tree, &value) && value.lParam) {
+                auto& node = *reinterpret_cast<AssociationOptionNode*>(value.lParam);
+                if (node.icon != icon) { node.icon = icon; node.icon_dirty = true; }
+            }
+        }
+    }
+    RefreshOptionsAssociationIcon(dialog);
 }
 
 void PlayerWindow::CloseOptions() {
@@ -3235,6 +3529,7 @@ void PlayerWindow::CloseOptions() {
         ImageList_Destroy(options_device_images_);
     options_device_images_ = nullptr;
     options_association_nodes_.clear();
+    options_association_commit_pending_ = false;
     if (options_association_images_)
         ImageList_Destroy(options_association_images_);
     options_association_images_ = nullptr;
@@ -3350,6 +3645,8 @@ LRESULT CALLBACK PlayerWindow::OptionsSheetSubclassProc(
 
 LRESULT PlayerWindow::HandleOptionsSheetMessage(
     HWND sheet, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (options_association_committing_ && (message == WM_COMMAND || message == WM_CLOSE ||
+        (message == WM_SYSCOMMAND && (wparam & 0xfff0U) == SC_CLOSE))) return 0;
     if (sheet == lyric_service_disabled_owner_ && IsWindow(lyric_service_editor_) &&
         (message == WM_COMMAND || message == WM_CLOSE ||
          (message == WM_SYSCOMMAND && (wparam & 0xfff0U) == SC_CLOSE))) {
@@ -3357,6 +3654,10 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
         return 0; // Includes close/apply commands queued before disabling.
     }
     switch (message) {
+    case WM_ACTIVATE:
+        if (LOWORD(wparam) != WA_INACTIVE && options_pages_[kPageAssociation])
+            RefreshOptionsAssociations(options_pages_[kPageAssociation]);
+        break;
     case WM_NCCALCSIZE:
         if (lparam && !IsRectEmpty(&options_page_bounds_)) {
             auto* rect = wparam ? &reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam)->rgrc[0]
@@ -4449,6 +4750,8 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         break;
     }
     case 262: {
+        SetDlgItemTextW(dialog, 2282, AlbumOptionText(IDS_ASSOCIATION_VIEW_SYSTEM).c_str());
+        InitializeOptionsAssociationActions(dialog);
         const HWND tree = GetDlgItem(dialog, 2038);
         if (tree) {
             TreeView_DeleteAllItems(tree);
@@ -4458,21 +4761,19 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                 options_association_images_ = nullptr;
             }
             options_association_images_ = ImageList_LoadImageW(
-                ResourceModule(), MAKEINTRESOURCEW(0x164), 16, 1,
-                RGB(255, 255, 255), IMAGE_BITMAP, LR_CREATEDIBSECTION);
+                ResourceModule(), MAKEINTRESOURCEW(0x164), 16, 0,
+                RGB(255, 255, 255), IMAGE_BITMAP, 0);
             if (options_association_images_)
                 TreeView_SetImageList(tree, options_association_images_,
-                                      TVSIL_STATE);
+                                      TVSIL_NORMAL);
             TreeView_SetExtendedStyle(tree, TVS_EX_DOUBLEBUFFER,
                                       TVS_EX_DOUBLEBUFFER);
             TVINSERTSTRUCTW root{};
             root.hParent = TVI_ROOT;
             root.hInsertAfter = TVI_LAST;
-            root.item.mask = TVIF_TEXT | TVIF_STATE;
+            root.item.mask = TVIF_TEXT | TVIF_IMAGE | TVIF_SELECTEDIMAGE;
             auto all = ResourceText(0x8123);
             root.item.pszText = all.data();
-            root.item.stateMask = TVIS_STATEIMAGEMASK;
-            root.item.state = INDEXTOSTATEIMAGEMASK(2);
             const HTREEITEM parent = TreeView_InsertItem(tree, &root);
 
             settings::FileAssociationBackend backend(
@@ -4494,11 +4795,9 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                 category_item.hInsertAfter =
                     format_index + 1U == association_formats.size()
                         ? TVI_LAST : TVI_SORT;
-                category_item.item.mask = TVIF_TEXT | TVIF_STATE;
+                category_item.item.mask = TVIF_TEXT | TVIF_IMAGE | TVIF_SELECTEDIMAGE;
                 category_item.item.pszText =
                     const_cast<wchar_t*>(description.c_str());
-                category_item.item.stateMask = TVIS_STATEIMAGEMASK;
-                category_item.item.state = INDEXTOSTATEIMAGEMASK(2);
                 const HTREEITEM category =
                     TreeView_InsertItem(tree, &category_item);
 
@@ -4506,10 +4805,18 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                     const auto query = backend.QueryExtension(format.extension);
                     auto node = std::make_unique<AssociationOptionNode>();
                     node->extension = format.extension;
+                    // 0049D2FA -> 00433B2E (_wcsupr) before TVI_SORT insertion.
+                    // Keep the reader/filter spelling untouched; only the
+                    // association page's leaf labels are uppercased.
+                    std::ranges::transform(node->extension, node->extension.begin(), towupper);
                     node->description = description;
-                    node->icon = query.icon;
-                    node->current = query.result && query.associated;
+                    node->current = query.result && query.effective;
                     node->desired = node->current;
+                    // 0049D2FA discards the queried DefaultIcon when this
+                    // executable is not the active handler. In particular,
+                    // do not borrow another installed rebuild's ProgID icon
+                    // when inspecting a portable/test copy of the player.
+                    if (node->current) node->icon = query.icon;
                     if (node->icon.empty()) {
                         const auto candidate =
                             CurrentExecutablePath().parent_path() / L"Icons" /
@@ -4518,16 +4825,21 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                         if (std::filesystem::is_regular_file(candidate, error))
                             node->icon = candidate.wstring();
                     }
+                    if (node->icon.empty()) {
+                        // 00491213 builds "%s",1 for audio and "%s",2 for
+                        // playlists; these original group icons are embedded
+                        // in the rebuild too, so TTPlayer.exe is not needed.
+                        node->icon = FormatIconSelection({CurrentExecutablePath(),
+                            format_index + 1U == association_formats.size() ? 2 : 1});
+                    }
 
                     TVINSERTSTRUCTW child{};
                     child.hParent = category;
                     child.hInsertAfter = TVI_SORT;
-                    child.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_STATE;
+                    child.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE;
                     child.item.pszText = node->extension.data();
                     child.item.lParam = reinterpret_cast<LPARAM>(node.get());
-                    child.item.stateMask = TVIS_STATEIMAGEMASK;
-                    child.item.state = INDEXTOSTATEIMAGEMASK(
-                        node->current ? 1 : 2);
+                    child.item.iImage = child.item.iSelectedImage = node->current ? 1 : 0;
                     TreeView_InsertItem(tree, &child);
                     options_association_nodes_.push_back(std::move(node));
                 }
@@ -4572,12 +4884,11 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                           options_association_button_images_[2]);
         AttachButtonImage(GetDlgItem(dialog, 2106),
                           options_association_button_images_[3]);
-        // FUN_0049D2FA leaves both icon buttons enabled even while the root
-        // item is selected.  Command 2108 simply becomes a no-op when there
-        // is no extension node; disabling it here differs visibly from the
-        // original association page.
+        // 0049DC89 / 0049D125 also allow assigning a common icon to all
+        // descendants of a selected category/root.
         EnableWindow(GetDlgItem(dialog, 2106), TRUE);
         EnableWindow(GetDlgItem(dialog, 2108), TRUE);
+        RefreshOptionsAssociationIcon(dialog);
         break;
     }
     case 384: {
@@ -4910,6 +5221,7 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         break;
     case 262:
         settings_.player.check_association = IsChecked(dialog, 2121);
+        settings_.player.suppress_association_reminder = IsChecked(dialog, IDC_ASSOCIATION_SUPPRESS);
         break;
     case 384:
         settings_.lyric.scroll_mode = ComboSelection(dialog, 1033,
@@ -5280,6 +5592,10 @@ bool PlayerWindow::CommitOptionsControl(
         return true;
     }
     case 262:
+        if (control == IDC_ASSOCIATION_SUPPRESS) {
+            settings_.player.suppress_association_reminder = IsChecked(dialog, IDC_ASSOCIATION_SUPPRESS);
+            return true;
+        }
         if (control != 2121) return false;
         settings_.player.check_association = IsChecked(dialog, 2121);
         return true;
@@ -5919,6 +6235,10 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
     case WM_INITDIALOG:
         InitializeOptionsPage(dialog, template_id);
         return TRUE;
+    case kApplyOptionsAssociations:
+        if (template_id == 262 && options_association_commit_pending_)
+            CommitOptionsAssociations(dialog,true);
+        return TRUE;
     case kExportSkinPreview:
         if (template_id == 261 && options_skin_preview_) {
             const HWND list = GetDlgItem(dialog, 1064);
@@ -6426,6 +6746,15 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 EnableWindow(GetDlgItem(dialog, 2043), IsChecked(dialog, 2037));
         }
         if (template_id == 262) {
+            if (control == IDC_ASSOCIATION_SUPPRESS && notification == BN_CLICKED) {
+                settings_.player.suppress_association_reminder = IsChecked(dialog, IDC_ASSOCIATION_SUPPRESS);
+                return TRUE;
+            }
+            if (control == IDC_ASSOCIATION_REFRESH && notification == BN_CLICKED) {
+                RefreshOptionsAssociations(dialog);
+                RefreshOptionsAssociationIcon(dialog);
+                return TRUE;
+            }
             const auto executable = CurrentExecutablePath();
             settings::FileAssociationBackend backend(
                 executable, ResourceText(0x80));
@@ -6480,6 +6809,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                             node->icon_dirty = true;
                         }
                     }
+                    RefreshOptionsAssociationIcon(dialog);
                 }
                 return TRUE;
             }
@@ -6541,66 +6871,25 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 return TRUE;
             }
             if (control == 2108 && notification == BN_CLICKED) {
-                const HWND tree = GetDlgItem(dialog, 2038);
-                const HTREEITEM selected = tree
-                    ? TreeView_GetSelection(tree) : nullptr;
-                TVITEMW item{};
-                item.mask = TVIF_PARAM;
-                item.hItem = selected;
-                if (selected && TreeView_GetItem(tree, &item) && item.lParam) {
-                    auto* node = reinterpret_cast<AssociationOptionNode*>(
-                        item.lParam);
-                    if (const auto icon = ChooseIconSelection(
-                            dialog, ResourceModule(), node->icon);
-                        icon && node->icon != *icon) {
-                        node->icon = *icon;
-                        node->icon_dirty = true;
-                    }
-                }
+                if (const auto icon = ChooseIconSelection(
+                        dialog, ResourceModule(), OptionsAssociationIcon(dialog)))
+                    SetOptionsAssociationIcon(dialog, *icon);
                 return TRUE;
             }
             if (control == 2281 && notification == BN_CLICKED) {
-                // FUN_0049DFB4 handed a temporary FileTypeAsso XML document
-                // to the elevated ttpsvr.exe helper.  That helper is not part
-                // of this recovered distribution.  Register the selected
-                // per-user ProgIDs first, then hand protected UserChoice
-                // selection to Windows' supported Default Apps UI.
-                settings::FileAssociationBackendOptions options;
-                options.notify_shell = false;
-                settings::FileAssociationBackend batch_backend(
-                    executable, ResourceText(0x80), options);
-                bool changed = false;
-                for (auto& node : options_association_nodes_) {
-                    if (node->current == node->desired && !node->icon_dirty)
-                        continue;
-                    const auto result = batch_backend.SetExtensionAssociation(
-                        node->extension, node->desired, node->description,
-                        node->icon, labels);
-                    if (result) {
-                        node->current = node->desired;
-                        node->icon_dirty = false;
-                        changed = changed || result.changed;
-                    }
+                // 0049DFB4 used ttpsvr.exe / FileTypeAsso. Register a real
+                // Default Programs candidate before handing user choice to
+                // the version-appropriate Windows UI, without the old EXE.
+                const auto formats = settings::BuildAssociableExtensions(
+                    BuildAssociationFormatSource(ResourceModule(), reader_formats_));
+                auto result = backend.RegisterApplication(formats);
+                if (result && !CommitOptionsAssociations(dialog, true, false)) return TRUE;
+                if (result) result = backend.OpenDefaultPrograms(dialog);
+                if (!result) {
+                    const auto error_text = result.operation + L"\n" + result.message;
+                    MessageBoxW(dialog, error_text.c_str(), ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
                 }
-                if (changed)
-                    settings::FileAssociationBackend::
-                        NotifyShellAssociationsChanged();
-
-                HINSTANCE launched = ShellExecuteW(
-                    dialog, L"open", L"ms-settings:defaultapps", nullptr,
-                    nullptr, SW_SHOWNORMAL);
-                if (reinterpret_cast<INT_PTR>(launched) <= 32) {
-                    launched = ShellExecuteW(
-                        dialog, L"open", L"control.exe",
-                        L"/name Microsoft.DefaultPrograms /page pageDefaultProgram",
-                        nullptr, SW_SHOWNORMAL);
-                }
-                if (reinterpret_cast<INT_PTR>(launched) <= 32) {
-                    MessageBoxW(
-                        dialog,
-                        ResourceText(0x81f1).c_str(),
-                        ResourceText(0x80).c_str(), MB_OK | MB_ICONINFORMATION);
-                }
+                RefreshOptionsAssociations(dialog);
                 return TRUE;
             }
         }
@@ -6926,50 +7215,16 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 const DWORD packed = GetMessagePos();
                 POINT point{GET_X_LPARAM(packed), GET_Y_LPARAM(packed)};
                 ScreenToClient(tree, &point);
-                TVHITTESTINFO hit{};
-                hit.pt = point;
-                TreeView_HitTest(tree, &hit);
-                if (hit.hItem && (hit.flags & TVHT_ONITEMSTATEICON)) {
-                    const int requested = TreeCheckState(tree, hit.hItem) == 1
-                        ? 0 : 1;
-                    std::vector<HTREEITEM> pending{hit.hItem};
-                    while (!pending.empty()) {
-                        const HTREEITEM item = pending.back();
-                        pending.pop_back();
-                        SetTreeCheckState(tree, item, requested);
-                        TVITEMW value{};
-                        value.mask = TVIF_PARAM;
-                        value.hItem = item;
-                        if (TreeView_GetItem(tree, &value) && value.lParam) {
-                            auto* node = reinterpret_cast<AssociationOptionNode*>(
-                                value.lParam);
-                            node->desired = requested != 0;
-                        }
-                        for (HTREEITEM child = TreeView_GetChild(tree, item);
-                             child; child = TreeView_GetNextSibling(tree, child)) {
-                            pending.push_back(child);
-                        }
-                    }
-                    for (HTREEITEM parent = TreeView_GetParent(tree, hit.hItem);
-                         parent; parent = TreeView_GetParent(tree, parent)) {
-                        SetTreeCheckState(tree, parent,
-                                          AggregateTreeChildren(tree, parent));
-                    }
-                    return TRUE;
-                }
+                if (ToggleOptionsAssociationAt(dialog,point)) return TRUE;
             }
             if (header->code == TVN_SELCHANGEDW ||
                 header->code == TVN_SELCHANGEDA) {
-                const HTREEITEM selected = TreeView_GetSelection(tree);
-                TVITEMW value{};
-                value.mask = TVIF_PARAM;
-                value.hItem = selected;
-                if (selected) TreeView_GetItem(tree, &value);
                 // FUN_0049DDD9 changes the application-wide AppIconFile and
                 // does not depend on a file-type leaf selection.  Original
                 // template 262 also keeps 2108 enabled for the root row.
                 EnableWindow(GetDlgItem(dialog, 2106), TRUE);
                 EnableWindow(GetDlgItem(dialog, 2108), TRUE);
+                RefreshOptionsAssociationIcon(dialog);
                 return TRUE;
             }
         }
@@ -7080,6 +7335,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
             if (header->code == PSN_KILLACTIVE && template_id == 252)
                 RegisterConfiguredHotKeys();
             if (header->code == PSN_APPLY) {
+                if (template_id == 262) CommitOptionsAssociations(dialog, true);
                 CommitOptionsPage(dialog, template_id);
                 FlushDeferredOptionsRuntime(template_id);
             } else if (header->code == PSN_KILLACTIVE) {
@@ -7106,28 +7362,10 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
             CancelOptionsDspScan();
         }
         if (template_id == 262 && !options_association_nodes_.empty()) {
-            settings::FileAssociationBackendOptions options;
-            options.notify_shell = false;
-            settings::FileAssociationBackend backend(
-                CurrentExecutablePath(), ResourceText(0x80), options);
-            const settings::ShellVerbLabels labels{
-                ResourceText(0x81a8), ResourceText(0x81a9)};
-            bool changed = false;
-            for (auto& node : options_association_nodes_) {
-                if (node->current == node->desired && !node->icon_dirty)
-                    continue;
-                const auto result = backend.SetExtensionAssociation(
-                    node->extension, node->desired, node->description,
-                    node->icon, labels);
-                if (result) {
-                    node->current = node->desired;
-                    node->icon_dirty = false;
-                    changed = changed || result.changed;
-                }
-            }
-            if (changed)
-                settings::FileAssociationBackend::
-                    NotifyShellAssociationsChanged();
+            // Fallback for direct teardown; never open a modal UI while the
+            // property sheet is destroying HWNDs. Normal Close/Save already
+            // committed through PSN_APPLY and reported errors there.
+            CommitOptionsAssociations(dialog, false);
         }
         RemovePropW(dialog, kPageReadyProperty);
         RemovePropW(dialog, kPageTemplateProperty);

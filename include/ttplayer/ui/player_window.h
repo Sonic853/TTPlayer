@@ -259,6 +259,14 @@ private:
     void PositionOptionsPage(HWND page);
     void SelectOptionsPage(int page, UINT focus_control = 0);
     void InitializeOptionsShell();
+    bool CommitOptionsAssociations(HWND dialog, bool show_errors, bool open_requested_defaults = true);
+    void RefreshOptionsAssociations(HWND dialog);
+    void InitializeOptionsAssociationActions(HWND dialog);
+    bool ToggleOptionsAssociationAt(HWND dialog, POINT point);
+    bool ShowOptionsAssociationReminder(HWND dialog);
+    std::wstring OptionsAssociationIcon(HWND dialog) const;
+    void RefreshOptionsAssociationIcon(HWND dialog);
+    void SetOptionsAssociationIcon(HWND dialog, const std::wstring& icon);
     void PopulateOptionsSkinPage(HWND dialog);
     void UpdateOptionsSkinDetails(HWND dialog);
     void StartOptionsDspScan(HWND dialog,
@@ -709,7 +717,10 @@ private:
     std::vector<std::unique_ptr<AssociationOptionNode>>
         options_association_nodes_;
     HIMAGELIST options_association_images_{};
-    std::array<HIMAGELIST, 4> options_association_button_images_{};
+    bool options_association_commit_pending_{};
+    bool options_association_committing_{};
+    // Desktop, Programs, Quick Launch, application icon, selected file icon.
+    std::array<HIMAGELIST, 5> options_association_button_images_{};
     HWND tooltip_{};
     HWND playlist_tooltip_{};
     HWND playlist_item_tooltip_{};

@@ -29,6 +29,7 @@ struct FileAssociationResult {
     DWORD native_error{ERROR_SUCCESS};
     HRESULT hresult{S_OK};
     bool changed{};
+    bool requires_user_choice{};
     std::wstring operation;
     std::wstring message;
 
@@ -54,9 +55,9 @@ struct AssociationQuery {
 };
 
 struct AssociableExtension {
-    // Reader-advertised spelling, without the leading dot.  The original
-    // association tree preserves case and duplicate extensions; the registry
-    // backend normalizes only when it performs a query/write.
+    // Reader-advertised spelling, without the leading dot. The filter parser
+    // preserves case/duplicates; the options tree uppercases labels at its
+    // 00433B2E insertion boundary. Registry operations normalize separately.
     std::wstring extension;
     std::wstring description;
     std::filesystem::path module_path;
@@ -116,9 +117,14 @@ struct FileAssociationBackendOptions {
     // registry traffic away from the live shell classes.  Production callers
     // should retain the default per-user Classes store.
     std::wstring current_user_classes_subkey{L"Software\\Classes"};
-    std::wstring prog_id_prefix{L"Audio"};
+    // Do not overwrite the original player's shared Audio.* ProgIDs.
+    std::wstring prog_id_prefix{L"TTPlayerRebuild.Audio"};
     bool notify_shell{true};
 };
+
+enum class DefaultAppsTarget { control_panel, settings, application_settings };
+[[nodiscard]] DefaultAppsTarget SelectDefaultAppsTarget(
+    DWORD major, DWORD minor, DWORD build, DWORD revision = 0) noexcept;
 
 class FileAssociationBackend {
 public:
@@ -132,12 +138,26 @@ public:
 
     // description is the reader-supplied type text shown in Explorer.
     // icon may be a complete DefaultIcon value.  An empty icon uses
-    // "<executable>,0".  Disabling restores the prior default ProgID and the
-    // pre-existing contents of any class keys touched while enabling.
+    // "<executable>,0". Win7 uses SetAppAsDefault after registration. Windows
+    // 8+ requires user choice; success with requires_user_choice does NOT mean
+    // the effective default changed. An unchecked effective default also needs
+    // a replacement chosen in Windows. Isolated stores retain the legacy
+    // backup/restore transaction for testing; /unreg removes owned candidates.
     [[nodiscard]] FileAssociationResult SetExtensionAssociation(
         std::wstring_view extension, bool enabled,
         std::wstring_view description = {}, std::wstring_view icon = {},
         const ShellVerbLabels& labels = {});
+
+    // Registers candidates, not UserChoice. Only call after a user action,
+    // never while populating an options page. Isolated Classes stores also
+    // redirect Capabilities/RegisteredApplications away from the live shell.
+    [[nodiscard]] FileAssociationResult RegisterApplication(
+        const std::vector<AssociableExtension>& formats);
+    // The format catalog also identifies pre-Capabilities registrations from
+    // older rebuilds. Only values bearing this executable's owner are restored.
+    [[nodiscard]] FileAssociationResult UnregisterApplication(
+        const std::vector<AssociableExtension>& legacy_formats = {});
+    [[nodiscard]] FileAssociationResult OpenDefaultPrograms(HWND owner) const;
 
     // Changes only this backend's managed ProgID.  It never overwrites the
     // icon of an unrelated current association.
@@ -170,6 +190,9 @@ public:
     }
 
 private:
+    [[nodiscard]] FileAssociationResult SetLegacyExtensionAssociation(
+        std::wstring_view extension, bool enabled, std::wstring_view description,
+        std::wstring_view icon, const ShellVerbLabels& labels);
     std::filesystem::path executable_;
     std::wstring application_name_;
     FileAssociationBackendOptions options_;

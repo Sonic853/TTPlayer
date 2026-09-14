@@ -361,6 +361,12 @@ target_compile_options(ttplayer_tests PRIVATE
 target_link_libraries(ttplayer_tests PRIVATE ttplayer_core)
 
 add_executable(file_association_tests tests/file_association_tests.cpp)
+add_executable(default_programs_tests src/settings/default_programs_tests.cpp)
+target_compile_definitions(default_programs_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(default_programs_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(default_programs_tests PRIVATE ttplayer_core)
+add_test(NAME default_programs_tests COMMAND default_programs_tests)
+set_tests_properties(default_programs_tests PROPERTIES TIMEOUT 30)
 target_compile_definitions(file_association_tests PRIVATE
   UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(file_association_tests PRIVATE

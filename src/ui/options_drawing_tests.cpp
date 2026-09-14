@@ -4,6 +4,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <shellapi.h>
 #include <uxtheme.h>
 #include <vsstyle.h>
 
@@ -123,6 +124,54 @@ struct SkinRebindAccess {
         unsigned select{}, activate{}, deactivate{}, position{}, destroy{};
     };
     static void CheckAssociationImages(HWND page, HMODULE resources) {
+        const HWND tree = GetDlgItem(page,2038);
+        const auto actual_checks = TreeView_GetImageList(tree,TVSIL_NORMAL);
+        const auto reference_checks = ImageList_LoadImageW(resources, MAKEINTRESOURCEW(0x164),
+            16, 0, RGB(255,255,255), IMAGE_BITMAP, 0);
+        Require(actual_checks && reference_checks && !TreeView_GetImageList(tree,TVSIL_STATE),
+            "0049D2FA must attach check images to TVSIL_NORMAL, not TVSIL_STATE");
+        int cw{},ch{};
+        ImageList_GetIconSize(actual_checks,&cw,&ch);
+        Require(cw == 16 && ch == 16 && ImageList_GetImageCount(actual_checks) == 3,
+            "association checkbox strip dimensions/order changed");
+        for (int state=0; state<3; ++state) {
+            Surface actual(cw,ch), reference(cw,ch);
+            ImageList_Draw(actual_checks,state,actual.dc,0,0,ILD_NORMAL);
+            ImageList_Draw(reference_checks,state,reference.dc,0,0,ILD_NORMAL);
+            GdiFlush();
+            for (int pixel=0; pixel<cw*ch; ++pixel)
+                Require((actual.pixels[pixel]&0xffffff) == (reference.pixels[pixel]&0xffffff),
+                    "checkbox palette/mask differs from 0048C8E1");
+        }
+        ImageList_Destroy(reference_checks);
+        const auto root = TreeView_GetRoot(tree);
+        for (auto category = TreeView_GetChild(tree,root); category;
+             category = TreeView_GetNextSibling(tree,category)) {
+            for (auto leaf = TreeView_GetChild(tree,category); leaf;
+                 leaf = TreeView_GetNextSibling(tree,leaf)) {
+                wchar_t text[256]{};
+                TVITEMW label{}; label.mask = TVIF_TEXT; label.hItem = leaf;
+                label.pszText = text; label.cchTextMax = 256;
+                Require(TreeView_GetItem(tree,&label),"missing extension label");
+                auto upper = std::wstring(text);
+                CharUpperBuffW(upper.data(),static_cast<DWORD>(upper.size()));
+                Require(!upper.empty() && upper == text,"00433B2E uppercase extension display missing");
+            }
+            TVITEMW item{}; item.mask = TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_STATE;
+            item.stateMask = TVIS_STATEIMAGEMASK; item.hItem = category;
+            Require(TreeView_GetItem(tree,&item) && item.iImage >= 0 && item.iImage <= 2 &&
+                item.iImage == item.iSelectedImage && item.state == 0,
+                "004A4BC0 must use the same zero-based normal/selected image");
+            RECT label{}; TreeView_GetItemRect(tree,category,&label,TRUE);
+            TVHITTESTINFO hit{}; hit.pt = POINT{label.left-8,(label.top+label.bottom)/2};
+            TreeView_HitTest(tree,&hit);
+            Require(hit.hItem == category && (hit.flags & TVHT_ONITEMICON),
+                "0049EBA4 click target is not the visible checkbox icon");
+        }
+        wchar_t association_label[64]{};
+        GetDlgItemTextW(page,2282,association_label,64);
+        Require(std::wstring_view(association_label) == L"前往查看系统关联",
+            "obsolete Vista/Win7 failure label was not replaced");
         for (const auto [control, resource] : {std::pair{2031, 0x162}, std::pair{2032, 0x163}}) {
             BUTTON_IMAGELIST layout{};
             Require(SendDlgItemMessageW(page, control, BCM_GETIMAGELIST, 0,
@@ -209,6 +258,228 @@ struct SkinRebindAccess {
             EnableWindow(button, was_enabled);
             SetWindowTheme(button, nullptr, nullptr);
         }
+    }
+    static void CheckAssociationSelection(ui::PlayerWindow& player, const fs::path& original) {
+        const HWND page = player.options_pages_[14];
+        const HWND tree = GetDlgItem(page,2038), button = GetDlgItem(page,2108);
+        const auto root = TreeView_GetRoot(tree);
+        wchar_t executable[32768]{};
+        GetModuleFileNameW(nullptr,executable,32768);
+        const auto location = [&](int index) { return L"\"" + std::wstring(executable) + L"\"," + std::to_wstring(index); };
+        const int width=GetSystemMetrics(SM_CXICON), height=GetSystemMetrics(SM_CYICON);
+        const auto same_icon = [&](HIMAGELIST images,HICON reference) {
+            Require(images && images != BCCL_NOGLYPH && reference,"file-type preview missing");
+            int w{},h{};
+            Require(ImageList_GetIconSize(images,&w,&h) && w==width && h==height,"file-type preview is not a large icon");
+            Surface expected(w,h),actual(w,h);
+            // Match 00435019's HICON -> image-list path. DrawIconEx directly
+            // uses a different alpha-rounding path for legacy icon masks.
+            const auto original_images=ImageList_Create(w,h,ILC_COLOR32|ILC_MASK,1,0);
+            ImageList_AddIcon(original_images,reference);
+            ImageList_Draw(original_images,0,expected.dc,0,0,ILD_NORMAL);
+            ImageList_Draw(images,0,actual.dc,0,0,ILD_NORMAL);
+            GdiFlush();
+            ImageList_Destroy(original_images);
+            for (int i=0;i<w*h;++i)
+                Require((expected.pixels[i]&0xffffff)==(actual.pixels[i]&0xffffff),"selected file icon pixels differ");
+        };
+        // Verify fallback resources against the original EXE, not against
+        // another copy of the rebuild's own icon-loading algorithm.
+        for (int index : {1,2}) {
+            HICON reference{},actual{};
+            ExtractIconExW((original/L"TTPlayer.exe").c_str(),index,&reference,nullptr,1);
+            ExtractIconExW(executable,index,&actual,nullptr,1);
+            Require(reference && actual,"00491213 audio/playlist fallback icon missing");
+            const auto images=ImageList_Create(width,height,ILC_COLOR32|ILC_MASK,1,0);
+            ImageList_AddIcon(images,actual);
+            same_icon(images,reference);
+            ImageList_Destroy(images); DestroyIcon(reference); DestroyIcon(actual);
+        }
+        struct Restore {
+            ui::PlayerWindow& player;
+            std::vector<ui::PlayerWindow::AssociationOptionNode> nodes;
+            explicit Restore(ui::PlayerWindow& p):player(p) {
+                for (const auto& node:p.options_association_nodes_) nodes.push_back(*node);
+            }
+            ~Restore() {
+                for (size_t i=0;i<nodes.size();++i) *player.options_association_nodes_[i]=nodes[i];
+            }
+        } restore(player); // Never commit synthetic icon edits, even on failure.
+        unsigned checked=0;
+        for (auto category=TreeView_GetChild(tree,root); category;
+             category=TreeView_GetNextSibling(tree,category)) {
+            for (auto leaf=TreeView_GetChild(tree,category); leaf;
+                 leaf=TreeView_GetNextSibling(tree,leaf)) {
+                TVITEMW value{}; value.mask=TVIF_PARAM; value.hItem=leaf;
+                TreeView_GetItem(tree,&value);
+                const auto& node=*reinterpret_cast<ui::PlayerWindow::AssociationOptionNode*>(value.lParam);
+                Require(!node.icon.empty(),"no icon path or embedded fallback for extension");
+                if (!node.current) {
+                    const auto file=fs::path(executable).parent_path()/L"Icons"/(node.extension+L".ico");
+                    const bool playlist=node.extension==L"M3U" || node.extension==L"M3U8" ||
+                        node.extension==L"TTBL" || node.extension==L"TTPL";
+                    Require(node.icon==(fs::is_regular_file(file)?file.wstring():location(playlist?2:1)),
+                        "unassociated extension used another installation's icon instead of Icons/fallback");
+                }
+                TreeView_SelectItem(tree,leaf); // Real TVN_SELCHANGED, no host input injection.
+                BUTTON_IMAGELIST image{};
+                SendMessageW(button,BCM_GETIMAGELIST,0,reinterpret_cast<LPARAM>(&image));
+                Require(image.himl && image.himl!=BCCL_NOGLYPH,"leaf selection did not refresh preview");
+                Require(player.OptionsAssociationIcon(page)==node.icon,"selected icon location mismatch");
+                ++checked;
+            }
+        }
+        const auto category=TreeView_GetChild(tree,root);
+        const auto first=TreeView_GetChild(tree,category);
+        Require(first!=nullptr,"no extension for category preview test");
+        TreeView_SelectItem(tree,category);
+        player.SetOptionsAssociationIcon(page,location(1));
+        Require(player.OptionsAssociationIcon(page)==location(1),"0049D125 category assignment not recursive");
+        HICON audio{}; ExtractIconExW(executable,1,&audio,nullptr,1);
+        same_icon(player.options_association_button_images_[4],audio); DestroyIcon(audio);
+        TreeView_SelectItem(tree,root);
+        player.SetOptionsAssociationIcon(page,location(2));
+        Require(std::ranges::all_of(player.options_association_nodes_,[&](const auto& node){return node->icon==location(2);}),
+            "0049D125 root assignment did not reach every extension");
+        TreeView_SelectItem(tree,category);
+        player.SetOptionsAssociationIcon(page,location(1));
+        TreeView_SelectItem(tree,root);
+        Require(player.OptionsAssociationIcon(page).empty() && !player.options_association_button_images_[4],
+            "mixed root retained a stale file-type preview");
+        TreeView_SelectItem(tree,first);
+        // Quotes/comma/positive index, negative resource ID and an invalid
+        // file must all follow the same original extraction/clear path.
+        player.SetOptionsAssociationIcon(page,location(-300));
+        Require(player.options_association_button_images_[4]!=nullptr,"negative icon resource ID not supported");
+        player.SetOptionsAssociationIcon(page,L"Z:\\nonexistent-ttplayer-test\\missing.ico");
+        BUTTON_IMAGELIST cleared{};
+        SendMessageW(button,BCM_GETIMAGELIST,0,reinterpret_cast<LPARAM>(&cleared));
+        Require(!player.options_association_button_images_[4] && cleared.himl==BCCL_NOGLYPH,
+            "invalid icon did not detach old image list");
+        const auto gdi_before=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
+        const auto user_before=GetGuiResources(GetCurrentProcess(),GR_USEROBJECTS);
+        for (unsigned i=0;i<100;++i) {
+            player.SetOptionsAssociationIcon(page,location(i%2+1));
+            Require(player.options_association_button_images_[4]!=nullptr,"repeated icon replacement failed");
+        }
+        Require(GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)<=gdi_before+4 &&
+            GetGuiResources(GetCurrentProcess(),GR_USEROBJECTS)<=user_before+4,
+            "repeated preview replacement leaked GDI/USER handles");
+        std::cout << "association preview: " << checked << " uppercase leaves, selection refresh, common/mixed,\n"
+                     "recursive assignment, fallback resource pixels and repeated replacement passed\n";
+    }
+    struct ReminderCheck {
+        HWND owner{};
+        bool verify{}, entered{}, owner_disabled{};
+        int button{IDCLOSE};
+        ULONGLONG started{};
+    };
+    static inline ReminderCheck* reminder{};
+    static VOID CALLBACK CheckReminder(HWND,UINT,UINT_PTR,DWORD) {
+        if (!reminder) return;
+        EnumThreadWindows(GetCurrentThreadId(),[](HWND window,LPARAM value)->BOOL {
+            auto& check=*reinterpret_cast<ReminderCheck*>(value);
+            // TaskDialog buttons are hosted by DirectUI, not necessarily
+            // immediate HWND children discoverable through GetDlgItem.
+            if (GetWindow(window,GW_OWNER)!=check.owner || !IsWindowVisible(window)) return TRUE;
+            wchar_t type[64]{}; GetClassNameW(window,type,64);
+            if (std::wstring_view(type)!=L"#32770") return TRUE;
+            check.entered=true;
+            check.owner_disabled=IsWindowEnabled(check.owner)==FALSE;
+            SendMessageW(window,TDM_CLICK_VERIFICATION,check.verify,FALSE);
+            PostMessageW(window,TDM_CLICK_BUTTON,check.button,0);
+            return FALSE;
+        },reinterpret_cast<LPARAM>(reminder));
+        if (!reminder->entered && GetTickCount64()-reminder->started>3000) {
+            // Let CTest's bounded timeout report a broken task-dialog route;
+            // do not interact with windows belonging to another process.
+            EnumThreadWindows(GetCurrentThreadId(),[](HWND window,LPARAM owner)->BOOL {
+                if (GetWindow(window,GW_OWNER)==reinterpret_cast<HWND>(owner)) PostMessageW(window,WM_CLOSE,0,0);
+                return TRUE;
+            },reinterpret_cast<LPARAM>(reminder->owner));
+        }
+    }
+    static void CheckAssociationActions(ui::PlayerWindow& player) {
+        const HWND page=player.options_pages_[14], tree=GetDlgItem(page,2038);
+        const HWND suppress=GetDlgItem(page,IDC_ASSOCIATION_SUPPRESS);
+        const HWND refresh=GetDlgItem(page,IDC_ASSOCIATION_REFRESH);
+        Require(suppress && refresh,"association reminder/refresh controls missing");
+        const auto rect=[](HWND control) { RECT value{}; GetWindowRect(control,&value); return value; };
+        const auto label=rect(GetDlgItem(page,2282)), checkbox=rect(suppress), list=rect(tree), glyph=rect(refresh), client=rect(page);
+        Require(checkbox.top>=label.bottom && checkbox.bottom<=client.bottom,"reminder checkbox overlaps footer or leaves page");
+        Require(glyph.bottom<=list.top && glyph.right<=list.right,"refresh icon overlaps tree or right column");
+        BUTTON_IMAGELIST image{};
+        SendMessageW(refresh,BCM_GETIMAGELIST,0,reinterpret_cast<LPARAM>(&image));
+        int width{},height{};
+        Require(image.himl && ImageList_GetIconSize(image.himl,&width,&height) && width==16 && height==16 &&
+            image.uAlign==BUTTON_IMAGELIST_ALIGN_CENTER,"refresh glyph is not the centered original toolbar image");
+        const bool initial=player.settings_.player.suppress_association_reminder;
+        SendMessageW(suppress,BM_CLICK,0,0);
+        Require(player.settings_.player.suppress_association_reminder!=initial,"page checkbox did not apply immediately");
+        SendMessageW(suppress,BM_CLICK,0,0);
+        Require(player.settings_.player.suppress_association_reminder==initial,"page checkbox cannot re-enable reminders");
+        const auto root=TreeView_GetRoot(tree);
+        TreeView_SelectItem(tree,root); TreeView_EnsureVisible(tree,root);
+        RECT root_label{}; TreeView_GetItemRect(tree,root,&root_label,TRUE);
+        struct RestorePending {
+            ui::PlayerWindow& player; HWND page;
+            std::vector<ui::PlayerWindow::AssociationOptionNode> nodes;
+            RestorePending(ui::PlayerWindow& p,HWND w):player(p),page(w) {
+                for (const auto& node:p.options_association_nodes_) nodes.push_back(*node);
+            }
+            void RestoreNodes() {
+                for (size_t i=0;i<nodes.size();++i) *player.options_association_nodes_[i]=nodes[i];
+            }
+            ~RestorePending() {
+                RestoreNodes(); player.options_association_commit_pending_=false;
+                MSG message{};
+                while (PeekMessageW(&message,page,ui::detail::kApplyOptionsAssociations,
+                    ui::detail::kApplyOptionsAssociations,PM_REMOVE)) {}
+            }
+        } restore(player,page);
+        const POINT icon{root_label.left-8,(root_label.top+root_label.bottom)/2};
+        Require(!player.ToggleOptionsAssociationAt(page,POINT{root_label.left+3,icon.y}),"text clicks incorrectly toggle associations");
+        Require(player.ToggleOptionsAssociationAt(page,icon) && player.options_association_commit_pending_,
+            "checkbox click did not enqueue immediate association application");
+        Require(player.ToggleOptionsAssociationAt(page,icon),"repeat root checkbox click failed");
+        MSG queued{};
+        Require(PeekMessageW(&queued,page,ui::detail::kApplyOptionsAssociations,ui::detail::kApplyOptionsAssociations,PM_REMOVE),
+            "application message missing");
+        Require(!PeekMessageW(&queued,page,ui::detail::kApplyOptionsAssociations,ui::detail::kApplyOptionsAssociations,PM_REMOVE),
+            "root/rapid clicks produced duplicate application dialogs");
+        // Inspect the actual queued input path but restore all synthetic
+        // edits BEFORE dispatch: never register real host file types in UI tests.
+        restore.RestoreNodes();
+        SendMessageW(page,ui::detail::kApplyOptionsAssociations,0,0);
+        Require(!player.options_association_commit_pending_ && !player.options_association_committing_,
+            "immediate application message did not drain cleanly");
+        const auto selected=TreeView_GetSelection(tree);
+        const auto count=TreeView_GetCount(tree);
+        SendMessageW(refresh,BM_CLICK,0,0);
+        Require(TreeView_GetSelection(tree)==selected && TreeView_GetCount(tree)==count &&
+            !player.options_association_commit_pending_,"refresh rebuilt the tree or queued registration writes");
+        for (int selected_button : {IDCLOSE,IDOK}) {
+            player.settings_.player.suppress_association_reminder=false;
+            CheckDlgButton(page,IDC_ASSOCIATION_SUPPRESS,BST_UNCHECKED);
+            ReminderCheck check{player.options_window_,selected_button==IDCLOSE,false,false,selected_button,GetTickCount64()};
+            reminder=&check;
+            const auto timer=SetTimer(nullptr,0,40,CheckReminder);
+            Require(timer!=0,"cannot automate association reminder");
+            const bool open=player.ShowOptionsAssociationReminder(page);
+            KillTimer(nullptr,timer); reminder=nullptr;
+            Require(check.entered && check.owner_disabled && IsWindowEnabled(check.owner),
+                "reminder is not a modal owned task dialog or did not re-enable owner");
+            Require(open==(selected_button==IDOK),"Close unexpectedly opens system settings");
+            Require(player.settings_.player.suppress_association_reminder==check.verify &&
+                (IsDlgButtonChecked(page,IDC_ASSOCIATION_SUPPRESS)==BST_CHECKED)==check.verify,
+                "task dialog verification and page checkbox are not synchronized");
+            player.settings_.player.suppress_association_reminder=true;
+            Require(!player.ShowOptionsAssociationReminder(page),"suppressed reminder still opens a dialog");
+        }
+        player.settings_.player.suppress_association_reminder=initial;
+        CheckDlgButton(page,IDC_ASSOCIATION_SUPPRESS,initial?BST_CHECKED:BST_UNCHECKED);
+        std::cout << "association actions: immediate coalesced click dispatch, refresh layout/state,\n"
+                     "modal verification checkbox, Close/Open and suppression passed (no live registration)\n";
     }
     static LRESULT CALLBACK Observe(HWND window, UINT message, WPARAM wp,
                                     LPARAM lp, UINT_PTR, DWORD_PTR data) {
@@ -449,7 +720,7 @@ struct SkinRebindAccess {
         fs::remove(directory);
         std::cout << "/reg: two-page shell, native Close/title-bar, inert Esc/WM_CLOSE, geometry persistence passed\n";
     }
-    static void Run(HMODULE resources, const fs::path& directory) {
+    static void Run(HMODULE resources, const fs::path& directory, const fs::path& original) {
         settings::Settings settings;
         settings.source_path = directory / L"test-only.xml";
         settings.general.tray_icon = false;
@@ -460,6 +731,9 @@ struct SkinRebindAccess {
         ui::PlayerWindow player(settings);
         player.SetSkinResourceModule(resources);
         player.instance_ = GetModuleHandleW(nullptr);
+        player.reader_formats_ = {{L"AAC 音频文件",L"*.aa;*.aac",{}},
+            {L"TAK 音频文件",L"*.tak",{}},{L"TTA 音频文件",L"*.tta",{}},
+            {L"Vorbis/Ogg 音频文件",L"*.ogg",{}},{L"Window Media 音频文件",L"*.wma",{}}};
         player.ShowOptions(14);
         const HWND sheet = player.options_window_;
         Require(sheet && IsWindow(sheet), "options sheet did not open");
@@ -469,6 +743,8 @@ struct SkinRebindAccess {
         Pump();
         CheckOptionsChrome(player);
         CheckAssociationImages(player.options_pages_[14], resources);
+        CheckAssociationSelection(player, original);
+        CheckAssociationActions(player);
         Events sheet_events;
         Require(SetWindowSubclass(sheet, Observe, 1,
             reinterpret_cast<DWORD_PTR>(&sheet_events)), "cannot observe options sheet");
@@ -579,7 +855,7 @@ int wmain(int argc, wchar_t** argv) {
         Access::Require(resources != nullptr, "original 5.7.9 resources unavailable");
         const auto directory = fs::temp_directory_path() /
             (L"TTPlayer-options-drawing-" + std::to_wstring(GetCurrentProcessId()));
-        Access::Run(resources, directory);
+        Access::Run(resources, directory, fs::path(argv[1]));
         Access::RunRegistration(resources, directory);
         FreeLibrary(resources);
         OleUninitialize();

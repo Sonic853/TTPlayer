@@ -35,6 +35,11 @@ BEGIN
     IDS_LYRIC_SERVICES_DOWN "下移"
     IDS_LYRIC_SERVICES_ADD "新增"
     IDS_LYRIC_SERVICES_DELETE "删除"
+    IDS_ASSOCIATION_VIEW_SYSTEM "前往查看系统关联"
+    IDS_ASSOCIATION_USER_CHOICE "已注册可打开的音频格式。默认播放器需要在 Windows 的系统关联界面中由您确认；返回后列表将显示实际关联状态。"
+    IDS_ASSOCIATION_SUPPRESS "不再提示关联提醒"
+    IDS_ASSOCIATION_REFRESH "刷新"
+    IDS_ASSOCIATION_OPEN_SETTINGS "前往系统设置"
 END
 
 IDD_LYRIC_SERVICES DIALOGEX 0, 0, 280, 220
@@ -62,6 +67,9 @@ END
 // TTPlayer.exe loads this exact group-icon identifier in FUN_0045FAD8 before
 // associating the resulting 16x16 HICON with command 0xE140.
 128 ICON "assets/TTPlayer.ico"
+// 5.7.9 COptionsAsso fallback icon indices 1 and 2 (00491213).
+300 ICON "assets/AudioFile.ico"
+301 ICON "assets/PlaylistFile.ico"
 
 // New optional LAME DLL configuration; legacy AddIns keep their own dialogs.
 4090 DIALOGEX 0, 0, 202, 99

@@ -13,6 +13,8 @@
 #include <vector>
 
 namespace ttplayer::ui::detail {
+// Defer the immediate association commit until TreeView's NM_CLICK unwinds.
+inline constexpr UINT kApplyOptionsAssociations = WM_APP + 0x314;
 // The native skin rebinders (0046D0C1/0044E5CE/0046ACE2/0046BCBE)
 // suppress redraw on already visible windows while rebinding their controls.
 // WM_SETREDRAW(TRUE) would show an originally hidden window, so only pair it

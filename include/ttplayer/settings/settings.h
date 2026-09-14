@@ -85,6 +85,7 @@ struct PlayerSettings {
     bool show_elapsed_time{true};
     bool check_association{true};
     bool auto_associate{};
+    bool suppress_association_reminder{};
     bool first_run_552{true};
     std::wstring user_word;
     std::wstring user_word_md5;

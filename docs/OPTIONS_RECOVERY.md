@@ -344,7 +344,8 @@ Windows Sandbox 证据及当前宿主机双版本对照确认的选项窗口行�
   描述排序，再把播放列表格式追加到末尾；随后 `FUN_0049D2FA` 从这份完整
   Open File filter 构造扩展名树。
 - 每个格式项各自生成一个分类，不合并同名分类，也不跨 reader 去重扩展名；
-  扩展名保留 filter 中的原始大小写。普通分类和叶节点使用 `TVI_SORT`，最后
+  扫描保留 filter 拼写，但插入叶节点前由 `00433B2E` 转为大写（修正先前
+  “树文字保留原始大小写”的误读）。普通分类和叶节点使用 `TVI_SORT`，最后
   的播放列表分类使用 `TVI_LAST`。父、分组、叶节点使用三态勾选，点击父节点
   递归设置所有子项。
 - 已确认的排除扩展名是 `avi`、`asf`、`wmv`、`rm`、`ram`、`rmvb`、
@@ -367,6 +368,156 @@ Windows Sandbox 证据及当前宿主机双版本对照确认的选项窗口行�
   不能留下无响应的死控件。
 - 原版播放命令为 `"TTPlayer.exe" "%1"`，加入列表命令为
   `"TTPlayer.exe" /a "%1"`；ProgID 形式为 `Audio.<extension>`。
+
+#### 系统关联勾选图与现代 Windows 默认程序（2026-09-14）
+
+仅对照 5.7.9 的伪代码与资源；关联方式按 Windows 的现行限制适配，不声称
+现代系统的注册流程与原版提升写注册表的流程逐指令一致。
+
+原版勾选框不是 TreeView 的原生 checkbox/state image：
+
+- `0049D2FA` 调用 `0048C8E1`，载入 `ttpres.dll` 位图 `356/0x164`，
+  单帧宽 16、增长数 0、白色透明掩码、加载标志 0，再发送
+  `TVM_SETIMAGELIST(0x1109, wParam=0)`，即 **TVSIL_NORMAL**。
+- `004A4BC0` 以 `mask=0x22` 更新 `TVIF_IMAGE | TVIF_SELECTEDIMAGE`。
+  两个字段使用相同的零基索引：0 未选、1 全选、2 混合。
+- `0049EBA4` 用 `GetMessagePos` 和 TreeView hit-test，仅接受 `flags & 2`
+  （`TVHT_ONITEMICON`），然后按 `state != 1` 切换状态。
+  `0049CEC9` 下传子节点，`0049CF48` 汇总父节点。
+
+旧重建版错误使用 `TVSIL_STATE`、一基 `TVIS_STATEIMAGEMASK`，并把前两帧
+理解反了，造成图形、缩进及点击区域差异。现已改回上述普通图像列表路径；
+CD、文件夹、启动检查三个普通 checkbox 仍按原资源模板绘制，不替换为树图像。
+
+原版 `0049DFB4` 将 FileTypeAsso XML 交给 `ttpsvr.exe`。现代 Windows 不再
+允许应用通过写 `.ext` 默认值强行替换受保护的用户选择，重建版采用：
+
+1. 注册 HKCU `Software\TTPlayerRebuild\Capabilities`、
+   `Software\RegisteredApplications` 的 `TTPlayerRebuild` 条目，以及
+   `Software\Classes\TTPlayerRebuild.Audio.<ext>` 和 `OpenWithProgids`。
+   发布候选处理程序不等同于已成为默认程序，不写入 `UserChoice` 或其 Hash。
+2. 使用独立 ProgID，避免覆盖原版的 `Audio.*`；`/unreg` 同时识别旧重建版
+   留下的所有权/备份元数据，仅恢复当前 EXE 拥有的注册项，不删除原版或其它
+   安装拥有的值。自定义文件类型图标在刷新候选列表时保留。
+3. 树中勾选状态使用 `AssocQueryStringW(ASSOCSTR_EXECUTABLE)` 查询实际处理
+   程序，不再把候选注册成功显示为已关联。返回选项窗口时刷新未编辑的节点，
+   同时保留尚未提交的用户选择。
+
+| 系统 | 设置关联/查看入口 |
+| --- | --- |
+| Vista / Win7 | 注册候选后调用 `IApplicationAssociationRegistration::SetAppAsDefault`；手动入口调用 `LaunchAdvancedAssociationUI` |
+| Win8 / 8.1 | 注册候选，调用 `LaunchAdvancedAssociationUI`，由用户确认默认程序 |
+| Win10 / 早期 Win11 | 注册候选，进入 `ms-settings:defaultapps` |
+| 更新后的 Win11 | 进入 `ms-settings:defaultapps?registeredAppUser=TTPlayerRebuild`；失败时降级为通用页面 |
+
+Win11 定向入口的版本门槛为 22000.1817、22621.1555 或更新发布版本；所有入口
+都有错误反馈和控制面板回退。`2282` 提示文本改为“前往查看系统关联”，
+右侧 `2281`“手动设置关联”按钮保留。最初实现在关闭/保存时提示系统确认；
+2026-09-15 按用户要求改为勾选后立即提交并提示，见下节。
+取消某种已关联格式同样需要用户在系统界面选择其它处理程序。
+不会在自动启动检查中反复弹出系统设置，仅在用户新确认的操作后打开。
+
+依据：微软 [默认程序注册](https://learn.microsoft.com/en-us/windows/win32/shell/default-programs)、
+[Windows 8 起的默认程序限制](https://learn.microsoft.com/en-us/windows/win32/shell/vista-managing-defaults)、
+[关联选择界面的系统版本差异](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl/nf-shobjidl-iapplicationassociationregistrationui-launchadvancedassociationui)、
+[Win11 定向默认应用入口](https://learn.microsoft.com/en-us/windows/apps/develop/launch/launch-default-apps-settings)。
+
+验证：
+
+- `options_drawing_tests`：原资源三帧 16×16 的 RGB/透明掩码绘制、普通/选中
+  图索引、图标命中区域、新提示文字、选项页绘制与注册窗口回归通过。
+- `default_programs_tests`：Win7/8/8.1/10/11 路由、候选注册幂等性、图标
+  保留、其它播放器注册项保护、跨安装所有权检查、旧注册备份恢复通过。
+  写操作全部在本进程唯一 HKCU 测试子树内，不修改宿主默认关联。
+- `file_association_tests`：旧备份恢复与快捷方式回归通过；仅创建并移除了
+  带进程/时间 nonce 的测试快捷方式。
+- 连同 `lyric_search_tests`、`lyric_association_tests`、`window_topmost_tests`，
+  最终宿主 Release 回归共 6 项全部通过（33.29 秒）。
+- 宿主机实际 Release 使用临时运行目录 `/reg --smoke-test` 打开并截图，
+  新提示与勾选图正常，标题栏系统关闭命令正常退出。未点击真实注册按钮，
+  未关闭用户正在运行的播放器。此次没有完成原版并行运行截图对比。
+
+**验证边界：** Win7/8/10 的版本分支是代码与路由测试，不是对应系统实机测试。
+尤其当前 VS 2026 / MSVC 14.51 Release 的标准库静态导入 `CreateFile2` 和
+`CopyFile2`；前者的 [最低客户端为 Windows 8](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfile2)。
+因此恢复 Win7 关联 API 分支不等于该 Release EXE 已能在 Win7 启动。
+Win7 整体兼容仍需兼容工具链/运行库及独立系统验证，本次未修改工具链或添加
+替换系统 API 的补丁。也未尝试绕过现代 Windows 的 UserChoice 保护。
+
+#### 即时提交、关联提醒与只读刷新（2026-09-15）
+
+这是按用户要求增加的交互，不声称原版存在同样的现代 Windows 弹窗。
+保留 `0049EBA4` 的图标命中与递归勾选规则，在本次树点击通知返回后投递
+`kApplyOptionsAssociations`，立即提交变更，不必等关闭/全部保存。分类或
+根节点只提交一个批次，合并未处理的提交消息，防止逐扩展名连续弹窗；
+提交期间阻止重复提交和选项窗口重入关闭。
+
+- 需要用户确认默认程序时，使用原生 `TaskDialogIndirect` 显示已有说明，
+  提供“前往系统设置”“关闭”和“不再提示关联提醒”勾选项。关闭提醒不会
+  撤销已完成的候选注册，也不会打开系统设置。
+- 页面上同名 checkbox 放在“前往查看系统关联”下方，与提醒中的勾选项
+  实时双向同步。保存为 `TTPlayerRebuild.xml` 的
+  `Player/@SuppressAssociationReminder`（0/1，默认 0）。它独立于
+  启动检查使用的 `CheckAssociation` 和 `AutoAssociate`。
+- 勾选不再提示后，后续树操作仍提交注册，但不弹出此提醒、也不自动打开
+  系统设置。“手动设置关联”按钮仍可主动进入；取消勾选即可恢复提醒。
+- “关联文件类型:”右侧增加图标按钮，复用原资源“重新载入”图像及选项
+  图像按钮绘制，悬停提示“刷新”。仅重新查询实际关联并刷新勾选状态和
+  当前图标预览，不执行注册、不重建列表、不丢失当前选择。
+- 页面仅缩短左树一个行高并上移原页脚；选项窗口大小、右侧图标及快捷方式
+  控件不变。动态控件初始化可重复调用，不反复缩小列表。
+
+现代 Windows 的 `UserChoice` 仍由系统维护。候选注册成功后但用户尚未
+确认时，列表按实际查询显示未勾选，不把候选注册伪装成已经成为默认播放器。
+TaskDialog 勾选状态由原生验证字段返回，参见
+[TaskDialogIndirect](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-taskdialogindirect)。
+
+宿主机验证：
+
+- `options_drawing_tests` 验证真实树图标命中、合并投递和提交消息处理、
+  刷新不改变选择/树节点数、新控件布局及图像、原生模态 owner 禁用/恢复、
+  提醒关闭/打开返回值、两个 checkbox 同步和抑制提醒。
+  在执行提交消息前恢复测试节点，未注册宿主的真实音频格式。
+- `default_programs_tests` 验证旧 XML 缺少新属性时默认提醒、开关写入和
+  重新读取、两个启动检查选项不受影响；原关联后端测试仍只写隔离注册表子树。
+- 临时副本 `/reg --smoke-test` 实际运行、截图并正常关闭，布局无重叠；
+  未更改用户安装中的配置及默认关联。
+
+#### 扩展名大写与文件类型图标预览补正（2026-09-14）
+
+这次补正的是扩展名叶节点文字，以及右侧 `2108`“选择文件图标”按钮上的
+预览。原版树节点仍使用三态勾选图，没有在勾选图旁再增加一套文件图标。
+
+| 原版地址 | 确认的行为与重建修复 |
+| --- | --- |
+| `0049D2FA → 00433B2E` | `_wcsupr` 后再插入 `TVI_SORT` 叶节点；显示 `AA/AAC/TAK/OGG/WAV/TTPL` 等大写文本，不改 reader 的过滤格式或注册表归一化规则 |
+| `00491213` | 音频回退图标字符串为 `"%s",1`，播放列表为 `"%s",2`；对应字符串地址 `0051E548/0051E538`，已用原 EXE 反汇编和只读数据核实 |
+| `0049D2FA` | 当前程序不是关联处理程序时，丢弃关联查询得到的图标，改用 EXE 旁 `Icons/<EXT>.ico`，文件不存在时使用上面的内置回退；不借用其它安装目录的候选 ProgID 图标 |
+| `0049EB86 → 0049D1A2` | TreeView 选中项变化后刷新预览；解析路径和索引，`ExtractIconExW` 取大图标，按 `SM_CXICON/SM_CYICON` 交给按钮图像绘制 |
+| `0049D011` | 递归查询分类/根节点的公共图标，按忽略大小写的路径比较；不一致时返回空路径，清除上一项预览 |
+| `0049DC89 → 0049D125` | 选择图标不局限于叶节点，也可递归应用到选中分类/根节点的所有扩展名，选完立即刷新 |
+
+此前重建版 `TVN_SELCHANGED` 仅启用按钮，并没有加载/附加任何预览图像；
+从文件夹批量选择、单项选择也只修改路径。现已接入上述刷新链。
+无图标或提取失败时，通过
+[`BCCL_NOGLYPH`](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/ns-commctrl-button_imagelist)
+先解除旧图像列表，随后释放旧资源并重画；按钮依然可以点击。新图标复制入
+图像列表后释放临时 HICON，避免选择切换造成句柄泄漏。
+
+补入原 EXE 的 RT_GROUP_ICON `300/301`（索引 1/2）及其完整 RT_ICON 图像，
+文件为 `src/app/assets/AudioFile.ico`、`PlaylistFile.ico`。全部尺寸/色深帧
+原样保留，不把原版 EXE 加为运行依赖；来源和 SHA-256 见同目录
+`ASSOCIATION_ICONS.md`。播放器本身图标仍为原先的索引 0。
+
+验证覆盖 26 个实际 HWND 叶节点，包括截图中的 AA/AAC、TAK/TTA、OGG/WAV、
+WMA 与播放列表格式：文字大写、选择通知自动刷新、分类/根节点递归设置、
+公共/不同图标、负资源索引、无效图标清除、连续替换 100 次的 GDI/USER
+句柄计数。两个内置回退图标与原 EXE 的提取结果逐像素比较通过。
+人工检查宿主机临时目录 `/reg --smoke-test` 截图，确认本地 AA 图标及
+没有 Icons 文件夹时 TTPL 的内置图标均出现，关闭正常。
+本轮 `options_drawing_tests`、`default_programs_tests`、`file_association_tests`、
+`lyric_search_tests`、`lyric_association_tests`、`window_topmost_tests` 六项通过。
+测试未修改宿主的默认程序或用户配置。
 
 #### `/reg` 窗口与快捷方式按钮（2026-09-14）
 

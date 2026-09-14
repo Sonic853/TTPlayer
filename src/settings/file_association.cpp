@@ -13,6 +13,8 @@
 #include <objbase.h>
 #include <shlobj.h>
 #include <shlwapi.h>
+#include <shobjidl.h>
+#include <shellapi.h>
 
 #pragma comment(lib, "Advapi32.lib")
 #pragma comment(lib, "Ole32.lib")
@@ -465,6 +467,65 @@ struct ManagedChange {
     return EqualInsensitive(value, L"Software\\Classes");
 }
 
+OSVERSIONINFOW AssociationWindowsVersion() {
+    OSVERSIONINFOW info{sizeof(info)};
+    using GetVersion = LONG (WINAPI*)(OSVERSIONINFOW*);
+    const auto get_version = reinterpret_cast<GetVersion>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+    if (!get_version || get_version(&info) != 0) info.dwMajorVersion = 10;
+    return info; // Failure must never enable the obsolete default-setting API.
+}
+
+std::wstring CapabilitiesPath(const FileAssociationBackendOptions& options) {
+    return IsRealClassesStore(options.current_user_classes_subkey)
+        ? L"Software\\TTPlayerRebuild\\Capabilities"
+        : JoinRegistryPath(options.current_user_classes_subkey, L"Registration\\Capabilities");
+}
+
+std::wstring RegisteredApplicationsPath(const FileAssociationBackendOptions& options) {
+    return IsRealClassesStore(options.current_user_classes_subkey)
+        ? L"Software\\RegisteredApplications"
+        : JoinRegistryPath(options.current_user_classes_subkey, L"Registration\\RegisteredApplications");
+}
+
+FileAssociationResult SetRegistrationString(std::wstring_view path,
+                                           const wchar_t* name, std::wstring_view value) {
+    UniqueRegKey key;
+    bool existed{};
+    LONG status = CreateKey(path, key, existed);
+    if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry,
+        L"create default-program registration", status);
+    std::optional<std::wstring> previous;
+    status = ReadStringValue(key.get(), name, previous);
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+        return Win32Failure(FileAssociationError::registry, L"read default-program registration", status);
+    if (previous && *previous == value) return Success();
+    status = WriteStringValue(key.get(), name, value);
+    return status == ERROR_SUCCESS ? Success(true) : Win32Failure(
+        FileAssociationError::registry, L"write default-program registration", status);
+}
+
+FileAssociationResult SetOpenWith(const FileAssociationBackendOptions& options,
+                                   std::wstring_view extension, const std::wstring& prog_id, bool add) {
+    const auto path = JoinRegistryPath(options.current_user_classes_subkey,
+        L"." + std::wstring(extension) + L"\\OpenWithProgids");
+    UniqueRegKey key;
+    bool existed{};
+    LONG status = add ? CreateKey(path, key, existed) : OpenKey(path, KEY_QUERY_VALUE | KEY_SET_VALUE, key);
+    if (!add && status == ERROR_FILE_NOT_FOUND) return Success();
+    if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, L"open OpenWithProgids", status);
+    DWORD type{}, bytes{};
+    status = RegQueryValueExW(key.get(), prog_id.c_str(), nullptr, &type, nullptr, &bytes);
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+        return Win32Failure(FileAssociationError::registry, L"query OpenWithProgids", status);
+    if ((add && status == ERROR_SUCCESS) || (!add && status == ERROR_FILE_NOT_FOUND)) return Success();
+    status = add ? RegSetValueExW(key.get(), prog_id.c_str(), 0, REG_NONE, nullptr, 0)
+                 : RegDeleteValueW(key.get(), prog_id.c_str());
+    // Never delete the extension key or other applications' named entries.
+    return status == ERROR_SUCCESS ? Success(true) : Win32Failure(
+        FileAssociationError::registry, L"update OpenWithProgids", status);
+}
+
 [[nodiscard]] std::filesystem::path CanonicalForCompare(
     const std::filesystem::path& value) {
     std::error_code error;
@@ -559,8 +620,8 @@ std::vector<AssociableExtension> BuildAssociableExtensions(
     for (const auto& reader : reader_formats) {
         // 0049D2FA repeatedly searches the serialized filter pattern for a
         // literal '.', takes bytes through the next ';', '*' or '.', and then
-        // resumes at that delimiter.  It deliberately does not canonicalize
-        // case or de-duplicate extensions contributed by different readers.
+        // resumes at that delimiter. Preserve reader spelling here; the UI's
+        // 00433B2E insertion step uppercases the label. Keep reader duplicates.
         const wchar_t* cursor = reader.pattern.c_str();
         while ((cursor = std::wcschr(cursor, L'.')) != nullptr) {
             ++cursor;
@@ -654,8 +715,11 @@ AssociationQuery FileAssociationBackend::QueryExtension(
     query.result = ReadDefaultAt(icon_key, query.icon, icon_present);
     if (!query.result) return query;
 
-    if (query.associated && IsRealClassesStore(
-                                options_.current_user_classes_subkey)) {
+    // UserChoice can select our ProgID without HKCU\\Classes\\.ext pointing
+    // at it. Query the effective shell executable independently of that key.
+    query.effective = query.associated;
+    if (IsRealClassesStore(options_.current_user_classes_subkey)) {
+        query.effective = false;
         const std::wstring dotted = L"." + query.extension;
         DWORD characters = 0;
         HRESULT shell_result = AssocQueryStringW(
@@ -678,7 +742,7 @@ AssociationQuery FileAssociationBackend::QueryExtension(
     return query;
 }
 
-FileAssociationResult FileAssociationBackend::SetExtensionAssociation(
+FileAssociationResult FileAssociationBackend::SetLegacyExtensionAssociation(
     std::wstring_view extension, bool enabled, std::wstring_view description,
     std::wstring_view icon, const ShellVerbLabels& labels) {
     const std::wstring normalized = NormalizeExtension(extension);
@@ -754,7 +818,12 @@ FileAssociationResult FileAssociationBackend::SetExtensionIcon(
     std::wstring_view extension, std::wstring_view icon) {
     AssociationQuery query = QueryExtension(extension);
     if (!query.result) return query.result;
-    if (!query.associated)
+    std::wstring command;
+    bool present{};
+    const auto read_command = ReadDefaultAt(JoinRegistryPath(options_.current_user_classes_subkey,
+        query.managed_prog_id + L"\\shell\\open\\command"), command, present);
+    if (!read_command) return read_command;
+    if (!present || !EqualInsensitive(command, OpenCommand(executable_, false)))
         return Win32Failure(FileAssociationError::registry,
                             L"set icon for an unmanaged association",
                             ERROR_NOT_FOUND);
@@ -769,6 +838,263 @@ FileAssociationResult FileAssociationBackend::SetExtensionIcon(
         NotifyShellAssociationsChanged();
     change.result.changed = change.changed;
     return change.result;
+}
+
+DefaultAppsTarget SelectDefaultAppsTarget(DWORD major, DWORD minor, DWORD build, DWORD revision) noexcept {
+    (void)minor;
+    if (major < 10) return DefaultAppsTarget::control_panel;
+    if (build >= 22631 || (build == 22621 && revision >= 1555) ||
+        (build == 22000 && revision >= 1817)) return DefaultAppsTarget::application_settings;
+    return DefaultAppsTarget::settings;
+}
+
+FileAssociationResult FileAssociationBackend::RegisterApplication(
+    const std::vector<AssociableExtension>& formats) {
+    if (executable_.empty()) return Invalid(L"register default program", L"executable is empty");
+    // Validate the complete input before changing any keys.
+    for (const auto& format : formats)
+        if (NormalizeExtension(format.extension).empty())
+            return Invalid(L"register default program", L"invalid extension");
+    const auto capabilities = CapabilitiesPath(options_);
+    UniqueRegKey key;
+    LONG status = OpenKey(capabilities, KEY_QUERY_VALUE, key);
+    if (status == ERROR_SUCCESS) {
+        std::optional<std::wstring> owner;
+        status = ReadStringValue(key.get(), kOwnerValue, owner);
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+            return Win32Failure(FileAssociationError::registry, L"read capabilities owner", status);
+        if (owner && !EqualInsensitive(*owner, executable_.wstring()))
+            return Win32Failure(FileAssociationError::registry, L"default program belongs to another installation", ERROR_SHARING_VIOLATION);
+    } else if (status != ERROR_FILE_NOT_FOUND) {
+        return Win32Failure(FileAssociationError::registry, L"open capabilities", status);
+    }
+    key.reset();
+    status = OpenKey(RegisteredApplicationsPath(options_), KEY_QUERY_VALUE, key);
+    if (status == ERROR_SUCCESS) {
+        std::optional<std::wstring> registered;
+        status = ReadStringValue(key.get(), L"TTPlayerRebuild", registered);
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+            return Win32Failure(FileAssociationError::registry, L"read RegisteredApplications", status);
+        if (registered && !EqualInsensitive(*registered, capabilities))
+            return Win32Failure(FileAssociationError::registry, L"registered application name already in use", ERROR_SHARING_VIOLATION);
+    } else if (status != ERROR_FILE_NOT_FOUND) {
+        return Win32Failure(FileAssociationError::registry, L"open RegisteredApplications", status);
+    }
+    bool changed = false;
+    const auto write = [&](std::wstring_view path, const wchar_t* name, std::wstring_view value) {
+        auto result = SetRegistrationString(path, name, value);
+        changed = changed || result.changed;
+        return result;
+    };
+    for (const auto& [name, value] : std::vector<std::pair<const wchar_t*,std::wstring>>{
+        {kOwnerValue, executable_.wstring()}, {L"ApplicationName", application_name_ + L" (TTPlayerRebuild)"},
+        {L"ApplicationDescription", application_name_ + L" - audio and playlist player"},
+        {L"ApplicationIcon", DefaultIcon(executable_)}}) {
+        const auto result = write(capabilities, name, value);
+        if (!result) return result;
+    }
+    std::unordered_set<std::wstring> visited;
+    for (const auto& format : formats) {
+        const auto extension = NormalizeExtension(format.extension);
+        if (!visited.insert(extension).second) continue;
+        const auto prog_id = ManagedProgId(options_, extension);
+        const auto class_key = JoinRegistryPath(options_.current_user_classes_subkey, prog_id);
+        // No .ext default is written here. A registration is merely a candidate.
+        for (const auto& [path, value] : std::vector<std::pair<std::wstring,std::wstring>>{
+            {class_key, format.description.empty() ? application_name_ + L" " + extension : format.description},
+            {class_key + L"\\DefaultIcon", DefaultIcon(executable_)},
+            {class_key + L"\\shell", L"open"},
+            {class_key + L"\\shell\\open\\command", OpenCommand(executable_, false)},
+            {class_key + L"\\shell\\PlayList\\command", OpenCommand(executable_, true)}}) {
+            // Preserve a previously selected file-type icon when refreshing
+            // the catalog, instead of replacing it with the EXE's icon.
+            if (path == class_key + L"\\DefaultIcon") {
+                std::wstring existing; bool present{};
+                const auto read = ReadDefaultAt(path, existing, present);
+                if (!read) return read;
+                if (present) continue;
+            }
+            const auto result = InstallManagedDefault(path, value, executable_.wstring());
+            if (!result.result) return result.result;
+            changed = changed || result.changed;
+        }
+        auto result = SetOpenWith(options_, extension, prog_id, true);
+        if (!result) return result;
+        changed = changed || result.changed;
+        result = write(capabilities + L"\\FileAssociations", (L"." + extension).c_str(), prog_id);
+        if (!result) return result;
+    }
+    // Publish only after the ProgIDs and capabilities can be resolved.
+    const auto result = write(RegisteredApplicationsPath(options_), L"TTPlayerRebuild", capabilities);
+    if (!result) return result;
+    if (changed && options_.notify_shell) NotifyShellAssociationsChanged();
+    return Success(changed);
+}
+
+FileAssociationResult FileAssociationBackend::SetExtensionAssociation(
+    std::wstring_view extension, bool enabled, std::wstring_view description,
+    std::wstring_view icon, const ShellVerbLabels& labels) {
+    if (!IsRealClassesStore(options_.current_user_classes_subkey))
+        return SetLegacyExtensionAssociation(extension, enabled, description, icon, labels);
+    const auto normalized = NormalizeExtension(extension);
+    if (normalized.empty()) return Invalid(L"set extension association", L"invalid extension");
+    FileAssociationResult result;
+    if (enabled) {
+        result = RegisterApplication({{normalized, std::wstring(description), {}}});
+        if (!result) return result;
+        if (!icon.empty()) {
+            const auto update = SetExtensionIcon(normalized, icon);
+            if (!update) return update;
+            result.changed = result.changed || update.changed;
+        }
+        // Preserve the localized Add-to-playlist verb.
+        if (!labels.add_to_playlist.empty()) {
+            const auto update = InstallManagedDefault(JoinRegistryPath(options_.current_user_classes_subkey,
+                ManagedProgId(options_, normalized) + L"\\shell\\PlayList"),
+                labels.add_to_playlist, executable_.wstring());
+            if (!update.result) return update.result;
+            result.changed = result.changed || update.changed;
+        }
+        const auto version = AssociationWindowsVersion();
+        if (version.dwMajorVersion == 6 && version.dwMinorVersion < 2) {
+            IApplicationAssociationRegistration* raw = nullptr;
+            HRESULT hr = CoCreateInstance(CLSID_ApplicationAssociationRegistration, nullptr,
+                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&raw));
+            UniqueComPtr<IApplicationAssociationRegistration> registration(raw);
+            if (SUCCEEDED(hr)) hr = registration->SetAppAsDefault(
+                L"TTPlayerRebuild", (L"." + normalized).c_str(), AT_FILEEXTENSION);
+            if (FAILED(hr)) return HResultFailure(FileAssociationError::com, L"SetAppAsDefault", hr);
+            result.changed = true;
+            if (options_.notify_shell) NotifyShellAssociationsChanged();
+        }
+    }
+    const auto query = QueryExtension(normalized);
+    if (!query.result) return query.result;
+    // Windows 8+ owns UserChoice; no deletion, hash forgery or default-key
+    // fallback. Disabling also needs the user to choose a replacement handler.
+    result.requires_user_choice = enabled != query.effective;
+    return result;
+}
+
+FileAssociationResult FileAssociationBackend::OpenDefaultPrograms(HWND owner) const {
+    if (!IsRealClassesStore(options_.current_user_classes_subkey))
+        return Invalid(L"open default programs", L"isolated registration cannot launch the live shell");
+    const auto version = AssociationWindowsVersion();
+    DWORD revision{};
+    UniqueRegKey key;
+    HKEY raw = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                     0, KEY_QUERY_VALUE, &raw) == ERROR_SUCCESS) {
+        key.reset(raw);
+        std::optional<DWORD> value;
+        if (ReadDwordValue(key.get(), L"UBR", value) == ERROR_SUCCESS && value) revision = *value;
+    }
+    const auto target = SelectDefaultAppsTarget(version.dwMajorVersion, version.dwMinorVersion,
+                                               version.dwBuildNumber, revision);
+    const auto launch = [owner](const wchar_t* file, const wchar_t* arguments) {
+        SHELLEXECUTEINFOW info{sizeof(info)};
+        info.fMask = SEE_MASK_FLAG_NO_UI;
+        info.hwnd = owner; info.lpVerb = L"open"; info.lpFile = file;
+        info.lpParameters = arguments; info.nShow = SW_SHOWNORMAL;
+        return ShellExecuteExW(&info) ? Success() : Win32Failure(
+            FileAssociationError::shell, L"open system default programs", GetLastError());
+    };
+    if (target != DefaultAppsTarget::control_panel) {
+        auto result = launch(target == DefaultAppsTarget::application_settings
+            ? L"ms-settings:defaultapps?registeredAppUser=TTPlayerRebuild"
+            : L"ms-settings:defaultapps", nullptr);
+        if (result) return result;
+        result = launch(L"ms-settings:defaultapps", nullptr);
+        if (result) return result;
+    } else {
+        IApplicationAssociationRegistrationUI* raw_ui = nullptr;
+        HRESULT hr = CoCreateInstance(CLSID_ApplicationAssociationRegistrationUI, nullptr,
+            CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&raw_ui));
+        UniqueComPtr<IApplicationAssociationRegistrationUI> ui(raw_ui);
+        if (SUCCEEDED(hr)) hr = ui->LaunchAdvancedAssociationUI(L"TTPlayerRebuild");
+        if (SUCCEEDED(hr)) return Success();
+    }
+    wchar_t system[MAX_PATH]{};
+    if (!GetSystemDirectoryW(system, MAX_PATH))
+        return Win32Failure(FileAssociationError::shell, L"GetSystemDirectoryW", GetLastError());
+    const auto control = std::filesystem::path(system) / L"control.exe";
+    return launch(control.c_str(), L"/name Microsoft.DefaultPrograms /page pageDefaultProgram");
+}
+
+FileAssociationResult FileAssociationBackend::UnregisterApplication(
+    const std::vector<AssociableExtension>& legacy_formats) {
+    std::unordered_set<std::wstring> extensions;
+    for (const auto& format : legacy_formats) {
+        const auto extension = NormalizeExtension(format.extension);
+        if (extension.empty()) return Invalid(L"unregister default program", L"invalid extension");
+        extensions.insert(extension);
+    }
+    const auto capabilities = CapabilitiesPath(options_);
+    UniqueRegKey key;
+    LONG status = OpenKey(capabilities, KEY_QUERY_VALUE, key);
+    const bool has_capabilities = status == ERROR_SUCCESS;
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+        return Win32Failure(FileAssociationError::registry, L"open capabilities", status);
+    if (has_capabilities) {
+        std::optional<std::wstring> owner;
+        status = ReadStringValue(key.get(), kOwnerValue, owner);
+        if (status != ERROR_SUCCESS || !owner || !EqualInsensitive(*owner, executable_.wstring()))
+            return Win32Failure(FileAssociationError::registry, L"capabilities belong to another installation", ERROR_ACCESS_DENIED);
+    }
+    key.reset();
+    status = OpenKey(capabilities + L"\\FileAssociations", KEY_QUERY_VALUE, key);
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+        return Win32Failure(FileAssociationError::registry, L"read registered formats", status);
+    if (key) {
+        for (DWORD index = 0;; ++index) {
+            wchar_t name[256]{}; DWORD size = 256;
+            status = RegEnumValueW(key.get(), index, name, &size, nullptr, nullptr, nullptr, nullptr);
+            if (status == ERROR_NO_MORE_ITEMS) break;
+            if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, L"enumerate registered formats", status);
+            const auto extension = NormalizeExtension(name);
+            std::optional<std::wstring> prog_id;
+            if (!extension.empty() && ReadStringValue(key.get(), name, prog_id) == ERROR_SUCCESS &&
+                prog_id && *prog_id == ManagedProgId(options_, extension)) extensions.insert(extension);
+        }
+    }
+    key.reset();
+    bool changed = false;
+    auto legacy_options = options_;
+    legacy_options.prog_id_prefix = L"Audio";
+    legacy_options.notify_shell = false;
+    FileAssociationBackend legacy(executable_, application_name_, legacy_options);
+    for (const auto& extension : extensions) {
+        auto result = SetLegacyExtensionAssociation(extension, false, {}, {}, {});
+        if (!result) return result;
+        changed = changed || result.changed;
+        // Older rebuilds shared Audio.* with the original. Restore only our
+        // own backups; never delete an original or another player's values.
+        result = legacy.SetLegacyExtensionAssociation(extension, false, {}, {}, {});
+        if (!result) return result;
+        changed = changed || result.changed;
+        result = SetOpenWith(options_, extension, ManagedProgId(options_, extension), false);
+        if (!result) return result;
+        changed = changed || result.changed;
+    }
+    if (!has_capabilities) {
+        if (changed && options_.notify_shell) NotifyShellAssociationsChanged();
+        return Success(changed);
+    }
+    status = OpenKey(RegisteredApplicationsPath(options_), KEY_QUERY_VALUE | KEY_SET_VALUE, key);
+    if (status == ERROR_SUCCESS) {
+        std::optional<std::wstring> value;
+        status = ReadStringValue(key.get(), L"TTPlayerRebuild", value);
+        if (status == ERROR_SUCCESS && value && *value == capabilities)
+            status = RegDeleteValueW(key.get(), L"TTPlayerRebuild");
+    }
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+        return Win32Failure(FileAssociationError::registry, L"remove RegisteredApplications entry", status);
+    // Exact private key, checked against the stored executable owner above.
+    status = RegDeleteTreeW(HKEY_CURRENT_USER, capabilities.c_str());
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+        return Win32Failure(FileAssociationError::registry, L"remove capabilities", status);
+    if (options_.notify_shell) NotifyShellAssociationsChanged();
+    return Success(true);
 }
 
 ShellIntegrationQuery FileAssociationBackend::QueryShellIntegration(

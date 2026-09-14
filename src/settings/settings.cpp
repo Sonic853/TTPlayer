@@ -854,6 +854,8 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
             n,L"CheckAssociation",s.player.check_association ? 1 : 0)!=0;
         s.player.auto_associate=IntAttr(
             n,L"AutoAssociate",s.player.auto_associate ? 1 : 0)!=0;
+        s.player.suppress_association_reminder=IntAttr(n,L"SuppressAssociationReminder",
+            s.player.suppress_association_reminder ? 1 : 0)!=0;
         s.player.first_run_552=IntAttr(
             n,L"FirstRun_552",s.player.first_run_552 ? 1 : 0)!=0;
         s.player.user_word=StringAttr(n,L"UserWord");
@@ -1630,6 +1632,7 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"CheckAssociation",
                      player.check_association ? 1 : 0);
         SetAttribute(element,L"AutoAssociate",player.auto_associate ? 1 : 0);
+        SetAttribute(element,L"SuppressAssociationReminder",player.suppress_association_reminder ? 1 : 0);
         SetAttribute(element,L"FirstRun_552",player.first_run_552 ? 1 : 0);
         SetAttribute(element,L"UserWord",player.user_word);
         SetAttribute(element,L"UserWordMD5",player.user_word_md5);
