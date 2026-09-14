@@ -2005,7 +2005,11 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         }
         return 0;
     }
+    case WM_SHOWWINDOW:
+        if (!wparam) CancelPlaylistMarquee(true);
+        break;
     case WM_SIZE:
+        CancelPlaylistMarquee(true);
         UpdatePlaylistWindowRegion();
         LayoutPlaylistListControls();
         UpdatePlaylistToolRects();
@@ -2013,6 +2017,20 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         InvalidateRect(playlist_window_, nullptr, FALSE);
         return 0;
     case WM_TIMER:
+        if (wparam == kPlaylistMarqueeTimer) {
+            if (!playlist_marquee_.Pending() || GetCapture() != playlist_window_) {
+                CancelPlaylistMarquee(false);
+                return 0;
+            }
+            const POINT point = playlist_marquee_.Pointer();
+            const auto metrics = geometry();
+            if (playlist_marquee_.Active()) {
+                if (point.y < metrics.tracks.top) ScrollPlaylist(-1);
+                else if (point.y >= metrics.tracks.bottom) ScrollPlaylist(1);
+                UpdatePlaylistMarquee(point);
+            }
+            return 0;
+        }
         if (wparam == kPlaylistScrollbarRepeatTimer) {
             if (playlist_scrollbar_pressed_ ==
                     PlaylistScrollbarPart::none ||
@@ -2072,6 +2090,12 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
     }
     case WM_INITMENUPOPUP: {
         const HMENU popup = reinterpret_cast<HMENU>(wparam);
+        if (popup && GetMenuItemID(popup, 0) == kPlaylistModeSingle) {
+            // 00461BAE refreshes these states at submenu-open time, including
+            // the resource-default seven-group menu shown over empty space.
+            PreparePlaylistModeMenu(popup);
+            return 0;
+        }
         // CPlayerWnd_OnInitMenuPopup (00461BAE) identifies this submenu by
         // its first resource command.  Populate only when the user opens it,
         // then owner-draw the rows appended after BeginPopupMenuStyle.
@@ -2083,6 +2107,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         break;
     }
     case WM_CLOSE:
+        CancelPlaylistMarquee(true);
         CancelPlaylistScrollbarInteraction(true);
         FinishPlaylistListEdit(false);
         SetSkinWindowVisible(playlist_window_, false);
@@ -2128,6 +2153,12 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
     }
     case WM_MOUSEMOVE: {
         const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        if (playlist_marquee_.Pending()) {
+            if (GetCapture() != playlist_window_ || !(wparam & MK_LBUTTON))
+                CancelPlaylistMarquee(true);
+            else UpdatePlaylistMarquee(point);
+            return 0;
+        }
         if (playlist_toolbar_menu_return_point_ &&
             (point.x != playlist_toolbar_menu_return_point_->x ||
              point.y != playlist_toolbar_menu_return_point_->y))
@@ -2503,11 +2534,20 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
             // below the final row deselects every item but retains its focus
             // caret.  Playback/current-track state is deliberately untouched.
             if (playlist_track_control_) SetFocus(playlist_track_control_);
-            playlist_selected_rows_.clear();
+            playlist_marquee_.Begin(point, metrics.tracks, playlist_scroll_,
+                metrics.row_height, playlist_selected_rows_,
+                (wparam & MK_CONTROL) != 0, (wparam & MK_SHIFT) != 0);
+            UpdatePlaylistMarquee(point);
             playlist_track_drag_pending_ = false;
             playlist_track_dragging_ = false;
             playlist_track_drag_row_.reset();
             playlist_track_drop_row_.reset();
+            playlist_toolbar_hover_.reset();
+            playlist_hover_.reset();
+            if (playlist_item_tooltip_)
+                SendMessageW(playlist_item_tooltip_, TTM_POP, 0, 0);
+            SetCapture(playlist_window_);
+            SetTimer(playlist_window_, kPlaylistMarqueeTimer, 50, nullptr);
             InvalidateRect(playlist_window_, &metrics.tracks, FALSE);
             return 0;
         } else if (PtInRect(&metrics.list, point)) {
@@ -2525,6 +2565,11 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
     case WM_LBUTTONUP: {
         const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         const auto metrics = geometry();
+        if (playlist_marquee_.Pending()) {
+            UpdatePlaylistMarquee(point);
+            CancelPlaylistMarquee(true);
+            return 0;
+        }
         if (playlist_rating_gesture_.Active()) {
             const auto committed = playlist_rating_gesture_.Release(
                 rating_hit(point));
@@ -2638,6 +2683,10 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         return 0;
     }
     case WM_KEYDOWN: {
+        if (playlist_marquee_.Pending()) {
+            if (wparam == VK_ESCAPE) CancelPlaylistMarquee(true);
+            return 0;
+        }
         if (wparam == VK_APPS ||
             (wparam == VK_F10 &&
              (GetKeyState(VK_SHIFT) & 0x8000) != 0)) {
@@ -2727,14 +2776,12 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
             // ordinary Space selects it just like the native ListView.
             SelectPlaylistRow(*playlist_selection_, control, shift);
         } else if ((wparam == L'A' || wparam == L'a') && control) {
-            playlist_selected_rows_.clear();
-            for (size_t index = 0; index < VisiblePlaylistTrackCount(); ++index)
-                playlist_selected_rows_.insert(index);
-            InvalidateRect(playlist_window_, nullptr, FALSE);
+            HandlePlaylistCommand(kPlaylistSelectAll);
         }
         return 0;
     }
     case WM_CONTEXTMENU: {
+        CancelPlaylistMarquee(true);
         POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         if (settings_.playlist.library_mode &&
             reinterpret_cast<HWND>(wparam) == playlist_tree_control_)
@@ -2782,6 +2829,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
                 *reinterpret_cast<MEASUREITEMSTRUCT*>(lparam))) return TRUE;
         break;
     case WM_CAPTURECHANGED:
+        CancelPlaylistMarquee(false);
         playlist_rating_gesture_.Cancel();
         playlist_close_pressed_ = false;
         CancelPlaylistScrollbarInteraction(false);
@@ -2805,6 +2853,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         }
         break;
     case WM_CANCELMODE:
+        CancelPlaylistMarquee(true);
         playlist_rating_gesture_.Cancel();
         playlist_close_pressed_ = false;
         CancelPlaylistScrollbarInteraction(true);
@@ -2825,6 +2874,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         }
         break;
     case WM_DESTROY:
+        CancelPlaylistMarquee(false);
         playlist_mouse_tracking_window_ = nullptr;
         playlist_toolbar_menu_return_point_.reset();
         CancelPlaylistScrollbarInteraction(false);
@@ -3934,6 +3984,31 @@ void PlayerWindow::ScrollPlaylist(int rows) {
     if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
 }
 
+void PlayerWindow::UpdatePlaylistMarquee(POINT point) {
+    if (!skin_ || !playlist_window_ || !playlist_marquee_.Pending()) return;
+    RECT client{};
+    GetClientRect(playlist_window_, &client);
+    const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
+        settings_.playlist.split_on_lists, client.right, client.bottom,
+        VisiblePlaylistTrackCount());
+    playlist_selected_rows_ = playlist_marquee_.Update(point, metrics.tracks,
+        playlist_scroll_, metrics.row_height, VisiblePlaylistTrackCount(),
+        {GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)});
+    // Native background selection changes LVIS_SELECTED only, not the focus
+    // caret, active song or playback. In particular do not call SelectTrack.
+    InvalidateRect(playlist_window_, &metrics.tracks, FALSE);
+}
+
+void PlayerWindow::CancelPlaylistMarquee(bool release_capture) {
+    if (!playlist_marquee_.Pending()) return;
+    playlist_marquee_.Reset();
+    if (playlist_window_) {
+        KillTimer(playlist_window_, kPlaylistMarqueeTimer);
+        InvalidateRect(playlist_window_, nullptr, FALSE);
+        if (release_capture && GetCapture() == playlist_window_) ReleaseCapture();
+    }
+}
+
 void PlayerWindow::PaintPlaylist(HDC dc) const {
     RECT client{};
     GetClientRect(playlist_window_, &client);
@@ -4166,6 +4241,16 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
                 control_focused)
                 DrawSolidFrame(canvas, row_bounds, title_color);
         }
+        if (playlist_marquee_.Active()) {
+            const RECT bounds = playlist_marquee_.Bounds();
+            const int saved = SaveDC(canvas);
+            IntersectClipRect(canvas, metrics.tracks.left, metrics.tracks.top,
+                              metrics.tracks.right, metrics.tracks.bottom);
+            SetTextColor(canvas, RGB(0, 0, 0));
+            SetBkColor(canvas, RGB(255, 255, 255));
+            DrawFocusRect(canvas, &bounds);
+            RestoreDC(canvas, saved);
+        }
         if ((playlist_track_dragging_ || playlist_external_dragging_) &&
             playlist_track_drop_row_) {
             const long relative = static_cast<long>(*playlist_track_drop_row_) -
@@ -4346,9 +4431,11 @@ void PlayerWindow::PreparePlaylistMenu(HMENU menu) const {
         has_tracks && playlist_find_text_[0] != L'\0');
     EnableCommand(menu, kPlaylistQuickFind, has_tracks);
     EnableCommand(menu, kPlaylistDeleteList, playlists_.Size() > 1);
-    EnableCommand(menu, kPlaylistRenameList, playlist_context_list_.has_value());
-    EnableCommand(menu, kPlaylistActivateList, playlist_context_list_ &&
-        *playlist_context_list_ != playlists_.ActiveIndex());
+    const auto catalogue_row = playlist_context_list_
+        ? playlist_context_list_ : playlist_list_selection_;
+    EnableCommand(menu, kPlaylistRenameList, catalogue_row && *catalogue_row < playlists_.Size());
+    EnableCommand(menu, kPlaylistActivateList, catalogue_row &&
+        *catalogue_row != playlists_.ActiveIndex());
     EnableCommand(menu, kPlaylistDeleteFiles,
         !settings_.playlist.disable_delete_file);
 
@@ -4356,9 +4443,9 @@ void PlayerWindow::PreparePlaylistMenu(HMENU menu) const {
         const size_t row = *playlist_selected_rows_.begin();
         if (const auto* track = VisiblePlaylistTrack(row)) {
             const int rating = track->rating;
-            if (rating >= 1 && rating <= 5 &&
-                FindCommandMenu(menu, kPlaylistRatingFirst)) {
-                CheckMenuRadioItem(menu, kPlaylistRatingFirst,
+            const HMENU ratings = FindCommandMenu(menu, kPlaylistRatingFirst);
+            if (rating >= 1 && rating <= 5 && ratings) {
+                CheckMenuRadioItem(ratings, kPlaylistRatingFirst,
                     kPlaylistRatingLast,
                     kPlaylistRatingFirst + static_cast<UINT>(rating - 1),
                     MF_BYCOMMAND);
@@ -4368,24 +4455,27 @@ void PlayerWindow::PreparePlaylistMenu(HMENU menu) const {
                      settings_.playlist.click_rating);
     }
 
+    PreparePlaylistModeMenu(menu);
+    CheckCommand(menu, kPlaylistLibraryMode, settings_.playlist.library_mode);
+
+    // Remaining resource items retain their default state. Shared IDs are
+    // dispatched by HandlePlaylistCommand/HandleContextCommand; see the
+    // per-command audit in PLAYLIST_MARQUEE_MENU_AUDIT.md.
+}
+
+void PlayerWindow::PreparePlaylistModeMenu(HMENU menu) const {
     UINT checked = kPlaylistModeSequential;
     if (settings_.player.play_mode == 0) checked = kPlaylistModeSingle;
     else if (settings_.player.play_mode == 1) checked = kPlaylistModeRepeatOne;
     else if (settings_.player.play_mode == 3) checked = kPlaylistModeRepeatAll;
     else if (settings_.player.play_mode == 4) checked = kPlaylistModeShuffle;
-    if (FindCommandMenu(menu, checked)) {
-        CheckMenuRadioItem(menu, kPlaylistModeSingle, kPlaylistModeShuffle,
+    if (const HMENU modes = FindCommandMenu(menu, checked)) {
+        CheckMenuRadioItem(modes, kPlaylistModeSingle, kPlaylistModeShuffle,
                            checked, MF_BYCOMMAND);
     }
     CheckCommand(menu, kPlaylistAutoSwitchList, settings_.player.auto_switch_list);
     CheckCommand(menu, kPlaylistPlayFollowCursor,
                  settings_.player.play_follow_cursor);
-    CheckCommand(menu, kPlaylistLibraryMode, settings_.playlist.library_mode);
-
-    // Keep resource-default state for commands whose handlers are still
-    // being recovered.  The original exposes these entries as enabled; the
-    // earlier rebuild grayed them merely because dispatch was incomplete,
-    // which made the visible menu diverge before a command was invoked.
 }
 
 void PlayerWindow::PopulatePlaylistSendToMenu(HMENU menu) {
@@ -5036,7 +5126,8 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
     }
     if (HandleLegacyPlaylistNetworkCommand(command)) return true;
     if (command == kPlaylistPlay) {
-        if (playlist_selection_) SelectTrack(*playlist_selection_, true);
+        // 00483C26 -> 0047FC61 queries LVNI_SELECTED, not LVNI_FOCUSED.
+        if (!playlist_selected_rows_.empty()) SelectTrack(*playlist_selected_rows_.begin(), true);
         return true;
     }
     if (command == kPlaylistProperties) {
@@ -5437,9 +5528,10 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
     if (command == kPlaylistRenameList) {
         // FUN_0048516E edits the selected catalogue item in place.  A title
         // context menu selects its hit item before command routing; toolbar
-        // invocation falls back to the active catalogue item.
-        BeginPlaylistListEdit(
-            playlist_context_list_.value_or(playlists_.ActiveIndex()));
+        // invocation queries that same selection, not an unrelated active list.
+        const auto target = playlist_context_list_
+            ? playlist_context_list_ : playlist_list_selection_;
+        if (target) BeginPlaylistListEdit(*target);
         return true;
     }
     if (command == kPlaylistDeleteList) {
@@ -5870,8 +5962,14 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
         command == kPlaylistSelectInvert) {
         if (command == kPlaylistSelectNone) {
             playlist_selected_rows_.clear();
+            // 0047B52E uses LVM_SETITEMSTATE(-1, 0, 0xB): unlike clicking
+            // empty space, the explicit menu command also clears the caret.
+            playlist_selection_.reset();
+            RememberPlaylistRow(playlists_.ActiveIndex(), std::nullopt);
         } else if (command == kPlaylistSelectAll) {
             playlist_selected_rows_.clear();
+            playlist_selection_.reset(); // 00486209: state=2, mask=0xB
+            RememberPlaylistRow(playlists_.ActiveIndex(), std::nullopt);
             for (size_t index = 0; index < ActivePlaylist().Tracks().size(); ++index)
                 playlist_selected_rows_.insert(index);
             // FUN_00486209 returns keyboard focus to the Files ListCtrl after
@@ -5882,6 +5980,11 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
             for (size_t index = 0; index < ActivePlaylist().Tracks().size(); ++index)
                 if (!playlist_selected_rows_.contains(index)) inverted.insert(index);
             playlist_selected_rows_ = std::move(inverted);
+            // 0048622A writes state=3 to each newly selected row, in index
+            // order. The final new selection owns the single focus caret.
+            playlist_selection_ = playlist_selected_rows_.empty() ? std::nullopt
+                : std::optional<size_t>{*playlist_selected_rows_.rbegin()};
+            RememberPlaylistRow(playlists_.ActiveIndex(), playlist_selection_);
         }
         InvalidateRect(playlist_window_, nullptr, FALSE);
         return true;

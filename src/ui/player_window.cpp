@@ -2772,6 +2772,10 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
     }
     case WM_INITMENUPOPUP: {
         const HMENU popup = reinterpret_cast<HMENU>(wparam);
+        if (popup && GetMenuItemID(popup, 0) == kPlaylistModeSingle) {
+            PreparePlaylistModeMenu(popup);
+            return 0;
+        }
         // CPlayerWnd_OnInitMenuPopup (00461BAE) recognizes the skin resource
         // submenu by its first command (0x7919).  The rebuild starts its scan
         // as soon as the root popup opens; this point waits for any unfinished
@@ -5671,6 +5675,7 @@ void PlayerWindow::DrawButton(const DRAWITEMSTRUCT& item) const {
 }
 
 void PlayerWindow::RefreshPlaylist() {
+    CancelPlaylistMarquee(true);
     if (playlist_view_) {
         SendMessageW(playlist_view_, WM_SETREDRAW, FALSE, 0);
         SendMessageW(playlist_view_, LB_RESETCONTENT, 0, 0);

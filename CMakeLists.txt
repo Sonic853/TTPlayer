@@ -591,6 +591,14 @@ target_compile_definitions(skin_rebind_tests PRIVATE UNICODE _UNICODE NOMINMAX W
 target_compile_options(skin_rebind_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(skin_rebind_tests PRIVATE ttplayer_core)
 
+add_executable(playlist_marquee_tests src/ui/playlist_marquee_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(playlist_marquee_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(playlist_marquee_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(playlist_marquee_tests PRIVATE ttplayer_core)
+add_test(NAME playlist_marquee_tests COMMAND playlist_marquee_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(playlist_marquee_tests PROPERTIES TIMEOUT 30)
+
 add_executable(pcm_integrity_probe tools/probe_pcm_integrity.cpp)
 target_compile_definitions(pcm_integrity_probe PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(pcm_integrity_probe PRIVATE /W4 /permissive- /EHsc /utf-8)

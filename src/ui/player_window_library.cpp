@@ -2239,7 +2239,8 @@ bool PlayerWindow::HandleMediaLibraryCommand(UINT command) {
         return true;
     }
     if (command == kPlaylistPlay) {
-        if (playlist_selection_) ActivateMediaLibraryResult(*playlist_selection_, true);
+        if (!playlist_selected_rows_.empty())
+            ActivateMediaLibraryResult(*playlist_selected_rows_.begin(), true);
         return true;
     }
     if (command == kPlaylistProperties) {
@@ -2508,13 +2509,14 @@ bool PlayerWindow::HandleMediaLibraryCommand(UINT command) {
         playlist_selected_rows_.clear();
         for (size_t row = 0; row < state.result_tracks.size(); ++row)
             playlist_selected_rows_.insert(row);
-        if (!state.result_tracks.empty()) playlist_selection_ = 0;
+        playlist_selection_.reset(); // 00486209 clears LVIS_FOCUSED
         if (playlist_track_control_) SetFocus(playlist_track_control_);
         if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
         return true;
     }
     if (command == kPlaylistSelectNone) {
         playlist_selected_rows_.clear();
+        playlist_selection_.reset();
         if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
         return true;
     }
@@ -2524,6 +2526,8 @@ bool PlayerWindow::HandleMediaLibraryCommand(UINT command) {
             if (!playlist_selected_rows_.contains(row)) inverted.insert(row);
         }
         playlist_selected_rows_ = std::move(inverted);
+        playlist_selection_ = playlist_selected_rows_.empty() ? std::nullopt
+            : std::optional<size_t>{*playlist_selected_rows_.rbegin()};
         if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
         return true;
     }

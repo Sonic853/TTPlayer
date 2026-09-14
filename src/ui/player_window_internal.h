@@ -108,6 +108,7 @@ constexpr UINT_PTR kSkinMenuToolTipTimer = 0x215;
 // first repeat and 50 ms steady repeat.  It owns a timer on CPlayListWnd,
 // separate from every main-window animation timer above.
 constexpr UINT_PTR kPlaylistScrollbarRepeatTimer = 0x216;
+constexpr UINT_PTR kPlaylistMarqueeTimer = 0x217;
 constexpr UINT kPlaylistScrollbarRepeatIntervalMs = 50;
 // FUN_0040C0C9/0040C0F6 advances the original alpha clock in roughly
 // five-alpha-unit samples. A window timer keeps the recovered transition on

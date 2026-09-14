@@ -1,5 +1,16 @@
 # Reconstruction status
 
+2026-09-15: restore Files ListCtrl background marquee selection from the
+00482BAF/00425DEC native multi-select report contract. Host SysListView32 input
+confirms plain replacement, Ctrl XOR and Shift union without changing the caret.
+Add content-anchored autoscroll, capture/cancel/hidden/refresh cleanup and clipped
+buffered marquee painting. Fix selected-vs-focused playback, nested menu radio
+handles, 00461BAE Mode submenu refresh and 00486209/0048622A selection/caret states.
+Audit every static command in resources 139/152/153/156 and shared routing.
+FreeDB, Music Window download/report backends and complete native find UI remain
+incomplete; see [PLAYLIST_MARQUEE_MENU_AUDIT.md](PLAYLIST_MARQUEE_MENU_AUDIT.md).
+
+
 2026-09-15: restore the 5.7.9 lyric upload form (0044CF5E / 0044895B /
 004487A5), using the selected search server origin + /dll/lrcup.php per
 user request. Fill artist/title/album/lyrics without submitting automatically;

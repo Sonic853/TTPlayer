@@ -7,6 +7,10 @@ source-code or binary identity with the lost private classes.
 
 ## Resource ownership
 
+For the 2026-09-15 marquee restoration, menu-state corrections and per-command
+implementation/remaining-gap audit, see [PLAYLIST_MARQUEE_MENU_AUDIT.md](PLAYLIST_MARQUEE_MENU_AUDIT.md).
+That audit distinguishes implemented command routing from full original behavior.
+
 - `FUN_00482BAF` creates the playlist toolbar and calls
   `FUN_0048AA1F((LPCWSTR)0x8B)`.
 - `FUN_0048AA1F` calls `LoadMenuW(DAT_0054605C, ...)`, so menu 139 (`0x8B`)

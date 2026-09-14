@@ -13,6 +13,7 @@
 #include "ttplayer/skin/skin_package.h"
 #include "ttplayer/ui/desktop_lyrics.h"
 #include "ttplayer/ui/playlist_rating_input.h"
+#include "ttplayer/ui/playlist_marquee.h"
 #include "ttplayer/ui/playlist_scrollbar_contract.h"
 #include "ttplayer/ui/playlist_selection_policy.h"
 #include "ttplayer/ui/shell_send_to.h"
@@ -577,6 +578,8 @@ private:
     void ShowEqualizerProfileMenu(POINT screen_point);
     bool HandleEqualizerCommand(UINT command);
     void PaintPlaylist(HDC dc) const;
+    void UpdatePlaylistMarquee(POINT point);
+    void CancelPlaylistMarquee(bool release_capture);
     [[nodiscard]] std::optional<size_t> PlaylistTrackAt(POINT point) const;
     [[nodiscard]] std::optional<size_t> PlaylistListAt(POINT point) const;
     [[nodiscard]] std::optional<size_t> PlaylistListInsertionAt(
@@ -595,6 +598,7 @@ private:
     void InvokePlaylistToolbar(size_t button, POINT screen_point);
     void ShowPlaylistContextMenu(POINT screen_point, POINT client_point);
     void PreparePlaylistMenu(HMENU menu) const;
+    void PreparePlaylistModeMenu(HMENU menu) const;
     void PopulatePlaylistSendToMenu(HMENU menu);
     bool HandlePlaylistSendToCommand(UINT command);
     bool HandlePlaylistCommand(UINT command);
@@ -969,6 +973,7 @@ private:
     PlaylistScrollbarPart playlist_scrollbar_pressed_{};
     bool playlist_scrollbar_repeat_fast_{};
     bool playlist_splitter_dragging_{};
+    PlaylistMarquee playlist_marquee_;
     bool playlist_track_drag_pending_{};
     bool playlist_track_dragging_{};
     bool playlist_list_drag_pending_{};
