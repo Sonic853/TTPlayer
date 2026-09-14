@@ -35,7 +35,7 @@ BEGIN
     IDS_LYRIC_SERVICES_DOWN "下移"
     IDS_LYRIC_SERVICES_ADD "新增"
     IDS_LYRIC_SERVICES_DELETE "删除"
-    IDS_ASSOCIATION_VIEW_SYSTEM "前往查看系统关联"
+    IDS_ASSOCIATION_VIEW_SYSTEM "Win7 以上系统需要手动关联"
     IDS_ASSOCIATION_USER_CHOICE "已注册可打开的音频格式。默认播放器需要在 Windows 的系统关联界面中由您确认；返回后列表将显示实际关联状态。"
     IDS_ASSOCIATION_SUPPRESS "不再提示关联提醒"
     IDS_ASSOCIATION_REFRESH "刷新"
