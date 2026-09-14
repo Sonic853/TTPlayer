@@ -37,6 +37,8 @@ private:
 };
 
 std::wstring LyricFileName(std::wstring value);
+int ScoreLyricMatch(const SearchResult& result, std::wstring_view artist,
+                   std::wstring_view title, std::wstring_view filename = {}, bool partial = false);
 size_t BestSearchResult(const std::vector<SearchResult>& results,
                        std::wstring_view artist, std::wstring_view title);
 std::filesystem::path DownloadDirectory(const settings::LyricSettings& settings,

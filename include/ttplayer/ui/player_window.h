@@ -3,6 +3,8 @@
 #include "ttplayer/audio/audio_engine.h"
 #include "ttplayer/integrations/discord_presence.h"
 #include "ttplayer/lyrics/lrc_parser.h"
+#include "ttplayer/lyrics/association.h"
+#include "ttplayer/lyrics/local_search.h"
 #include "ttplayer/lyrics/online_search.h"
 #include "ttplayer/playlist/playlist_store.h"
 #include "ttplayer/plugins/plugin_manager.h"
@@ -206,6 +208,10 @@ private:
     void ShowOptions(int page = -1, UINT focus_control = 0);
     void CloseOptions();
     void ShowOnlineLyricSearch(bool automatic_results = false);
+    void EnsureLyricAssociationsLoaded();
+    void ShowLyricAssociation();
+    void CancelLocalLyricSearch();
+    void PollLocalLyricSearch();
     void StartOnlineLyricSearch(bool automatic);
     void PollOnlineLyricSearch();
     void CloseOnlineLyricSearch();
@@ -893,6 +899,10 @@ private:
     lyrics::Lyrics lyrics_;
     std::filesystem::path lyric_path_;
     std::filesystem::path associated_lyric_path_;
+    lyrics::AssociationStore lyric_associations_;
+    std::shared_ptr<lyrics::LocalSearchJob> local_lyric_search_;
+    lyrics::SongKey local_lyric_song_;
+    bool lyric_association_open_{};
     HWND lyric_search_dialog_{};
     lyrics::ServiceCatalog lyric_services_, lyric_editor_baseline_;
     std::shared_ptr<lyrics::CatalogJob> lyric_catalog_job_, lyric_catalog_save_job_;

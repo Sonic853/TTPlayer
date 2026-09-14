@@ -261,11 +261,11 @@ std::wstring LyricFileName(std::wstring value) {
     return value;
 }
 
-size_t BestSearchResult(const std::vector<SearchResult>& results,
-                       std::wstring_view artist, std::wstring_view title) {
-    // Online branch of 0044497F (param_2 == 0), with 00444450/004444BA's
-    // symmetric, word-boundary-aware comparison. Filename-only fallback
-    // scores 1..3 belong to the LOCAL search branch and are not used here.
+int ScoreLyricMatch(const SearchResult& result, std::wstring_view artist,
+                   std::wstring_view title, std::wstring_view filename, bool partial) {
+    // 0044497F, with 00444450/004444BA's symmetric comparison. Normal
+    // loading uses word boundaries; the association dialog's partial search
+    // also accepts substrings and filename-only scores 1..3.
     auto normalize = [](std::wstring_view input) {
         if (input.empty()) return std::wstring{};
         const DWORD flags = LCMAP_SIMPLIFIED_CHINESE | LCMAP_LOWERCASE;
@@ -308,8 +308,8 @@ size_t BestSearchResult(const std::vector<SearchResult>& results,
         const auto at = haystack.find(needle);
         if (at == haystack.npos) return 0;
         if (haystack.size() == needle.size()) return 1;
-        return (at == 0 || separator(haystack[at - 1])) &&
-            (at + needle.size() == haystack.size() || separator(haystack[at + needle.size()])) ? -1 : 0;
+        return partial || ((at == 0 || separator(haystack[at - 1])) &&
+            (at + needle.size() == haystack.size() || separator(haystack[at + needle.size()]))) ? -1 : 0;
     };
     auto match = [&](const std::wstring& a, const std::wstring& b) {
         const int value = one_way(a, b);
@@ -317,19 +317,38 @@ size_t BestSearchResult(const std::vector<SearchResult>& results,
     };
     const auto a = normalize(artist), t = normalize(title);
     const auto clean_a = stripped(a), clean_t = stripped(t);
-    int best = -1; size_t selected = 0;
-    for (size_t i = 0; i < results.size(); ++i) {
-        const auto ra = normalize(results[i].artist), rt = normalize(results[i].title);
+        const auto ra = normalize(result.artist), rt = normalize(result.title);
         const int title_match = match(t, rt);
         const int clean_title_match = title_match ? 0 : match(clean_t, stripped(rt));
         int score = title_match == 1 ? 6 : title_match == -1 ? 5 :
             clean_title_match == 1 ? 5 : clean_title_match == -1 ? 4 : 0;
-        if (score >= 4) {
+        if (!score && partial) {
+            const int file_match = match(normalize(filename), rt);
+            const int clean_file_match = match(stripped(normalize(filename)), stripped(rt));
+            score = file_match == 1 ? 3 : file_match == -1 ? 2 :
+                clean_file_match == 1 ? 2 : clean_file_match == -1 ? 1 : 0;
+        }
+        if (score >= 4 || partial) {
             const int artist_match = match(a, ra);
             const int clean_artist_match = artist_match ? 0 : match(clean_a, stripped(ra));
-            score += artist_match == 1 ? 3 : artist_match == -1 ? 2 :
+            int bonus = artist_match == 1 ? 3 : artist_match == -1 ? 2 :
                 clean_artist_match == 1 ? 2 : clean_artist_match == -1 ? 1 : 0;
+            if (!bonus && partial) {
+                const int file_match = match(normalize(filename), ra);
+                const int clean_file_match = match(stripped(normalize(filename)), stripped(ra));
+                bonus = file_match == 1 ? 3 : file_match == -1 ? 2 :
+                    clean_file_match == 1 ? 2 : clean_file_match == -1 ? 1 : 0;
+            }
+            score += bonus;
         }
+        return score;
+}
+
+size_t BestSearchResult(const std::vector<SearchResult>& results,
+                       std::wstring_view artist, std::wstring_view title) {
+    int best = -1; size_t selected = 0;
+    for (size_t i = 0; i < results.size(); ++i) {
+        const int score = ScoreLyricMatch(results[i], artist, title);
         if (score > best) { best = score; selected = i; }
         if (score == 9) break;
     }

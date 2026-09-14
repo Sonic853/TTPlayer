@@ -53,6 +53,8 @@ add_library(ttplayer_core
   src/integrations/discord_presence.cpp
   src/integrations/discord_track_presence.cpp
   src/lyrics/lrc_parser.cpp
+  src/lyrics/association.cpp
+  src/lyrics/local_search.cpp
   src/lyrics/online_search.cpp
   src/lyrics/service_catalog.cpp
   src/lyrics/lyric_http.cpp
@@ -78,6 +80,7 @@ add_library(ttplayer_core
   src/ui/modern_file_dialog.cpp
   src/ui/player_control_packet.cpp
   src/ui/player_window_lyrics.cpp
+  src/ui/lyric_association_dialog.cpp
     src/ui/player_window_lyric_search.cpp
     src/ui/player_window_lyric_services.cpp
   src/ui/player_window_lyric_input.cpp
@@ -213,6 +216,14 @@ target_compile_options(lyric_search_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(lyric_search_tests PRIVATE ttplayer_core ws2_32)
 add_test(NAME lyric_search_tests COMMAND lyric_search_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(lyric_search_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+
+add_executable(lyric_association_tests src/ui/lyric_association_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(lyric_association_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(lyric_association_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(lyric_association_tests PRIVATE ttplayer_core)
+add_test(NAME lyric_association_tests COMMAND lyric_association_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(lyric_association_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
 add_executable(lyric_service_catalog_tests src/lyrics/service_catalog_tests.cpp)
 target_compile_definitions(lyric_service_catalog_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

@@ -1358,6 +1358,8 @@ PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(se
 }
 
 PlayerWindow::~PlayerWindow() {
+    CancelLocalLyricSearch();
+    static_cast<void>(lyric_associations_.Save());
     CloseOnlineLyricSearch();
     CloseLyricServiceEditor();
     DestroyFullScreenLyricInput();
@@ -3000,6 +3002,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             // procedure.
             if (skin_catalog_result_stale_) StartSkinMenuCatalogLoad();
             PollMediaLibraryWorkers();
+            PollLocalLyricSearch();
             PollOnlineLyricSearch();
             PollLyricServices();
             playlists_.FlushDirty(false);
@@ -3301,6 +3304,8 @@ void PlayerWindow::PersistWindowState() {
         }
     }
     settings::SaveWindowState(settings_.source_path, settings_);
+    if (!lyric_associations_.Save())
+        OutputDebugStringW(L"TTPlayerRebuild: cannot save lyric associations; previous .rll retained.\n");
 }
 
 void PlayerWindow::LayoutControls(int width, int height) const {
@@ -6077,7 +6082,9 @@ bool PlayerWindow::PlayCurrent(bool report_error) {
     // the decoder/open path succeeds, rather than waiting for timer 10.
     RebuildSkinInfoItems(true);
     ResetSkinInfoScroll();
-    if (lyric_path_.empty()) LoadCurrentLyrics();
+    // 0045AD86 -> 0044A370: the newly opened reader's metadata must be
+    // available before choosing embedded / associated / local lyrics.
+    if (!lyric_editor_) LoadCurrentLyrics();
     playback_was_active_ = true;
     RefreshPlaybackUi();
     ShowPlaybackOpenTip();
@@ -6178,7 +6185,8 @@ void PlayerWindow::SelectTrackFrom(size_t playlist_index, size_t index,
     ResetSkinInfoScroll();
     display_artist_ = artist;
     associated_lyric_path_.clear();
-    LoadCurrentLyrics();
+    ClearLyrics();
+    if (!start_playback) LoadCurrentLyrics();
     if (title_) SetWindowTextW(title_, display_title_.c_str());
     if (artist_) SetWindowTextW(artist_, artist.c_str());
     if (skin_) InvalidateRect(window_, nullptr, FALSE);

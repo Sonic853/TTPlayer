@@ -1,6 +1,7 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
+#include "lyric_association_dialog.h"
 #include "../app/resource_ids.h"
 
 #include "ttplayer/core/text.h"
@@ -3100,9 +3101,8 @@ std::optional<std::wstring> PlayerWindow::ReadEmbeddedLyrics() const {
     HRESULT result{};
     const auto reader = sound_library_->OpenReader(track->path, &result);
     if (!reader) return std::nullopt;
-    if (const auto value = reader->MetadataValue("Lyrics");
-        value && !value->empty())
-        return value;
+    for (const auto* name : {"Lyrics", "Lyric"})
+        if (const auto value = reader->MetadataValue(name); value && !value->empty()) return value;
     for (const auto& entry : reader->Metadata()) {
         if ((_wcsicmp(entry.name.c_str(), L"Lyrics") == 0 ||
              _wcsicmp(entry.name.c_str(), L"WM/Lyrics") == 0) &&
@@ -3415,6 +3415,7 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
         if (lyric_editor_) SendMessageW(lyric_editor_, EM_REDO, 0, 0);
         return true;
     case kCmdLyricEmbeddedRead: {
+        CancelLocalLyricSearch();
         const auto embedded = ReadEmbeddedLyrics();
         if (!embedded) {
             const auto message = ResourceText(0x817e);
@@ -3561,22 +3562,17 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
                                                   !associated_lyric_path_.empty());
         else LoadCurrentLyrics(true);
         return true;
-    case kCmdLyricAssociate: {
-        auto filter = BuildDialogFilter(ResourceModule(), {
-            {0x8128U, L"*.lrc;*.txt"}, {0x8124U, L"*.*"}});
-        ModernOpenFileOptions dialog;
-        dialog.owner = lyric_window_;
-        dialog.filters = ParseLegacyDialogFilter(
-            std::span<const wchar_t>(filter.data(), filter.size()));
-        if (!lyric_path_.empty())
-            dialog.initial_path = lyric_path_.parent_path();
-        if (const auto selected = ModernOpenFile(dialog))
-            LoadLyricsFrom(*selected, true);
+    case kCmdLyricAssociate:
+        ShowLyricAssociation();
         return true;
-    }
     case kCmdLyricUnassociate:
+        EnsureLyricAssociationsLoaded();
+        if (const auto* track = PlaybackTrackForUi())
+            lyric_associations_.Erase({track->path, track->subtrack});
+        CloseOnlineLyricSearch();
         associated_lyric_path_.clear();
-        LoadCurrentLyrics(true);
+        ClearLyrics();
+        ApplyAutoLyricVisibility();
         return true;
     case kCmdLyricCopy:
         CopyLyricsToClipboard();
@@ -3607,6 +3603,7 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
 }
 
 void PlayerWindow::ClearLyrics() {
+    CancelLocalLyricSearch();
     lyrics_ = {};
     desktop_lyrics_.SetLyrics(&lyrics_);
     lyric_path_.clear();
@@ -3620,7 +3617,7 @@ void PlayerWindow::ClearLyrics() {
 }
 
 void PlayerWindow::ApplyAutoLyricVisibility() {
-    if (!settings_.lyric.auto_visible) return;
+    if (!settings_.lyric.auto_visible || lyric_association_open_) return;
     const bool have_lyrics = !lyrics_.lines.empty();
     ActiveLyricVisible() = have_lyrics;
     if (desktop_lyric_mode_) {
@@ -3637,19 +3634,21 @@ void PlayerWindow::ApplyAutoLyricVisibility() {
 
 void PlayerWindow::LoadLyricsFrom(const std::filesystem::path& path,
                                   bool associated) {
+    CancelLocalLyricSearch();
     lyrics_embedded_ = false;
     try {
         auto loaded = lyrics::LoadLrc(path);
+        if (loaded.lines.empty()) throw std::runtime_error("no synchronized lyric lines");
         ApplyLyricTrimSpaces(loaded, settings_.lyric.trim_spaces);
         lyrics_ = std::move(loaded);
         desktop_lyrics_.SetLyrics(&lyrics_);
         lyric_path_ = path;
-        if (associated) associated_lyric_path_ = path;
+        associated_lyric_path_ = associated ? path : std::filesystem::path{};
     } catch (const std::exception&) {
         lyrics_ = {};
         desktop_lyrics_.SetLyrics(&lyrics_);
         lyric_path_.clear();
-        if (associated) associated_lyric_path_.clear();
+        associated_lyric_path_.clear();
     }
     if (lyric_control_) {
         if (fullscreen_lyric_detached_)
@@ -3665,7 +3664,8 @@ void PlayerWindow::LoadDroppedLyrics(const std::filesystem::path& path) {
     // lyric; while the RichEdit editor is active it streams the source bytes
     // into that document instead of adding the file to the music playlist.
     if (!lyric_editor_) {
-        LoadLyricsFrom(path, true);
+        // 0044AC70 loads the document, but never inserts a .rll mapping.
+        LoadLyricsFrom(path, false);
         return;
     }
     int encoding = kEditorEncodingUtf8;
@@ -3689,39 +3689,130 @@ void PlayerWindow::LoadCurrentLyrics(bool force) {
           GetWindow(lyric_service_editor_, GW_OWNER) == lyric_search_dialog_))
         CloseOnlineLyricSearch();
     ClearLyrics();
+    associated_lyric_path_.clear();
     const auto* playback_track = PlaybackTrackForUi();
     if (!playback_track || (!force && !settings_.lyric.auto_load_lyric)) {
         ApplyAutoLyricVisibility();
         return;
     }
-    if (!associated_lyric_path_.empty()) {
-        std::error_code error;
-        if (std::filesystem::exists(associated_lyric_path_, error) && !error) {
-            LoadLyricsFrom(associated_lyric_path_, true);
-            return;
-        }
-        associated_lyric_path_.clear();
-    }
-
     const auto& track = *playback_track;
+    // 004AD30E: Lyrics, then Lyric. Use the metadata already read by the
+    // playback worker; never open a second decoder on the UI thread here.
+    if (!settings_.lyric.dont_load_lyric_tag) {
+        for (const auto* name : {"Lyrics", "Lyric"}) {
+            auto field = std::find_if(track.metadata.begin(), track.metadata.end(), [&](const auto& entry) {
+                return !_stricmp(entry.first.c_str(), name) && !entry.second.empty();
+            });
+            if (field == track.metadata.end()) continue;
+            auto loaded = lyrics::ParseLrc(field->second);
+            // 004AD30E only falls back to singular Lyric when Lyrics was
+            // absent/empty, not when its non-empty text failed to parse.
+            if (loaded.lines.empty()) break;
+            lyrics_ = std::move(loaded); lyrics_embedded_ = true;
+            ApplyLyricTrimSpaces(lyrics_, settings_.lyric.trim_spaces);
+            desktop_lyrics_.SetLyrics(&lyrics_);
+            if (lyric_control_) InvalidateRect(lyric_control_, nullptr, FALSE);
+            ApplyAutoLyricVisibility(); return;
+        }
+    }
+    EnsureLyricAssociationsLoaded();
+    const auto association = lyric_associations_.Find({track.path, track.subtrack});
+    // The sentinel blocks external lookup, not the earlier embedded branch.
+    if (association == std::filesystem::path(lyrics::kNoLyric)) { ApplyAutoLyricVisibility(); return; }
     std::wstring artist;
     std::wstring title;
     try { artist = core::Utf8ToWide(track.artist); }
     catch (const std::exception&) {}
     try { title = core::Utf8ToWide(track.title); }
     catch (const std::exception&) {}
-    const auto candidates = BuildLocalLyricCandidates(
-        track.path, artist, title, PlayerRuntimeDirectory(),
+    lyrics::LocalSearchRequest request;
+    request.media = track.path; request.artist = std::move(artist); request.title = std::move(title);
+    request.associated = association.value_or(std::filesystem::path{});
+    request.roots = lyrics::LocalSearchRoots(track.path, PlayerRuntimeDirectory(),
         settings_.lyric.download_folder, settings_.lyric.folders);
-    for (const auto& candidate : candidates) {
-        std::error_code error;
-        if (!std::filesystem::exists(candidate, error) || error) continue;
-        LoadLyricsFrom(candidate, false);
+    local_lyric_song_ = {track.path, track.subtrack};
+    local_lyric_search_ = lyrics::SearchLocalLyricsAsync(std::move(request));
+    ApplyAutoLyricVisibility();
+}
+
+void PlayerWindow::EnsureLyricAssociationsLoaded() {
+    if (lyric_associations_.Loaded()) return;
+    wchar_t executable[32768]{};
+    if (!GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)))) return;
+    auto path = std::filesystem::path(executable);
+    path.replace_extension(L".rll"); // 00401829: EXE basename, not TTPlayer.xml.
+    static_cast<void>(lyric_associations_.Load(path));
+}
+
+void PlayerWindow::CancelLocalLyricSearch() {
+    if (local_lyric_search_) local_lyric_search_->canceled = true;
+    local_lyric_search_.reset();
+}
+
+void PlayerWindow::PollLocalLyricSearch() {
+    if (!local_lyric_search_ || lyric_association_open_) return;
+    const auto* track = PlaybackTrackForUi();
+    if (!track || !(local_lyric_song_ == lyrics::SongKey{track->path, track->subtrack}) || lyric_editor_) {
+        CancelLocalLyricSearch(); return;
+    }
+    std::optional<lyrics::LocalSearchResult> result;
+    {
+        std::lock_guard lock(local_lyric_search_->mutex);
+        if (local_lyric_search_->result) result = std::move(local_lyric_search_->result);
+    }
+    if (!result) return;
+    CancelLocalLyricSearch();
+    if (!result->lyric.lines.empty()) {
+        lyric_path_ = std::move(result->loaded_path);
+        if (lyric_associations_.Find(local_lyric_song_) == lyric_path_) associated_lyric_path_ = lyric_path_;
+        lyrics_ = std::move(result->lyric); lyrics_embedded_ = false;
+        ApplyLyricTrimSpaces(lyrics_, settings_.lyric.trim_spaces);
+        desktop_lyrics_.SetLyrics(&lyrics_);
+        if (lyric_control_) {
+            if (fullscreen_lyric_detached_) RebuildLyricFont(false);
+            InvalidateRect(lyric_control_, nullptr, FALSE);
+        }
+        UpdateDiscordPresence();
+    } else if (settings_.lyric.auto_download && (!settings_.lyric.download_when_full_info ||
+        (!track->artist.empty() && !track->title.empty()))) StartOnlineLyricSearch(true);
+    ApplyAutoLyricVisibility();
+}
+
+void PlayerWindow::ShowLyricAssociation() {
+    const auto* track = PlaybackTrackForUi();
+    if (!track || lyric_association_open_) return;
+    EnsureLyricAssociationsLoaded();
+    if (!lyric_associations_.Loaded()) {
+        MessageBoxW(lyric_window_ ? lyric_window_ : window_, ResourceText(0x8182).c_str(),
+            ResourceText(0x80).c_str(), MB_ICONERROR);
         return;
     }
-    if (!lyric_editor_ && settings_.lyric.auto_download &&
-        (!settings_.lyric.download_when_full_info || (!artist.empty() && !title.empty())))
-        StartOnlineLyricSearch(true);
+    const lyrics::SongKey song{track->path, track->subtrack};
+    lyrics::LocalSearchRequest request;
+    request.media = track->path;
+    try { request.artist = core::Utf8ToWide(track->artist); request.title = core::Utf8ToWide(track->title); } catch (...) {}
+    request.roots = lyrics::LocalSearchRoots(track->path, PlayerRuntimeDirectory(),
+        settings_.lyric.download_folder, settings_.lyric.folders);
+    lyric_association_open_ = true;
+    const auto choice = ChooseLyricAssociation(ResourceModule(), lyric_window_ ? lyric_window_ : window_,
+        lyric_associations_, song, std::move(request), [this] { LoadCurrentLyrics(true); });
+    lyric_association_open_ = false;
+    const auto* current = PlaybackTrackForUi();
+    const bool same = current && song == lyrics::SongKey{current->path, current->subtrack};
+    if (choice.action == IDOK && !choice.path.empty()) {
+        lyric_associations_.Set(song, choice.path);
+        if (same) {
+            CloseOnlineLyricSearch();
+            LoadLyricsFrom(choice.path, true); // Explicit file bypasses embedded metadata.
+        }
+    } else if (choice.action == 0x844 || choice.action == 6 || choice.action == 7) {
+        if (choice.action == 7) lyric_associations_.Set(song, lyrics::kNoLyric);
+        else lyric_associations_.Erase(song);
+        if (same) {
+            CloseOnlineLyricSearch(); associated_lyric_path_.clear(); ClearLyrics();
+            ApplyAutoLyricVisibility();
+        }
+    }
     ApplyAutoLyricVisibility();
 }
 

@@ -3,6 +3,7 @@
 #include "project_links.h"
 #include "output_devices.h"
 #include "modern_file_dialog.h"
+#include "lyric_association_dialog.h"
 #include "../app/resource_ids.h"
 #include "ttplayer/app/worker_process.h"
 #include "ttplayer/build_date.h"
@@ -2648,6 +2649,16 @@ void PlayerWindow::LaunchOptionsDspConfiguration(
 
 void PlayerWindow::ShowVisualOptions() {
     ShowOptions(kPageVisual);
+}
+
+void detail::InstallLyricAssociationImages(HWND dialog, HMODULE resources, bool all_associations) {
+    // 00447A2E / 00445B30 use the same 00434754 button bitmap adapter as
+    // the options sheet. Reuse its hover/disabled rendering and destruction.
+    if (all_associations) InstallButtonBitmap(dialog, 0x802e, resources, 0x40f);
+    else {
+        InstallButtonBitmap(dialog, 2115, resources, 1);
+        InstallButtonBitmap(dialog, 2120, resources, 7);
+    }
 }
 
 void PlayerWindow::InstallLyricServiceEditorButtons(HWND dialog) {

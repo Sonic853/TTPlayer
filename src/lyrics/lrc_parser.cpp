@@ -79,14 +79,14 @@ Lyrics LoadLrc(const std::filesystem::path& path) {
         bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
     if (utf8_count > 0 || bytes.empty()) return ParseLrc(bytes);
 
-    // The 5.7-era local lyric collection commonly contains ANSI/GBK files.
-    // The original reader falls back to the process ANSI code page when no
-    // BOM/valid UTF-8 sequence is present.
-    const int wide_count = MultiByteToWideChar(CP_ACP, 0, bytes.data(),
+    // 0043E237: after BOM/strict UTF-8 checks, use Big5 on a Big5 system,
+    // GBK otherwise (including English and UTF-8 system locales).
+    const UINT fallback = GetACP() == 950 ? 950 : 936;
+    const int wide_count = MultiByteToWideChar(fallback, 0, bytes.data(),
         static_cast<int>(bytes.size()), nullptr, 0);
     if (wide_count <= 0) throw std::runtime_error("unsupported lyric encoding");
     std::wstring wide(static_cast<size_t>(wide_count), L'\0');
-    MultiByteToWideChar(CP_ACP, 0, bytes.data(), static_cast<int>(bytes.size()),
+    MultiByteToWideChar(fallback, 0, bytes.data(), static_cast<int>(bytes.size()),
                         wide.data(), wide_count);
     return ParseLrc(core::WideToUtf8(wide));
 }

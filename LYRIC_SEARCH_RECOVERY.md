@@ -91,7 +91,7 @@ HTTP/HTTPS 协议客户端，解除 HTTP-only/两个服务器的限制；已知�
   手动搜索按钮禁用，不显示假服务器，也不伪造成功结果。
 - 保存目录消费 `SaveToSoundFolder/DownLoadFolder`，相对目录以 EXE 路径解析。
   无下载目录且是本地歌曲时依原逻辑使用歌曲目录；URL 没有本地歌曲目录。
-- 文件名消费 `SameFileTitle`；下载后关联消费 `AutoAssociate`，接入现有歌词关联状态。
+- 文件名消费 `SameFileTitle`；下载后关联消费 `AutoAssociate`，接入 `TTPlayerRebuild.rll` 持久关联表。
   防止服务器/输入文件名穿越路径、NTFS ADS、DOS 设备名；下载文本上限 2M 字符。
 - 依 `0043E3CF` 优先无损 ACP，否则 UTF-8 BOM。先写同目录临时文件，再移动到
   目标；未授权覆盖不会截断原文件。手动覆盖询问复用 `0x814D`。
@@ -115,5 +115,7 @@ ctest --test-dir out/png-6120 -C Release -R '^lyric_search_tests$' --output-on-f
 这些结果验证**客户端调用链可运行**，不代表历史外网服务器现在仍可用。
 为避免网络等待及可重入的模态循环，重建的 208/209 使用可关闭的 modeless 外壳，
 不是逐字复制原版 `DialogBoxParamW` 的内部对象/消息循环。
-既有手动关联的完整跨会话数据库、歌词上传及原版广告/提示链接业务不在此次恢复范围；
+2026-09-14 已补上手动关联窗口和跨会话关联表，详见
+[LYRIC_ASSOCIATION_RECOVERY.md](LYRIC_ASSOCIATION_RECOVERY.md)。
+歌词上传及原版广告/提示链接业务不在已恢复范围；
 不能将本次结果描述为整个歌词网络系统已实现逐字或二进制等价。

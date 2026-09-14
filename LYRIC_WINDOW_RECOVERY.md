@@ -1,5 +1,11 @@
 # Lyric window recovery
 
+2026-09-14: the context-menu association command now opens original dialog 206,
+with nested dialog 205 and an EXE-named persistent `.rll` table. Local loading
+uses embedded / association / scored folder search / online fallback order.
+See [LYRIC_ASSOCIATION_RECOVERY.md](LYRIC_ASSOCIATION_RECOVERY.md) for evidence,
+host regressions, intentional modern-dialog compatibility and remaining limits.
+
 Online search/download is now connected to the real lyric AddIn ABI, including
 DLL-owned external server XML/cache and original dialogs 208/209. See
 [LYRIC_SEARCH_RECOVERY.md](LYRIC_SEARCH_RECOVERY.md) for protocol evidence,

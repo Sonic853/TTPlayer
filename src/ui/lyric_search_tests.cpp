@@ -109,6 +109,30 @@ private:
 
 namespace ttplayer::testing {
 struct SkinRebindAccess {
+    static void CheckServiceColumns(ui::PlayerWindow& player) {
+        const HWND editor = player.lyric_service_editor_;
+        const HWND list = GetDlgItem(editor, IDC_LYRIC_SERVICES_LIST);
+        Require(Header_GetItemCount(ListView_GetHeader(list)) == 2, "server editor must have only name and URL columns");
+        for (int i = 0; i < 2; ++i) {
+            wchar_t text[128]{};
+            LVCOLUMNW column{}; column.mask = LVCF_TEXT; column.pszText = text; column.cchTextMax = 128;
+            Require(ListView_GetColumn(list, i, &column) && std::wstring(text) == (i == 0 ? L"名称" : L"地址"),
+                "server editor column caption");
+        }
+        const HWND storage = GetDlgItem(editor, IDC_LYRIC_SERVICES_STORAGE);
+        Require(storage && (GetWindowLongPtrW(storage, GWL_STYLE) & ES_READONLY), "storage field must remain read-only");
+        const int previous = player.lyric_service_selection_;
+        for (int index : {0, 2}) { // Real selection notifications: DLL row, then INI row.
+            ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_SetItemState(list, index, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            wchar_t text[32768]{}; GetWindowTextW(storage, text, static_cast<int>(std::size(text)));
+            Require(player.lyric_service_selection_ == index &&
+                std::wstring(text) == player.lyric_service_draft_[index].storage.wstring(),
+                "selected server storage not displayed below list");
+        }
+        ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        if (previous >= 0) ListView_SetItemState(list, previous, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    }
     static void CheckDiscardPrompt(ui::PlayerWindow& player, int answer) {
         // Drive the REAL nested MessageBox on this UI thread, without sending
         // global mouse/keyboard input or touching another application's window.
@@ -167,6 +191,7 @@ struct SkinRebindAccess {
             return editor;
         };
         const HWND editor = open();
+        CheckServiceColumns(player);
         const auto searches = server.searches.load(), downloads = server.downloads.load();
         for (const int command : {1046, IDOK, IDCANCEL}) SendMessageW(search, WM_COMMAND, command, 0);
         SendMessageW(search, WM_SYSCOMMAND, SC_CLOSE, 0);
@@ -204,6 +229,7 @@ struct SkinRebindAccess {
         settings.lyric.server_key = lyrics::ServiceKey({L"Fixture one", core::Utf8ToWide(server.base), {},
             directory / L"AddIn/ttp_lrcsh.dll", directory / L"AddIn/ttp_lrcsh.ini", false, 0});
         ui::PlayerWindow player(settings);
+        Require(player.lyric_associations_.Load(directory / L"test-only.rll"), "isolated association store");
         player.instance_ = GetModuleHandleW(nullptr);
         player.SetSkinResourceModule(resources);
         player.SetSoundLibrary(&library);
@@ -245,6 +271,7 @@ struct SkinRebindAccess {
             editor_bounds.bottom-editor_bounds.top < options_bounds.bottom-options_bounds.top,
             "service editor must be smaller than options");
         const HWND services = GetDlgItem(editor, IDC_LYRIC_SERVICES_LIST);
+        CheckServiceColumns(player);
         RECT list_rect{}, prior_button{}; GetWindowRect(services, &list_rect);
         for (const auto [button, local] : {std::pair{IDC_LYRIC_SERVICES_ADD, 1027},
             {IDC_LYRIC_SERVICES_DELETE, 1039}, {IDC_LYRIC_SERVICES_UP, 1042}, {IDC_LYRIC_SERVICES_DOWN, 1045}}) {
@@ -265,9 +292,11 @@ struct SkinRebindAccess {
                 "server icon must be centered without stretching the original 16x15 bitmap");
         }
         Require(ListView_GetItemCount(services) == 4, "editor list incomplete");
-        ListView_GetItemText(services, 0, 2, name, 256);
+        ListView_SetItemState(services, 0, LVIS_SELECTED, LVIS_SELECTED);
+        GetDlgItemTextW(editor, IDC_LYRIC_SERVICES_STORAGE, name, 256);
         Require(std::filesystem::path(name).extension() == L".dll", "editor first row not from DLL");
-        ListView_GetItemText(services, 2, 2, name, 256);
+        ListView_SetItemState(services, 2, LVIS_SELECTED, LVIS_SELECTED);
+        GetDlgItemTextW(editor, IDC_LYRIC_SERVICES_STORAGE, name, 256);
         Require(std::filesystem::path(name).extension() == L".ini", "editor INI rows not below DLL rows");
         ListView_SetItemState(services, 0, LVIS_SELECTED, LVIS_SELECTED);
         Require(GetWindowLongW(GetDlgItem(editor, IDC_LYRIC_SERVICES_NAME), GWL_STYLE) & ES_READONLY,
@@ -433,6 +462,7 @@ struct SkinRebindAccess {
         // Auto-search policy, silent best match, and stale-track cancellation.
         player.settings_.lyric.auto_download = true;
         player.settings_.lyric.auto_select_download = true;
+        player.settings_.lyric.auto_associate = true;
         playlist::Track track; track.path = directory / L"media.flac";
         track.title = "千千阙歌"; track.artist = "陈慧娴";
         player.opened_track_ = track;
@@ -440,6 +470,12 @@ struct SkinRebindAccess {
         player.StartOnlineLyricSearch(true);
         Until([&] { player.PollOnlineLyricSearch(); return !player.lyric_path_.empty(); });
         Require(!player.lyric_search_dialog_, "auto-select unexpectedly displayed modal results");
+        Require(player.lyric_associations_.Find({track.path, track.subtrack}) == player.lyric_path_,
+            "automatic download did not persist captured song association");
+        Require(player.lyric_associations_.Save(), "cannot save downloaded association");
+        lyrics::AssociationStore restarted;
+        Require(restarted.Load(directory / L"test-only.rll") &&
+            restarted.Find({track.path, track.subtrack}) == player.lyric_path_, "download association lost after restart");
         const auto searches = server.searches.load();
         player.StartOnlineLyricSearch(true);
         Require(server.searches == searches && !player.lyric_search_, "automatic retry storm");

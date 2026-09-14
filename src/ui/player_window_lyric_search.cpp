@@ -92,6 +92,13 @@ void PlayerWindow::ShowOnlineLyricSearch(bool automatic_results) {
 }
 
 void PlayerWindow::StartOnlineLyricSearch(bool automatic) {
+    if (!automatic) CancelLocalLyricSearch();
+    else {
+        if (local_lyric_search_ || lyric_association_open_ || lyric_editor_ ||
+            !lyric_path_.empty() || !lyrics_.lines.empty()) return;
+        const auto* track = PlaybackTrackForUi();
+        if (track && lyric_associations_.Find({track->path, track->subtrack}) == std::filesystem::path(lyrics::kNoLyric)) return;
+    }
     if (!sound_library_ || sound_library_->LyricSearchProviders().empty()) return;
     if (!lyric_services_ready_) {
         if (!lyric_catalog_job_) RefreshLyricServices();
@@ -181,6 +188,10 @@ void PlayerWindow::DownloadOnlineLyric(int index) {
             // Original automatic path accepts the already-present lyric;
             // do not leave an idle DLL session (or overwrite it silently).
             LoadLyricsFrom(lyric_download_path_, settings_.lyric.auto_associate);
+            if (settings_.lyric.auto_associate) {
+                EnsureLyricAssociationsLoaded();
+                lyric_associations_.Set({lyric_search_track_.path, lyric_search_track_.subtrack}, lyric_download_path_);
+            }
             CloseOnlineLyricSearch();
             return;
         }
@@ -201,6 +212,7 @@ void PlayerWindow::DownloadOnlineLyric(int index) {
 
 void PlayerWindow::PollOnlineLyricSearch() {
     if (!lyric_search_) return;
+    if (lyric_association_open_ || (lyric_search_automatic_ && local_lyric_search_)) return;
     // Network work remains asynchronous, but do not auto-download/close the
     // modal owner (and discard its editor) while the user edits the service list.
     if (lyric_search_dialog_ && IsWindow(lyric_service_editor_) &&
@@ -210,7 +222,7 @@ void PlayerWindow::PollOnlineLyricSearch() {
     }
     // A local association/editor opened while a background search was in
     // flight takes precedence over its late network response.
-    if (lyric_search_automatic_ && (!lyric_path_.empty() || lyric_editor_ ||
+    if (lyric_search_automatic_ && (!lyric_path_.empty() || !lyrics_.lines.empty() || lyric_editor_ ||
         !settings_.lyric.auto_download)) { CloseOnlineLyricSearch(); return; }
     auto snapshot = lyric_search_->Snapshot();
     if (lyric_download_deadline_ && GetTickCount64() >= lyric_download_deadline_) {
@@ -269,6 +281,10 @@ void PlayerWindow::PollOnlineLyricSearch() {
             if (lyric_download_path_.empty() || !lyrics::SaveDownloadedLyric(
                 lyric_download_path_, snapshot.text, lyric_download_overwrite_)) status = 0x8182;
             else {
+                if (lyric_download_associate_) {
+                    EnsureLyricAssociationsLoaded();
+                    lyric_associations_.Set({lyric_search_track_.path, lyric_search_track_.subtrack}, lyric_download_path_);
+                }
                 LoadLyricsFrom(lyric_download_path_, lyric_download_associate_);
                 UpdateDiscordPresence();
                 if (lyric_search_automatic_) { CloseOnlineLyricSearch(); return; }

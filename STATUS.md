@@ -1,5 +1,25 @@
 # Reconstruction status
 
+2026-09-14: recover the lyric context-menu association workflow from 5.7.9
+0044C930 and original resources 206/205. Restore search/partial search,
+browse (modern picker retained), associate/double-click, rename/recycle,
+remove/no-lyric/unblock, and the nested association manager. Raw EXE disassembly
+of 00447B3C..00447C98 confirms the missing STATIC 2087 hyperlink binding and
+initial columns; tests exercise actual child mouse messages and keyboard input.
+Add EXE-named UTF-8-BOM .rll persistence keyed by case-insensitive media path
+and subtrack; preserve original TTPlayer.rll. Restore embedded / association /
+scored local search / online fallback order, recursion-marker semantics,
+nonblocking stale-safe directory scanning and GBK/Big5 fallback. Downloads
+optionally update the same table; dropping a lyric does not create a mapping.
+See LYRIC_ASSOCIATION_RECOVERY.md for source addresses, host tests and remaining
+automatic tag-write / filename-rename migration limits. No production configuration
+or media files were changed by the tests.
+Final host verification: lyric_association_tests, lyric_search_tests,
+options_drawing_tests and desktop_lyrics_menu_tests passed (4/4, 12.27 s);
+association input passed three consecutive runs; lyric-settings,
+runtime-ui-settings and lyric-shift sections passed. Release executable rebuilt
+at out/png-6120/Release/TTPlayerRebuild.exe; not copied over a deployed player.
+
 2026-09-14: default fullscreen album-background transparency to 60 percent
 and the independent album profile's lyric height to 100 percent (LrcSizeAlbum=10).
 Keep All and the other visual profiles at 20 percent; preserve explicit saved

@@ -207,7 +207,6 @@ void PlayerWindow::PopulateLyricServiceEditor(int selected) {
         LVITEMW item{}; item.mask = LVIF_TEXT; item.iItem = static_cast<int>(i); item.pszText = entry.name.data();
         ListView_InsertItem(list, &item);
         ListView_SetItemText(list, item.iItem, 1, entry.url.data());
-        auto path = entry.storage.wstring(); ListView_SetItemText(list, item.iItem, 2, path.data());
     }
     if (!lyric_service_draft_.empty()) {
         selected = std::clamp(selected, 0, static_cast<int>(lyric_service_draft_.size()) - 1);
@@ -273,11 +272,15 @@ INT_PTR CALLBACK PlayerWindow::LyricServiceEditorProc(HWND dialog, UINT message,
         }
         const HWND list = GetDlgItem(dialog, IDC_LYRIC_SERVICES_LIST);
         ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP);
-        const UINT names[]{IDS_LYRIC_SERVICES_NAME, IDS_LYRIC_SERVICES_URL, IDS_LYRIC_SERVICES_STORAGE};
+        const UINT names[]{IDS_LYRIC_SERVICES_NAME, IDS_LYRIC_SERVICES_URL};
         RECT bounds{}; GetClientRect(list, &bounds);
-        for (int i = 0; i < 3; ++i) {
+        // Storage remains in the read-only field below, not a third column.
+        // Reserve scrollbar space and give the URL the remaining width.
+        const int width = std::max(0L, bounds.right - bounds.left - GetSystemMetrics(SM_CXVSCROLL));
+        const int name_width = width * 30 / 100;
+        for (int i = 0; i < 2; ++i) {
             auto text = Text(names[i]); LVCOLUMNW col{}; col.mask = LVCF_TEXT | LVCF_WIDTH;
-            col.pszText = text.data(); col.cx = bounds.right * (i == 0 ? 24 : 38) / 100;
+            col.pszText = text.data(); col.cx = i == 0 ? name_width : width - name_width;
             ListView_InsertColumn(list, i, &col);
         }
         SendDlgItemMessageW(dialog, IDC_LYRIC_SERVICES_NAME, EM_SETLIMITTEXT, 256, 0);

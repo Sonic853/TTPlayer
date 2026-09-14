@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ttplayer/lyrics/lrc_parser.h"
+#include "ttplayer/lyrics/local_search.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -13,8 +14,9 @@
 namespace ttplayer::ui {
 
 // CSettings stores the local lyric search order as a list of strings.  A
-// leading '*' is the persisted check state; the two angle-bracket values are
-// logical locations rather than literal directory names.
+// leading '*' enables recursion, not the directory itself (00401C0F).
+// This helper lists exact-name candidates; the asynchronous local search also
+// enumerates scored matches and subdirectories (00444F71).
 inline std::vector<std::filesystem::path> BuildLocalLyricCandidates(
     const std::filesystem::path& media_path,
     std::wstring_view artist,
@@ -22,53 +24,23 @@ inline std::vector<std::filesystem::path> BuildLocalLyricCandidates(
     const std::filesystem::path& runtime_directory,
     const std::filesystem::path& download_folder,
     const std::vector<std::wstring>& configured_folders) {
-    std::vector<std::filesystem::path> roots;
-    std::set<std::wstring> root_keys;
+    const auto roots = lyrics::LocalSearchRoots(media_path, runtime_directory,
+        download_folder, configured_folders);
     const std::wstring media_text = media_path.wstring();
     const bool network = media_text.find(L"://") != std::wstring::npos;
 
-    const auto normalize = [](const std::filesystem::path& value,
-                              const std::filesystem::path& base) {
-        if (value.empty()) return std::filesystem::path{};
-        return (value.is_absolute() ? value : base / value).lexically_normal();
-    };
-    const auto append_root = [&](const std::filesystem::path& value) {
-        if (value.empty()) return;
-        const auto normalized = value.lexically_normal();
-        auto key = normalized.wstring();
-        std::ranges::transform(key, key.begin(), [](wchar_t character) {
-            return static_cast<wchar_t>(std::towlower(character));
-        });
-        if (root_keys.insert(std::move(key)).second)
-            roots.push_back(normalized);
-    };
-
-    for (auto configured : configured_folders) {
-        if (configured.empty() || configured.front() != L'*') continue;
-        configured.erase(configured.begin());
-        if (configured == L"<Sound Folder>") {
-            if (!network) append_root(media_path.parent_path());
-        } else if (configured == L"<Lyrics Download Folder>") {
-            append_root(download_folder.empty()
-                ? runtime_directory / L"Lyrics"
-                : normalize(download_folder, runtime_directory));
-        } else if (!configured.empty()) {
-            append_root(normalize(configured, runtime_directory));
-        }
-    }
-
     std::vector<std::wstring> names;
-    if (!network && !media_path.stem().empty())
-        names.push_back(media_path.stem().wstring());
     if (!artist.empty() && !title.empty())
         names.push_back(std::wstring(artist) + L" - " + std::wstring(title));
+    if (!network && !media_path.stem().empty())
+        names.push_back(media_path.stem().wstring());
 
     std::vector<std::filesystem::path> result;
     std::set<std::wstring> candidate_keys;
     for (const auto& root : roots) {
         for (const auto& name : names) {
             for (const auto* extension : {L".lrc", L".txt"}) {
-                const auto candidate = root / (name + extension);
+                const auto candidate = root.path / (name + extension);
                 auto key = candidate.lexically_normal().wstring();
                 std::ranges::transform(key, key.begin(), [](wchar_t character) {
                     return static_cast<wchar_t>(std::towlower(character));

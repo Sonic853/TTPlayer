@@ -555,6 +555,18 @@ public:
         read_known("title", L"title", metadata_.title);
         read_known("artist", L"artist", metadata_.artist);
         read_known("album", L"album", metadata_.album);
+        // 004AD30E explicitly queries these names; some readers omit lyrics
+        // from their generic enumeration. Keep that fallback on the decoder
+        // worker so automatic lyric loading never opens a DLL on the UI thread.
+        for (const auto& [name, wide] : {std::pair{"Lyrics", L"Lyrics"}, std::pair{"Lyric", L"Lyric"}}) {
+            const auto found = std::find_if(metadata_.entries.begin(), metadata_.entries.end(), [&](const auto& entry) {
+                return MetadataKeyEquals(entry.first, wide) && !entry.second.empty();
+            });
+            if (found != metadata_.entries.end()) break;
+            if (const auto value = reader_->MetadataValue(name); value && !value->empty()) {
+                metadata_.entries.emplace_back(wide, *value); break;
+            }
+        }
         if (!metadata_.replay_gain_db) {
             if (const auto value = reader_->MetadataValue("replaygain_track_gain"))
                 metadata_.replay_gain_db = MetadataNumber(*value);
