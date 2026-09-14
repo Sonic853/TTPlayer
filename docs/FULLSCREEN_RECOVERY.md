@@ -24,9 +24,9 @@ The three commands retain their original meanings:
 
 | Command | Mode | Layout |
 | --- | --- | --- |
-| `0x7DE8` | lyrics | opaque selected-screen lyrics, or that display's color-keyed work-area lyric surface when `TransparentFS=1` |
+| `0x7DE8` | lyrics | opaque selected-screen lyrics, or that display's transparent work-area lyric surface when `TransparentFS=1` |
 | `0x7DE9` | visual | full selected-screen visual surface; visual types 0 and 4 are changed to type 1 |
-| `0x7DEA` | combined | per-effect `LrcSize*` split, or full visual plus color-keyed lyric overlay when `PosRelation*=1` |
+| `0x7DEA` | combined | per-effect `LrcSize*` split, or full visual plus transparent lyric overlay when `PosRelation*=1` |
 
 The normal lyric window is hidden for every full-screen mode, including
 visual-only mode, and its pre-entry visibility is restored on exit. Mode
@@ -59,8 +59,12 @@ candidate's absolute height and must be strictly smaller than the client
 width. This preserves the original `16 -> 12` terminal case and never writes
 the temporary height back to `TTPlayer.xml`. A nonzero lyric `CharSet`
 overrides the selected normal or full-screen `LOGFONT` after fitting, and
-transparent lyrics use non-antialiased glyphs so the background color key
-leaves no fringe.
+the original transparent path uses non-antialiased glyphs to avoid color-key
+fringes. Since 2026-09-15, the requested smooth fullscreen extension instead
+uses grayscale coverage and per-pixel alpha, while preserving the saved font
+and ordinary/mini color-key behavior. See
+[FULLSCREEN_LYRIC_RENDERING.md](FULLSCREEN_LYRIC_RENDERING.md) for original
+evidence, the intentional rendering difference and host pixel tests.
 
 ## Context menus
 

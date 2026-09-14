@@ -80,6 +80,11 @@ saved. `FUN_004494E5` applies `WS_EX_LAYERED` with `BkgndColor` as
 configuration `FUN_0044B4A1` also forces `LOGFONT::lfQuality` to
 `NONANTIALIASED_QUALITY`, preventing color-key fringe pixels around glyphs.
 
+This remains the normal/mini window policy. The requested smooth transparent
+fullscreen extension now uses per-pixel glyph alpha instead; the original
+evidence and intentional difference are documented in
+[FULLSCREEN_LYRIC_RENDERING.md](FULLSCREEN_LYRIC_RENDERING.md).
+
 `FUN_00449313` and `FUN_004495C8` distinguish two transparent layouts:
 
 - `Transparent=1, TransSkin=0` retains the skin chrome and its normal lyric

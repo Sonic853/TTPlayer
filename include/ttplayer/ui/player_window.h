@@ -486,7 +486,7 @@ private:
     void CaptureActiveLyricWindowState();
     void ApplyActiveLyricWindowState();
     void PaintLyricWindow(HDC dc) const;
-    void PaintLyricControl(HWND control, HDC dc) const;
+    void PaintLyricControl(HWND control, HDC dc, bool present_layered = true) const;
     [[nodiscard]] std::wstring LyricLineText(size_t index) const;
     [[nodiscard]] int LyricLineExtent(HDC dc, size_t index) const;
     [[nodiscard]] std::pair<size_t, int> LyricDragPosition(HDC dc,

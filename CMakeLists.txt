@@ -186,6 +186,14 @@ target_link_libraries(fullscreen_lyric_drag_tests PRIVATE ttplayer_core)
 add_test(NAME fullscreen_lyric_drag_tests COMMAND fullscreen_lyric_drag_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(fullscreen_lyric_drag_tests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
 
+add_executable(fullscreen_lyric_render_tests src/ui/fullscreen_lyric_render_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(fullscreen_lyric_render_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(fullscreen_lyric_render_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(fullscreen_lyric_render_tests PRIVATE ttplayer_core)
+add_test(NAME fullscreen_lyric_render_tests COMMAND fullscreen_lyric_render_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(fullscreen_lyric_render_tests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+
 add_executable(fullscreen_album_tests src/ui/fullscreen_album_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(fullscreen_album_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

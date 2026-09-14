@@ -2,6 +2,7 @@
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
 #include "lyric_association_dialog.h"
+#include "lyric_alpha_mask.h"
 #include "../app/resource_ids.h"
 
 #include "ttplayer/core/text.h"
@@ -1241,12 +1242,15 @@ void PlayerWindow::RebuildLyricFont(bool repaint) {
         }
     }
 
-    // FUN_004499AD mutates only its stack copy after fitting.  CharSet and
-    // color-key-safe glyph quality therefore affect the installed font, not
-    // candidate measurement or the persisted FontFS value.
+    // FUN_004499AD mutates only its temporary copy after fitting. Preserve
+    // that contract, but use grayscale coverage for the modern fullscreen
+    // alpha surface instead of the original color-key/non-antialiased path.
     if (settings_.lyric.charset != 0)
         font.lfCharSet = static_cast<BYTE>(settings_.lyric.charset);
-    if (ActiveLyricTransparent()) font.lfQuality = NONANTIALIASED_QUALITY;
+    if (fullscreen_lyric_detached_ && ActiveLyricTransparent())
+        font.lfQuality = ANTIALIASED_QUALITY;
+    else if (ActiveLyricTransparent())
+        font.lfQuality = NONANTIALIASED_QUALITY;
 
     HFONT replacement = CreateFontIndirectW(&font);
 
@@ -1265,11 +1269,14 @@ void PlayerWindow::ApplyFullScreenLyricTransparency() {
     if (!fullscreen_lyric_detached_ || !lyric_control_) return;
     LONG_PTR extended = GetWindowLongPtrW(lyric_control_, GWL_EXSTYLE);
     if (settings_.lyric.fullscreen_transparent) {
+        // Clear any old SetLayeredWindowAttributes state before using
+        // UpdateLayeredWindow. Repeated layout updates keep the alpha surface.
+        DWORD flags{};
+        if ((extended & WS_EX_LAYERED) &&
+            GetLayeredWindowAttributes(lyric_control_, nullptr, nullptr, &flags))
+            SetWindowLongPtrW(lyric_control_, GWL_EXSTYLE, extended & ~static_cast<LONG_PTR>(WS_EX_LAYERED));
         extended |= WS_EX_LAYERED;
         SetWindowLongPtrW(lyric_control_, GWL_EXSTYLE, extended);
-        SetLayeredWindowAttributes(lyric_control_,
-            settings_.lyric.fullscreen_background_color, 255,
-            LWA_COLORKEY);
     } else {
         extended &= ~static_cast<LONG_PTR>(WS_EX_LAYERED);
         SetWindowLongPtrW(lyric_control_, GWL_EXSTYLE, extended);
@@ -1553,7 +1560,7 @@ void PlayerWindow::PaintLyricWindow(HDC dc) const {
     DeleteDC(canvas);
 }
 
-void PlayerWindow::PaintLyricControl(HWND control, HDC dc) const {
+void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered) const {
     RECT client{};
     GetClientRect(control, &client);
     const int width = client.right;
@@ -1581,6 +1588,16 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc) const {
         return;
     }
     const HGDIOBJ old_buffer = SelectObject(canvas, buffer);
+    const bool alpha_text = text_control && fullscreen_lyric_detached_ && ActiveLyricTransparent();
+    std::optional<LyricAlphaMask> alpha_mask;
+    if (alpha_text) {
+        alpha_mask.emplace(dc, width, height);
+        if (!lyric_pixels || !*alpha_mask) {
+            SelectObject(canvas, old_buffer); DeleteObject(buffer); DeleteDC(canvas);
+            return; // Retain the previous frame on allocation failure.
+        }
+        std::memset(lyric_pixels, 0, static_cast<size_t>(width) * height * 4);
+    }
     if (!text_control) {
         RECT parent_client{};
         GetClientRect(lyric_window_, &parent_client);
@@ -1621,12 +1638,19 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc) const {
         const COLORREF text_color = ActiveLyricTextColor();
         const COLORREF highlight_color = ActiveLyricHighlightColor();
         const COLORREF background_color = ActiveLyricBackgroundColor();
-        const HBRUSH background = CreateSolidBrush(background_color);
-        FillRect(canvas, &client, background);
-        DeleteObject(background);
+        if (!alpha_text) {
+            const HBRUSH background = CreateSolidBrush(background_color);
+            FillRect(canvas, &client, background);
+            DeleteObject(background);
+        }
         SetBkMode(canvas, TRANSPARENT);
         const HGDIOBJ old_font = SelectObject(canvas,
             lyric_font_ ? lyric_font_ : GetStockObject(DEFAULT_GUI_FONT));
+        const auto draw_text = [&](const std::wstring& text, RECT line, UINT format) {
+            if (alpha_mask)
+                alpha_mask->Text(canvas, static_cast<uint32_t*>(lyric_pixels), text, line, format);
+            else DrawTextW(canvas, text.c_str(), -1, &line, format);
+        };
         const int drag = lyric_line_dragging_ ? lyric_line_drag_offset_ : 0;
         // FUN_0043F766 samples the decoder callback once and derives the line,
         // start/end interval and pixel phase from that single value.  Sampling
@@ -1672,21 +1696,19 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc) const {
             const auto text = LyricLineText(index);
             if (index != current) {
                 SetTextColor(canvas, animated_line_color(index));
-                DrawTextW(canvas, text.c_str(), -1, &line, format);
+                draw_text(text, line, format);
                 return;
             }
             if (!ActiveLyricKaraokeMode() || lyric_line_dragging_ ||
                 !playback_line || *playback_line != current) {
                 SetTextColor(canvas, highlight_color);
-                DrawTextW(canvas, text.c_str(), -1, &line, format);
+                draw_text(text, line, format);
                 return;
             }
 
             // With KaraokeMode=1 the original draws the same current line in
             // two clipped passes: highlighted before the playback boundary,
             // normal after it (0043FC10 at 00440426/0044080E).
-            SetTextColor(canvas, text_color);
-            DrawTextW(canvas, text.c_str(), -1, &line, format);
             RECT highlight_clip = line;
             if (horizontal_stream) {
                 highlight_clip.right = width / 2;
@@ -1711,13 +1733,25 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc) const {
                 highlight_clip.left = text_left;
                 highlight_clip.right = text_left + highlighted;
             }
+            SetTextColor(canvas, text_color);
+            if (alpha_text && highlight_clip.right > highlight_clip.left) {
+                // Disjoint passes preserve coverage at the karaoke boundary;
+                // highlighting over a normal glyph would double edge alpha.
+                const int saved = SaveDC(canvas);
+                if (saved) {
+                    ExcludeClipRect(canvas, highlight_clip.left, highlight_clip.top,
+                        highlight_clip.right, highlight_clip.bottom);
+                    draw_text(text, line, format);
+                    RestoreDC(canvas, saved);
+                }
+            } else draw_text(text, line, format);
             if (highlight_clip.right > highlight_clip.left) {
                 const int saved = SaveDC(canvas);
                 IntersectClipRect(canvas, highlight_clip.left,
                                   highlight_clip.top, highlight_clip.right,
                                   highlight_clip.bottom);
                 SetTextColor(canvas, highlight_color);
-                DrawTextW(canvas, text.c_str(), -1, &line, format);
+                draw_text(text, line, format);
                 if (saved != 0) RestoreDC(canvas, saved);
             }
         };
@@ -1741,7 +1775,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc) const {
             else if (ActiveLyricTextAlign() >= 2) format |= DT_RIGHT;
             SetTextColor(canvas, highlight_color);
             const auto text = DisplayName(*fallback);
-            DrawTextW(canvas, text.c_str(), -1, &line, format);
+            draw_text(text, line, format);
         } else if (!lyrics_.lines.empty()) {
             if (ActiveLyricScrollMode() != 0) {
                 // XML ScrollMode=1 maps to CLyricCtrl's internal +0x6c == 0;
@@ -1794,29 +1828,37 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc) const {
                 canvas, GetStockObject(DEFAULT_GUI_FONT));
             SetTextColor(canvas, guide_color);
             SetBkMode(canvas, TRANSPARENT);
+            const auto draw_guide = [&](HDC guide_dc) {
+                if (ActiveLyricScrollMode() != 0) {
+                    const int centre = width / 2;
+                    MoveToEx(guide_dc, centre - 4, 1, nullptr); LineTo(guide_dc, centre + 4, 1);
+                    MoveToEx(guide_dc, centre, 1, nullptr); LineTo(guide_dc, centre, height - 1);
+                    MoveToEx(guide_dc, centre - 4, height - 1, nullptr);
+                    LineTo(guide_dc, centre + 4, height - 1);
+                } else {
+                    const int centre = height / 2;
+                    MoveToEx(guide_dc, 1, centre - 4, nullptr); LineTo(guide_dc, 1, centre + 4);
+                    MoveToEx(guide_dc, 1, centre, nullptr); LineTo(guide_dc, width - 1, centre);
+                    MoveToEx(guide_dc, width - 1, centre - 4, nullptr);
+                    LineTo(guide_dc, width - 1, centre + 4);
+                }
+            };
+            if (alpha_mask)
+                alpha_mask->Draw(canvas, static_cast<uint32_t*>(lyric_pixels), client, draw_guide);
+            else draw_guide(canvas);
             if (ActiveLyricScrollMode() != 0) {
                 const int centre = width / 2;
-                MoveToEx(canvas, centre - 4, 1, nullptr); LineTo(canvas, centre + 4, 1);
-                MoveToEx(canvas, centre, 1, nullptr); LineTo(canvas, centre, height - 1);
-                MoveToEx(canvas, centre - 4, height - 1, nullptr);
-                LineTo(canvas, centre + 4, height - 1);
                 if (target) {
                     RECT label{centre + 1, 1, width, height - 1};
                     const auto text = FormatInfoDuration(*target);
-                    DrawTextW(canvas, text.c_str(), -1, &label,
-                              DT_SINGLELINE | DT_BOTTOM);
+                    draw_text(text, label, DT_SINGLELINE | DT_BOTTOM);
                 }
             } else {
                 const int centre = height / 2;
-                MoveToEx(canvas, 1, centre - 4, nullptr); LineTo(canvas, 1, centre + 4);
-                MoveToEx(canvas, 1, centre, nullptr); LineTo(canvas, width - 1, centre);
-                MoveToEx(canvas, width - 1, centre - 4, nullptr);
-                LineTo(canvas, width - 1, centre + 4);
                 if (target) {
                     RECT label{1, centre + 1, width - 1, height};
                     const auto text = FormatInfoDuration(*target);
-                    DrawTextW(canvas, text.c_str(), -1, &label,
-                              DT_SINGLELINE | DT_RIGHT);
+                    draw_text(text, label, DT_SINGLELINE | DT_RIGHT);
                 }
             }
             SelectObject(canvas, guide_font);
@@ -1830,6 +1872,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc) const {
             // every edge pixel toward BkgndColor.  It is a bitmap gradient,
             // not a per-line color shortcut, so antialiased glyph pixels must
             // take part in the same operation.
+            GdiFlush();
             const bool horizontal_stream = ActiveLyricScrollMode() != 0;
             const int axis_length = horizontal_stream ? width : height;
             const int fade_extent = std::max(
@@ -1856,7 +1899,16 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc) const {
         }
         SelectObject(canvas, old_font);
     }
-    BitBlt(dc, 0, 0, width, height, canvas, 0, 0, SRCCOPY);
+    if (alpha_text && present_layered) {
+        SIZE size{width, height};
+        POINT source{};
+        BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+        // Keep the HWND, screen position, owner and z-order. DWM blends each
+        // coverage pixel against the live visual/album/desktop underneath.
+        if (!UpdateLayeredWindow(control, nullptr, nullptr, &size, canvas,
+                &source, 0, &blend, ULW_ALPHA))
+            OutputDebugStringW(L"TTPlayer: fullscreen lyric alpha presentation failed\n");
+    } else BitBlt(dc, 0, 0, width, height, canvas, 0, 0, SRCCOPY);
     SelectObject(canvas, old_buffer);
     DeleteObject(buffer);
     DeleteDC(canvas);
