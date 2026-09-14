@@ -137,7 +137,7 @@ Wave 配置按钮仍按原版禁用。重建版在同一进程做三轮共 18 �
 
 ### 本轮复查时缺少的外部命令行组件（后续已补齐）
 
-以下是补齐组件之前的历史结果；当前状态见 EXTERNAL_ENCODERS.md。
+以下是补齐组件之前的历史结果；当前状态见 [EXTERNAL_ENCODERS.md](EXTERNAL_ENCODERS.md)。
 
 XML 共 29 个预设，已提供的 LAME ZIP 可补齐其中 5 个。其余 24 个依赖以下
 10 份尚不存在的可选 EXE：`qaac.exe`、`mppenc.exe`、`faac.exe`、`oggenc.exe`、
@@ -183,7 +183,7 @@ Nero 大于 48 kHz 输入的 `8BDA0602` 是原 `ttp_aac` 的明确拒绝，两�
    替换。若卷禁用短文件名且路径无法由系统代码页表示，返回明确失败，不提交残缺文件。
 8. 物理 CD 抓轨、各编码器的全部参数组合及全部输入格式没有逐项实机验证。
    本次 29 个预设的短样本转换通过，不代表通用解码探针的全部路径通过；具体
-   短读/HE-AAC/TTA/TAK 探针异常及独立解码结果见 EXTERNAL_ENCODERS.md。
+   短读/HE-AAC/TTA/TAK 探针异常及独立解码结果见 [EXTERNAL_ENCODERS.md](EXTERNAL_ENCODERS.md)。
 
 部署时使用新的 `build/Release/ttplayer_rebuild.exe`，保留同目录 `ttpres.dll`、
 `ttpcomm.dll`、`AddIn`；若使用新 LAME 条目，同时携带两份已部署的 LAME 依赖 DLL。

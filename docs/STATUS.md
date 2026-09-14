@@ -11,7 +11,7 @@ and subtrack; preserve original TTPlayer.rll. Restore embedded / association /
 scored local search / online fallback order, recursion-marker semantics,
 nonblocking stale-safe directory scanning and GBK/Big5 fallback. Downloads
 optionally update the same table; dropping a lyric does not create a mapping.
-See LYRIC_ASSOCIATION_RECOVERY.md for source addresses, host tests and remaining
+See [LYRIC_ASSOCIATION_RECOVERY.md](LYRIC_ASSOCIATION_RECOVERY.md) for source addresses, host tests and remaining
 automatic tag-write / filename-rename migration limits. No production configuration
 or media files were changed by the tests.
 Final host verification: lyric_association_tests, lyric_search_tests,
@@ -47,7 +47,7 @@ through the existing button subclass, using theme/disabled image rendering
 and buffered screen paint, without replacing native input or captioned
 button layout. Native CENTER alone failed odd-size/pressed pixel checks.
 Add host pixel regressions for all eight buttons, odd/even resizes, themed/
-classic rendering and normal/pressed/disabled states; see OPTIONS_RECOVERY.md.
+classic rendering and normal/pressed/disabled states; see [OPTIONS_RECOVERY.md](OPTIONS_RECOVERY.md).
 Release build and all four targeted host regressions passed (32.98 seconds).
 
 2026-09-14: use native modal ownership for the lyric-service editor: Options
@@ -85,7 +85,7 @@ paths, preserve other XML, detect external edits, atomically save with backups,
 and retain service selection across reordering/renaming. Add a background
 WinHTTP client for the recovered search/download protocol, including HTTPS,
 certificate validation and more than two INI servers. Do not let the old remote
-svrlst cache overwrite user edits. See LYRIC_SERVICE_EDITOR.md for deliberate
+svrlst cache overwrite user edits. See [LYRIC_SERVICE_EDITOR.md](LYRIC_SERVICE_EDITOR.md) for deliberate
 compatibility differences, protocol addresses and host verification.
 Compact editor measured 436x369 versus options 558x458 at the host DPI. It
 inherits normal/mini topmost preferences through the existing owner-group
@@ -105,7 +105,7 @@ resource messages, local-miss automatic search, complete-info gating, candidate
 matching, single-result/auto-best download and multi-result countdown. Keep
 plugin-owned same-name .ini XML/remote cache behavior, asynchronous lifetime and
 late-result cancellation, safe ACP/UTF-8 saves and overwrite handling. See
-LYRIC_SEARCH_RECOVERY.md for exact addresses and remaining compatibility limits.
+[LYRIC_SEARCH_RECOVERY.md](LYRIC_SEARCH_RECOVERY.md) for exact addresses and remaining compatibility limits.
 Real shipped-DLL loopback and five adjacent host regressions passed (6/6,
 32.99 seconds); lyric-search tests also passed three consecutive standalone
 runs. Release rebuilt and copied to build/Release/TTPlayerRebuild.exe after
@@ -119,7 +119,7 @@ pixel copying when adapting native property-page geometry. Preserve HWNDs,
 nested-page targeted entries and save semantics. options_drawing_tests covers
 all 15 native pages; the pre-fix test reproduced three activation/deactivation
 cycles and twelve positioning requests for three same-page clicks. See
-OPTIONS_RECOVERY.md section 9 for evidence and verification boundaries.
+[OPTIONS_RECOVERY.md](OPTIONS_RECOVERY.md) section 9 for evidence and verification boundaries.
 Release built successfully; options_drawing_tests, fullscreen_album_tests,
 window_topmost_tests, project_links_tests and skin_rebind_tests all passed
 on the host (5/5, 31.83 seconds).
@@ -138,7 +138,7 @@ auxiliary windows. Previously the guard spanned the entire operation,
 leaving WS_VISIBLE temporarily cleared during layout and owner reconciliation.
 Resume without premature group invalidation, retain all HWNDs and the existing
 topmost policy. Add tracked lifecycle/message-order regressions, optional
-Classic/PNG packages and options-HWND identity checks. See SKIN_REBIND_LIFECYCLE.md.
+Classic/PNG packages and options-HWND identity checks. See [SKIN_REBIND_LIFECYCLE.md](SKIN_REBIND_LIFECYCLE.md).
 Release and all ten targeted host regressions pass (55.77 seconds).
 
 2026-09-13: recover window-group Z order, including existing modeless options
@@ -152,7 +152,7 @@ preferences. Expand native regressions to include real options, nested
 dialogs and actual Z order; service the test message queue to avoid Windows
 hung-window ghosting corrupting measurements. The expanded native regression
 passes three consecutive runs, followed by all ten targeted host regressions
-(55.47 seconds). See WINDOW_Z_ORDER.md.
+(55.47 seconds). See [WINDOW_Z_ORDER.md](WINDOW_Z_ORDER.md).
 
 2026-09-13: fix startup fallback after the selected skin is deleted or damaged.
 Validate/bind the package before reading its profile; on fallback restore the
@@ -161,7 +161,7 @@ overlay Skin/Default.xml. Never load orphan sidecars or retain the removed
 skin's main-XML styles. Preserve unrelated global settings and normal valid
 startup semantics. Reproduced the actual-EXE failure before the fix; Release
 and seven host regressions pass, including 16 fallback combinations and five
-real EXE startup/shutdown runs. See SKIN_STARTUP_FALLBACK.md.
+real EXE startup/shutdown runs. See [SKIN_STARTUP_FALLBACK.md](SKIN_STARTUP_FALLBACK.md).
 
 2026-09-13: add EXE-local Skin/new to async skin menus/options, retaining
 new\\package.skn selectors and adjacent .skn.xml profiles across startup,
@@ -171,7 +171,7 @@ by content. Rename the built player to TTPlayerRebuild.exe and the live
 configuration to TTPlayerRebuild.xml, with one-time non-destructive old-config
 import and incremental-build preservation. Update manual Actions packaging.
 Release and seven host regressions pass, including two actual renamed-EXE
-startup runs; see RUNTIME_LAYOUT.md for layout and migration rules.
+startup runs; see [RUNTIME_LAYOUT.md](RUNTIME_LAYOUT.md) for layout and migration rules.
 
 2026-09-13: fix loss of "Always on top" on skin/mini transitions. Separate
 geometry from Z order and reconcile main, playlist/EQ, lyric and desktop lyric
@@ -182,7 +182,7 @@ application and fullscreen return without recreating windows or forcing their
 Z order on a timer. A new native host regression covers startup, all pin
 combinations, four skin choices, mini/desktop transitions, queued fades,
 visibility/minimize/shadow changes and fullscreen control restoration.
-Release builds and all eight targeted host regressions pass. See WINDOW_TOPMOST.md.
+Release builds and all eight targeted host regressions pass. See [WINDOW_TOPMOST.md](WINDOW_TOPMOST.md).
 
 2026-09-13: restore the independent skin preview's initial control state from
 5.7.9's 0049A6EF/00467B9B, including resource info/channel strings, empty status
@@ -194,7 +194,7 @@ confined to the intentionally supported set/mode skin extensions. Add pixel
 regressions and render all 182 local packages; retain the PNG/LED fixes.
 All six targeted host regressions pass. The verified Release executable was
 deployed with an executable-only backup; skin packages and user XML were unchanged.
-See SKIN_PREVIEW.md for evidence, test scope and the unrelated full-screen
+See [SKIN_PREVIEW.md](SKIN_PREVIEW.md) for evidence, test scope and the unrelated full-screen
 options mismatch in the broader settings probe.
 
 2026-09-13: fix DEFAULT_SKIN__6120 LED/progress overlap. Follow
@@ -217,7 +217,7 @@ image references, three-state scrollbars and mixed BMP/PNG preview pixels;
 36 PNG/75 BMP reference images and 182 local skin packages pass. Release
 build and ten targeted host regressions pass; native hover passes eight
 consecutive runs after waiting for actual mouse-message delivery.
-See SKIN_PNG_RECOVERY.md for scope and rendering boundaries.
+See [SKIN_PNG_RECOVERY.md](SKIN_PNG_RECOVERY.md) for scope and rendering boundaries.
 
 2026-09-13: fix desktop lyric toolbar hover flicker. Trace 5.7.9's
 0040A5E3 state-change-only invalidation, 00426434 no-op erase and
@@ -228,7 +228,7 @@ offscreen-composited BMP/PNG frame. Cover capture/outside/reentry/cancel and
 enable transitions. Native host hover tests visit 12 BMP and 4 PNG controls;
 metafile recording verifies no intermediate destination clears/draws.
 Release builds successfully and eight targeted host regressions pass.
-See DESKTOP_LYRIC_HOVER_PAINT.md for evidence and the implementation boundary.
+See [DESKTOP_LYRIC_HOVER_PAINT.md](DESKTOP_LYRIC_HOVER_PAINT.md) for evidence and the implementation boundary.
 
 2026-09-13: add optional per-item playlist toolbar rectangles for the approved
 BaiduMusic8209 layout. Keep legacy seven-cell/two-row behavior when absent.
@@ -237,7 +237,7 @@ buttons, with Find inside the open-file field. Restore the missing volume
 bar_image layer; align this package's fill with its 53px thumb-centre travel
 so zero volume no longer leaves a visible filled stub. Preserve user skin
 edits and configuration. Release/Debug, four regressions and native host
-mouse tests pass; see PLAYLIST_TOOLBAR_LAYOUT.md.
+mouse tests pass; see [PLAYLIST_TOOLBAR_LAYOUT.md](PLAYLIST_TOOLBAR_LAYOUT.md).
 
 2026-09-12: add Dream/Spectrum/Scope/Album as the first four commands in
 the fullscreen lyric context menu, before a separator and the original
@@ -247,7 +247,7 @@ effect; selecting an effect from lyrics-only fullscreen enters combined
 mode on the current monitor without restarting playback or losing restore
 state. Native popup tests cover all labels/IDs/checks, both fullscreen lyric
 modes and retained lyric/monitor menus; command tests cover all four effects
-while playing/paused. See FULLSCREEN_ALBUM_BACKGROUND.md.
+while playing/paused. See [FULLSCREEN_ALBUM_BACKGROUND.md](FULLSCREEN_ALBUM_BACKGROUND.md).
 
 2026-09-12: fix normal/mini lyric text dragging. Earlier recovery mistakenly
 used every timed row's text rectangle as 00442360's clickable-link hit test.
@@ -257,8 +257,8 @@ rows; both text and blank space now capture and seek through the same path.
 Keep normal/mini DragLyric independent of fullscreen DragLyricFS. The new
 regression fails before the fix and passes afterwards; native child-window
 SendInput verifies text/blank dragging, both axes, paused/playing state,
-stationary clicks and cursors. See LYRIC_WINDOW_RECOVERY.md and
-FULLSCREEN_LYRIC_DRAG.md (which corrects the previous text-hit interpretation).
+stationary clicks and cursors. See [LYRIC_WINDOW_RECOVERY.md](LYRIC_WINDOW_RECOVERY.md) and
+[FULLSCREEN_LYRIC_DRAG.md](FULLSCREEN_LYRIC_DRAG.md) (which corrects the previous text-hit interpretation).
 
 2026-09-12: fix fullscreen lyric dragging from transparent blank areas, not
 only glyphs. Colour-keyed pixels bypass the lyric HWND entirely. Add an
@@ -269,7 +269,7 @@ size, visibility and z-order changes; destroy the proxy when no longer needed.
 Native host SendInput tests cover text/blank dragging in both fullscreen
 modes/scroll directions, paused/playing seeks, blank-area menus, unchanged
 background pixels, both attached monitors and proxy lifecycle cleanup.
-See FULLSCREEN_LYRIC_DRAG.md for the Windows 8+/DWM compatibility boundary.
+See [FULLSCREEN_LYRIC_DRAG.md](FULLSCREEN_LYRIC_DRAG.md) for the Windows 8+/DWM compatibility boundary.
 
 2026-09-12: add "允许拖拽歌词" to Options / Fullscreen / Lyrics fullscreen.
 Persist Lyric/DragLyricFS independently, migrating absent values from the
@@ -277,7 +277,7 @@ old shared DragLyric preference. Allow fullscreen text glyphs to initiate
 capture (colour-keyed background pixels cannot), while retaining normal/
 mini hit-test behaviour. Reuse direct seeking and its clock handoff; cancel
 on disable, Escape, capture loss or WM_CANCELMODE without seeking. Release
-and six host regressions pass. See FULLSCREEN_LYRIC_DRAG.md.
+and six host regressions pass. See [FULLSCREEN_LYRIC_DRAG.md](FULLSCREEN_LYRIC_DRAG.md).
 
 2026-09-12: add the community album-image background to combined fullscreen.
 Keep 5.7.9's lyric layout/scrolling and add an independent fourth effect
@@ -288,7 +288,7 @@ instead of introducing another background colour. Decode WIC first, OLE
 second, cache complete frames, and publish reconfiguration/cover state under
 one render lock. Original resource-263 options and fullscreen context menus
 are extended without altering resource DLLs or existing user configuration.
-See FULLSCREEN_ALBUM_BACKGROUND.md for persistence, scope and host tests.
+See [FULLSCREEN_ALBUM_BACKGROUND.md](FULLSCREEN_ALBUM_BACKGROUND.md) for persistence, scope and host tests.
 
 2026-09-12: restore desktop-lyric track popups and state-dependent control
 tips from 5.7.9. Share 00461BAE -> 004813C1 track-menu initialization with
@@ -298,11 +298,11 @@ actually receives WM_INITMENUPOPUP. Restore resource callback tips for all
 topmost actions; retain native tooltip styles and no forced wrap width.
 Release and eight host regressions pass, including the real production
 popup callback, generated playlist commands and live tooltip text queries.
-User configurations unchanged. See DESKTOP_LYRIC_MENU.md for evidence/scope.
+User configurations unchanged. See [DESKTOP_LYRIC_MENU.md](DESKTOP_LYRIC_MENU.md) for evidence/scope.
 
 2026-09-12: default General/DiscordSyncLyrics to off for new settings, missing
 XML attributes and Reset All. Preserve explicitly saved on/off preferences;
-the master Discord song-presence switch is unchanged. See DISCORD_PRESENCE.md.
+the master Discord song-presence switch is unchanged. See [DISCORD_PRESENCE.md](DISCORD_PRESENCE.md).
 
 2026-09-12: fix sparse per-skin profile loading. Apply target package lyric/
 playlist defaults before its sidecar, then merge only specified attributes
@@ -313,14 +313,14 @@ DEFAULT_SKIN_579.skn and the DLL ZIP have identical bytes (75 entries);
 their existing profile differences are intentional and are not erased.
 Host isolated profile/pixel regression and five existing regressions pass,
 including missing, empty, malformed and partial profiles. Release builds.
-See SKIN_PROFILE_LOADING.md for evidence and the verification boundary.
+See [SKIN_PROFILE_LOADING.md](SKIN_PROFILE_LOADING.md) for evidence and the verification boundary.
 
 2026-09-12: fix Classic.skn playlist/lyric title offsets using 5.7.9's
 0042912E -> 0047A9C5 alignment rules. Center within the current client using
 the title image dimensions; keep right/bottom insets and per-axis undersize
 guards. Preserve the parsed XML and use the shared rule for auxiliary titles.
 Release build and four regressions pass, including real Classic caption pixels
-at widths 268, 269, 400, 401 and back to 268. See SKIN_ALIGNMENT.md.
+at widths 268, 269, 400, 401 and back to 268. See [SKIN_ALIGNMENT.md](SKIN_ALIGNMENT.md).
 
 2026-09-12: fix community-link icons and main-popup icon shadows. Bind new
 link IDs to native web/edit images, remove the non-native submenu/command
@@ -330,7 +330,7 @@ TTPlayer6120 remains a skin-only reference. Extend project_links_tests with
 the real EXE icon/manifest, all main icons and five-state pixel checks against independent source masks
 for the original 5.7.9 DLL and the staged Release resource DLL.
 Release build, project_links_tests and both skin regressions pass.
-See MENU_STYLE.md for the corrected focus-shadow behavior.
+See [MENU_STYLE.md](MENU_STYLE.md) for the corrected focus-shadow behavior.
 
 2026-09-12: populate the main context menu's resource 0x9D related-links
 placeholder with Github仓库 and 提交反馈. Share labels, HTTPS targets and
@@ -352,7 +352,7 @@ animate buttons/toolbars and playback progress thumb, bind set/mode_* and
 read Color_SelText. Host pixel checks cover 36 PNG + 75 BMP assets; all
 179 local skin packages load. Resource/external PNG skins, mini round trips
 and legacy HWND-preserving rebind regression pass. Cloud/mobile/browser
-business windows are not recovered by this change. See SKIN_PNG_RECOVERY.md.
+business windows are not recovered by this change. See [SKIN_PNG_RECOVERY.md](SKIN_PNG_RECOVERY.md).
 
 2026-09-12: multi-monitor fullscreen now stays active across process focus
 changes. Resolve entry from the main/lyric host (including lyric chrome's
@@ -363,7 +363,7 @@ popup coordinate double-offset, and refresh display/visual buffer dimensions.
 Release build and taskbar_playback_tests pass. Two host runs passed 24 cases
 across both displays, three modes, split/overlay/transparent layouts, actual
 menu selections and foreign-window clicks, Esc/menu exit and HWND reuse.
-Release runtime configuration restored by hash. See FULLSCREEN_RECOVERY.md.
+Release runtime configuration restored by hash. See [FULLSCREEN_RECOVERY.md](FULLSCREEN_RECOVERY.md).
 
 2026-09-12: desktop lyrics can move between monitors. Replace primary-only
 work-area queries and zero left/top clamps in snap/PositionWindows with the
@@ -371,14 +371,14 @@ proposed rectangle's monitor work area. Keep control/paint/bar synchronized
 and restore saved secondary-screen positions. Preserve staged 400..10000 width
 limits; update old UI scroll-test dimensions accordingly. Release build and
 desktop_lyrics_tests pass; physical host tests pass 16 two-screen edge cases
-and primary/secondary/primary lyric drags. See WINDOW_DRAG.md.
+and primary/secondary/primary lyric drags. See [WINDOW_DRAG.md](WINDOW_DRAG.md).
 
 2026-09-12: skin-window move/resize snapping now resolves the proposed
 rectangle's monitor work area instead of always using the primary screen.
 Attached groups retain a common translation and the existing Snap_Windows
 enable/distance setting. Release build and ttplayer_tests pass; host physical
 drag probes pass 16 edge/threshold cases across both displays. Negative and
-vertically offset layouts are covered by geometry tests. See WINDOW_DRAG.md.
+vertically offset layouts are covered by geometry tests. See [WINDOW_DRAG.md](WINDOW_DRAG.md).
 
 2026-09-12: restore thumbnail playback controls after mini/fullscreen returns.
 Main-window SWP_HIDEWINDOW now resets the cached shell toolbar registration;
@@ -386,7 +386,7 @@ the next TaskbarButtonCreated reinstalls buttons even when the HWND is reused.
 Minimization, tool-window visibility rules and playback dispatch are unchanged.
 Release build/taskbar_playback_tests pass; host default-skin tests pass two
 mini and two combined-fullscreen round trips with real thumbnail pause/resume
-clicks. Existing Release configs restored by hash. See TASKBAR_PLAYBACK.md.
+clicks. Existing Release configs restored by hash. See [TASKBAR_PLAYBACK.md](TASKBAR_PLAYBACK.md).
 
 2026-09-11: fixed playlist Add/Delete/List/Sort/Find/Edit/Mode hover loss.
 Child mouse forwarding had armed leave tracking on the playlist parent,
@@ -399,7 +399,7 @@ captures for default, LX-iPlay, TT2012, Let's Vista and Media Player 10.
 222 common-region toolbar frames and 35 popup mappings match. Release build
 and ttplayer_tests pass; original 30 Release configs preserved by hash checks.
 This is scoped toolbar compatibility, not an all-skins/binary-identity claim.
-Details and reproducible local probes: PLAYLIST_MENU_INPUT.md.
+Details and reproducible local probes: [PLAYLIST_MENU_INPUT.md](PLAYLIST_MENU_INPUT.md).
 
 2026-09-11: General options now exposes "向 Discord 发送歌词", bound to the
 existing General/@DiscordSyncLyrics setting (default unchanged). The master
@@ -409,7 +409,7 @@ line coalescing, suppress pending/stale lyric text and preserve song/pause field
 Release build and both Discord regression targets pass; private IPC toggle tests
 and host General-page save/close/reopen/restart tests pass without real Discord
 publication. Existing 30 Release configs restored byte-for-byte after building.
-Implementation/verification details: DISCORD_PRESENCE.md.
+Implementation/verification details: [DISCORD_PRESENCE.md](DISCORD_PRESENCE.md).
 
 2026-09-11: appended 13 optional PATH-based FFmpeg CLI presets to the root,
 Debug and Release ttp_clienc.xml: AAC-LC, MP3, Opus, Vorbis, FLAC, ALAC,
@@ -420,7 +420,7 @@ Release host-window tone conversions and independent ffprobe/PCM checks;
 six lossless/PCM presets reproduce the 16-bit fixture exactly after decoding.
 Tagtype 0 intentionally does not claim original metadata/cover preservation.
 No EXE rebuild or new full CTest run needed for this configuration-only change.
-Details, commands and verification scope: EXTERNAL_ENCODERS.md.
+Details, commands and verification scope: [EXTERNAL_ENCODERS.md](EXTERNAL_ENCODERS.md).
 
 2026-09-11: supplied all ten previously missing CLI encoder executables in the
 local Release/Encoders directory, including Apple dependencies for QAAC and the
@@ -433,7 +433,7 @@ All 29 current CLI presets finish real host-window conversions with a generated
 validate all eight outputs that the generic PCM probe could not read correctly;
 those separate probe/decoder-path anomalies remain, not claimed fixed here.
 No system installs or registry/PATH changes. Explicit hash-pinned deployment
-script and redistribution limitations: EXTERNAL_ENCODERS.md.
+script and redistribution limitations: [EXTERNAL_ENCODERS.md](EXTERNAL_ENCODERS.md).
 
 2026-09-11: fixed Nero conversion loading and output sharing violations.
 Resolve NeroIPP/aacenc32/Aac by absolute AddIn paths before original creator
@@ -448,7 +448,7 @@ Wave/APE/native MP3 fixture files are byte-identical. Stage optional CLI LAME
 from the supplied ZIP into Encoders without replacing existing executables;
 no player startup/playback/DLL conversion EXE dependency. The other 24 CLI
 presets still lack ten external programs. Nero >48 kHz remains unsupported as
-in the original. Details and explicit boundaries: CONVERSION_RECOVERY.md.
+in the original. Details and explicit boundaries: [CONVERSION_RECOVERY.md](CONVERSION_RECOVERY.md).
 Final Release regression: all 30 CTest cases pass (32.43 s); all six encoder
 configuration dialogs pass close/OK/cancel (18 opens), with DEP enabled.
 Restored all 30 pre-test runtime configuration files and verified their hashes;
@@ -465,7 +465,7 @@ executable heap changes or registry mitigation changes. Host UI tests pass all
 six configurable encoders through close/OK/cancel (18 opens); Wave stays
 disabled, parent ownership/re-enabling and clean exit pass. Runtime DEP flags=1,
 permanent=TRUE. All 30 Release CTest cases pass (37.67 s). Nero's separate
-dependency loading/output-commit issues remain; see CONVERSION_RECOVERY.md.
+dependency loading/output-commit issues remain; see [CONVERSION_RECOVERY.md](CONVERSION_RECOVERY.md).
 
 2026-09-11: restored the playlist conversion pipeline against 0047D682,
 004122CD/00412723 and 00412B48/00412E61: Wave-first encoder catalogue,
@@ -599,7 +599,7 @@ addresses, host comparison coverage and the repeatable probe.
 | Core/build | recovered `004C0E8F` `wWinMain` lifecycle with intentionally version-independent EXE-local ttpcomm loading, five-second single-instance forwarding (including `/a`/`/e` payload mode), TLS/OLE/common-controls, validated EXE-local `ttpres.dll`, sound/CoolSB startup and reverse teardown. `/reg` opens the original reduced About+association sheet; `/unreg` removes owned per-user extension, AudioCD and Directory registrations. The `004B5470/004B54F2` idle-aware message pump and tooltip hook behavior are live. | private thread-diagnostic object, WTL command-bar/button wrapper and CBT shadow/theme wrapper cannot be reconstructed from the pseudo-C object layout alone |
 | Audio | recovered reader and decoder registries plus synchronous x86 creator/`IStream`/six-slot-buffer chains; APE, TAK, VQF and the supplied FLAC decode/read/seek are real-sample validated. A shared decoded-source and PCM-output chain covers AddIn, Media Foundation URL/WAV/MPEG, AIFF/AIFC/AU, exact 75 Hz CUE and raw CD-DA; output bit depth, SSRC ordinal 102, dither, ReplayGain, EQ, Surround and Winamp DSP feed bounded waveOut, DirectSound, KS or ASIO streams. `AutoScanGain` analyzes the same pre-gain playback PCM and commits only at natural EOF; it does not launch a second decoder. Encoder creators execute Configure/Open/Start/Write/Finalize for playlist conversion. All five fade-mode transitions and four duration fields have runtime consumers where the original output supports them; `WM_CLOSE` now starts the bit-3 stop fade before window teardown and retains the original `FadeDuration[3] + 500 ms` bounded exit guard. | validate CD-DA on physical optical hardware and KS/ASIO on compatible devices; retain explicit device-specific KS topology and retired network-reader boundaries |
 | Playlist | independent `TTPlayer_PlayListWnd`, all 23 supplied `playlist_window` skins, original `0x7D66` show/hide command, skin-relative switching, fixed/native and resizable/minimum-size window modes, client-edge/corner resizing, attached main-window group movement, nine-slice background painting, multi-list `%04d.ttbl` store with `%03d` migration and current-row persistence, M3U/M3U8 plus TTPL/version-4 XML reading and writing, native-style multi-selection, internal selected-row drag reorder plus Ctrl copy to another catalogue, 16-pixel owner-draw rows, skinned splitter/scrollbar/title/close, resource-backed toolbar/context menus, delayed atomic saving/slot compaction, Vista+ Common Item Dialog single/multi-file and folder intake, and real OLE `CF_HDROP` routing for main replace/play, playlist positional insertion/catalogue import, archive/CUE expansion and lyric-first-item loading are live; the equalizer intentionally rejects drops. The resource-backed file-information sheet reaches reader-QI metadata/thumbnail setters or the executable's built-in MP3 tag path through a bounded helper. | same-process private clipboard/data-object interoperability and retired service dialogs |
-| Lyrics | normal/mini `TTPlayer_LyricWnd` popup plus detached full-screen `LyricCtrl` and independent layered `DeskLrcCtrl/Paint/Bar` subsystem recovered: independent normal/mini/full-screen scroll, font, alignment, spacing, fade, karaoke, colors and transparency; exact `AutoFontFS` width fitting; opaque, desktop-color-key and visual-overlay layouts; native full-screen/desktop menus; menu/physical-Escape restoration; `004A88D0` skin/Lyric.xml parsing, local LRC discovery, editing, metadata, smooth scrolling and pixel-to-time dragging are live. Lyric drag/line-step seeks preserve the supplied original's direct audible transition instead of applying the reconstruction's broader generic seek fade gate. | real AddIn search/download now connected (see LYRIC_SEARCH_RECOVERY.md); remaining association-database/upload and unrepresented ABI variants |
+| Lyrics | normal/mini `TTPlayer_LyricWnd` popup plus detached full-screen `LyricCtrl` and independent layered `DeskLrcCtrl/Paint/Bar` subsystem recovered: independent normal/mini/full-screen scroll, font, alignment, spacing, fade, karaoke, colors and transparency; exact `AutoFontFS` width fitting; opaque, desktop-color-key and visual-overlay layouts; native full-screen/desktop menus; menu/physical-Escape restoration; `004A88D0` skin/Lyric.xml parsing, local LRC discovery, editing, metadata, smooth scrolling and pixel-to-time dragging are live. Lyric drag/line-step seeks preserve the supplied original's direct audible transition instead of applying the reconstruction's broader generic seek fade gate. | real AddIn search/download now connected (see [LYRIC_SEARCH_RECOVERY.md](LYRIC_SEARCH_RECOVERY.md)); remaining association-database/upload and unrepresented ABI variants |
 | Skin/UI | the DLL default and all valid EXE-local ZIP-based external skins load and switch successfully, including UTF-8-BOM metadata compatibility for `004941_088.skn`; DLL/Skin resolution is restricted to the EXE directory; playback-state controls, original context menus, hover paths, dragging, mini-player switching and separate auxiliary windows are live. `VisualCtrl(0x7DDC)` supplies PCM-driven dream/spectrum/scope, WIC-first/OLE-fallback covers with atomic off-screen presentation, per-skin `Visual.xml`, the exact native seven-item detached menu, split/overlay full-screen layouts and restored HWND style/parent transitions. The original 15-page modeless Options sheet, targeted entry routes, nested lyric/network pages, ttpres-backed controls, device/DSP/association pages, lifecycle messages and modeless 48-color `ColorSelectCtrl` are present. The EXE-local `Music.library` catalogue, tree/query/playback/rating/edit routes and monitored-directory refresh are active | retired online-service backends |
 | Plugins | loads EXE-local `AddIn\ttp_*.dll` and enumerates the four real categories: reader, decoder, encoder and lyric-search provider. Retained factories and sessions implement reader/decoder PCM, metadata slots 3–6, thumbnail slots 3/4/5/8/9 and encoder Configure/Open/Start/Write/Finalize with SEH and module-lifetime barriers. There is no separate Sound AddIn writer/processor category: metadata/thumbnail writing belongs to a reader QI and PCM processors come from ttpcomm/Winamp DSP. | lyric request/result/download ABI and nonblocking cancellation connected; validate variants not represented by the supplied DLL set |
 | Settings | imports and saves the Player/Playback/Device/Convert/Library/History/lyrics/visual/hotkey schemas and the modeless 15-page Options sheet preserves Apply/close notification semantics. Runtime consumers now cover output backend/buffer/width/resampling/dither, AutoGain/live AutoScanGain/manual SkipScanGain, all fade durations, EQ/DSP, local lyric discovery/visibility/trimming, media-library monitoring, modern-dialog history, menu/control hotkey tips, playback-open tips, window snap/title/auto-shutdown and the normal/mini/full-screen/desktop UI profiles. MP3 policy crosses the helper boundary and affects actual tag I/O; per-skin profiles remain separate from root globals. The retired MSN/Baidu Hi checkbox is migrated to asynchronous Discord Rich Presence with built-in application ID `1546275976676376716`; only a non-empty `DiscordApplicationId` in `TTPlayer.xml` can override it, and the ID is not exposed in Options. | lyric search/download settings now have real AddIn consumers; retired update/FreeDB/general cache/download services remain separate compatibility boundaries |
@@ -626,7 +626,7 @@ Verified on the supplied installation:
   exit and physical Escape restore the main/lyric windows, and full-screen
   lyrics use the same black background, 60-pixel font and blue/green colors.
   The isolated rerun harness and its limitations are documented in
-  `FULLSCREEN_RECOVERY.md` and `tools/windows_sandbox/README.md`.
+  [FULLSCREEN_RECOVERY.md](FULLSCREEN_RECOVERY.md) and `tools/windows_sandbox/README.md`.
 
 - `TTPlayer.xml`: volume 100, output 16-bit, file buffer 16384;
 - Built-in file information now follows the MP3 paths at `004D9AC8` and
@@ -654,7 +654,7 @@ Verified on the supplied installation:
   Original/rebuild LX-iPlay probes match the `500x70` popup, exact
   `35,5,465,65` lyric child, popup style/ex-style/owner, the three zero-size
   skin commands, and hidden `0x82DC` base control.  Detailed evidence and the
-  separate desktop-lyric recovery is in `LYRIC_WINDOW_RECOVERY.md`.
+  separate desktop-lyric recovery is in [LYRIC_WINDOW_RECOVERY.md](LYRIC_WINDOW_RECOVERY.md).
 - Sound AddIn registration now follows `004C8421`, `004CABC0`, `004C88D9`,
   `004C8954` and `004CB1DB`: the EXE-local AddIn path is appended to `PATH`,
   only `ttp_*.dll` is code-loaded, the factory and interface enumerator must
@@ -721,7 +721,7 @@ Verified on the supplied installation:
   the 47-pixel tall toolbar in `一听音乐` keeps quick-find in its lower row.
   Physical selected-row moves in embedded LX-iPlay and separate TT2012 lists
   produce the same final TTBL order in the original and rebuild. Detailed
-  evidence is in `PLAYLIST_MENU_INPUT.md`.
+  evidence is in [PLAYLIST_MENU_INPUT.md](PLAYLIST_MENU_INPUT.md).
 - Playlist toolbar composition now follows the native color-keyed image-list
   path instead of opaque `SRCCOPY`. Across all 23 supplied skins the base
   toolbar crop is pixel-identical to the original and no rebuilt playlist
@@ -782,7 +782,7 @@ Verified on the supplied installation:
   rebuild menu handles both report 130x20 playlist-title rows, 10-pixel
   separators, a 17x0 main side item, and 121x20 main rows; normal, hover,
   icon, disabled and checked-menu captures are under
-  `build/comparison/menu-style/`. See `MENU_STYLE.md`.
+  `build/comparison/menu-style/`. See [MENU_STYLE.md](MENU_STYLE.md).
   The remaining `004700D9` ambiguity has also been resolved: its localized
   brand flag selects one `DT_WORDBREAK` draw rather than a manual per-character
   loop. The measured main-menu side region is now pixel-identical, including
@@ -835,7 +835,7 @@ Verified on the supplied installation:
   default was measured at 327x141 -> 383x25 -> exact normal-rectangle restore.
   LX-iPlay produces 500x350 -> 200x33 -> exact restore, followed by an exact
   `(20,10)` captured background drag. Detailed evidence is in
-  `../reverse/semantic/MAIN_WINDOW_MOUSE.md` and `LYRIC_WINDOW_RECOVERY.md`.
+  `../reverse/semantic/MAIN_WINDOW_MOUSE.md` and [LYRIC_WINDOW_RECOVERY.md](LYRIC_WINDOW_RECOVERY.md).
 - Runtime skin switching keeps the old bitmap/icon ownership alive until the
   new window size, region and icons have been committed. Failed/invalid skin
   loads no longer clear the current live skin; empty regions are rejected and
@@ -985,14 +985,14 @@ runtime context-menu switching test are documented in
   `Transparent` uses `BkgndColor` as the layered color key, while `TransSkin`
   parks lyric chrome and expands the control to the complete popup. Original
   and rebuild menu IDs/text/check states/row sizes and both transparent control
-  rectangles match in physical probes. Details are in `LYRIC_DISPLAY.md`.
+  rectangles match in physical probes. Details are in [LYRIC_DISPLAY.md](LYRIC_DISPLAY.md).
 - LX-iPlay's `mini_border="#1e1e1e"` is no longer drawn around the normal
   `LyricCtrl`. `004A88D0` stores those colors at skin offsets `+0xA2C/+0xA30`,
   but their sole paint consumer, `00449313`, reads them only in the
   `DAT_0054775C != 0` mini-player branch and applies the frame to the lyric
   popup client. Original/rebuild physical HWND captures now both have no
   rectangular outline around the normal `35,5,465,65` lyric child. Detailed
-  evidence is in `LYRIC_WINDOW_RECOVERY.md`.
+  evidence is in [LYRIC_WINDOW_RECOVERY.md](LYRIC_WINDOW_RECOVERY.md).
 - Win32 Release playback no longer loses every decoded block when EQ is
   enabled. The ordinal-103 setup now preserves the original standalone
   `FUN_004B182C` call boundary, preventing VS 18 `/O2 /Ob2` from producing a

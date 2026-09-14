@@ -261,7 +261,7 @@ runtime is about 67 seconds), and per-case runtime directories are validated
 and deleted after evidence capture. This removes both sources of the reported
 apparent hang: a false 60-second native-test timeout and nearly 1 GB of retained
 VM-local copies after repeated matrices. The complete evidence map and scope
-boundary are documented in `FILE_INTAKE_RECOVERY.md`; harness details are in
+boundary are documented in [FILE_INTAKE_RECOVERY.md](FILE_INTAKE_RECOVERY.md); harness details are in
 `tools/windows_sandbox/README.md`. This remains an observable-compatibility
 recovery, not a claim that the lost private classes were reproduced word for
 word.

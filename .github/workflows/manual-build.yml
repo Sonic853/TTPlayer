@@ -96,7 +96,7 @@ jobs:
           New-Item -ItemType Directory -Path artifact | Out-Null
           Copy-Item -LiteralPath $executable -Destination artifact
           Copy-Item -LiteralPath LICENSE -Destination artifact
-          Copy-Item -LiteralPath BUILDING.md -Destination artifact
+          Copy-Item -LiteralPath docs/BUILDING.md -Destination artifact
           $symbols = Join-Path $output 'TTPlayerRebuild.pdb'
           if (Test-Path -LiteralPath $symbols) {
             Copy-Item -LiteralPath $symbols -Destination artifact

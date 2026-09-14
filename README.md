@@ -1,4 +1,6 @@
-# TTPlayer clean reconstruction
+# Thousand Tunes Player
+
+[中文](README_chs.md) | [English](README.md)
 
 <img width="713" height="569" alt="image" src="https://github.com/user-attachments/assets/a14ee585-7f05-4000-bac7-3a3bf81d7d79" />
 
@@ -6,15 +8,16 @@ This is a clean, buildable rewrite around the recovered behaviour and file/ABI
 boundaries. It intentionally does not compile Ghidra pseudo-C directly.
 The current address-by-address status for AddIn, native outputs, PCM, fades,
 media library, tags, CD/VCD, URL, associations, settings and startup is in
-[`MAJOR_FEATURE_RECOVERY.md`](MAJOR_FEATURE_RECOVERY.md).
+[`MAJOR_FEATURE_RECOVERY.md`](docs/MAJOR_FEATURE_RECOVERY.md).
+Build instructions and recovery documentation are collected in [docs/](docs/).
 
 The player no longer requires sidecar helper EXEs. File metadata/cover/tag jobs,
 DSP discovery/configuration and output-device discovery/details are embedded
 private modes of the player EXE, with process isolation retained. The original
 EXE-local DLLs, AddIns and skins are still required. Build `ttplayer_rebuild` to
 build the player only; a full developer build also produces test/probe tools
-which do not need to be distributed. See [EMBEDDED_WORKERS.md](EMBEDDED_WORKERS.md)
-and [PORTABLE_FILE_PROPERTIES.md](PORTABLE_FILE_PROPERTIES.md).
+which do not need to be distributed. See [EMBEDDED_WORKERS.md](docs/EMBEDDED_WORKERS.md)
+and [PORTABLE_FILE_PROPERTIES.md](docs/PORTABLE_FILE_PROPERTIES.md).
 
 Current milestone (0.1):
 
@@ -29,12 +32,12 @@ Current milestone (0.1):
   XML-positioned controls;
 - 6.1.2 mixed BMP/PNG skins: GDI+ per-pixel alpha, four-state buttons,
   hover transitions, playback thumb pulses and PNG playlist toolbars;
-  see [SKIN_PNG_RECOVERY.md](SKIN_PNG_RECOVERY.md) for evidence and limits;
+  see [SKIN_PNG_RECOVERY.md](docs/SKIN_PNG_RECOVERY.md) for evidence and limits;
 - file picker/drag-and-drop, playlist selection, previous/play-pause/next/stop,
   volume/balance control, playback status, and command-line audio/playlist opening;
 - Windows-native taskbar thumbnail previous/play-pause/next controls with live
   playback state, without restoring the minimized player; this requested modern
-  extension is documented in [TASKBAR_PLAYBACK.md](TASKBAR_PLAYBACK.md);
+  extension is documented in [TASKBAR_PLAYBACK.md](docs/TASKBAR_PLAYBACK.md);
 - main-window `WM_CONTEXTMENU` behaviour rebuilt from `CPlayerWnd`: original
   `ttpres.dll` menu hierarchy/text, dynamic current-playlist and installed-skin
   submenus, transparency levels, playback-mode checks and command dispatch;
@@ -60,12 +63,12 @@ Current milestone (0.1):
   coloring, resource toolbar and focus-scoped Ctrl+X/C/V/Z/Y accelerators,
   timed multi-row paint, smooth motion, captured row dragging, arrow seek and
   500 ms lyric-timeline wheel adjustment; runtime parity evidence is in
-  `LYRIC_WINDOW_RECOVERY.md`;
+  [LYRIC_WINDOW_RECOVERY.md](docs/LYRIC_WINDOW_RECOVERY.md);
 - recovered full-screen state machine: the existing `VisualCtrl` and
   `LyricCtrl` are detached/reparented with their original style transitions;
   opaque lyrics, desktop-transparent lyrics, split and overlay combined
   layouts use the independent `*FS` settings and native resource 143/145/390
-  context menus. See `FULLSCREEN_RECOVERY.md` and the reproducible
+  context menus. See [FULLSCREEN_RECOVERY.md](docs/FULLSCREEN_RECOVERY.md) and the reproducible
   `tools/windows_sandbox/` comparison harness;
 - recovered x86 `ttpGetSoundAddIn` adapter: the four real reader, decoder,
   encoder and lyric-search-provider categories, retained module/factory/session
@@ -76,7 +79,7 @@ Current milestone (0.1):
   transactions, built-in MP3 ID3v1/ID3v2/APEv2 preservation, ReplayGain,
   one-based CUE sub-tracks, CDA conversion/grabbing source, URL dialog/source,
   and EXE-local monitored `Music.library`; detailed evidence is in
-  `AUDIO_RECOVERY.md` and `MAJOR_FEATURE_RECOVERY.md`;
+  [AUDIO_RECOVERY.md](docs/AUDIO_RECOVERY.md) and [MAJOR_FEATURE_RECOVERY.md](docs/MAJOR_FEATURE_RECOVERY.md);
 - recovered `CSkinParser_ParseEqualizerWindow` layout and the independent
   `WS_POPUP/WS_EX_TOOLWINDOW` equalizer: enable/profile/reset/close buttons,
   balance, surround, preamp, ten EQ bands, presets, profile files, capture
@@ -90,7 +93,7 @@ Current milestone (0.1):
   native eight-tool companion, and its shared explicit-string hover tools,
   with the recovered pre-translate `MSG` relay and no duplicate tooltip
   subclass/periodic-update path;
-  evidence is in `EQUALIZER_RECOVERY.md`;
+  evidence is in [EQUALIZER_RECOVERY.md](docs/EQUALIZER_RECOVERY.md);
 - `TTPlayerRebuild.xml` settings with one-time legacy `TTPlayer.xml` import; runtime consumers for player, playback,
   device, conversion, media-library, history, hotkey, visual, lyric and desktop-
   lyric settings; `/reg` and `/unreg` use safe per-user association transactions;
@@ -103,7 +106,7 @@ Current milestone (0.1):
 Manual GitHub Actions builds are available through **Actions → Manual Windows
 Build → Run workflow** after the workflow reaches the default branch. The
 workflow produces an x86 player EXE without bundling original DLLs or private
-configuration. See [BUILDING.md](BUILDING.md) for inputs, artifacts and clean
+configuration. See [BUILDING.md](docs/BUILDING.md) for inputs, artifacts and clean
 checkout builds.
 
 Build the complete local recovery workspace from a Visual Studio developer shell:
@@ -177,9 +180,9 @@ message dispatch order and recovered method bodies are unchanged.
   unchanged. Cover frames are composed off-screen and transferred atomically;
   the parent skin painter excludes the live `VisualCtrl`, preventing its
   250-ms UI refresh from exposing a background-only frame. Analysis and the
-  Windows Sandbox regression are recorded in `COVER_FLICKER_RECOVERY.md`.
+  Windows Sandbox regression are recorded in [COVER_FLICKER_RECOVERY.md](docs/COVER_FLICKER_RECOVERY.md).
 - Visualization recovery evidence and the exact command/configuration mapping
-  are recorded in `VISUALIZATION_RECOVERY.md`.
+  are recorded in [VISUALIZATION_RECOVERY.md](docs/VISUALIZATION_RECOVERY.md).
 
 ## Remaining validation/recovery boundaries
 

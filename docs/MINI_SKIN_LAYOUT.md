@@ -73,4 +73,4 @@
 `karaoke-tests-20260913-161937`（全PNG包）。
 
 用户更新的皮肤位于 `Skin/new/BaiduMusic8209.skn`。
-全PNG升级及逐文件保留规则见 `BAIDU_SKIN_PNG_UPGRADE.md`。
+全PNG升级及逐文件保留规则见 [BAIDU_SKIN_PNG_UPGRADE.md](BAIDU_SKIN_PNG_UPGRADE.md)。
