@@ -718,6 +718,7 @@ struct PlayerWindow::MediaLibraryState {
     std::vector<playlist::Track> persisted_tracks;
     std::vector<playlist::Track> result_tracks;
     std::vector<size_t> result_items;
+    std::uint64_t order_revision{playlist::NextPlaybackOrderRevision()};
     std::set<std::wstring> excluded;
     std::vector<playlist::Track> pending_tracks;
     std::vector<std::filesystem::path> pending_files;
@@ -1078,6 +1079,7 @@ void PlayerWindow::RemoveMediaLibraryTracksByIdentity(
         else if (current_) *current_ -= erased.removed_before_current;
     }
     if (!first_removed) return;
+    state.order_revision = playlist::NextPlaybackOrderRevision();
 
     playlist_selected_rows_.clear();
     if (state.result_tracks.empty()) {
@@ -1150,6 +1152,7 @@ bool PlayerWindow::CommitMediaLibraryTracks(
         return false;
     }
 
+    state.order_revision = playlist::NextPlaybackOrderRevision();
     const size_t first = insertion;
     for (auto& [item_index, track] : additions) {
         state.result_items.insert(state.result_items.begin() +
@@ -1211,6 +1214,7 @@ bool PlayerWindow::UpdateMediaLibraryTrackPath(
     }
     if (!changed) return false;
 
+    state.order_revision = playlist::NextPlaybackOrderRevision();
     state.pending_tracks.push_back(std::move(updated));
     settings_.library.valid = true;
     state.refresh_pending = true;
@@ -1278,6 +1282,15 @@ bool PlayerWindow::UpdateMediaLibraryTrackByIdentity(
         }
     }
     return changed;
+}
+
+std::pair<std::uint64_t, std::uint64_t> PlayerWindow::NavigationOrderContext() const {
+    if (settings_.playlist.library_mode && media_library_)
+        return {1, media_library_->order_revision};
+    if (settings_.playlist.library_mode && media_library_playback_active_)
+        return {2, media_library_playback_.OrderRevision()};
+    if (playlists_.Empty()) return {};
+    return {4 + playlists_.ActiveSlot(), ActivePlaylist().OrderRevision()};
 }
 
 std::optional<size_t> PlayerWindow::VisiblePlaylistPlayingRow() const {
@@ -2072,6 +2085,7 @@ bool PlayerWindow::HandleMediaLibraryTreeNotification(
         }
     };
     const auto query = [this, &state](MediaLibraryState::Node* node) {
+        state.order_revision = playlist::NextPlaybackOrderRevision();
         state.result_tracks.clear();
         state.result_items.clear();
         if (!node) return;
@@ -2542,6 +2556,7 @@ bool PlayerWindow::HandleMediaLibraryCommand(UINT command) {
                 duplicate_rows.insert(row);
         }
         if (duplicate_rows.empty()) return true;
+        state.order_revision = playlist::NextPlaybackOrderRevision();
         const size_t first_removed = *duplicate_rows.begin();
         for (auto row = duplicate_rows.rbegin();
              row != duplicate_rows.rend(); ++row) {
@@ -2633,6 +2648,7 @@ bool PlayerWindow::HandleMediaLibraryCommand(UINT command) {
             }
         }
         if (!reordered) return true;
+        state.order_revision = playlist::NextPlaybackOrderRevision();
 
         if (playback_is_query) {
             media_library_playback_ = BuildMediaLibraryPlaybackSnapshot(

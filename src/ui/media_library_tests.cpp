@@ -321,6 +321,30 @@ struct ProgressSeekAccess {
             else Require(p.current_==size_t{0} && p.PlaybackPlaylist().Tracks()[0].path==tracks[0].path,
                     "library completion did not follow selected focus");
         }
+        // Real query materialization must retain the shared random cursor even
+        // though ActivateMediaLibraryResult replaces the playback snapshot.
+        p.settings_.player.play_follow_cursor=false;
+        prepare(tracks,0,0); p.SetPlaybackMode(4);
+        std::set<size_t> visited{0};
+        for(size_t step=0; step<2; ++step) {
+            p.SelectRelative(true);
+            const auto deadline=GetTickCount64()+10000;
+            while(!p.random_navigation_requests_.empty()) {
+                p.PollRandomNavigation();
+                Require(GetTickCount64()<deadline,"library random index worker stalled");
+                Sleep(1);
+            }
+            const auto row=p.NavigationPlayingRow();
+            Require(row && visited.insert(*row).second,"query snapshot reset the random round");
+        }
+        Require(p.random_playback_order_.AtEnd(3),"library query did not complete one random round");
+        const auto context=p.NavigationOrderContext();
+        p.playlist_last_sort_command_=ui::detail::kPlaylistSortFile;
+        p.playlist_sort_ascending_=true;
+        Require(p.HandleMediaLibraryCommand(ui::detail::kPlaylistSortFile),"library sort command");
+        Require(p.NavigationOrderContext()!=context,"library sort retained stale row mapping revision");
+        p.PrepareRandomPlaybackOrder();
+        Require(!p.random_playback_order_.AtEnd(3),"library sort reused stale worker/cursor");
     }
     static LRESULT CALLBACK CatalogueTestProc(HWND window,UINT message,WPARAM wparam,LPARAM lparam) {
         if(message==WM_NCCREATE) SetWindowLongPtrW(window,GWLP_USERDATA,

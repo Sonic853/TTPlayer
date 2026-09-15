@@ -58,6 +58,15 @@ struct ProgressSeekAccess {
             p.current_ = row;
             p.pending_natural_play_ = false;
         }
+        void Drain() {
+            const auto deadline = GetTickCount64() + 10000;
+            while (!p.random_navigation_requests_.empty()) {
+                p.PollRandomNavigation();
+                Require(GetTickCount64() < deadline, "random worker did not finish");
+                if (!p.random_navigation_requests_.empty()) Sleep(1);
+            }
+        }
+        void Complete() { p.AdvanceAfterNaturalEnd(); Drain(); }
         void Command(bool next, bool context = false) {
             using namespace ui::detail;
             if (context) {
@@ -66,6 +75,7 @@ struct ProgressSeekAccess {
             } else {
                 p.HandleMessage(WM_COMMAND, next ? kNext : kPrevious, 0);
             }
+            Drain();
         }
     };
 
@@ -123,17 +133,17 @@ struct ProgressSeekAccess {
             Fixture f(library);
             f.p.settings_.player.play_mode = 1;
             f.Playing(1);
-            f.p.AdvanceAfterNaturalEnd();
+            f.Complete();
             Require(f.p.current_ == size_t{1} && f.p.pending_natural_play_,
                     "repeat-one natural completion must still restart the same track");
             f.p.settings_.player.play_mode = 2;
             f.Playing(2);
-            f.p.AdvanceAfterNaturalEnd();
+            f.Complete();
             Require(f.p.current_ == size_t{2} && !f.p.pending_natural_play_,
                     "sequential natural completion must not wrap");
             f.p.settings_.player.play_mode = 0;
             f.Playing(1);
-            f.p.AdvanceAfterNaturalEnd();
+            f.Complete();
             Require(!f.p.pending_natural_play_, "single natural completion did not stop");
         }
 
@@ -160,6 +170,7 @@ struct ProgressSeekAccess {
         Require(f.p.current_ == size_t{2}, "next must advance when focus is already on the playing item");
 
         CheckRandomOrder();
+        CheckAsyncRandomNavigation();
         CheckCompletionMatrix();
         CheckCatalogues();
         std::cout << "all modes: commands, button states, completion, cursor, random history/rounds, "
@@ -169,48 +180,82 @@ struct ProgressSeekAccess {
     static void CheckRandomOrder() {
         using Order = playlist::RandomPlaybackOrder;
         using Request = Order::Request;
-        // These assertions constrain behavior, not a particular random seed.
-        for (size_t count : {size_t{2}, size_t{3}, size_t{13}}) {
+#if defined(TTPLAYER_LEGACY_WINDOWS)
+        Require(Order::kThreeRoundLimit == 0, "XP/Win7 must always use one shuffled cycle");
+#else
+        Require(Order::kThreeRoundLimit == 5000, "modern three-round cutoff must be 5000 inclusive");
+#endif
+        // All rounds are permutations; keep two actual rounds across reversals.
+        for (size_t count : {size_t{2}, size_t{3}, size_t{13}, size_t{5000}, size_t{5001}}) {
             Order order;
-            std::optional<size_t> current = 1;
-            std::vector<size_t> visited{*current};
-            while (visited.size() < count) {
-                auto next = order.Select(count, current, Request::next);
-                Require(next && *next < count, "random next out of bounds");
-                Require(std::find(visited.begin(), visited.end(), *next) == visited.end(),
-                        "random round repeated a song before visiting the remaining songs");
-                visited.push_back(*next); current = next;
+            std::optional<size_t> current = 0;
+            std::vector<std::vector<size_t>> rounds;
+            for (size_t round = 0; round < 3; ++round) {
+                std::vector<size_t> visited;
+                if (round == 0) visited.push_back(*current);
+                while (visited.size() < count) {
+                    auto next = order.Select(count, current, Request::next);
+                    Require(next && *next < count && next != current, "random boundary repeated or out of bounds");
+                    visited.push_back(*next); current = next;
+                }
+                Require(order.AtEnd(count), "random completion did not detect end of round");
+                auto unique = visited;
+                std::sort(unique.begin(), unique.end());
+                for (size_t row = 0; row < count; ++row)
+                    Require(unique[row] == row, "random round was not a complete permutation");
+                if (!rounds.empty()) {
+                    if (count > Order::kThreeRoundLimit || count == 2)
+                        Require(visited == rounds.front(), "single shuffled cycle changed its order");
+                    else for (const auto& earlier : rounds)
+                        Require(visited != earlier, "retained shuffled rounds must have different orders");
+                }
+                rounds.push_back(std::move(visited));
             }
-            Require(order.AtEnd(count), "random completion did not detect end of round");
-            for (size_t index = count - 1; index > 0; --index) {
+            if (count > 5000)
+                Require(!std::is_sorted(rounds[0].begin(), rounds[0].end()), "large-list fallback became sequential");
+            // Back through the current round, cross into the prior round, then
+            // return forward. Crossing must not regenerate the retained future.
+            for (size_t offset = count - 1; offset > 0; --offset) {
                 current = order.Select(count, current, Request::previous);
-                Require(current == visited[index - 1], "previous did not walk back through random history");
+                Require(current == rounds[2][offset - 1], "previous lost current round");
             }
-            for (size_t index = 1; index < count; ++index) {
+            current = order.Select(count, current, Request::previous);
+            Require(current == rounds[1].back(), "previous lost preceding round at boundary");
+            for (size_t row = 0; row < count; ++row) {
                 current = order.Select(count, current, Request::next);
-                Require(current == visited[index], "next after previous regenerated random history");
+                Require(current == rounds[2][row], "forward traversal lost retained round after reversal");
             }
-            auto next = order.Select(count, current, Request::next);
-            Require(next && next != current && !order.AtEnd(count + 1),
-                    "new round repeated its anchor or retained a mismatched size");
-            const auto grown = order.Select(count + 1, next, Request::next);
-            Require(grown && *grown < count + 1 && grown != next, "changed list size did not rebuild random order");
+            auto preview = order.Select(count, current, Request::preview_next);
+            Require(preview && preview != current, "preview did not cross round boundary");
+            Require(order.Select(count, current, Request::next) == preview, "preview consumed next song");
+            current = preview;
             order.Reset();
-            const auto backwards = order.Select(count, current, Request::previous);
-            Require(backwards == current, "original backward rebuild must retain current at the last slot");
-            Require(order.Select(count, current, Request::previous) != current,
-                    "second previous must enter the rebuilt random order");
-
+            preview = order.Select(count, current, Request::initialize_preview);
+            Require(preview && preview != current, "initial preview repeated current anchor");
+            Require(order.Select(count, current, Request::preview_next) == preview, "preview changed successor");
+            Require(order.Select(count, current, Request::next) == preview, "initial preview consumed successor");
+            current = preview;
             order.Reset();
-            auto preview = order.Select(count, current, Request::initialize_preview);
-            Require(preview && preview != current, "initial preview did not exclude the current anchor");
-            Require(order.Select(count, current, Request::preview_next) == preview,
-                    "non-consuming preview changed the prepared successor");
-            Require(order.Select(count, current, Request::next) == preview,
-                    "preview consumed an item in the random order");
-            while (!order.AtEnd(count)) current = order.Select(count, current, Request::next);
-            Require(!order.Select(count, current, Request::preview_next), "preview wrapped beyond the round");
+            auto previous = order.Select(count, current, Request::previous);
+            Require(previous && previous != current, "first previous did not enter previous shuffled round");
+            Require(order.Select(count, previous, Request::next) == current, "previous/next did not restore anchor");
         }
+        // Supersede an in-flight large build, then repeatedly cross the cutoff.
+        Order superseded;
+        superseded.Prepare(2000000, 0);
+        superseded.SetContext(2, 1);
+        for (size_t count : {size_t{5001}, size_t{5000}, size_t{13}, size_t{5001}, size_t{3}}) {
+            superseded.Prepare(count, 0);
+            superseded.SetContext(2, count);
+            auto next = superseded.Select(count, 0, Request::next);
+            Require(next && *next > 0 && *next < count, "stale job published into replacement list");
+        }
+        superseded.SetContext(3, 3);
+        Require(!superseded.AtEnd(3), "same-sized source switch retained old cursor");
+        Require(!superseded.Select(0, {}, Request::next), "empty random list selected a row");
+        Require(superseded.Select(1, 0, Request::previous) == size_t{0}, "single random track did not repeat");
+        // Destruction cancels a large unfinished job without touching UI objects.
+        { Order closing; closing.Prepare(2000000, 0); }
         // The player routes manual and automatic movement through one order.
         for (bool library : {false, true}) {
             Fixture f(library, 7);
@@ -218,7 +263,7 @@ struct ProgressSeekAccess {
             std::set<size_t> visited{0};
             std::vector<size_t> history{0};
             for (size_t i = 0; i < 6; ++i) {
-                if (i % 2) f.p.AdvanceAfterNaturalEnd(); else f.Command(true);
+                if (i % 2) f.Complete(); else f.Command(true);
                 Require(f.p.current_ && visited.insert(*f.p.current_).second,
                         "manual next and natural completion do not share the same random round");
                 history.push_back(*f.p.current_);
@@ -235,14 +280,92 @@ struct ProgressSeekAccess {
         }
     }
 
+    static void CheckAsyncRandomNavigation() {
+        using Order = playlist::RandomPlaybackOrder;
+        using Request = Order::Request;
+        for (bool library : {false, true}) {
+            Fixture f(library, 5001);
+            f.Playing(0); f.p.SetPlaybackMode(4);
+            // Build a full reference cycle through the same core, without decoding.
+            std::vector<size_t> cycle{0};
+            auto current = std::optional<size_t>{0};
+            for (size_t i = 1; i < 5001; ++i) {
+                current = f.p.random_playback_order_.Select(5001, current, Request::next);
+                Require(current.has_value(), "large UI cycle build failed");
+                cycle.push_back(*current);
+            }
+            f.Playing(current);
+            f.Command(true);
+            Require(f.p.current_ == size_t{0}, "large UI list did not wrap within its shuffled cycle");
+            f.Command(true);
+            Require(f.p.current_ == cycle[1], "large UI fallback used list row order");
+            f.Command(false); f.Command(false);
+            Require(f.p.current_ == cycle.back(), "large UI previous did not wrap in shuffled cycle");
+            f.Complete();
+            Require(f.p.current_ == size_t{0}, "large natural completion did not share shuffled cycle");
+            f.Command(false); // Last item in the internal cycle, not row 5000.
+            if (!library) {
+                const auto old = f.p.playlists_.ActiveIndex();
+                const auto target = f.p.playlists_.NewList(L"large-cycle destination");
+                playlist::Track track; track.path = L"destination.wav";
+                f.p.ActivePlaylist().Add(track); f.p.playlists_.SetActive(old);
+                f.p.settings_.player.auto_switch_list = true;
+                f.Complete();
+                Require(f.p.playlists_.ActiveIndex() == target && f.p.current_ == size_t{0},
+                        "large auto-switch did not use internal cycle boundary");
+            }
+        }
+        Fixture burst(false, 13);
+        burst.Playing(0); burst.p.SetPlaybackMode(4);
+        burst.p.QueueRandomNavigation(true, false);
+        burst.p.QueueRandomNavigation(true, false);
+        burst.p.QueueRandomNavigation(false, false);
+        burst.Drain();
+        const auto first = burst.p.current_;
+        burst.Command(false);
+        Require(burst.p.current_ == size_t{0} && first != size_t{0}, "queued clicks lost their order");
+        // Exercise the real UI timer's retry path without releasing the queued
+        // action through the synchronous test helper.
+        burst.p.random_navigation_requests_.push_back({true, false, true});
+        const auto deadline = GetTickCount64() + 10000;
+        while (!burst.p.random_navigation_requests_.empty()) {
+            burst.p.HandleMessage(WM_TIMER, ui::detail::kUiTimer, 0);
+            Require(GetTickCount64() < deadline, "UI timer did not dispatch completed index work");
+            Sleep(1);
+        }
+        Require(burst.p.current_ == first, "UI timer consumed wrong queued direction");
+        burst.p.random_playback_order_.Reset();
+        burst.p.QueueRandomNavigation(true, false);
+        burst.p.Stop(); burst.p.PollRandomNavigation();
+        Require(burst.p.random_navigation_requests_.empty() && !burst.p.pending_natural_play_,
+                "stop did not cancel queued random navigation");
+
+        Fixture edited(false, 3);
+        edited.Playing(0); edited.p.SetPlaybackMode(4);
+        edited.Command(true); edited.Command(true);
+        Require(edited.p.random_playback_order_.AtEnd(3), "edit fixture did not reach end");
+        const auto revision = edited.p.ActivePlaylist().OrderRevision();
+        edited.p.ActivePlaylist().SetRating(0, 3);
+        Require(edited.p.ActivePlaylist().OrderRevision() == revision, "tag edit invalidated index mapping");
+        edited.p.ActivePlaylist().Reorder({0}, 3);
+        Require(edited.p.ActivePlaylist().OrderRevision() != revision, "same-count reorder kept revision");
+        edited.p.PrepareRandomPlaybackOrder();
+        Require(!edited.p.random_playback_order_.AtEnd(3), "same-count reorder reused stale random order");
+        edited.p.ActivePlaylist().Remove(0);
+        playlist::Track replacement; replacement.path = L"replacement.wav";
+        edited.p.ActivePlaylist().Add(replacement);
+        edited.Command(true);
+        Require(edited.p.current_ && *edited.p.current_ < 3, "same-count replacement used stale indices");
+    }
+
     static void CheckCompletionMatrix() {
         for (bool library : {false, true}) for (int mode = 0; mode <= 4; ++mode) {
             for (size_t row = 0; row < 3; ++row) {
                 Fixture f(library);
                 f.p.SetPlaybackMode(mode); f.Playing(row);
-                Require(f.p.NavigationEnabled(false) == (mode >= 3 || row > 0), "previous button state differs from original");
-                Require(f.p.NavigationEnabled(true) == (mode >= 3 || row < 2), "next button state differs from original");
-                f.p.AdvanceAfterNaturalEnd();
+                Require(f.p.NavigationEnabled(false) == (mode == 1 || mode >= 3 || row > 0), "previous button state differs from the configured wrap policy");
+                Require(f.p.NavigationEnabled(true) == (mode == 1 || mode >= 3 || row < 2), "next button state differs from the configured wrap policy");
+                f.Complete();
                 if (mode == 0 || (mode == 2 && row == 2)) {
                     Require(!f.p.pending_natural_play_, "completion should stop without another play request");
                 } else {
@@ -254,7 +377,7 @@ struct ProgressSeekAccess {
             }
             Fixture idle(library);
             idle.p.SetPlaybackMode(mode); idle.Playing(std::nullopt);
-            Require(idle.p.NavigationEnabled(true) && idle.p.NavigationEnabled(false) == (mode >= 3),
+            Require(idle.p.NavigationEnabled(true) && idle.p.NavigationEnabled(false) == (mode == 1 || mode >= 3),
                     "missing playing marker produced incorrect button states");
             for (bool selected : {false, true}) {
                 Fixture f(library);
@@ -262,7 +385,7 @@ struct ProgressSeekAccess {
                 f.p.settings_.player.play_follow_cursor = true;
                 f.p.playlist_selection_ = 0;
                 if (selected) f.p.playlist_selected_rows_ = {0};
-                f.p.AdvanceAfterNaturalEnd();
+                f.Complete();
                 if (mode == 0) Require(!f.p.pending_natural_play_, "single mode followed the cursor on completion");
                 else if (selected) Require(f.p.current_ == size_t{0}, "completion did not follow selected focus");
                 else if (mode != 4) Require(f.p.current_ == (mode == 1 ? 1U : 2U), "unselected caret overrode completion");
@@ -270,7 +393,7 @@ struct ProgressSeekAccess {
             for (size_t count : {size_t{0}, size_t{1}}) {
                 Fixture f(library, count); f.p.SetPlaybackMode(mode);
                 f.Playing(count ? std::optional<size_t>{0} : std::nullopt);
-                f.p.AdvanceAfterNaturalEnd();
+                f.Complete();
                 Require(f.p.pending_natural_play_ == (count == 1 && (mode == 1 || mode >= 3)),
                         "empty/single list natural completion differs from original");
             }
@@ -280,12 +403,12 @@ struct ProgressSeekAccess {
             f.p.SetPlaybackMode(mode);
             playlist::Track detached; detached.path = L"retained-source.wav";
             f.p.opened_track_ = detached;
-            f.p.AdvanceAfterNaturalEnd();
+            f.Complete();
             Require(f.p.pending_natural_play_, "empty list lost repeat of its detached open source");
         }
         Fixture interval;
         interval.p.SetPlaybackMode(2); interval.Playing(0);
-        interval.p.AdvanceAfterNaturalEnd();
+        interval.Complete();
         Require(interval.p.PlaybackPlaylist().PlayingRow() == size_t{1}, "track interval did not publish the chosen marker");
         interval.Command(true);
         Require(interval.p.current_ == size_t{2}, "next during track interval used the stale playing marker");
@@ -304,7 +427,7 @@ struct ProgressSeekAccess {
             if (mode == 4) { f.Command(true); f.Command(true); }
             else f.Playing(2);
             f.p.pending_natural_play_ = false;
-            f.p.AdvanceAfterNaturalEnd();
+            f.Complete();
             const bool switches = automatic && mode >= 2;
             Require(f.p.playlists_.ActiveIndex() == (switches ? second : first),
                     "mode/AutoSwitchList selected the wrong catalogue on completion");
@@ -316,7 +439,7 @@ struct ProgressSeekAccess {
             f.Playing(0);
             if (mode == 4) { f.Command(true); f.Command(true); } else f.Playing(2);
             f.p.pending_natural_play_ = false;
-            f.p.AdvanceAfterNaturalEnd();
+            f.Complete();
             Require(f.p.pending_natural_play_ == (mode != 2), "one-list catalogue wrap/stop is incorrect");
             if (mode != 2) Require(f.p.current_ == size_t{0}, "wrapped catalogue must start at its first song");
         }
@@ -326,7 +449,7 @@ struct ProgressSeekAccess {
         empty.p.playlists_.SetActive(first); empty.Playing(2);
         empty.p.SetPlaybackMode(3); empty.p.settings_.player.auto_switch_list = true;
         empty.p.fullscreen_mode_ = 1;
-        empty.p.AdvanceAfterNaturalEnd();
+        empty.Complete();
         Require(empty.p.playlists_.ActiveIndex() == destination && !empty.p.pending_natural_play_,
                 "empty destination reopened the previous song or was skipped");
         Require(empty.p.fullscreen_mode_ == 1, "empty destination incorrectly took the end-of-catalogue exit branch");
@@ -338,7 +461,7 @@ struct ProgressSeekAccess {
             Fixture f; const auto owner = f.p.playlists_.ActiveIndex(); f.Playing(1);
             const auto shown = f.p.playlists_.NewList(L"shown");
             playlist::Track t; t.path = L"shown.wav"; f.p.ActivePlaylist().Add(t);
-            f.p.SetPlaybackMode(mode); f.p.AdvanceAfterNaturalEnd();
+            f.p.SetPlaybackMode(mode); f.Complete();
             Require(f.p.playing_playlist_index_ == (mode == 1 ? owner : shown),
                     "completion confused displayed catalogue and opened-song ownership");
         }

@@ -12,6 +12,8 @@
 #include <vector>
 
 namespace ttplayer::playlist {
+// Process-local identity for a row mapping; metadata-only edits preserve it.
+[[nodiscard]] std::uint64_t NextPlaybackOrderRevision() noexcept;
 // FUN_004C54D1 resolves StrCmpLogicalW at run time and falls back to
 // lstrcmpiW when it is unavailable.  Playlist and catalogue sorting share
 // this comparison so numeric text has the same order in both controls.
@@ -95,6 +97,7 @@ public:
     bool SetRating(size_t index, int rating);
     bool SetPath(size_t index, std::filesystem::path path);
     [[nodiscard]] const std::vector<Track>& Tracks() const noexcept { return tracks_; }
+    [[nodiscard]] std::uint64_t OrderRevision() const noexcept { return order_revision_; }
     [[nodiscard]] const std::wstring& Title() const noexcept { return title_; }
     void SetTitle(std::wstring title) { title_ = std::move(title); }
     [[nodiscard]] std::optional<size_t> CurrentRow() const noexcept {
@@ -127,6 +130,7 @@ public:
                     bool save_relative_path = true,
                     bool save_tags = false) const;
 private:
+    std::uint64_t order_revision_{NextPlaybackOrderRevision()};
     std::vector<Track> tracks_;
     std::wstring title_;
     // CPlayList +0x1c.  This is the last-playing item and the fourth DWORD in

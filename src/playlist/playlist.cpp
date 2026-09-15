@@ -562,10 +562,19 @@ void ApplyTrackOrder(std::vector<Track>& tracks,
 }
 } // namespace
 
-void Playlist::Add(Track track) { tracks_.push_back(std::move(track)); }
+std::uint64_t NextPlaybackOrderRevision() noexcept {
+    static std::atomic<std::uint64_t> revision{};
+    return revision.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+void Playlist::Add(Track track) {
+    tracks_.push_back(std::move(track));
+    order_revision_ = NextPlaybackOrderRevision();
+}
 void Playlist::Insert(size_t index, Track track) {
     index = std::min(index, tracks_.size());
     tracks_.insert(tracks_.begin() + static_cast<ptrdiff_t>(index), std::move(track));
+    order_revision_ = NextPlaybackOrderRevision();
     if (playing_row_ && index <= *playing_row_) ++*playing_row_;
     if (current_row_ && index <= *current_row_) ++*current_row_;
 }
@@ -576,12 +585,14 @@ void Playlist::InsertRange(size_t index, std::vector<Track> tracks) {
     tracks_.insert(tracks_.begin() + static_cast<ptrdiff_t>(index),
                    std::make_move_iterator(tracks.begin()),
                    std::make_move_iterator(tracks.end()));
+    order_revision_ = NextPlaybackOrderRevision();
     if (playing_row_ && index <= *playing_row_) *playing_row_ += count;
     if (current_row_ && index <= *current_row_) *current_row_ += count;
 }
 bool Playlist::Remove(size_t index) {
     if (index >= tracks_.size()) return false;
     tracks_.erase(tracks_.begin() + static_cast<ptrdiff_t>(index));
+    order_revision_ = NextPlaybackOrderRevision();
     if (playing_row_) {
         if (index < *playing_row_) --*playing_row_;
         else if (index == *playing_row_) playing_row_.reset();
@@ -595,6 +606,7 @@ bool Playlist::Remove(size_t index) {
     return true;
 }
 void Playlist::Clear() {
+    order_revision_ = NextPlaybackOrderRevision();
     tracks_.clear();
     playing_row_.reset();
     current_row_.reset();
@@ -696,6 +708,7 @@ std::vector<size_t> Playlist::Sort(
     for (size_t index = 0; index < order.size(); ++index)
         old_to_new[order[index]] = index;
     ApplyTrackOrder(tracks_, order);
+    order_revision_ = NextPlaybackOrderRevision();
     return old_to_new;
 }
 
@@ -717,6 +730,7 @@ std::vector<size_t> Playlist::Shuffle() {
     for (size_t index = 0; index < order.size(); ++index)
         old_to_new[order[index]] = index;
     ApplyTrackOrder(tracks_, order);
+    order_revision_ = NextPlaybackOrderRevision();
     return old_to_new;
 }
 
@@ -744,6 +758,7 @@ std::set<size_t> Playlist::Reorder(const std::set<size_t>& selected,
     playing_row_ = RemapRow(playing_row_, remaining);
     current_row_ = RemapRow(current_row_, remaining);
     ApplyTrackOrder(tracks_, remaining);
+    order_revision_ = NextPlaybackOrderRevision();
     std::set<size_t> reordered;
     for (size_t index = 0; index < moved.size(); ++index)
         reordered.insert(insertion + index);
@@ -826,6 +841,8 @@ bool Playlist::SetExtendedMetadata(
 
 bool Playlist::SetTrack(size_t index, Track track) {
     if (index >= tracks_.size() || tracks_[index] == track) return false;
+    if (tracks_[index].path != track.path || tracks_[index].subtrack != track.subtrack)
+        order_revision_ = NextPlaybackOrderRevision();
     tracks_[index] = std::move(track);
     return true;
 }
@@ -843,6 +860,7 @@ bool Playlist::SetPath(size_t index, std::filesystem::path path) {
     if (index >= tracks_.size() || path.empty() || tracks_[index].path == path)
         return false;
     tracks_[index].path = std::move(path);
+    order_revision_ = NextPlaybackOrderRevision();
     return true;
 }
 
@@ -862,6 +880,7 @@ std::optional<size_t> Playlist::Previous(size_t current, PlayMode mode) {
 
 void Playlist::LoadM3u8(const std::filesystem::path& path,
                          const LoadOptions& options) {
+    order_revision_ = NextPlaybackOrderRevision();
     tracks_.clear();
     playing_row_.reset();
     current_row_.reset();
@@ -1062,6 +1081,7 @@ void Playlist::LoadTtbl(const std::filesystem::path& path) {
         copy_audio_info(loaded.back());
     }
     tracks_ = std::move(loaded);
+    order_revision_ = NextPlaybackOrderRevision();
     title_ = std::move(loaded_title);
     playing_row_ = loaded_playing_row >= 0 &&
         static_cast<size_t>(loaded_playing_row) < tracks_.size()
@@ -1270,6 +1290,7 @@ void Playlist::LoadXml(const std::filesystem::path& path,
         throw std::runtime_error("incomplete TTPlayer XML playlist");
 
     tracks_ = std::move(loaded);
+    order_revision_ = NextPlaybackOrderRevision();
     title_ = std::move(loaded_title);
     playing_row_.reset();
     current_row_.reset();

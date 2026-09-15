@@ -132,3 +132,6 @@ ctest --test-dir build-library-tests -C Release -R '^media_library_tests$' --out
 测试无需原版 DLL、私有测试源码或音频设备，覆盖五种播放模式、随机序列前后回退、
 首尾边界、播放跟随光标、自然结束和自动切换列表。媒体库测试另验证可见树节点切换。
 分析与验证记录见 [PLAYBACK_MODES_AUDIT_AND_FIXES.md](PLAYBACK_MODES_AUDIT_AND_FIXES.md)。
+随机播放另覆盖普通版 ≤5000 首三轮后台索引、>5000 首单份随机索引循环，
+XP／Win7 版始终单份随机索引循环，以及跨轮回退、
+任务失效和异步切歌队列；规则见 [RANDOM_PLAYBACK_ROUNDS.md](RANDOM_PLAYBACK_ROUNDS.md)。

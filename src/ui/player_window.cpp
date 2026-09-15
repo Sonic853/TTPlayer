@@ -3041,6 +3041,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             // procedure.
             if (skin_catalog_result_stale_) StartSkinMenuCatalogLoad();
             PollMediaLibraryWorkers();
+            PollRandomNavigation();
             PollLocalLyricSearch();
             PollOnlineLyricSearch();
             PollLyricServices();
@@ -6012,6 +6013,7 @@ void PlayerWindow::AdvanceSkinInfoScroll(UINT_PTR timer) {
 }
 
 bool PlayerWindow::PlayCurrent() {
+    if (!random_navigation_dispatch_) random_navigation_requests_.clear();
     media_library_startup_pending_ = false;
     // Both explicit and automatic requests use the same nonmodal notice.
     ClearAudioError();
@@ -6038,6 +6040,7 @@ bool PlayerWindow::PlayCurrent() {
     if (indexed_playback && PlaybackPlaylist().SetPlayingRow(*current_) &&
         playback_playlist_index)
         playlists_.MarkDirty(*playback_playlist_index);
+    if (settings_.player.play_mode == 4) PrepareRandomPlaybackOrder();
     if (natural_completion_dispatch_) {
         // Publish the chosen row before waiting between tracks. A manual
         // Next during this interval must use that row, not the old marker.
@@ -6253,9 +6256,12 @@ void PlayerWindow::SelectTrackFrom(size_t playlist_index, size_t index,
 void PlayerWindow::SetPlaybackMode(int mode, bool reset_random_order) {
     if (mode < 0 || mode > 4) return;
     settings_.player.play_mode = mode;
+    random_navigation_requests_.clear();
     // 004655FE resets on the main command/skin path even if random was
     // already selected. 00483AF8's playlist submenu only assigns the mode.
     if (mode == 4 && reset_random_order) random_playback_order_.Reset();
+    if (mode == 4) PrepareRandomPlaybackOrder();
+    else random_playback_order_.Reset();
     RefreshPlaybackUi();
 }
 
@@ -6276,10 +6282,13 @@ std::optional<size_t> PlayerWindow::NavigationPlayingRow() const {
 bool PlayerWindow::NavigationEnabled(bool next) const {
     const size_t count = NavigationTrackCount();
     if (count == 0) return false;
-    if (settings_.player.play_mode == 3 || settings_.player.play_mode == 4) return true;
+    // Repeat One deliberately exposes the existing wrap commands at both
+    // ends, as requested. Empty lists still disable both controls above.
+    if (settings_.player.play_mode == 1 || settings_.player.play_mode == 3 ||
+        settings_.player.play_mode == 4) return true;
     const auto playing = NavigationPlayingRow();
-    // 0045A6xx disables the end buttons in modes 0..2; a missing marker
-    // (-1) disables Previous but enables Next. Commands themselves wrap.
+    // Retain 0045A6xx's boundary rules for Single and Sequential: a missing
+    // marker (-1) disables Previous but enables Next. Commands still wrap.
     return next ? !playing || *playing + 1 < count : playing && *playing > 0;
 }
 
@@ -6325,6 +6334,60 @@ bool PlayerWindow::SwitchNavigationList(bool wrap) {
     return true;
 }
 
+void PlayerWindow::PrepareRandomPlaybackOrder() {
+    const auto [source, revision] = NavigationOrderContext();
+    random_playback_order_.SetContext(source, revision);
+    random_playback_order_.Prepare(NavigationTrackCount(), NavigationPlayingRow());
+}
+
+void PlayerWindow::QueueRandomNavigation(bool next, bool natural) {
+    // Preserve rapid button presses while a cold/new round is being built.
+    // A queued transition supersedes an older between-tracks delay.
+    pending_natural_play_ = false;
+    pending_failed_advance_ = false;
+    ClearAudioError();
+    random_navigation_requests_.push_back({next, natural, natural_completion_dispatch_});
+    PollRandomNavigation();
+}
+
+void PlayerWindow::PollRandomNavigation() {
+    if (random_navigation_dispatch_) return;
+    if (settings_.player.play_mode != 4) {
+        random_navigation_requests_.clear();
+        return;
+    }
+    // Yield back to the window loop even if many commands were queued.
+    for (size_t handled = 0; handled < 32 && !random_navigation_requests_.empty(); ++handled) {
+        PrepareRandomPlaybackOrder();
+        const size_t count = NavigationTrackCount();
+        const auto request = random_navigation_requests_.front();
+        const bool switch_list = request.natural && settings_.player.auto_switch_list &&
+            (count <= 1 || random_playback_order_.AtEnd(count));
+        playlist::RandomPlaybackOrder::Selection selection;
+        if (!switch_list) {
+            selection = random_playback_order_.TrySelect(count, NavigationPlayingRow(),
+                request.next ? playlist::RandomPlaybackOrder::Request::next
+                             : playlist::RandomPlaybackOrder::Request::previous);
+            if (selection.pending) return; // Retry from kUiTimer; never wait in WndProc.
+        }
+        random_navigation_requests_.pop_front();
+        const bool was_deferred = natural_completion_dispatch_;
+        natural_completion_dispatch_ = request.deferred;
+        random_navigation_dispatch_ = true;
+        if (switch_list) {
+            if (!SwitchNavigationList(true)) Stop();
+            else {
+                random_playback_order_.Reset();
+                if (NavigationTrackCount()) SelectNavigationTrack(0);
+                else RefreshPlaybackUi();
+            }
+        } else if (selection.row) SelectNavigationTrack(*selection.row);
+        else if (request.natural) Stop();
+        random_navigation_dispatch_ = false;
+        natural_completion_dispatch_ = was_deferred;
+    }
+}
+
 void PlayerWindow::SelectRelative(bool next) {
     const size_t count = NavigationTrackCount();
     if (count == 0) return;
@@ -6332,9 +6395,8 @@ void PlayerWindow::SelectRelative(bool next) {
     const auto playing = NavigationPlayingRow();
     std::optional<size_t> selected;
     if (settings_.player.play_mode == 4) {
-        selected = random_playback_order_.Select(count, playing, next
-            ? playlist::RandomPlaybackOrder::Request::next
-            : playlist::RandomPlaybackOrder::Request::previous);
+        QueueRandomNavigation(next, false);
+        return;
     } else {
         // 00465230/0046528B special-case only random mode. Commands in
         // modes 0..3 wrap; their enabled/disabled UI state is separate.
@@ -6356,9 +6418,8 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
         if (fullscreen_mode_ != 0) LeaveFullScreen();
         RefreshPlaybackUi();
     };
-    const auto switch_and_play = [this](bool wrap, bool random) {
+    const auto switch_and_play = [this](bool wrap) {
         if (!SwitchNavigationList(wrap)) { Stop(); return; }
-        if (random) random_playback_order_.Reset(); // 0045BBF6(0) returns row 0.
         if (NavigationTrackCount() != 0) SelectNavigationTrack(0);
         // 0047FEA3 rejects row zero in an empty list without reopening the
         // retained sound or taking 0045BF3A's leave-fullscreen branch.
@@ -6380,21 +6441,16 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
         return;
     case 2:
         if (next < count) SelectNavigationTrack(next);
-        else if (auto_switch) switch_and_play(false, false);
+        else if (auto_switch) switch_and_play(false);
         else finished();
         return;
     case 3:
-        if (auto_switch && next >= count) switch_and_play(true, false);
+        if (auto_switch && next >= count) switch_and_play(true);
         else if (count != 0) SelectNavigationTrack(next < count ? next : 0);
         else Stop();
         return;
     case 4:
-        if (auto_switch && (count <= 1 || random_playback_order_.AtEnd(count))) {
-            switch_and_play(true, true);
-        } else if (const auto target = random_playback_order_.Select(
-                count, playing, playlist::RandomPlaybackOrder::Request::next)) {
-            SelectNavigationTrack(*target);
-        } else Stop();
+        QueueRandomNavigation(true, true);
         return;
     default:
         return;
@@ -6402,6 +6458,7 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
 }
 
 void PlayerWindow::Stop() {
+    random_navigation_requests_.clear();
     media_library_startup_pending_ = false;
     // FUN_00465169 first leaves whichever full-screen host is active, then
     // stops the decoder and refreshes the ordinary player windows.  It does
