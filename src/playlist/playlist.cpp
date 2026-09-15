@@ -769,6 +769,7 @@ bool Playlist::SetDuration(size_t index, int duration_ms) {
     if (index >= tracks_.size()) return false;
     if (tracks_[index].duration_ms == duration_ms) return false;
     tracks_[index].duration_ms = duration_ms;
+    ++info_revision_;
     return true;
 }
 
@@ -789,6 +790,7 @@ bool Playlist::SetMetadata(size_t index, std::string title,
         track.album = std::move(album);
         changed = true;
     }
+    if (changed) ++info_revision_;
     return changed;
 }
 
@@ -836,6 +838,7 @@ bool Playlist::SetExtendedMetadata(
         track.sample_rate_hz = sample_rate_hz;
         changed = true;
     }
+    if (changed) ++info_revision_;
     return changed;
 }
 
@@ -844,6 +847,7 @@ bool Playlist::SetTrack(size_t index, Track track) {
     if (tracks_[index].path != track.path || tracks_[index].subtrack != track.subtrack)
         order_revision_ = NextPlaybackOrderRevision();
     tracks_[index] = std::move(track);
+    ++info_revision_;
     return true;
 }
 
@@ -853,6 +857,7 @@ bool Playlist::SetRating(size_t index, int rating) {
     if (index >= tracks_.size() || rating < 0 || rating > 5) return false;
     if (tracks_[index].rating == rating) return false;
     tracks_[index].rating = rating;
+    ++info_revision_;
     return true;
 }
 
@@ -861,6 +866,7 @@ bool Playlist::SetPath(size_t index, std::filesystem::path path) {
         return false;
     tracks_[index].path = std::move(path);
     order_revision_ = NextPlaybackOrderRevision();
+    ++info_revision_;
     return true;
 }
 

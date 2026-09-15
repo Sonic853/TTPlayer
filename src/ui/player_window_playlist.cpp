@@ -3432,6 +3432,59 @@ void PlayerWindow::UpdatePlaylistToolRects() {
     park_unused();
 }
 
+std::pair<size_t, size_t> PlayerWindow::VisiblePlaylistInfoRange() const {
+    if (settings_.playlist.library_mode) return {};
+    if (playlist_window_ && IsWindowVisible(playlist_window_) && skin_ && skin_->Playlist().valid) {
+        RECT client{};
+        GetClientRect(playlist_window_, &client);
+        const auto metrics = MakePlaylistGeometry(skin_->Playlist(), settings_.playlist.split_on_lists,
+            client.right, client.bottom, VisiblePlaylistTrackCount());
+        return {playlist_scroll_, static_cast<size_t>(std::max(0, metrics.visible_rows))};
+    }
+    if (playlist_view_ && IsWindowVisible(playlist_view_)) {
+        RECT client{}; GetClientRect(playlist_view_, &client);
+        const auto first = SendMessageW(playlist_view_, LB_GETTOPINDEX, 0, 0);
+        const auto height = SendMessageW(playlist_view_, LB_GETITEMHEIGHT, 0, 0);
+        if (first >= 0 && height > 0)
+            return {static_cast<size_t>(first), static_cast<size_t>((client.bottom + height - 1) / height)};
+    }
+    return {};
+}
+
+void PlayerWindow::InvalidatePlaylistInfoRows(const std::vector<size_t>& rows) {
+    if (settings_.playlist.library_mode) return;
+    if (playlist_window_ && skin_ && skin_->Playlist().valid) {
+        RECT client{}; GetClientRect(playlist_window_, &client);
+        const auto metrics = MakePlaylistGeometry(skin_->Playlist(), settings_.playlist.split_on_lists,
+            client.right, client.bottom, VisiblePlaylistTrackCount());
+        for (const auto row : rows) {
+            if (row < playlist_scroll_ || row - playlist_scroll_ >= static_cast<size_t>(std::max(0, metrics.visible_rows))) continue;
+            const int top = metrics.tracks.top + static_cast<int>(row - playlist_scroll_) * metrics.row_height;
+            RECT rect{metrics.tracks.left, top, metrics.tracks.right,
+                std::min<LONG>(metrics.tracks.bottom, top + metrics.row_height)};
+            InvalidateRect(playlist_window_, &rect, FALSE);
+            if (playlist_track_control_) {
+                MapWindowPoints(playlist_window_, playlist_track_control_, reinterpret_cast<POINT*>(&rect), 2);
+                InvalidateRect(playlist_track_control_, &rect, FALSE);
+            }
+        }
+    }
+    if (playlist_view_) {
+        const auto selection = SendMessageW(playlist_view_, LB_GETCURSEL, 0, 0);
+        const auto first = SendMessageW(playlist_view_, LB_GETTOPINDEX, 0, 0);
+        // The fallback LISTBOX stores strings, unlike the painted skin list.
+        // Replace just the changed strings and preserve cursor/scroll position.
+        for (const auto row : rows) {
+            if (row >= ActivePlaylist().Tracks().size()) continue;
+            const auto name = DisplayName(ActivePlaylist().Tracks()[row]);
+            SendMessageW(playlist_view_, LB_DELETESTRING, row, 0);
+            SendMessageW(playlist_view_, LB_INSERTSTRING, row, reinterpret_cast<LPARAM>(name.c_str()));
+        }
+        SendMessageW(playlist_view_, LB_SETCURSEL, selection, 0);
+        if (first >= 0) SendMessageW(playlist_view_, LB_SETTOPINDEX, first, 0);
+    }
+}
+
 void PlayerWindow::UpdatePlaylistItemTipRects() {
     if (!playlist_window_) return;
     if (tooltip_ || playlist_item_tooltip_) {
@@ -3467,7 +3520,7 @@ void PlayerWindow::UpdatePlaylistItemTipRects() {
         // FUN_00487C0D queues an unread (-2) non-network CPlayItem only when
         // custom drawing reaches a visible row.
         QueuePlaylistInfoRange(playlists_.ActiveIndex(), playlist_scroll_,
-            static_cast<size_t>(metrics.visible_rows));
+            static_cast<size_t>(metrics.visible_rows), true, true);
     }
     if (!settings_.playlist.item_tips || !playlist_track_control_) return;
     if (!playlist_item_tooltip_ || !IsWindow(playlist_item_tooltip_)) {
@@ -3536,7 +3589,7 @@ bool PlayerWindow::HandleToolTipNotification(HWND owner, LPARAM notification) {
         // LVN_GETINFOTIPW at 004887AA explicitly resolves just the requested
         // item when it has not yet passed through the visible-row queue.
         RequestPlaylistTrackInfo(playlists_.ActiveIndex(),
-            static_cast<size_t>(identifier - kCmdFirstTrack), true);
+            static_cast<size_t>(identifier - kCmdFirstTrack), true, true);
     }
     tooltip_text_ = ToolTipText(owner, identifier);
     const bool playlist_item_tip = owner == playlist_window_ &&

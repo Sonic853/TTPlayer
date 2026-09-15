@@ -3,6 +3,7 @@
 #include "file_info_probe_protocol.h"
 
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -59,5 +60,28 @@ RunPlaylistInfoReadProbe(
     DWORD timeout_milliseconds = 15000,
     FileInfoProbeProcessState* process_state = nullptr,
     const FileInfoProbeMp3Policy& mp3_policy = {});
+
+// One caller thread per session. A bounded child and its lazily loaded plug-ins
+// survive successive reads; cancellation/failure discards the entire child.
+class PlaylistInfoProbeSession {
+public:
+    PlaylistInfoProbeSession();
+    ~PlaylistInfoProbeSession();
+    PlaylistInfoProbeSession(const PlaylistInfoProbeSession&) = delete;
+    PlaylistInfoProbeSession& operator=(const PlaylistInfoProbeSession&) = delete;
+    std::optional<FileInfoProbeReadResult> Read(
+        std::stop_token stop, const std::filesystem::path& helper,
+        const std::filesystem::path& addin_directory,
+        const std::filesystem::path& logical_path,
+        const std::filesystem::path& ttpcomm_path, int subtrack,
+        DWORD timeout_milliseconds = 15000,
+        FileInfoProbeProcessState* process_state = nullptr,
+        const FileInfoProbeMp3Policy& mp3_policy = {});
+    struct Statistics { size_t launches{}, reads{}, cache_hits{}; };
+    [[nodiscard]] Statistics Stats() const noexcept;
+private:
+    struct State;
+    std::unique_ptr<State> state_;
+};
 
 } // namespace ttplayer::ui::detail

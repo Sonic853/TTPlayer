@@ -36,6 +36,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <unordered_map>
 #include <commdlg.h>
 #include <commctrl.h>
 #include <windows.h>
@@ -65,7 +66,7 @@ public:
         lyric_catalog_job_.reset();
         lyric_services_ = {};
         lyric_services_ready_ = false;
-        playlist_info_unavailable_sources_.clear();
+        ShutdownPlaylistInfoLoading();
         reader_formats_ = manager ? manager->ReaderFormats()
                                   : std::vector<plugins::ReaderFormat>{};
         audio_.SetPluginManager(manager);
@@ -450,9 +451,13 @@ private:
     void UpdatePlaylistToolRects();
     void UpdatePlaylistItemTipRects();
     void QueuePlaylistInfoRange(size_t playlist_index, size_t first,
-                                size_t count, bool priority = false);
+                                size_t count, bool priority = false, bool visible_only = false);
     void RequestPlaylistTrackInfo(size_t playlist_index, size_t row,
-                                  bool priority = false);
+                                  bool priority = false, bool visible_only = false);
+    std::pair<size_t, size_t> VisiblePlaylistInfoRange() const;
+    void InvalidatePlaylistInfoRows(const std::vector<size_t>& rows);
+    void PollPlaylistInfo();
+    const std::vector<size_t>& PlaylistInfoSourceRows(size_t index, const std::wstring& source);
     void StartNextPlaylistInfoRead();
     LRESULT ApplyPlaylistInfoResult(LPARAM result);
     void ShutdownPlaylistInfoLoading();
@@ -1037,12 +1042,16 @@ private:
         size_t row_hint{};
         std::filesystem::path path;
         int subtrack{};
+        bool visible_only{};
     };
+    struct PlaylistInfoIndex;
+    std::shared_ptr<PlaylistInfoIndex> playlist_info_index_;
     struct PlaylistInfoReceiver;
-    std::deque<PlaylistInfoRequest> playlist_info_pending_;
+    std::list<PlaylistInfoRequest> playlist_info_pending_;
     std::optional<PlaylistInfoRequest> playlist_info_active_;
-    std::set<std::wstring> playlist_info_queued_keys_;
-    std::set<std::wstring> playlist_info_unavailable_sources_;
+    std::unordered_map<std::wstring, std::list<PlaylistInfoRequest>::iterator> playlist_info_queued_keys_;
+    std::unordered_map<std::wstring, ULONGLONG> playlist_info_checked_;
+    ULONGLONG playlist_info_poll_tick_{};
     std::shared_ptr<PlaylistInfoReceiver> playlist_info_receiver_;
     bool playlist_info_working_{};
     std::shared_ptr<std::atomic_bool> playlist_metadata_working_;

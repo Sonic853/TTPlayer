@@ -3041,6 +3041,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             // procedure.
             if (skin_catalog_result_stale_) StartSkinMenuCatalogLoad();
             PollMediaLibraryWorkers();
+            PollPlaylistInfo();
             PollRandomNavigation();
             PollLocalLyricSearch();
             PollOnlineLyricSearch();

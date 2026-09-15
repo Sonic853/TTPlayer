@@ -135,3 +135,11 @@ ctest --test-dir build-library-tests -C Release -R '^media_library_tests$' --out
 随机播放另覆盖普通版 ≤5000 首三轮后台索引、>5000 首单份随机索引循环，
 XP／Win7 版始终单份随机索引循环，以及跨轮回退、
 任务失效和异步切歌队列；规则见 [RANDOM_PLAYBACK_ROUNDS.md](RANDOM_PLAYBACK_ROUNDS.md)。
+
+### 独立歌曲信息加载回归
+
+配置时设置 `-DTTPLAYER_BUILD_INFO_TESTS=ON`，构建目标 `playlist_info_tests`，再运行
+`ctest --test-dir <构建目录> -C Release -R '^playlist_info_tests$' --output-on-failure`。
+无需私有测试代码、原版 DLL 或音频设备，使用生成的 WAV/CUE 和隔离故障进程验证会话复用、
+缓存失效、取消恢复、读取队列及编辑竞争。Actions 在两个构建中均执行该测试。
+实现与测量见 [PLAYLIST_INFO_LOADING_OPTIMIZATION.md](PLAYLIST_INFO_LOADING_OPTIMIZATION.md)。

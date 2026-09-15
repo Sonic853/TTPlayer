@@ -2,6 +2,7 @@
 #include "ttplayer/app/file_info_worker.h"
 #include "../ui/file_info_cover_policy.h"
 #include "../ui/file_info_probe_protocol.h"
+#include "../ui/playlist_info_session_protocol.h"
 
 #include "ttplayer/audio/archive_member.h"
 #include "ttplayer/audio/builtin_file_info.h"
@@ -202,7 +203,7 @@ int ReadFileInfo(const std::filesystem::path& addin_directory,
         result.status = TryBuiltinRead(logical_path, request.mp3, result);
         completed = SUCCEEDED(result.status);
     }
-    const HRESULT loaded = manager.Load(addin_directory);
+    const HRESULT loaded = completed ? S_OK : manager.Load(addin_directory);
     if (!completed && SUCCEEDED(loaded)) {
         HRESULT opened{};
         auto reader = OpenReader(manager, logical_path, ttpcomm, &opened);
@@ -221,19 +222,37 @@ int ReadFileInfo(const std::filesystem::path& addin_directory,
         ? 0 : 4;
 }
 
-int ReadPlaylistInfo(const std::filesystem::path& addin_directory,
-                     const std::filesystem::path& logical_path,
-                     const std::filesystem::path& ttpcomm_path,
-                     int subtrack, const std::filesystem::path& request_path,
-                     const std::filesystem::path& output) {
+class PlaylistReaderContext {
+public:
+    ttplayer::plugins::PluginManager manager;
+    std::filesystem::path addin, comm_path;
+    HMODULE comm{};
+    bool load_attempted{};
+    HRESULT loaded{E_FAIL};
+    PlaylistReaderContext(std::filesystem::path directory, std::filesystem::path library)
+        : addin(std::move(directory)), comm_path(std::move(library)) {}
+    ~PlaylistReaderContext() {
+        manager.Shutdown();
+        if (comm) FreeLibrary(comm);
+    }
+    HRESULT Load() {
+        if (!load_attempted) { load_attempted = true; loaded = manager.Load(addin); }
+        return loaded;
+    }
+    HMODULE ArchiveLibrary() {
+        if (!comm && !comm_path.empty()) comm = LoadLibraryExW(
+            comm_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        return comm;
+    }
+};
+
+ttplayer::ui::detail::FileInfoProbeReadResult ReadPlaylistMetadata(
+    PlaylistReaderContext& context, const std::filesystem::path& logical_path,
+    int subtrack, const ttplayer::ui::detail::FileInfoProbeMp3Policy& policy) {
     ttplayer::ui::detail::FileInfoProbeReadResult result;
-    ttplayer::ui::detail::FileInfoProbeReadRequest request;
-    if (!ttplayer::ui::detail::ReadFileInfoProbeReadRequest(
-            request_path, request))
-        return 3;
-    HMODULE ttpcomm = ttpcomm_path.empty() ? nullptr :
-        LoadLibraryExW(ttpcomm_path.c_str(), nullptr,
-                       LOAD_WITH_ALTERED_SEARCH_PATH);
+    ttplayer::audio::ArchiveMemberPath archive;
+    HMODULE ttpcomm = ttplayer::audio::ParseArchiveMemberPath(logical_path.native(), archive)
+        ? context.ArchiveLibrary() : nullptr;
     std::filesystem::path decoder_path = logical_path;
     std::optional<std::int64_t> cue_duration;
     std::wstring cue_title;
@@ -275,14 +294,18 @@ int ReadPlaylistInfo(const std::filesystem::path& addin_directory,
         }
     }
 
-    ttplayer::plugins::PluginManager manager;
+    // A local CUE may resolve to an archive member even when the CUE itself
+    // did not need the archive module.
+    if (!ttpcomm && ttplayer::audio::ParseArchiveMemberPath(decoder_path.native(), archive))
+        ttpcomm = context.ArchiveLibrary();
+    auto& manager = context.manager;
     if (result.status == E_FAIL) {
         bool completed{};
         if (IsDirectBuiltinPath(decoder_path)) {
-            result.status = TryBuiltinRead(decoder_path, request.mp3, result);
+            result.status = TryBuiltinRead(decoder_path, policy, result);
             completed = SUCCEEDED(result.status);
         }
-        const HRESULT loaded = manager.Load(addin_directory);
+        const HRESULT loaded = completed ? S_OK : context.Load();
         if (!completed && SUCCEEDED(loaded)) {
             if (manager.HasReaderForPath(decoder_path)) {
                 HRESULT opened{};
@@ -297,7 +320,7 @@ int ReadPlaylistInfo(const std::filesystem::path& addin_directory,
             }
         }
         if (!completed) {
-            result.status = TryBuiltinRead(decoder_path, request.mp3, result);
+            result.status = TryBuiltinRead(decoder_path, policy, result);
             completed = SUCCEEDED(result.status);
         }
         if (completed) {
@@ -337,10 +360,47 @@ int ReadPlaylistInfo(const std::filesystem::path& addin_directory,
                               std::to_wstring(cue_track_number));
                 }
     }
-    manager.Shutdown();
-    if (ttpcomm) FreeLibrary(ttpcomm);
-    return ttplayer::ui::detail::WriteFileInfoProbeReadResult(output, result)
-        ? 0 : 4;
+    result.cover.clear();
+    return result;
+}
+
+int ReadPlaylistInfo(const std::filesystem::path& addin,
+                     const std::filesystem::path& path,
+                     const std::filesystem::path& comm, int subtrack,
+                     const std::filesystem::path& request_path,
+                     const std::filesystem::path& output) {
+    ttplayer::ui::detail::FileInfoProbeReadRequest request;
+    if (!ttplayer::ui::detail::ReadFileInfoProbeReadRequest(request_path, request)) return 3;
+    PlaylistReaderContext context(addin, comm);
+    return ttplayer::ui::detail::WriteFileInfoProbeReadResult(output,
+        ReadPlaylistMetadata(context, path, subtrack, request.mp3)) ? 0 : 4;
+}
+
+int ServePlaylistInfo(wchar_t** args) {
+    using namespace ttplayer::ui::detail;
+    const HANDLE incoming = OpenEventW(SYNCHRONIZE, FALSE, args[6]);
+    const HANDLE outgoing = OpenEventW(EVENT_MODIFY_STATE, FALSE, args[7]);
+    if (!incoming || !outgoing) {
+        if (incoming) CloseHandle(incoming);
+        if (outgoing) CloseHandle(outgoing);
+        return 3;
+    }
+    int code{};
+    {
+        PlaylistReaderContext context(args[2], args[3]);
+        // Idle retirement also bounds lifetime if the parent exits without a
+        // usable job object. The parent restarts an idle child on the next read.
+        while (WaitForSingleObject(incoming, 60000) == WAIT_OBJECT_0) {
+            PlaylistInfoSessionRequest request;
+            if (!ReadPlaylistInfoSessionRequest(args[4], request) ||
+                !WritePlaylistInfoSessionResult(args[5], request.id, ReadPlaylistMetadata(
+                    context, request.path, request.subtrack, request.mp3)) ||
+                !SetEvent(outgoing)) { code = 4; break; }
+        }
+    }
+    CloseHandle(outgoing);
+    CloseHandle(incoming);
+    return code;
 }
 
 int WriteFileInfo(const std::filesystem::path& addin_directory,
@@ -383,7 +443,7 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
         result.cover_status = written.cover_status;
         completed = true;
     }
-    const HRESULT loaded = manager.Load(addin_directory);
+    const HRESULT loaded = completed ? S_OK : manager.Load(addin_directory);
     if (!completed && SUCCEEDED(loaded)) {
         HRESULT opened{};
         auto reader = OpenReader(manager, logical_path, ttpcomm, &opened);
@@ -446,7 +506,9 @@ int ttplayer::app::RunFileInfoWorker(int count, wchar_t** arguments) {
     const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool owns_apartment = SUCCEEDED(apartment);
     int exit_code{2};
-    if (_wcsicmp(arguments[1], L"read") == 0 && count == 7) {
+    if (_wcsicmp(arguments[1], L"playlist-session") == 0 && count == 8) {
+        exit_code = ServePlaylistInfo(arguments);
+    } else if (_wcsicmp(arguments[1], L"read") == 0 && count == 7) {
         exit_code = ReadFileInfo(arguments[2], arguments[3], arguments[4],
                                  arguments[5], arguments[6]);
     } else if (_wcsicmp(arguments[1], L"playlist-read") == 0 && count == 8) {

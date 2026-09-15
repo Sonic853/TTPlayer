@@ -775,14 +775,15 @@ struct PlayerWindow::MediaLibraryState {
         return MediaLibraryTrackIdentity(track);
     }
 
-    static void ReadTrackMetadata(playlist::Track& track, const BuildRequest& request) {
+    static void ReadTrackMetadata(playlist::Track& track, const BuildRequest& request,
+                                  PlaylistInfoProbeSession& session) {
         const auto source = track.path.wstring();
         if (source.find(L"://") != std::wstring::npos ||
             source.find(L'|') != std::wstring::npos || track.subtrack != 0) return;
         // Built-in decoders and AddIns use the same bounded child process.
         // A stalled/crashing reader cannot hold the catalogue scanner forever.
         FileInfoProbeProcessState process{};
-        const auto probe = RunPlaylistInfoReadProbe(request.control->stop.get_token(),
+        const auto probe = session.Read(request.control->stop.get_token(),
             request.helper, request.runtime / L"AddIn", track.path,
             request.runtime / L"ttpcomm.dll", track.subtrack, 15000, &process, request.mp3);
         if (!probe || FAILED(probe->status)) {
@@ -840,9 +841,10 @@ struct PlayerWindow::MediaLibraryState {
         result->instance = request.instance;
         result->generation = request.generation;
         result->persistence_attempted = request.load_persistence;
+        PlaylistInfoProbeSession info_session;
         std::set<std::wstring> metadata_read;
         const auto read_track = [&](playlist::Track& track) {
-            if (metadata_read.insert(Identity(track)).second) ReadTrackMetadata(track, request);
+            if (metadata_read.insert(Identity(track)).second) ReadTrackMetadata(track, request, info_session);
         };
         std::unordered_map<std::wstring, size_t> identities;
         const auto seed_capacity = request.seeds.size() * 2 + 64;

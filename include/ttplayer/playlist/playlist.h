@@ -97,6 +97,9 @@ public:
     bool SetRating(size_t index, int rating);
     bool SetPath(size_t index, std::filesystem::path path);
     [[nodiscard]] const std::vector<Track>& Tracks() const noexcept { return tracks_; }
+    // Reject information reads started before a metadata edit; this counter
+    // does not invalidate the random playback order or source-to-row index.
+    [[nodiscard]] std::uint64_t InfoRevision() const noexcept { return info_revision_; }
     [[nodiscard]] std::uint64_t OrderRevision() const noexcept { return order_revision_; }
     [[nodiscard]] const std::wstring& Title() const noexcept { return title_; }
     void SetTitle(std::wstring title) { title_ = std::move(title); }
@@ -130,6 +133,7 @@ public:
                     bool save_relative_path = true,
                     bool save_tags = false) const;
 private:
+    std::uint64_t info_revision_{};
     std::uint64_t order_revision_{NextPlaybackOrderRevision()};
     std::vector<Track> tracks_;
     std::wstring title_;
