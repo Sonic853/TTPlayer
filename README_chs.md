@@ -28,6 +28,10 @@
 
 ## 构建
 
+**Windows XP / Windows 7 用户请使用 `TTPlayerRebuild-XP-Win7.zip` 中的 EXE。**
+默认现代版由新版 MSVC 构建，不适用于这些系统。旧系统版的构建、安装和功能范围见
+[XP / Win7 兼容版说明](docs/LEGACY_WINDOWS.md)。Actions 会同时提供两个版本。
+
 需要安装 Visual Studio 2026 的“使用 C++ 的桌面开发”组件和 CMake 4.2+。当前项目必须使用 Win32/x86，不能选择 x64。
 
 在项目中打开终端，执行以下命令进行构建：

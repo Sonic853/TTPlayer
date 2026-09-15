@@ -3,6 +3,7 @@ project(TTPlayerRebuild VERSION 0.1.0 LANGUAGES C CXX)
 
 include(CTest)
 option(TTPLAYER_STAGE_RUNTIME "Rebuild/copy local original DLLs, skins and configuration beside the EXE" ON)
+option(TTPLAYER_LEGACY_WINDOWS "Build the separate Windows XP SP3 / Windows 7 edition" OFF)
 
 if(NOT WIN32)
   message(FATAL_ERROR "TTPlayerRebuild currently targets Windows")
@@ -18,6 +19,10 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(TTPLAYER_LEGACY_WINDOWS)
+  include(cmake/legacy_windows.cmake)
+endif()
 
 # Re-evaluate at build time, not just when CMake configures. The generator
 # updates the header only if the Beijing calendar date changes, so same-day
@@ -44,6 +49,7 @@ add_library(ttplayer_core
   src/audio/cue_sheet.cpp
   src/audio/file_encoder.cpp
   src/audio/kernel_streaming_sink.cpp
+  src/audio/legacy_windows_source.cpp
   src/audio/mp3pro_source.cpp
   src/audio/native_output_contract.cpp
   src/audio/pcm_output_transform.cpp
@@ -60,6 +66,7 @@ add_library(ttplayer_core
   src/lyrics/lyric_http.cpp
   src/playlist/playlist.cpp
   src/playlist/playlist_store.cpp
+  src/platform/optional_windows_api.cpp
   src/plugins/plugin_manager.cpp
   src/settings/file_association.cpp
   src/settings/settings.cpp
@@ -137,6 +144,20 @@ target_link_libraries(ttplayer_rebuild PRIVATE ttplayer_core ttpcomm_api comctl3
 # emulation, faulting before WM_INITDIALOG finishes. wWinMain instead
 # enables DEP explicitly, with the system's legacy ATL compatibility.
 target_link_options(ttplayer_rebuild PRIVATE /NXCOMPAT:NO)
+if(TTPLAYER_LEGACY_WINDOWS)
+  target_link_options(ttplayer_rebuild PRIVATE /SUBSYSTEM:WINDOWS,5.01 /OSVERSION:5.1)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_custom_command(TARGET ttplayer_rebuild POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_legacy_imports.py"
+      "$<TARGET_FILE:ttplayer_rebuild>"
+      --exports "${ttplayer_yy_thunks_SOURCE_DIR}/Config/x86/5.1.2600.txt"
+      --exports "${ttplayer_yy_thunks_SOURCE_DIR}/Config/x86/6.1.7600.txt"
+      --report "$<TARGET_FILE_DIR:ttplayer_rebuild>/legacy-imports.json"
+    COMMENT "Checking every static import against XP and Windows 7"
+    VERBATIM)
+  set_property(TARGET ttplayer_rebuild APPEND PROPERTY LINK_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_legacy_imports.py")
+endif()
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
   set(TTPLAYER_LAME_ARCH x64)
@@ -166,6 +187,15 @@ endif()
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
 if(BUILD_TESTING)
+add_executable(legacy_windows_tests src/platform/legacy_windows_tests.cpp
+  src/platform/optional_windows_api.cpp)
+target_compile_definitions(legacy_windows_tests PRIVATE
+  UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN TTPLAYER_TEST_NO_OPTIONAL_WINDOWS_API)
+target_compile_options(legacy_windows_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(legacy_windows_tests PRIVATE ttplayer_core)
+add_test(NAME legacy_windows_tests COMMAND legacy_windows_tests)
+set_tests_properties(legacy_windows_tests PROPERTIES TIMEOUT 45)
+
 add_executable(runtime_paths_tests src/ui/runtime_paths_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(runtime_paths_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

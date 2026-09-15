@@ -57,7 +57,7 @@ try {
     $env:RELEASE_INSTALL_NOTES = $notes.Groups[1].Value -replace '(?m)^            ', ''
     $expectedInstallation = @'
 使用该程序前确保本地已安装有 5.7.9 版本的千千静听，请按照以下步骤安装重建版：
-1. 下载 TTPlayerRebuild.exe 文件。
+1. Windows XP / Windows 7 下载并解压 TTPlayerRebuild-XP-Win7.zip；现代 Windows 下载 TTPlayerRebuild.exe。
 2. 打开开始菜单。
 3. 打开所有程序——千千静听——右键千千静听程序图标。
 4. 在菜单选择“打开文件位置”
@@ -70,11 +70,11 @@ try {
     }
     $scenarios = @('first', 'previous', 'same-day', 'numeric-patch', 'gaps', 'patch-only', 'draft',
         'many-tags', 'invalid-tags', 'wrong-artifact', 'wrong-configuration', 'wrong-hash', 'tag-api-error',
-        'release-api-error', 'collision', 'invalid-date', 'exhausted')
+        'release-api-error', 'collision', 'invalid-date', 'exhausted', 'wrong-legacy-hash', 'wrong-legacy-configuration')
     foreach ($scenario in $scenarios) {
         & {
             $env:RELEASE_DATE = '2026.09.05'
-            $observed = @{ creates = 0; apis = 0; arguments = @() }
+            $observed = @{ creates = 0; apis = 0; arguments = @(); notes = '' }
             $tagNames = @('2026.01.03', '2026.09.04p2'); $releaseNames = @()
             $expectedVersion = '2026.09.05'; $previous = '2026.09.04p2'
             switch ($scenario) {
@@ -95,16 +95,28 @@ try {
                     'artifact/build-info.json' {
                         $commit = if ($scenario -eq 'wrong-artifact') { 'different' } else { $env:GITHUB_SHA }
                         $configuration = if ($scenario -eq 'wrong-configuration') { 'Debug' } else { 'Release' }
-                        @{commit=$commit;configuration=$configuration} | ConvertTo-Json
+                        $legacy = if ($scenario -eq 'wrong-legacy-configuration') { 'Debug' } else { 'Release' }
+                        @{commit=$commit;configuration=$configuration;legacy_configuration=$legacy} | ConvertTo-Json
                     }
-                    'artifact/SHA256SUMS.txt' { ('a' * 64) + '  TTPlayerRebuild.exe' }
+                    'artifact/SHA256SUMS.txt' { ('a' * 64) + "  TTPlayerRebuild.exe`r`n" + ('c' * 64) + '  TTPlayerRebuild-XP-Win7.zip' }
                     default { throw "Unexpected file read: $LiteralPath" }
                 }
             }
             function Get-FileHash {
                 param($LiteralPath, $Algorithm)
-                if ($LiteralPath -ne 'artifact/TTPlayerRebuild.exe' -or $Algorithm -ne 'SHA256') { throw 'Unexpected hash request.' }
-                @{Hash = $(if ($scenario -eq 'wrong-hash') { 'b' * 64 } else { 'a' * 64 })}
+                if ($Algorithm -ne 'SHA256') { throw 'Unexpected hash algorithm.' }
+                switch ($LiteralPath) {
+                    'artifact/TTPlayerRebuild.exe' { @{Hash = $(if ($scenario -eq 'wrong-hash') { 'b' * 64 } else { 'a' * 64 })} }
+                    'artifact/TTPlayerRebuild-XP-Win7.zip' { @{Hash = $(if ($scenario -eq 'wrong-legacy-hash') { 'b' * 64 } else { 'c' * 64 })} }
+                    default { throw 'Unexpected hash request.' }
+                }
+            }
+            function Set-Content {
+                param([Parameter(ValueFromPipeline)]$Value, $LiteralPath, $Encoding)
+                process {
+                    if ($LiteralPath -ne 'artifact/release-notes.md') { throw 'Unexpected file write.' }
+                    $observed.notes = $Value
+                }
             }
             function gh {
                 $global:LASTEXITCODE = 0
@@ -133,13 +145,14 @@ try {
                 $url = if ($previous) { "https://github.com/fixture/TTPlayer/compare/$previous...$expectedVersion" }
                        else { "https://github.com/fixture/TTPlayer/commits/$expectedVersion" }
                 $expectedNotes = "**完整更新日志**: $url`n`n" + $env:RELEASE_INSTALL_NOTES
-                $expected = @('release','create',$expectedVersion,'artifact/TTPlayerRebuild.exe','artifact/SHA256SUMS.txt',
-                    '--repo',$env:GITHUB_REPOSITORY,'--target',$env:GITHUB_SHA,'--title',$expectedVersion,'--notes',$expectedNotes)
+                $expected = @('release','create',$expectedVersion,'artifact/TTPlayerRebuild.exe','artifact/TTPlayerRebuild-XP-Win7.zip','artifact/SHA256SUMS.txt',
+                    '--repo',$env:GITHUB_REPOSITORY,'--target',$env:GITHUB_SHA,'--title',$expectedVersion,'--notes-file','artifact/release-notes.md')
+                if ($observed.notes -cne $expectedNotes) { throw "Wrong release notes file: $scenario" }
                 if (($observed.arguments -join "`0") -cne ($expected -join "`0")) { throw "Wrong version/changelog/assets: $scenario" }
             }
         }
     }
-    Write-Output '6 Beijing-date/configuration cases, 17 mocked publication cases, installation notes and PowerShell syntax passed. No remote writes.'
+    Write-Output '6 Beijing-date/configuration cases, 19 mocked publication cases, both artifacts, installation notes and PowerShell syntax passed. No remote writes.'
 } finally {
     foreach ($name in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }
     $global:LASTEXITCODE = $savedExitCode

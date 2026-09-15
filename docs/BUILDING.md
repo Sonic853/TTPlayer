@@ -18,16 +18,18 @@
 最大补丁号加一：`2026.09.05` → `2026.09.05p1` → `2026.09.05p2`，不复用中间空号。
 草稿 Release 也占用版本号。发布任务串行执行，在获得发布名额后重新分页读取全部
 tag/Release；新标签始终指向本次构建提交，不移动旧标签、不覆盖已有 Release。
-Debug / RelWithDebInfo 仍可只构建，不用于发布。
-附件为可直接下载的 `TTPlayerRebuild.exe` 与 `SHA256SUMS.txt`，原 Actions 产物也会保留。
+Debug / RelWithDebInfo 仍可只构建，不用于发布；每次工作流也会额外构建旧系统 Release 版。
+附件为现代版 `TTPlayerRebuild.exe`、旧系统版 `TTPlayerRebuild-XP-Win7.zip` 与
+包含两者校验值的 `SHA256SUMS.txt`，原 Actions 产物也会保留。
+**XP / Win7 请下载 ZIP 并使用其中的 EXE**；详见 [兼容版说明](LEGACY_WINDOWS.md)。
 完整更新日志链接自动使用仓库中最近的版本 tag 与本次新 tag 对比，例如
 `compare/2026.09.05...2026.09.05p1`。历史版本 tag 必须符合 `yyyy.MM.dd` 或
 `yyyy.MM.ddpN`，按日期和数值补丁号排序（`p10` 晚于 `p2`），不依赖 API 返回顺序。
 若还没有符合规则的历史 tag，则链接到 `commits/本次版本`，不生成无效对比链接。
-正文其余七步安装说明保持不变，不自动追加 GitHub 生成的说明。
+正文安装说明明确区分现代版与旧系统版，不自动追加 GitHub 生成的说明。
 
 工作流会先运行 `cmake/test_manual_release.ps1`，离线检查北京时间边界、同日补丁号、
-动态对比链接、安装说明和模拟发布保护逻辑。
+动态对比链接、安装说明和模拟发布保护逻辑，包括两个附件的 SHA-256 和 Release 配置。
 本地也可运行该脚本；测试不调用远程 API，不创建标签或 Release。
 
 工作流必须先存在于默认分支，手动运行入口才会显示，见
@@ -46,6 +48,10 @@ Debug / RelWithDebInfo 仍可只构建，不用于发布。
 VS 2026 生成器要求 CMake 4.2 或更新版本，Runner 已提供相应工具。
 参见 [GitHub 镜像迁移公告](https://github.com/actions/runner-images/issues/14017)
 及 [CMake VS 2026 生成器说明](https://cmake.org/cmake/help/latest/generator/Visual%20Studio%2018%202026.html)。
+
+旧系统版在 `build-legacy` 独立构建，固定使用 YY-Thunks 1.2.2 和 VC-LTL 5.3.1，
+首次配置自动下载并校验 SHA-256；Python 3 检查 XP / Win7 导入表后才允许打包。
+旧系统包附带依赖许可和导入报告。构建时不改动系统 DLL，也无需安装旧 Visual Studio。
 
 修改工作流后，请提交并在 **Run workflow** 中选择含修复的分支发起新运行；
 直接 **Re-run jobs** 重跑旧失败记录仍使用旧提交中的工作流。

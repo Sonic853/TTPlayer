@@ -1,3 +1,4 @@
+#include "ttplayer/platform/optional_windows_api.h"
 #include "player_window_internal.h"
 #include "album_background.h"
 #include "ttplayer/app/worker_process.h"
@@ -304,7 +305,7 @@ WicPicture DecodePictureWithWic(const std::vector<unsigned char>& bytes) {
     WicPicture result;
     if (bytes.empty() || bytes.size() > std::numeric_limits<UINT>::max())
         return result;
-    IStream* stream = SHCreateMemStream(bytes.data(),
+    IStream* stream = platform::SHCreateMemStream(bytes.data(),
                                         static_cast<UINT>(bytes.size()));
     if (!stream) return result;
     IWICImagingFactory* factory{};
@@ -370,7 +371,7 @@ IPicture* DecodePictureWithOle(const std::vector<unsigned char>& bytes) {
             static_cast<size_t>(std::numeric_limits<LONG>::max()) ||
         bytes.size() > std::numeric_limits<UINT>::max())
         return nullptr;
-    IStream* stream = SHCreateMemStream(bytes.data(),
+    IStream* stream = platform::SHCreateMemStream(bytes.data(),
                                         static_cast<UINT>(bytes.size()));
     if (!stream) return nullptr;
     IPicture* result{};

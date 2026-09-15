@@ -99,4 +99,5 @@ Desktop.ini
 # Generic temporary files
 *.tmp
 *.temp
+__pycache__/
 rebuild.7z

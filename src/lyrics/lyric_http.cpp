@@ -71,10 +71,16 @@ Response Fetch(const std::wstring& address, const settings::NetworkSettings& net
     InternetHandle session{WinHttpOpen(L"TTPlayerRebuild/Lyrics", access,
         proxy.empty() ? WINHTTP_NO_PROXY_NAME : proxy.c_str(),
         proxy.empty() ? WINHTTP_NO_PROXY_BYPASS : L"<local>", 0)};
+    if (!session.value && access == WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY &&
+        GetLastError() == ERROR_INVALID_PARAMETER) {
+        session.value = WinHttpOpen(L"TTPlayerRebuild/Lyrics", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    }
     Check(session.value != nullptr);
     Check(WinHttpSetTimeouts(session, 5000, 10000, 10000, 10000));
     DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
-    if (!WinHttpSetOption(session, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols))) {
+    if (parts.nScheme == INTERNET_SCHEME_HTTPS &&
+        !WinHttpSetOption(session, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols))) {
         protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
         Check(WinHttpSetOption(session, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols)));
     }
@@ -86,7 +92,12 @@ Response Fetch(const std::wstring& address, const settings::NetworkSettings& net
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)};
     Check(request.value != nullptr);
     DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
-    Check(WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &redirect, sizeof(redirect)));
+    if (!WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &redirect, sizeof(redirect))) {
+        // XP lacks this policy. Disable automatic redirects instead of silently
+        // allowing an HTTPS request to be redirected to an insecure connection.
+        DWORD disabled = WINHTTP_DISABLE_REDIRECTS;
+        Check(WinHttpSetOption(request, WINHTTP_OPTION_DISABLE_FEATURE, &disabled, sizeof(disabled)));
+    }
     DWORD logon = WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH;
     WinHttpSetOption(request, WINHTTP_OPTION_AUTOLOGON_POLICY, &logon, sizeof(logon));
     DWORD status{};

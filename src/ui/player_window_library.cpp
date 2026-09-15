@@ -1,3 +1,4 @@
+#include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/ui/player_window.h"
 #include "ttplayer/ui/media_library_playback.h"
 #include "directory_change_monitor.h"
@@ -759,7 +760,7 @@ struct PlayerWindow::MediaLibraryState {
 
     static void ReadShellMetadata(playlist::Track& track) {
         IPropertyStore* store{};
-        if (FAILED(SHGetPropertyStoreFromParsingName(track.path.c_str(), nullptr,
+        if (FAILED(platform::SHGetPropertyStoreFromParsingName(track.path.c_str(), nullptr,
                 GPS_BESTEFFORT, IID_PPV_ARGS(&store))) || !store) return;
         const auto get = [store](const PROPERTYKEY& key) {
             PROPVARIANT value{};
@@ -767,7 +768,7 @@ struct PlayerWindow::MediaLibraryState {
             std::wstring result;
             if (SUCCEEDED(store->GetValue(key, &value))) {
                 wchar_t text[1024]{};
-                if (SUCCEEDED(PropVariantToString(value, text,
+                if (SUCCEEDED(platform::PropVariantToString(value, text,
                         static_cast<UINT>(std::size(text))))) result = text;
             }
             PropVariantClear(&value);
@@ -805,7 +806,7 @@ struct PlayerWindow::MediaLibraryState {
         PropVariantInit(&rating);
         ULONG rating_value{};
         if (SUCCEEDED(store->GetValue(PKEY_Rating, &rating)) &&
-            SUCCEEDED(PropVariantToUInt32(rating, &rating_value)) &&
+            SUCCEEDED(platform::PropVariantToUInt32(rating, &rating_value)) &&
             rating_value != 0) {
             track.rating = std::clamp<int>(
                 static_cast<int>((rating_value + 12) / 25), 1, 5);

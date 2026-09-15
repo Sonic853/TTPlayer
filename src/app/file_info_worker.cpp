@@ -1,3 +1,4 @@
+#include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/app/file_info_worker.h"
 #include "../ui/file_info_cover_policy.h"
 #include "../ui/file_info_probe_protocol.h"
@@ -163,7 +164,7 @@ std::unique_ptr<ttplayer::plugins::LegacyReaderSession> OpenReader(
             if (result) *result = HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
             return {};
         }
-        IStream* stream = SHCreateMemStream(
+        IStream* stream = ttplayer::platform::SHCreateMemStream(
             bytes.empty() ? nullptr : bytes.data(),
             static_cast<UINT>(bytes.size()));
         if (!stream) {

@@ -109,6 +109,11 @@ workflow produces an x86 player EXE without bundling original DLLs or private
 configuration. See [BUILDING.md](docs/BUILDING.md) for inputs, artifacts and clean
 checkout builds.
 
+For Windows XP SP3 / Windows 7, use the executable inside
+`TTPlayerRebuild-XP-Win7.zip`, built separately with `TTPLAYER_LEGACY_WINDOWS=ON`.
+The default modern MSVC build requires newer Windows APIs. Both editions are
+included in manual build artifacts and releases; see [legacy build details](docs/LEGACY_WINDOWS.md).
+
 Build the complete local recovery workspace from a Visual Studio developer shell:
 
 ```powershell

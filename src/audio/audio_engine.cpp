@@ -1,3 +1,4 @@
+#include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/audio_engine.h"
 #include "ttplayer/audio/playback_clock.h"
 #include "ttplayer/audio/archive_member.h"
@@ -6,6 +7,7 @@
 #include "ttplayer/audio/asio_sink.h"
 #include "ttplayer/audio/kernel_streaming_sink.h"
 #include "ttplayer/audio/mp3pro_source.h"
+#include "ttplayer/audio/legacy_windows_source.h"
 #include "ttplayer/audio/pcm_output_transform.h"
 #include "ttplayer/audio/replay_gain_policy.h"
 #include "ttplayer/audio/replay_gain_scanner.h"
@@ -224,7 +226,7 @@ public:
     bool Open(const std::filesystem::path& path,
               const PlaybackOptions&) override {
         ComPtr<IMFAttributes> attributes;
-        HRESULT result = MFCreateAttributes(&attributes, 1);
+        HRESULT result = platform::MFCreateAttributes(&attributes, 1);
         if (SUCCEEDED(result)) {
             attributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, FALSE);
             ArchiveMemberPath member;
@@ -234,18 +236,18 @@ public:
                     if (!archive_stream_) {
                         result = HRESULT_FROM_WIN32(ERROR_OUTOFMEMORY);
                     } else {
-                        result = MFCreateMFByteStreamOnStream(
+                        result = platform::MFCreateMFByteStreamOnStream(
                             archive_stream_.Get(), &archive_byte_stream_);
                     }
                     if (SUCCEEDED(result)) {
-                        result = MFCreateSourceReaderFromByteStream(
+                        result = platform::MFCreateSourceReaderFromByteStream(
                             archive_byte_stream_.Get(), attributes.Get(), &reader_);
                     }
                 } catch (const std::exception&) {
                     result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
                 }
             } else {
-                result = MFCreateSourceReaderFromURL(
+                result = platform::MFCreateSourceReaderFromURL(
                     path.c_str(), attributes.Get(), &reader_);
             }
         }
@@ -266,7 +268,7 @@ public:
                                &encoded_bytes_per_second);
 
         ComPtr<IMFMediaType> requested;
-        result = MFCreateMediaType(&requested);
+        result = platform::MFCreateMediaType(&requested);
         if (FAILED(result)) return Fail(L"MFCreateMediaType", result);
         requested->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
         requested->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
@@ -278,7 +280,7 @@ public:
                                                nullptr, requested.Get());
         if (FAILED(result)) {
             requested.Reset();
-            MFCreateMediaType(&requested);
+            platform::MFCreateMediaType(&requested);
             requested->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
             requested->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
             result = reader_->SetCurrentMediaType(kFirstAudioStream,
@@ -331,7 +333,7 @@ public:
         ArchiveMemberPath member;
         if (!ParseArchiveMemberPath(path.native(), member)) {
             ComPtr<IPropertyStore> properties;
-            if (SUCCEEDED(SHGetPropertyStoreFromParsingName(
+            if (SUCCEEDED(platform::SHGetPropertyStoreFromParsingName(
                     path.c_str(), nullptr, GPS_DEFAULT,
                     IID_PPV_ARGS(&properties))) && properties) {
                 ReadProperty(properties.Get(), PKEY_Title, L"title", metadata_.title);
@@ -455,7 +457,7 @@ private:
         PropVariantInit(&value);
         PWSTR text{};
         if (SUCCEEDED(store->GetValue(key, &value)) &&
-            SUCCEEDED(PropVariantToStringAlloc(value, &text)) && text && *text) {
+            SUCCEEDED(platform::PropVariantToStringAlloc(value, &text)) && text && *text) {
             destination = text;
             metadata_.entries.emplace_back(name, destination);
         }
@@ -624,7 +626,7 @@ private:
     std::wstring error_;
 };
 
-class BigEndianPcmSource final : public DecodedAudioSource {
+class PcmFileSource final : public DecodedAudioSource {
 public:
     bool Open(const std::filesystem::path& path,
               const PlaybackOptions&) override {
@@ -640,11 +642,13 @@ public:
             return false;
         }
         stream_.seekg(0);
+        if (FourCc(header.data(), "RIFF") && FourCc(header.data() + 8, "WAVE"))
+            return OpenWave();
         if (FourCc(header.data(), "FORM") &&
             (FourCc(header.data() + 8, "AIFF") || FourCc(header.data() + 8, "AIFC")))
             return OpenAiff(FourCc(header.data() + 8, "AIFC"));
         if (FourCc(header.data(), ".snd")) return OpenAu();
-        error_ = L"Not an AIFF/AIFC or AU/SND file";
+        error_ = L"Not a PCM WAVE, AIFF/AIFC or AU/SND file";
         return false;
     }
 
@@ -702,6 +706,67 @@ public:
     [[nodiscard]] std::wstring Error() const override { return error_; }
 
 private:
+    bool OpenWave() {
+        const auto fail = [this] {
+            error_ = L"Unsupported or truncated PCM WAVE file";
+            return false;
+        };
+        stream_.seekg(0, std::ios::end);
+        const auto length = stream_.tellg();
+        if (length < 12) return fail();
+        const uint64_t file_size = static_cast<uint64_t>(length);
+        stream_.seekg(4);
+        uint32_t riff_size{};
+        stream_.read(reinterpret_cast<char*>(&riff_size), 4);
+        const uint64_t end = static_cast<uint64_t>(riff_size) + 8;
+        if (end > file_size || end < 12) return fail();
+        uint64_t cursor = 12;
+        bool have_format{}, have_data{};
+        while (cursor + 8 <= end) {
+            stream_.seekg(static_cast<std::streamoff>(cursor));
+            char id[4]{}; uint32_t size{};
+            stream_.read(id, 4);
+            stream_.read(reinterpret_cast<char*>(&size), 4);
+            const uint64_t payload = cursor + 8;
+            if (!stream_ || size > end - payload) return fail();
+            if (std::memcmp(id, "fmt ", 4) == 0 && !have_format) {
+                if (size < 16) return fail();
+                WAVEFORMATEXTENSIBLE format{};
+                stream_.read(reinterpret_cast<char*>(&format), std::min<size_t>(size, sizeof(format)));
+                if (!stream_) return fail();
+                wave_format_ = format.Format;
+                if (wave_format_.wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+                    if (size < sizeof(format) || wave_format_.cbSize < 22 ||
+                        format.Samples.wValidBitsPerSample != wave_format_.wBitsPerSample) return fail();
+                    if (format.SubFormat == MFAudioFormat_PCM) wave_format_.wFormatTag = WAVE_FORMAT_PCM;
+                    else if (format.SubFormat == MFAudioFormat_Float) wave_format_.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+                    else return fail();
+                }
+                const WORD bits = wave_format_.wBitsPerSample;
+                if (wave_format_.wFormatTag == WAVE_FORMAT_PCM) {
+                    if (bits != 8 && bits != 16 && bits != 24 && bits != 32) return fail();
+                } else if (wave_format_.wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+                    if (bits != 32 && bits != 64) return fail();
+                } else return fail();
+                bytes_per_sample_ = bits / 8;
+                const uint64_t block = static_cast<uint64_t>(wave_format_.nChannels) * bytes_per_sample_;
+                const uint64_t rate = block * wave_format_.nSamplesPerSec;
+                if (!block || block > 0xffff || !rate || rate > MAXDWORD ||
+                    wave_format_.nBlockAlign != block || wave_format_.nAvgBytesPerSec != rate) return fail();
+                wave_format_.cbSize = 0;
+                little_endian_ = true;
+                signed_eight_bit_ = false;
+                have_format = true;
+            } else if (std::memcmp(id, "data", 4) == 0 && !have_data) {
+                data_offset_ = payload;
+                data_bytes_ = size;
+                have_data = true;
+            }
+            cursor = payload + size + (size & 1U);
+        }
+        return have_format && have_data ? FinishOpen(L"WAVE") : fail();
+    }
+
     bool OpenAiff(bool compressed) {
         stream_.seekg(12);
         bool have_common{}, have_sound{};
@@ -1041,10 +1106,15 @@ std::unique_ptr<DecodedAudioSource> MakeBaseSource(
         return std::make_unique<LegacyPluginSource>(*plugin_manager, ttpcomm);
     ArchiveMemberPath archive_member;
     if (ParseArchiveMemberPath(path.native(), archive_member))
-        return std::make_unique<MediaFoundationSource>(ttpcomm);
+        return platform::HasMediaFoundation() ? std::unique_ptr<DecodedAudioSource>(
+            std::make_unique<MediaFoundationSource>(ttpcomm)) : CreateLegacyWindowsSource(ttpcomm);
     if (extension == L".aif" || extension == L".aifc" ||
         extension == L".aiff" || extension == L".au" || extension == L".snd")
-        return std::make_unique<BigEndianPcmSource>();
+        return std::make_unique<PcmFileSource>();
+    if (!platform::HasMediaFoundation() && extension == L".wav")
+        return std::make_unique<PcmFileSource>();
+    if (!platform::HasMediaFoundation())
+        return WrapMp3ProSource(CreateLegacyWindowsSource(ttpcomm));
     return WrapMp3ProSource(std::make_unique<MediaFoundationSource>(ttpcomm));
 }
 
@@ -2068,15 +2138,11 @@ void AudioEngine::PlaybackWorker(std::filesystem::path path, int subtrack) {
     if (IsMidiPath(path)) {
         MciWorker(path);
     } else {
-        const HRESULT media_result = MFStartup(MF_VERSION, MFSTARTUP_LITE);
-        if (FAILED(media_result)) {
-            if (!stop_requested_)
-                SetError(HResultMessage(L"MFStartup", media_result));
-        }
-        else {
-            WaveOutWorker(path, subtrack);
-            MFShutdown();
-        }
+        const HRESULT media_result = platform::MFStartup(MF_VERSION, MFSTARTUP_LITE);
+        // Native readers and original AddIns do not require Media Foundation.
+        // If an MF-only format is chosen, its reader reports the missing API.
+        WaveOutWorker(path, subtrack);
+        if (SUCCEEDED(media_result)) platform::MFShutdown();
     }
     if (SUCCEEDED(com_result)) CoUninitialize();
     {

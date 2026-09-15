@@ -86,6 +86,15 @@ jobs:
       - name: Build
         run: cmake --build build --config "$env:BUILD_CONFIGURATION" --target ttplayer_rebuild --parallel 4
 
+      - name: Configure XP and Windows 7 edition
+        run: >-
+          cmake -S . -B build-legacy -G "Visual Studio 18 2026" -A Win32
+          "-DCMAKE_GENERATOR_INSTANCE=$env:TTPLAYER_VS_INSTANCE"
+          -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF -DTTPLAYER_LEGACY_WINDOWS=ON
+
+      - name: Build and audit XP and Windows 7 edition
+        run: cmake --build build-legacy --config Release --target ttplayer_rebuild --parallel 4
+
       - name: Prepare artifact
         run: |
           $output = Join-Path 'build' $env:BUILD_CONFIGURATION
@@ -97,18 +106,25 @@ jobs:
           Copy-Item -LiteralPath $executable -Destination artifact
           Copy-Item -LiteralPath LICENSE -Destination artifact
           Copy-Item -LiteralPath docs/BUILDING.md -Destination artifact
+          ./cmake/package_legacy.ps1 -BuildDirectory build-legacy -Destination artifact/TTPlayerRebuild-XP-Win7.zip
           $symbols = Join-Path $output 'TTPlayerRebuild.pdb'
           if (Test-Path -LiteralPath $symbols) {
             Copy-Item -LiteralPath $symbols -Destination artifact
           }
           $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  TTPlayerRebuild.exe" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
+          $legacyHash = (Get-FileHash -LiteralPath artifact/TTPlayerRebuild-XP-Win7.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$legacyHash  TTPlayerRebuild-XP-Win7.zip" | Add-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
           [ordered]@{
             commit = $env:GITHUB_SHA
             ref = $env:GITHUB_REF
             configuration = $env:BUILD_CONFIGURATION
             architecture = 'x86'
             generator = 'Visual Studio 18 2026'
+            legacy_configuration = 'Release'
+            legacy_minimum_windows = 'XP SP3 / Windows 7'
+            yy_thunks = '1.2.2'
+            vc_ltl = '5.3.1'
             run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           } | ConvertTo-Json | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
 
@@ -125,7 +141,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: TTPlayer-configure-log-${{ github.run_number }}
-          path: build/CMakeFiles/CMakeConfigureLog.yaml
+          path: |
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build-legacy/CMakeFiles/CMakeConfigureLog.yaml
           if-no-files-found: ignore
           retention-days: 7
 
@@ -158,7 +176,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_INSTALL_NOTES: |
             使用该程序前确保本地已安装有 5.7.9 版本的千千静听，请按照以下步骤安装重建版：
-            1. 下载 TTPlayerRebuild.exe 文件。
+            1. Windows XP / Windows 7 下载并解压 TTPlayerRebuild-XP-Win7.zip；现代 Windows 下载 TTPlayerRebuild.exe。
             2. 打开开始菜单。
             3. 打开所有程序——千千静听——右键千千静听程序图标。
             4. 在菜单选择“打开文件位置”
@@ -168,12 +186,15 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $info = Get-Content -LiteralPath artifact/build-info.json -Raw | ConvertFrom-Json
-          if ($info.commit -ne $env:GITHUB_SHA -or $info.configuration -ne 'Release') {
+          if ($info.commit -ne $env:GITHUB_SHA -or $info.configuration -ne 'Release' -or
+              $info.legacy_configuration -ne 'Release') {
             throw 'The downloaded artifact does not match this Release build.'
           }
           $hash = (Get-FileHash -LiteralPath artifact/TTPlayerRebuild.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $legacyHash = (Get-FileHash -LiteralPath artifact/TTPlayerRebuild-XP-Win7.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           $expectedHash = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw).Trim()
-          if ($expectedHash -cne "$hash  TTPlayerRebuild.exe") { throw 'Player SHA-256 verification failed.' }
+          $actualHashes = "$hash  TTPlayerRebuild.exe`n$legacyHash  TTPlayerRebuild-XP-Win7.zip"
+          if (($expectedHash -replace "`r", '') -cne $actualHashes) { throw 'Player SHA-256 verification failed.' }
 
           function Read-VersionTag([string]$name) {
             $match = [regex]::Match($name, '^(?<date>[0-9]{4}\.[0-9]{2}\.[0-9]{2})(?:p(?<patch>[1-9][0-9]*))?$')
@@ -210,8 +231,9 @@ jobs:
                     else { "$repoUrl/commits/$version" }
           $notes = "**完整更新日志**: $logUrl`n`n" + $env:RELEASE_INSTALL_NOTES
           Write-Output "Publishing $version; changelog: $logUrl"
+          $notes | Set-Content -LiteralPath artifact/release-notes.md -Encoding utf8
           # Create only: never edit an existing release or overwrite its assets.
-          gh release create "$version" artifact/TTPlayerRebuild.exe artifact/SHA256SUMS.txt `
+          gh release create "$version" artifact/TTPlayerRebuild.exe artifact/TTPlayerRebuild-XP-Win7.zip artifact/SHA256SUMS.txt `
             --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" `
-            --title "$version" --notes "$notes"
+            --title "$version" --notes-file artifact/release-notes.md
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed; existing releases are not overwritten.' }

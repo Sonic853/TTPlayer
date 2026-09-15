@@ -1,3 +1,4 @@
+#include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "project_links.h"
@@ -3286,7 +3287,7 @@ bool PlayerWindow::ShowOptionsAssociationReminder(HWND dialog) {
     config.pszVerificationText = suppress.c_str();
     config.cButtons = 1; config.pButtons = &button; config.nDefaultButton = IDOK;
     int selected{}; BOOL checked{};
-    const HRESULT result = TaskDialogIndirect(&config, &selected, nullptr, &checked);
+    const HRESULT result = platform::TaskDialogIndirect(&config, &selected, nullptr, &checked);
     if (FAILED(result)) {
         // The permanent page checkbox remains available even if the common
         // controls task dialog cannot be created on the user's installation.

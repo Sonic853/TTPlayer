@@ -1,3 +1,4 @@
+#include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/ui/playlist_transforms.h"
 
 #include "modern_file_dialog.h"
@@ -552,21 +553,21 @@ public:
         // RPC_E_CHANGED_MODE means the UI conversion worker already entered
         // its original STA with CoInitialize; COM is nevertheless usable.
         com_available_ = owns_com_ || initialized == RPC_E_CHANGED_MODE;
-        media_result_ = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+        media_result_ = platform::MFStartup(MF_VERSION, MFSTARTUP_LITE);
         owns_media_foundation_ = SUCCEEDED(media_result_);
     }
 
     ~ConversionRuntime() {
-        if (owns_media_foundation_) MFShutdown();
+        if (owns_media_foundation_) platform::MFShutdown();
         if (owns_com_) CoUninitialize();
     }
 
     [[nodiscard]] bool Available() const noexcept {
-        return com_available_ && owns_media_foundation_;
+        return com_available_;
     }
     [[nodiscard]] HRESULT Result() const noexcept {
         if (!com_available_) return CO_E_NOTINITIALIZED;
-        return media_result_;
+        return S_OK;
     }
 
 private:

@@ -1,3 +1,4 @@
+#include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/builtin_file_info.h"
 
 #include <algorithm>
@@ -946,7 +947,7 @@ std::wstring PropertyText(IPropertyStore* store, const PROPERTYKEY& key) {
     std::wstring result;
     if (SUCCEEDED(store->GetValue(key, &value))) {
         PWSTR text{};
-        if (SUCCEEDED(PropVariantToStringAlloc(value, &text)) && text) {
+        if (SUCCEEDED(platform::PropVariantToStringAlloc(value, &text)) && text) {
             result = text;
             CoTaskMemFree(text);
         }
@@ -961,7 +962,7 @@ std::uint64_t PropertyUInt64(IPropertyStore* store,
     PropVariantInit(&value);
     ULONGLONG result{};
     if (FAILED(store->GetValue(key, &value)) ||
-        FAILED(PropVariantToUInt64(value, &result))) result = 0;
+        FAILED(platform::PropVariantToUInt64(value, &result))) result = 0;
     PropVariantClear(&value);
     return result;
 }
@@ -969,7 +970,7 @@ std::uint64_t PropertyUInt64(IPropertyStore* store,
 HRESULT ReadShellFallback(const std::filesystem::path& path,
                           BuiltinFileInfo& result) {
     ComPtr<IPropertyStore> store;
-    const HRESULT opened = SHGetPropertyStoreFromParsingName(path.c_str(),
+    const HRESULT opened = platform::SHGetPropertyStoreFromParsingName(path.c_str(),
         nullptr, GPS_BESTEFFORT, IID_PPV_ARGS(store.Put()));
     if (FAILED(opened) || !store.Get()) return opened;
     const auto add = [&result, &store](const PROPERTYKEY& key,
