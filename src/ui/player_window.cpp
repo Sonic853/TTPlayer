@@ -2013,14 +2013,33 @@ bool PlayerWindow::LoadStartupSkin(HMODULE module) {
     if (!loaded && (!fallback || !LoadSkinResource(module))) return false;
 
     const auto global_visual = settings_.visual;
+    // A successful first load needs the same font/color baseline as a runtime
+    // skin switch. Settings{} starts with the DLL palette; the selected package
+    // can supply a different palette or override only some of its fields.
+    // Apply defaults before overlaying fields actually present in saved XML.
+    ApplyPlaylistSkinDefaults(skin_->Playlist(), settings_.playlist);
+    ApplyLyricSkinDefaults(skin_->Lyric(), settings_.lyric);
+    if (!fallback && !settings_.source_path.empty()) {
+        // Keep explicit main-file customizations (including values equal to
+        // Settings{} defaults), while omitted/invalid fields inherit the skin.
+        // LoadRuntimeSettings can import the old XML in memory when a read-only
+        // directory prevents copying it to the new settings filename.
+        auto source = settings_.source_path;
+        std::error_code error;
+        if (source.filename() == settings::kSettingsFileName &&
+            !std::filesystem::exists(source, error) && !error)
+            source = source.parent_path() / L"TTPlayer.xml";
+        auto retained_player = settings_.player;
+        auto retained_visual = global_visual;
+        static_cast<void>(settings::LoadSkinVisualProfile(source, retained_player,
+            settings_.playlist, settings_.lyric, retained_visual));
+    }
     if (fallback) {
         // FUN_0045D5FA's requested-package-missing branch replaces the
         // selector BEFORE binding 0045DDEE and reading Skin/Default.xml.
         // It is a skin change even on first startup, not an ordinary restore
         // of the last main XML. Never read the orphan .skn.xml or retain its
         // styles/rectangles already serialized into TTPlayerRebuild.xml.
-        ApplyPlaylistSkinDefaults(skin_->Playlist(), settings_.playlist);
-        ApplyLyricSkinDefaults(skin_->Lyric(), settings_.lyric);
         settings_.visual = settings::VisualSettings{};
         ApplySkinVisualSettings();
         // Type/FPS are global preferences, not per-skin profile fields.
@@ -2086,7 +2105,7 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
                             const std::filesystem::path& profile, bool restore_profile) {
     if (!package.IsLegacyCompatible()) return false;
     package.ExtractTo(cache, ttpcomm_module_);
-    auto next = skin::LegacySkin::Load(cache);
+    auto next = skin::LegacySkin::Load(cache, &settings_);
     if (!next.Valid()) return false;
     const HRGN region = next.CreateWindowRegion();
     RECT bounds{};

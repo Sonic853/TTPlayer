@@ -1,5 +1,6 @@
 #include "ttplayer/ui/player_window.h"
 #include "ttplayer/ui/player_runtime_policy.h"
+#include "ttplayer/skin/skin_package.h"
 #include "player_window_internal.h"
 
 #include <cstring>
@@ -35,6 +36,52 @@ DWORD RunChild(const fs::path& executable, const wchar_t* arguments, const fs::p
     else TerminateProcess(child.hProcess, 1); // only this test's own child
     CloseHandle(child.hProcess);
     return code;
+}
+void FreshStartupTests(const fs::path& runtime, const fs::path& built_executable) {
+    const auto fresh = runtime / L"fresh-startup";
+    fs::create_directories(fresh / L"Skin");
+    for (const auto name : {L"ttpres.dll", L"ttpcomm.dll"}) fs::copy_file(runtime / name, fresh / name);
+    const auto executable = fresh / L"TTPlayerRebuild.exe";
+    fs::copy_file(built_executable, executable);
+    Require(SUCCEEDED(OleInitialize(nullptr)), "fresh startup inspection OLE init failed");
+    HMODULE resources = LoadLibraryExW((fresh / L"ttpres.dll").c_str(), nullptr,
+        LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+    HMODULE comm = LoadLibraryW((fresh / L"ttpcomm.dll").c_str());
+    Require(resources && comm, "fresh startup fixture DLL unavailable");
+    {
+        auto package = skin::SkinPackage::OpenResource(resources, L"<DEFAULT_SKIN>", L"ZIP");
+        const auto reference = fresh / L"reference";
+        package.ExtractTo(reference, comm);
+        auto expected = skin::LegacySkin::Load(reference);
+        Require(expected.Valid(), "fresh startup reference skin invalid");
+        for (int launch = 0; launch < 2; ++launch) {
+            Require(RunChild(executable, L"--smoke-test", runtime.parent_path()) == 0,
+                    "fresh/repeated default startup failed");
+            for (const auto file : {fresh / settings::kSettingsFileName, fresh / L"Skin/Default.xml"}) {
+                const auto saved = settings::LoadLegacyXml(file);
+                const auto& list = expected.Playlist();
+                Require(saved.playlist.background_color == list.background_color &&
+                    saved.playlist.alternate_background_color == list.alternate_background_color &&
+                    saved.playlist.text_color == list.text_color &&
+                    saved.playlist.highlight_color == list.highlight_color &&
+                    saved.playlist.number_color == list.number_color &&
+                    saved.playlist.duration_color == list.duration_color &&
+                    saved.playlist.selected_color == list.selected_color &&
+                    saved.lyric.background_color == expected.Lyric().background_color &&
+                    saved.lyric.text_color == expected.Lyric().text_color &&
+                    saved.lyric.highlight_color == expected.Lyric().highlight_color &&
+                    saved.visual.spectrum_top_color == *expected.Visual().spectrum_top_color &&
+                    saved.visual.spectrum_bottom_color == *expected.Visual().spectrum_bottom_color &&
+                    saved.visual.spectrum_middle_color == *expected.Visual().spectrum_middle_color &&
+                    saved.visual.spectrum_peak_color == *expected.Visual().spectrum_peak_color &&
+                    saved.visual.blur_scope_color == *expected.Visual().blur_scope_color &&
+                    saved.visual.text_color == *expected.Visual().text_color,
+                    "fresh default startup saved generic colors instead of the package palette");
+            }
+        }
+    }
+    FreeLibrary(comm); FreeLibrary(resources); OleUninitialize();
+    std::cout << "fresh distribution startup and persisted default palette passed\n";
 }
 void StartupTests(const fs::path& runtime, const fs::path& built_executable) {
     Require(built_executable.filename() == L"TTPlayerRebuild.exe", "wrong CMake output executable name");
@@ -152,6 +199,68 @@ void PathTests(const fs::path& runtime) {
 
 namespace ttplayer::testing {
 struct SkinRebindAccess {
+    static void StartupStyles(const fs::path& runtime, HMODULE resources, HMODULE comm) {
+        const auto main = runtime / settings::kSettingsFileName;
+        const auto legacy = runtime / L"TTPlayer.xml";
+        const std::string custom = "<ttplayer><Player Volume=\"37\"/>"
+            "<PlayList Color_Text=\"#123456\" Color_Bkgnd=\"#3b3e43\" Font=\"invalid\"/>"
+            "<Lyric TextColor=\"#234567\"/><Visual Type=\"4\" TextColor=\"#345678\"/></ttplayer>";
+        for (const auto selector : {L"<Default_Skin>", L"common.skn", L"new\\common.skn"}) {
+            const auto profile = ui::ResolveSkinProfilePath(main, selector);
+            for (int main_kind = 0; main_kind < 6; ++main_kind) {
+                for (int profile_kind = 0; profile_kind < 4; ++profile_kind) {
+                    fs::remove(main); fs::remove(legacy); fs::remove(profile);
+                    if (main_kind == 1) Write(main, "<ttplayer>");
+                    if (main_kind == 2) Write(main, "<ttplayer><Player Volume=\"37\"/></ttplayer>");
+                    if (main_kind == 3) Write(main, custom);
+                    if (main_kind >= 4) Write(legacy, custom);
+                    if (profile_kind == 1) Write(profile, "<ttplayer>");
+                    if (profile_kind == 2) Write(profile, "<wrong-root><PlayList Color_Text=\"#ffffff\"/></wrong-root>");
+                    if (profile_kind == 3) Write(profile,
+                        "<ttplayer><PlayList Color_Select=\"#456789\" Color_Bkgnd=\"bad\"/>"
+                        "<Lyric HilightColor=\"#56789a\"/><Visual Type=\"1\" TextColor=\"#ffffff\"/></ttplayer>");
+                    // Case 5 represents LoadRuntimeSettings' in-memory import
+                    // when copying legacy XML into a read-only directory fails.
+                    auto seed = main_kind == 5 ? settings::LoadLegacyXml(legacy) :
+                        settings::LoadRuntimeSettings(runtime);
+                    seed.source_path = main;
+                    seed.skin_file = selector;
+                    const bool main_exists = fs::exists(main), profile_exists = fs::exists(profile);
+                    const auto main_before = main_exists ? Read(main) : std::string{};
+                    const auto profile_before = profile_exists ? Read(profile) : std::string{};
+                    ui::PlayerWindow p(seed);
+                    p.SetSkinResourceModule(resources); p.SetTtpCommModule(comm);
+                    Require(p.LoadStartupSkin(resources), "normal startup skin failed");
+                    const auto& actual = p.settings_;
+                    const auto& list = p.skin_->Playlist();
+                    const auto& lyric = p.skin_->Lyric();
+                    Require(actual.playlist.background_color == (main_kind >= 3 ? RGB(59,62,67) : list.background_color) &&
+                        actual.playlist.text_color == (main_kind >= 3 ? RGB(0x12,0x34,0x56) : list.text_color) &&
+                        actual.playlist.alternate_background_color == list.alternate_background_color &&
+                        actual.playlist.highlight_color == list.highlight_color &&
+                        actual.playlist.number_color == list.number_color &&
+                        actual.playlist.duration_color == list.duration_color &&
+                        actual.playlist.selected_color == (profile_kind == 3 ? RGB(0x45,0x67,0x89) : list.selected_color),
+                        "normal startup did not layer package / explicit main / explicit skin colors");
+                    Require(actual.playlist.font == list.font && actual.playlist.font_height == list.font_height &&
+                        actual.lyric.background_color == lyric.background_color &&
+                        actual.lyric.text_color == (main_kind >= 3 ? RGB(0x23,0x45,0x67) : lyric.text_color) &&
+                        actual.lyric.highlight_color == (profile_kind == 3 ? RGB(0x56,0x78,0x9a) : lyric.highlight_color),
+                        "normal startup lost package font/lyric defaults or explicit overrides");
+                    Require(actual.player.volume == seed.player.volume &&
+                        actual.playlist.item_tips == seed.playlist.item_tips &&
+                        actual.visual.type == seed.visual.type && actual.visual.text_color == seed.visual.text_color,
+                        "normal startup changed global preferences");
+                    Require(fs::exists(main) == main_exists && (!main_exists || Read(main) == main_before) &&
+                        fs::exists(profile) == profile_exists && (!profile_exists || Read(profile) == profile_before) &&
+                        (main_kind < 4 || Read(legacy) == custom), "loading startup styles wrote configuration");
+                }
+            }
+            fs::remove(profile);
+        }
+        fs::remove(main); fs::remove(legacy);
+        std::cout << "72 normal-startup configuration / skin palette cases passed\n";
+    }
     static void StartupFallbacks(const fs::path& runtime, HMODULE resources, HMODULE comm) {
         settings::Settings seed;
         seed.source_path = runtime / settings::kSettingsFileName;
@@ -386,7 +495,10 @@ int wmain(int argc, wchar_t** argv) {
             fs::last_write_time(runtime / L"Skin/new/common.skn", fs::last_write_time(runtime / L"Skin/common.skn"));
             const DWORD code = RunChild(runtime / L"runtime_paths_tests.exe", L"--isolated", runtime);
             std::wcout << L"runtime path artifacts: " << runtime.wstring() << L'\n';
-            if (code == 0 && argc == 3) StartupTests(runtime, argv[2]);
+            if (code == 0 && argc == 3) {
+                FreshStartupTests(runtime, argv[2]);
+                StartupTests(runtime, argv[2]);
+            }
             return static_cast<int>(code);
         }
         Require(SUCCEEDED(OleInitialize(nullptr)), "OLE init failed");
@@ -398,6 +510,7 @@ int wmain(int argc, wchar_t** argv) {
             LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
         HMODULE comm = LoadLibraryW((runtime / L"ttpcomm.dll").c_str());
         Require(resources && comm, "cannot load native DLL fixtures");
+        testing::SkinRebindAccess::StartupStyles(runtime, resources, comm);
         testing::SkinRebindAccess::Run(runtime, resources, comm);
         testing::SkinRebindAccess::StartupFallbacks(runtime, resources, comm);
         FreeLibrary(comm); FreeLibrary(resources); OleUninitialize();

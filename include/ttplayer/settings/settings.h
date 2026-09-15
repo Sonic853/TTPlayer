@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ttplayer/integrations/discord_presence_config.h"
+#include "ttplayer/skin/default_colors.h"
 
 #include <array>
 #include <filesystem>
@@ -143,15 +144,15 @@ struct HotKeySettings {
 struct VisualSettings {
     int type{2};                         // 0 none, 1 dream, 2 spectrum, 3 scope, 4 cover
     int frames_per_second{25};
-    COLORREF spectrum_top_color{RGB(25, 77, 92)};
-    COLORREF spectrum_bottom_color{RGB(25, 77, 92)};
-    COLORREF spectrum_middle_color{RGB(25, 77, 92)};
-    COLORREF spectrum_peak_color{RGB(25, 77, 92)};
+    COLORREF spectrum_top_color{skin::DefaultSkinColors().visual.spectrum_top_color};
+    COLORREF spectrum_bottom_color{skin::DefaultSkinColors().visual.spectrum_bottom_color};
+    COLORREF spectrum_middle_color{skin::DefaultSkinColors().visual.spectrum_middle_color};
+    COLORREF spectrum_peak_color{skin::DefaultSkinColors().visual.spectrum_peak_color};
     int spectrum_wide{1};
     int blur_speed{3};
     bool blur{true};
-    COLORREF blur_scope_color{RGB(25, 77, 92)};
-    COLORREF text_color{RGB(255, 255, 255)};
+    COLORREF blur_scope_color{skin::DefaultSkinColors().visual.blur_scope_color};
+    COLORREF text_color{skin::DefaultSkinColors().visual.text_color};
     LOGFONTW font{};
     bool font_valid{};
 };
@@ -216,13 +217,13 @@ struct PlaylistSettings {
     // every other field when a .ttpl_cfg profile is imported and exported.
     LOGFONTW font_descriptor{};
     bool font_descriptor_valid{};
-    COLORREF text_color{RGB(180,180,180)};
-    COLORREF highlight_color{RGB(30,30,30)};
-    COLORREF background_color{RGB(59,62,67)};
-    COLORREF number_color{RGB(180,180,180)};
-    COLORREF duration_color{RGB(180,180,180)};
-    COLORREF selected_color{RGB(255,255,255)};
-    COLORREF alternate_background_color{RGB(44,47,51)};
+    COLORREF text_color{skin::DefaultSkinColors().playlist.text_color};
+    COLORREF highlight_color{skin::DefaultSkinColors().playlist.highlight_color};
+    COLORREF background_color{skin::DefaultSkinColors().playlist.background_color};
+    COLORREF number_color{skin::DefaultSkinColors().playlist.number_color};
+    COLORREF duration_color{skin::DefaultSkinColors().playlist.duration_color};
+    COLORREF selected_color{skin::DefaultSkinColors().playlist.selected_color};
+    COLORREF alternate_background_color{skin::DefaultSkinColors().playlist.alternate_background_color};
     bool legacy_playlist_generation{};
     bool library_mode{};
     bool item_tips{true};
@@ -330,9 +331,9 @@ struct LyricSettings {
 
     LOGFONTW font{};
     bool font_valid{};
-    COLORREF text_color{CLR_INVALID};
-    COLORREF highlight_color{CLR_INVALID};
-    COLORREF background_color{CLR_INVALID};
+    COLORREF text_color{skin::DefaultSkinColors().lyric.text_color};
+    COLORREF highlight_color{skin::DefaultSkinColors().lyric.highlight_color};
+    COLORREF background_color{skin::DefaultSkinColors().lyric.background_color};
     int charset{};
     int scroll_mode{};
     // TTPlayer keeps three independent fields at settings offsets +0x2B4,

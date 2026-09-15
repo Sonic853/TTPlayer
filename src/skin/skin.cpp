@@ -1,4 +1,5 @@
 #include "ttplayer/skin/skin.h"
+#include "ttplayer/settings/settings.h"
 
 #include <algorithm>
 #include <array>
@@ -607,7 +608,11 @@ void LoadPlaylistColors(const std::filesystem::path& directory, PlaylistSkin& pl
             playlist.background_color = ParseColor(Attribute(node, L"Color_Bkgnd"), playlist.background_color);
             playlist.number_color = ParseColor(Attribute(node, L"Color_Number"), playlist.number_color);
             playlist.duration_color = ParseColor(Attribute(node, L"Color_Duration"), playlist.duration_color);
-            playlist.selected_color = ParseColor(Attribute(node, L"Color_Select"), playlist.selected_color);
+            // 0048E696 has a special fallback for an existing PlayList node:
+            // absent/invalid Color_Select uses the system selection color.
+            // An absent node/file, like other missing fields, retains the seed.
+            playlist.selected_color = ParseColor(Attribute(node, L"Color_Select"),
+                                                  GetSysColor(COLOR_HIGHLIGHT));
             const auto selected_text = Attribute(node, L"Color_SelText");
             if (!selected_text.empty()) {
                 const auto color = ParseColor(selected_text, CLR_INVALID);
@@ -679,7 +684,8 @@ void LoadVisualSettings(const std::filesystem::path& directory,
 }
 } // namespace
 
-LegacySkin LegacySkin::Load(const std::filesystem::path& directory) {
+LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
+                            const settings::Settings* current) {
     ComScope com;
     if (FAILED(com.result) && com.result != RPC_E_CHANGED_MODE) throw std::runtime_error("COM init failed");
     IXMLDOMDocument* document{};
@@ -734,6 +740,25 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory) {
     }
 
     LegacySkin skin;
+    // 0048E635 / 0048EA53 seed package descriptors from the current settings
+    // before parsing sparse XML. Standalone loads start with DLL defaults.
+    if (current) {
+        auto& list = skin.playlist_;
+        list.text_color = current->playlist.text_color;
+        list.highlight_color = current->playlist.highlight_color;
+        list.number_color = current->playlist.number_color;
+        list.duration_color = current->playlist.duration_color;
+        list.selected_color = current->playlist.selected_color;
+        list.background_color = current->playlist.background_color;
+        list.alternate_background_color = current->playlist.alternate_background_color;
+        auto& lyric = skin.lyric_;
+        if (current->lyric.text_color != CLR_INVALID)
+            lyric.text_color = current->lyric.text_color;
+        if (current->lyric.highlight_color != CLR_INVALID)
+            lyric.highlight_color = current->lyric.highlight_color;
+        if (current->lyric.background_color != CLR_INVALID)
+            lyric.background_color = current->lyric.background_color;
+    }
     IXMLDOMNode* root{};
     document->selectSingleNode(_bstr_t(L"/skin"), &root);
     skin.transparent_color_ = ParseColor(Attribute(root, L"transparent_color"), RGB(255, 0, 255));

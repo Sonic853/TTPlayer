@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ttplayer/skin/skin_image.h"
+#include "ttplayer/skin/default_colors.h"
 
 #include <filesystem>
 #include <array>
@@ -10,6 +11,8 @@
 #include <unordered_map>
 #include <vector>
 #include <windows.h>
+
+namespace ttplayer::settings { struct Settings; }
 
 namespace ttplayer::skin {
 // The first 0x24 bytes of TTPlayer's private skin-package object are the
@@ -104,14 +107,14 @@ struct PlaylistSkin {
     bool scrollbar_thumb_resize_tile{};
     std::wstring font{L"SimSun"};
     int font_height{-13};
-    COLORREF text_color{RGB(180, 180, 180)};
-    COLORREF highlight_color{RGB(30, 30, 30)};
-    COLORREF background_color{RGB(59, 62, 67)};
-    COLORREF number_color{RGB(180, 180, 180)};
-    COLORREF duration_color{RGB(180, 180, 180)};
-    COLORREF selected_color{RGB(255, 255, 255)};
+    COLORREF text_color{DefaultSkinColors().playlist.text_color};
+    COLORREF highlight_color{DefaultSkinColors().playlist.highlight_color};
+    COLORREF background_color{DefaultSkinColors().playlist.background_color};
+    COLORREF number_color{DefaultSkinColors().playlist.number_color};
+    COLORREF duration_color{DefaultSkinColors().playlist.duration_color};
+    COLORREF selected_color{DefaultSkinColors().playlist.selected_color};
     std::optional<COLORREF> selected_text_color; // 6.1.2 Playlist.xml Color_SelText
-    COLORREF alternate_background_color{RGB(44, 47, 51)};
+    COLORREF alternate_background_color{DefaultSkinColors().playlist.alternate_background_color};
 };
 
 // CSkinParser_ParseEqualizerWindow (004A8B73) stores the equalizer as a
@@ -159,9 +162,9 @@ struct LyricSkin {
     COLORREF mini_background_color{CLR_INVALID};
     RECT mini_padding{2, 2, 4, 2}; // left/top/right/bottom insets, not coordinates
     LOGFONTW font{};
-    COLORREF text_color{RGB(255, 255, 255)};
-    COLORREF highlight_color{RGB(154, 234, 255)};
-    COLORREF background_color{RGB(21, 75, 126)};
+    COLORREF text_color{DefaultSkinColors().lyric.text_color};
+    COLORREF highlight_color{DefaultSkinColors().lyric.highlight_color};
+    COLORREF background_color{DefaultSkinColors().lyric.background_color};
 };
 
 // CSkinParser_ParseDeskLrcBar (004A92A2) parses a third lyric-owned popup
@@ -209,7 +212,8 @@ struct VisualSkin {
 
 class LegacySkin {
 public:
-    static LegacySkin Load(const std::filesystem::path& directory);
+    static LegacySkin Load(const std::filesystem::path& directory,
+                           const settings::Settings* current = nullptr);
     LegacySkin() = default;
     ~LegacySkin();
     LegacySkin(const LegacySkin&) = delete;

@@ -71,6 +71,7 @@ add_library(ttplayer_core
   src/settings/file_association.cpp
   src/settings/settings.cpp
   src/settings/runtime_settings.cpp
+  src/skin/default_colors.cpp
   src/skin/skin.cpp
   src/skin/skin_image.cpp
   src/skin/skin_package.cpp
@@ -187,6 +188,13 @@ endif()
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
 if(BUILD_TESTING)
+add_executable(default_colors_tests src/skin/default_colors_tests.cpp)
+target_compile_definitions(default_colors_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(default_colors_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(default_colors_tests PRIVATE ttplayer_core)
+add_test(NAME default_colors_tests COMMAND default_colors_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(default_colors_tests PROPERTIES TIMEOUT 100 RUN_SERIAL TRUE)
+
 add_executable(legacy_windows_tests src/platform/legacy_windows_tests.cpp
   src/platform/optional_windows_api.cpp)
 target_compile_definitions(legacy_windows_tests PRIVATE
