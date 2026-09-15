@@ -2549,10 +2549,9 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         LoadStoredPlaylist();
         // 004C038B loads Music.library during application startup whenever
         // Library/Enabled is set; entering the library view is not required.
-        if (settings_.library.enabled) {
+        StartMediaLibraryMonitoring(true);
+        if (settings_.library.enabled || settings_.library.monitor_directories)
             StartMediaLibraryRefresh();
-            StartMediaLibraryMonitoring();
-        }
         CreateLyricWindow();
         CreateEqualizerWindow();
         CreatePlaylistWindow();
@@ -6010,6 +6009,7 @@ void PlayerWindow::AdvanceSkinInfoScroll(UINT_PTR timer) {
 }
 
 bool PlayerWindow::PlayCurrent() {
+    media_library_startup_pending_ = false;
     // Both explicit and automatic requests use the same nonmodal notice.
     ClearAudioError();
     if (natural_completion_dispatch_) {
@@ -6141,6 +6141,7 @@ bool PlayerWindow::PlayCurrent() {
 }
 
 void PlayerWindow::ClearPersistedPlaybackIdentity() noexcept {
+    media_library_startup_pending_ = false;
     settings::ClearPlaybackIdentity(settings_.player);
 }
 
@@ -6152,6 +6153,7 @@ void PlayerWindow::RestoreStartupPlayback() {
         ClearPersistedPlaybackIdentity();
         return;
     }
+    if (settings_.playlist.library_mode && RestoreMediaLibraryPlayback()) return;
 
     const auto same_path = [&remembered_path](const std::filesystem::path& value) {
         if (_wcsicmp(value.c_str(), remembered_path.c_str()) == 0) return true;
@@ -6185,6 +6187,7 @@ void PlayerWindow::RestoreStartupPlayback() {
         }
     }
     if (!found) {
+        if (RestoreMediaLibraryPlayback()) return;
         ClearPersistedPlaybackIdentity();
         return;
     }
@@ -6208,6 +6211,7 @@ void PlayerWindow::SelectTrackFrom(size_t playlist_index, size_t index,
                                    bool start_playback) {
     if (playlist_index >= playlists_.Size() ||
         index >= playlists_.At(playlist_index).Tracks().size()) return;
+    media_library_startup_pending_ = false;
     ClearAudioError();
     media_library_playback_active_ = false;
     media_library_playback_.Clear();
@@ -6457,6 +6461,7 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
 }
 
 void PlayerWindow::Stop() {
+    media_library_startup_pending_ = false;
     // FUN_00465169 first leaves whichever full-screen host is active, then
     // stops the decoder and refreshes the ordinary player windows.  It does
     // not reset CPlayList +0x1c: that last-playing marker survives an explicit

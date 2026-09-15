@@ -67,6 +67,8 @@ struct MediaLibraryReaderInfo {
     std::uint32_t bitrate_bps{};
     std::uint32_t sample_rate_hz{};
     std::vector<std::pair<std::string, std::string>> metadata;
+    std::uint16_t channels{};
+    std::uint16_t bits_per_sample{};
 };
 
 void ApplyMediaLibraryReaderInfo(playlist::Track& track,

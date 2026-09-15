@@ -108,4 +108,18 @@ VS 2022 配置，请改用新的空构建目录，不要复用旧的生成器缓
 
 本地完整恢复工作区的原有两个选项默认仍为 ON，保留测试和运行文件复制流程；
 它需要仓库旁的 `reverse/`、原版 DLL、皮肤等数据以及本地测试/工具源码。
-GitHub 工作流只验证编译，不冒充已经完成依赖原版资源的 UI/播放运行测试。
+GitHub 工作流在现代版和旧系统版构建后运行媒体库核心回归；依赖私有原版资源
+的完整窗口测试只在本地资源可用时运行，不等同于 XP／Win7 实机验收。
+
+### 独立媒体库回归
+
+无需未提交的 `tests/`、`tools/` 即可构建：
+
+```powershell
+cmake -S . -B build-library-tests -G "Visual Studio 18 2026" -A Win32 -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF -DTTPLAYER_BUILD_LIBRARY_TESTS=ON
+cmake --build build-library-tests --config Release --target media_library_tests --parallel 4
+ctest --test-dir build-library-tests -C Release -R '^media_library_tests$' --output-on-failure
+```
+
+测试在独立临时目录运行。原版 DLL 可用时追加完整窗口的启动、关闭期间保存和
+重新打开验证；资源不可用时明确报告跳过该部分，核心数据／文件监视测试仍执行。

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <charconv>
 #include <cstdint>
@@ -823,6 +824,12 @@ bool Playlist::SetExtendedMetadata(
     return changed;
 }
 
+bool Playlist::SetTrack(size_t index, Track track) {
+    if (index >= tracks_.size() || tracks_[index] == track) return false;
+    tracks_[index] = std::move(track);
+    return true;
+}
+
 bool Playlist::SetRating(size_t index, int rating) {
     // CPlayItem::SetRating (004AE10A) performs an unsigned "rating < 6"
     // guard. Out-of-range values are rejected rather than clamped.
@@ -989,12 +996,23 @@ void Playlist::LoadTtbl(const std::filesystem::path& path) {
         int duration = -2;
         if ((flags & 4U) != 0) duration = ReadValue<std::int32_t>(input);
         if ((flags & 8U) != 0) static_cast<void>(ReadValue<std::int32_t>(input));
+        Track audio_info;
         if ((flags & 0x10U) != 0) {
-            static_cast<void>(ReadTtblString(input));
-            std::array<char, 12> metadata{};
-            input.read(metadata.data(), metadata.size());
-            if (!input) throw std::runtime_error("truncated TTBL metadata");
+            // 00476550: string, CPlayItem +0x14 (DWORD), +0x0c/+0x0e
+            // (WORD each), +0x18 (DWORD). Preserve the raw bitrate/VBR bit.
+            audio_info.media_type = WideField(ReadTtblString(input));
+            audio_info.sample_rate_hz = ReadValue<std::uint32_t>(input);
+            audio_info.channels = ReadValue<std::uint16_t>(input);
+            audio_info.bits_per_sample = ReadValue<std::uint16_t>(input);
+            audio_info.bitrate_bps = ReadValue<std::uint32_t>(input);
         }
+        const auto copy_audio_info = [&audio_info](Track& track) {
+            track.media_type = audio_info.media_type;
+            track.sample_rate_hz = audio_info.sample_rate_hz;
+            track.channels = audio_info.channels;
+            track.bits_per_sample = audio_info.bits_per_sample;
+            track.bitrate_bps = audio_info.bitrate_bps;
+        };
         if ((flags & 0x20U) != 0) {
             const auto pairs = ReadValue<std::int16_t>(input);
             if (pairs < 0 || pairs > 4096) throw std::runtime_error("invalid TTBL metadata count");
@@ -1035,6 +1053,7 @@ void Playlist::LoadTtbl(const std::filesystem::path& path) {
             track.rating = rating;
             track.track_number = track_number;
             track.metadata = std::move(metadata_entries);
+            copy_audio_info(track);
             loaded.push_back(std::move(track));
             continue;
         }
@@ -1046,6 +1065,7 @@ void Playlist::LoadTtbl(const std::filesystem::path& path) {
             static_cast<void>(ReadValue<std::uint32_t>(input));
         loaded.push_back({std::filesystem::path(filename), WideField(title), {},
                           duration, subtrack, {}, rating, 0});
+        copy_audio_info(loaded.back());
     }
     tracks_ = std::move(loaded);
     title_ = std::move(loaded_title);
@@ -1059,8 +1079,19 @@ void Playlist::LoadTtbl(const std::filesystem::path& path) {
 void Playlist::SaveTtbl(const std::filesystem::path& path) const {
     const auto parent = path.parent_path();
     if (!parent.empty()) std::filesystem::create_directories(parent);
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    // Publish only a complete stream. A failed write/replace must retain the
+    // preceding Music.library (also used by numbered-list staging).
+    static std::atomic_ullong serial{};
+    auto temporary = path;
+    temporary += L".writing." + std::to_wstring(GetCurrentProcessId()) + L"." +
+        std::to_wstring(serial.fetch_add(1));
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() { DeleteFileW(path.c_str()); }
+    } cleanup{temporary};
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     if (!output) throw std::runtime_error("cannot create TTBL");
+    output.exceptions(std::ios::badbit | std::ios::failbit);
     output.write("TTBL", 4);
     WriteValue<std::uint32_t>(output, 5);
     WriteValue<std::int32_t>(output, -1);
@@ -1101,6 +1132,9 @@ void Playlist::SaveTtbl(const std::filesystem::path& path) const {
         if (track.subtrack > 0 && track.subtrack <= 0xffff) flags |= 1U;
         if (!title.empty()) flags |= 2U;
         if (track.duration_ms >= 0) flags |= 4U;
+        if (!track.media_type.empty() || track.sample_rate_hz ||
+            track.channels || track.bits_per_sample || track.bitrate_bps)
+            flags |= 0x10U;
         if (!metadata.empty()) flags |= 0x20U;
         WriteValue(output, flags);
         if ((flags & 1U) != 0)
@@ -1108,6 +1142,13 @@ void Playlist::SaveTtbl(const std::filesystem::path& path) const {
                 static_cast<std::uint16_t>(track.subtrack));
         if ((flags & 2U) != 0) WriteTtblString(output, title);
         if ((flags & 4U) != 0) WriteValue<std::int32_t>(output, track.duration_ms);
+        if ((flags & 0x10U) != 0) {
+            WriteTtblString(output, Utf8Field(track.media_type));
+            WriteValue(output, track.sample_rate_hz);
+            WriteValue(output, track.channels);
+            WriteValue(output, track.bits_per_sample);
+            WriteValue(output, track.bitrate_bps);
+        }
         if ((flags & 0x20U) != 0) {
             const auto count = static_cast<std::int16_t>(metadata.size());
             WriteValue(output, count);
@@ -1122,6 +1163,11 @@ void Playlist::SaveTtbl(const std::filesystem::path& path) const {
         WriteValue<std::int32_t>(output, std::clamp(track.rating, 0, 5));
         WriteValue<std::uint32_t>(output, 0);
     }
+    output.flush();
+    output.close();
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        throw std::runtime_error("cannot replace TTBL");
 }
 
 void Playlist::LoadXml(const std::filesystem::path& path,

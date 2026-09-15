@@ -242,7 +242,8 @@ struct PlaylistSettings {
 };
 struct MediaLibraryDirectory {
     std::filesystem::path path;
-    bool enabled{};
+    // Dialog 255: checked means also watch subdirectories, not enabled.
+    bool recursive{};
 };
 struct MediaLibrarySettings {
     bool enabled{};

@@ -4,6 +4,7 @@
 #include "directory_change_monitor.h"
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
+#include "file_info_probe_client.h"
 
 #include "ttplayer/core/text.h"
 
@@ -171,6 +172,8 @@ void ApplyMediaLibraryReaderInfo(playlist::Track& track,
     track.media_type = std::move(info.media_type);
     track.bitrate_bps = info.bitrate_bps;
     track.sample_rate_hz = info.sample_rate_hz;
+    track.channels = info.channels;
+    track.bits_per_sample = info.bits_per_sample;
     track.metadata = std::move(info.metadata);
 }
 using namespace detail;
@@ -290,7 +293,7 @@ bool IsSameOrBelowPath(const std::filesystem::path& path,
     if (candidate == prefix) return true;
     return candidate.size() > prefix.size() &&
         candidate.compare(0, prefix.size(), prefix) == 0 &&
-        candidate[prefix.size()] == L'\\';
+        (prefix.back() == L'\\' || candidate[prefix.size()] == L'\\');
 }
 
 std::vector<std::wstring> Split(std::wstring_view text, wchar_t delimiter);
@@ -649,6 +652,7 @@ struct PlayerWindow::MediaLibraryState {
     struct Seed {
         playlist::Track track;
         Source source;
+        bool refresh{};
     };
     struct Item {
         playlist::Track track;
@@ -656,6 +660,11 @@ struct PlayerWindow::MediaLibraryState {
         std::vector<Source> sources;
     };
     struct BuildResult {
+        bool complete{true};
+        unsigned long long revision{};
+        std::optional<size_t> numbered_target;
+        std::vector<std::wstring> missing;
+        std::set<std::wstring> observed;
         unsigned long long instance{};
         unsigned long long generation{};
         bool failed{};
@@ -676,17 +685,16 @@ struct PlayerWindow::MediaLibraryState {
         std::atomic_bool complete{};
     };
     struct BuildRequest {
+        unsigned long long revision{};
+        std::optional<size_t> numbered_target;
+        std::filesystem::path runtime, helper;
+        FileInfoProbeMp3Policy mp3;
         unsigned long long instance{};
         unsigned long long generation{};
         std::vector<Seed> seeds;
         std::vector<Seed> priority_seeds;
-        std::vector<std::filesystem::path> directories;
+        std::vector<DirectoryWatchPath> directories;
         std::set<std::wstring> extensions;
-        // The detached scanner may still be inside a private reader when the
-        // PlayerWindow/application begins teardown.  This independent sound
-        // library owns AddIn references and loaded-module references until
-        // every LegacyReaderSession in this request has been destroyed.
-        std::shared_ptr<plugins::PluginManager> sound_library;
         // 004C03FD passes Library/MaxItemCount to 004AF271, whose only
         // consumer chooses the initial CPlayItem hash-table bucket count.
         // It is a capacity hint, never an admission/result limit.
@@ -713,8 +721,32 @@ struct PlayerWindow::MediaLibraryState {
     std::set<std::wstring> excluded;
     std::vector<playlist::Track> pending_tracks;
     std::vector<std::filesystem::path> pending_files;
-    std::vector<std::filesystem::path> pending_directories;
-    std::set<std::wstring> monitored_directories;
+    std::vector<DirectoryWatchPath> pending_directories;
+    std::map<std::wstring, bool> monitored_directories;
+    std::map<std::wstring, unsigned long long> removed_files;
+    struct FileChange { unsigned long long revision; std::filesystem::path path; bool removed; };
+    std::vector<FileChange> file_changes;
+    struct Edit { unsigned long long revision; playlist::Track track; bool rating_only; };
+    std::map<std::wstring, Edit> edits;
+    unsigned long long revision{};
+
+    void RecordEdit(const playlist::Track& track, bool rating_only = false) {
+        const auto id = Identity(track);
+        auto found = edits.find(id);
+        if (rating_only && found != edits.end() && !found->second.rating_only) {
+            found->second.track.rating = track.rating;
+            found->second.revision = ++revision;
+        } else edits.insert_or_assign(id, Edit{++revision, track, rating_only});
+    }
+
+    void RevivePath(const std::filesystem::path& path) {
+        std::erase_if(excluded, [&](const auto& id) {
+            const auto split = id.rfind(L'\x1f');
+            if (split == std::wstring::npos || !IsSameOrBelowPath(id.substr(0,split), path)) return false;
+            removed_files.erase(id);
+            return true;
+        });
+    }
     std::vector<std::unique_ptr<Node>> nodes;
     Node* root{};
     std::list<std::shared_ptr<WorkerControl>> workers;
@@ -724,6 +756,7 @@ struct PlayerWindow::MediaLibraryState {
         next_instance.fetch_add(1, std::memory_order_relaxed)};
     unsigned long long generation{};
     bool rebuilding{};
+    bool tree_dirty{};
     bool indexing{};
     bool refresh_pending{};
     bool persistence_loaded{};
@@ -741,149 +774,39 @@ struct PlayerWindow::MediaLibraryState {
         return MediaLibraryTrackIdentity(track);
     }
 
-    static void ResetShellMetadata(playlist::Track& track) {
-        // FILE_ACTION_MODIFIED must not let ReadShellMetadata's "fill only"
-        // policy preserve stale tag values. Keep decoder/runtime fields and
-        // the independent TTPlayer rating, but clear every Shell-owned field
-        // before re-reading it.
-        track.title.clear();
-        track.artist.clear();
-        track.album.clear();
-        std::erase_if(track.metadata, [](const auto& entry) {
-            return AsciiEqual(entry.first, "Title") ||
-                AsciiEqual(entry.first, "Artist") ||
-                AsciiEqual(entry.first, "Album") ||
-                AsciiEqual(entry.first, "Genre") ||
-                AsciiEqual(entry.first, "Date");
-        });
-    }
-
-    static void ReadShellMetadata(playlist::Track& track) {
-        IPropertyStore* store{};
-        if (FAILED(platform::SHGetPropertyStoreFromParsingName(track.path.c_str(), nullptr,
-                GPS_BESTEFFORT, IID_PPV_ARGS(&store))) || !store) return;
-        const auto get = [store](const PROPERTYKEY& key) {
-            PROPVARIANT value{};
-            PropVariantInit(&value);
-            std::wstring result;
-            if (SUCCEEDED(store->GetValue(key, &value))) {
-                wchar_t text[1024]{};
-                if (SUCCEEDED(platform::PropVariantToString(value, text,
-                        static_cast<UINT>(std::size(text))))) result = text;
-            }
-            PropVariantClear(&value);
-            return result;
-        };
-        const auto assign = [](std::string& destination,
-                               const std::wstring& value) {
-            if (!destination.empty() || value.empty()) return;
-            try { destination = core::WideToUtf8(value); }
-            catch (const std::exception&) {}
-        };
-        assign(track.title, get(PKEY_Title));
-        assign(track.artist, get(PKEY_Music_Artist));
-        assign(track.album, get(PKEY_Music_AlbumTitle));
-        const auto merge = [&track](std::string name, const std::wstring& value) {
-            if (value.empty()) return;
-            const auto found = std::find_if(track.metadata.begin(),
-                track.metadata.end(), [&name](const auto& entry) {
-                    return AsciiEqual(entry.first, name);
-                });
-            if (found != track.metadata.end() && !found->second.empty()) return;
-            try {
-                auto converted = core::WideToUtf8(value);
-                if (found == track.metadata.end())
-                    track.metadata.emplace_back(std::move(name),
-                                                 std::move(converted));
-                else
-                    found->second = std::move(converted);
-            }
-            catch (const std::exception&) {}
-        };
-        merge("Genre", get(PKEY_Music_Genre));
-        merge("Date", get(PKEY_Media_Year));
-        PROPVARIANT rating{};
-        PropVariantInit(&rating);
-        ULONG rating_value{};
-        if (SUCCEEDED(store->GetValue(PKEY_Rating, &rating)) &&
-            SUCCEEDED(platform::PropVariantToUInt32(rating, &rating_value)) &&
-            rating_value != 0) {
-            track.rating = std::clamp<int>(
-                static_cast<int>((rating_value + 12) / 25), 1, 5);
-        }
-        PropVariantClear(&rating);
-        store->Release();
-    }
-
-    // Returns true once an AddIn reader matched the physical source.  A
-    // matched reader whose Open fails is authoritative failure, matching the
-    // CPlayItem -2 -> -1 transition in 00481759/004ADA76; Shell metadata must
-    // not turn a corrupt/private-reader source back into a successful item.
-    static bool ReadSoundMetadata(
-        playlist::Track& track,
-        const std::shared_ptr<plugins::PluginManager>& library) {
-        if (!library || track.path.empty() || track.subtrack != 0 ||
-            !library->HasReaderForPath(track.path)) return false;
-
-        // 004ADA76 clears ordinary physical-file fields before opening the
-        // sound reader and enumerating ISoundMetadata.  Preserve only source
-        // identity, CPlayItem rating and other non-reader state on failure.
-        track.duration_ms = -1;
-        track.title.clear();
-        track.artist.clear();
-        track.album.clear();
-        track.media_type.clear();
-        track.bitrate_bps = 0;
-        track.sample_rate_hz = 0;
-        track.metadata.clear();
-
-        HRESULT opened{};
-        auto reader = library->OpenReader(track.path, &opened);
-        if (!reader) return true;
-
-        MediaLibraryReaderInfo info;
-        info.duration_ms = static_cast<int>(std::min<DWORD>(
-            reader->DurationMilliseconds(), static_cast<DWORD>(
-                std::numeric_limits<int>::max())));
-        try {
-            info.media_type = core::WideToUtf8(reader->CodecName());
-        } catch (const std::exception&) {
-            info.media_type.clear();
-        }
-        std::uint64_t encoded = reader->EncodedBitsPerSecond();
-        if (encoded == 0)
-            encoded = static_cast<std::uint64_t>(
-                reader->Format().nAvgBytesPerSec) * 8U;
-        info.bitrate_bps = static_cast<std::uint32_t>(
-            std::min<std::uint64_t>(encoded, 0x7fffffffU));
-        info.sample_rate_hz = reader->Format().nSamplesPerSec;
-        info.metadata.reserve(reader->Metadata().size());
-        for (const auto& entry : reader->Metadata()) {
-            if (entry.name.empty()) continue;
-            try {
-                info.metadata.emplace_back(
-                    core::WideToUtf8(entry.name),
-                    core::WideToUtf8(entry.value));
-            } catch (const std::exception&) {
-                // One malformed Unicode field does not invalidate the other
-                // reader-owned fields or the successfully opened item.
-            }
-        }
-        ApplyMediaLibraryReaderInfo(track, std::move(info));
-        return true;
-    }
-
-    static void ReadTrackMetadata(
-        playlist::Track& track,
-        const std::shared_ptr<plugins::PluginManager>& library) {
+    static void ReadTrackMetadata(playlist::Track& track, const BuildRequest& request) {
         const auto source = track.path.wstring();
         if (source.find(L"://") != std::wstring::npos ||
-            source.find(L'|') != std::wstring::npos) return;
-        // A physical container reader cannot resolve one CUE subtrack's
-        // duration/tags.  Those logical fields remain owned by the CUE
-        // parser, just as they do in CPlayItem's segmented-source branch.
-        if (track.subtrack != 0) return;
-        if (!ReadSoundMetadata(track, library)) ReadShellMetadata(track);
+            source.find(L'|') != std::wstring::npos || track.subtrack != 0) return;
+        // Built-in decoders and AddIns use the same bounded child process.
+        // A stalled/crashing reader cannot hold the catalogue scanner forever.
+        FileInfoProbeProcessState process{};
+        const auto probe = RunPlaylistInfoReadProbe(request.control->stop.get_token(),
+            request.helper, request.runtime / L"AddIn", track.path,
+            request.runtime / L"ttpcomm.dll", track.subtrack, 15000, &process, request.mp3);
+        if (!probe || FAILED(probe->status)) {
+            if (process != FileInfoProbeProcessState::launch_failed &&
+                process != FileInfoProbeProcessState::cancelled) {
+                MediaLibraryReaderInfo failed; failed.duration_ms = -1;
+                ApplyMediaLibraryReaderInfo(track, std::move(failed));
+            }
+            return;
+        }
+        MediaLibraryReaderInfo info;
+        info.duration_ms = static_cast<int>(std::min<DWORD>(probe->duration_ms, INT_MAX));
+        info.media_type = core::WideToUtf8(probe->codec);
+        const auto bitrate = probe->encoded_bits_per_second ? probe->encoded_bits_per_second :
+            static_cast<std::uint64_t>(probe->format.nAvgBytesPerSec) * 8;
+        info.bitrate_bps = static_cast<std::uint32_t>(std::min<std::uint64_t>(bitrate, 0x7fffffffU));
+        info.sample_rate_hz = probe->format.nSamplesPerSec;
+        info.channels = probe->format.nChannels;
+        info.bits_per_sample = probe->format.wBitsPerSample;
+        for (const auto& entry : probe->metadata) {
+            if (!entry.name.empty()) info.metadata.emplace_back(
+                core::WideToUtf8(entry.name), core::WideToUtf8(entry.value));
+        }
+        // The library rating belongs to CPlayItem, never to Shell PKEY_Rating.
+        ApplyMediaLibraryReaderInfo(track, std::move(info));
     }
 
     static void DeliverBuildResult(
@@ -911,9 +834,15 @@ struct PlayerWindow::MediaLibraryState {
             ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
         } apartment_guard{apartment};
         auto result = std::make_unique<BuildResult>();
+        result->revision = request.revision;
+        result->numbered_target = request.numbered_target;
         result->instance = request.instance;
         result->generation = request.generation;
         result->persistence_attempted = request.load_persistence;
+        std::set<std::wstring> metadata_read;
+        const auto read_track = [&](playlist::Track& track) {
+            if (metadata_read.insert(Identity(track)).second) ReadTrackMetadata(track, request);
+        };
         std::unordered_map<std::wstring, size_t> identities;
         const auto seed_capacity = request.seeds.size() * 2 + 64;
         identities.reserve(std::max(seed_capacity,
@@ -939,7 +868,7 @@ struct PlayerWindow::MediaLibraryState {
         // interning map.
         for (auto& seed : request.priority_seeds) {
             if (stop.stop_requested()) return;
-            ReadTrackMetadata(seed.track, request.sound_library);
+            if (seed.refresh) read_track(seed.track);
             add(std::move(seed.track), seed.source);
         }
         if (request.load_persistence && !request.persistence_path.empty()) {
@@ -953,9 +882,9 @@ struct PlayerWindow::MediaLibraryState {
                                             exists_error) && !exists_error) {
                     playlist::Playlist persisted;
                     persisted.LoadTtbl(request.persistence_path);
-                    for (const auto& track : persisted.Tracks()) {
+                    for (auto track : persisted.Tracks()) {
                         if (stop.stop_requested()) return;
-                        add(track, {});
+                        add(std::move(track), {});
                     }
                 }
             } catch (const std::exception&) {
@@ -971,33 +900,61 @@ struct PlayerWindow::MediaLibraryState {
             // the equivalent enrichment off the UI thread, once per unique
             // local identity, so Artist/Album/Genre/Date nodes do not depend
             // solely on a prior tooltip or playback request.
-            const auto identity = Identity(seed.track);
-            if (!identities.contains(identity))
-                ReadTrackMetadata(seed.track, request.sound_library);
             add(std::move(seed.track), seed.source);
         }
 
+        if (request.load_persistence) {
+            auto cached = std::make_unique<BuildResult>(*result);
+            cached->complete = false;
+            DeliverBuildResult(control, std::move(cached));
+        }
+        for (auto& item : result->items) {
+            if (stop.stop_requested()) return;
+            if (item.track.duration_ms == -2 || item.track.media_type.empty())
+                read_track(item.track);
+        }
         for (const auto& directory : request.directories) {
             if (stop.stop_requested()) break;
             std::error_code error;
             std::filesystem::recursive_directory_iterator iterator(
-                directory, std::filesystem::directory_options::skip_permission_denied,
+                directory.path, std::filesystem::directory_options::skip_permission_denied,
                 error);
             const std::filesystem::recursive_directory_iterator end;
             while (!error && iterator != end && !stop.stop_requested()) {
                 std::error_code status_error;
+                if (!directory.recursive) iterator.disable_recursion_pending();
                 if (iterator->is_regular_file(status_error)) {
                     auto extension = Fold(iterator->path().extension().wstring());
                     if (!extension.empty() && request.extensions.contains(extension)) {
                         playlist::Track track;
                         track.path = iterator->path();
-                        if (!identities.contains(Identity(track)))
-                            ReadTrackMetadata(track, request.sound_library);
-                        add(std::move(track), {});
+                        result->observed.insert(NormalizedLocalPath(track.path));
+                        const auto existing = identities.find(Identity(track));
+                        if (existing != identities.end()) {
+                            read_track(result->items[existing->second].track);
+                        } else {
+                            read_track(track);
+                            add(std::move(track), {});
+                        }
                     }
                 }
                 iterator.increment(error);
-                if (error) error.clear();
+                // An inaccessible subtree is not evidence that its songs were deleted.
+            }
+        }
+        for (const auto& item : result->items) {
+            for (const auto& directory : request.directories) {
+                if (!IsSameOrBelowPath(item.track.path, directory.path) ||
+                    (!directory.recursive && NormalizedLocalPath(item.track.path.parent_path()) !=
+                        NormalizedLocalPath(directory.path))) continue;
+                const DWORD root_attributes = GetFileAttributesW(directory.path.c_str());
+                if (root_attributes == INVALID_FILE_ATTRIBUTES) continue;
+                if (GetFileAttributesW(item.track.path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                    const auto error = GetLastError();
+                    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+                        result->missing.push_back(item.identity);
+                }
+                break;
             }
         }
         if (stop.stop_requested()) return;
@@ -1040,42 +997,39 @@ const playlist::Track* PlayerWindow::VisiblePlaylistTrack(
 
 bool PlayerWindow::SetVisiblePlaylistRating(size_t index, int rating) {
     if (rating < 0 || rating > 5) return false;
+    bool changed{};
+    std::wstring id;
     if (!settings_.playlist.library_mode || !media_library_) {
         if (!ActivePlaylist().SetRating(index, rating)) return false;
-        playlists_.MarkDirty();
-        return true;
+        playlists_.MarkDirty(); changed = true;
+        id = MediaLibraryTrackIdentity(ActivePlaylist().Tracks()[index]);
+    } else {
+        const auto& state = *media_library_;
+        if (index >= state.result_tracks.size() || index >= state.result_items.size() ||
+            state.result_items[index] >= state.items.size()) return false;
+        id = state.items[state.result_items[index]].identity;
     }
+    if (!media_library_) return changed;
     auto& state = *media_library_;
-    if (index >= state.result_items.size() ||
-        index >= state.result_tracks.size()) return false;
-    const size_t item_index = state.result_items[index];
-    if (item_index >= state.items.size()) return false;
-    auto& item = state.items[item_index];
-    bool changed = item.track.rating != rating ||
-                   state.result_tracks[index].rating != rating;
-    item.track.rating = rating;
-    state.result_tracks[index].rating = rating;
-
-    for (auto& persisted : state.persisted_tracks) {
-        if (MediaLibraryState::Identity(persisted) != item.identity) continue;
-        changed |= persisted.rating != rating;
-        persisted.rating = rating;
+    auto found = std::find_if(state.items.begin(),state.items.end(),
+        [&](const auto& item) { return item.identity == id; });
+    if (found == state.items.end()) return changed;
+    changed |= found->track.rating != rating;
+    found->track.rating = rating;
+    state.RecordEdit(found->track,true);
+    state.tree_dirty = true;
+    for (auto* tracks : {&state.result_tracks, &state.persisted_tracks})
+        for (auto& track : *tracks)
+            if (MediaLibraryTrackIdentity(track) == id) track.rating = rating;
+    // Source row hints can become stale after sorting/reordering a numbered list.
+    for (size_t list=0; list<playlists_.Size(); ++list) {
+        auto& playlist = playlists_.At(list);
+        for (size_t row=0; row<playlist.Tracks().size(); ++row)
+            if (MediaLibraryTrackIdentity(playlist.Tracks()[row]) == id && playlist.SetRating(row,rating)) {
+                playlists_.MarkDirty(list); changed = true;
+            }
     }
-    for (const auto source : item.sources) {
-        if (source.playlist >= playlists_.Size()) continue;
-        auto& list = playlists_.At(source.playlist);
-        if (source.row >= list.Tracks().size() ||
-            MediaLibraryState::Identity(list.Tracks()[source.row]) !=
-                item.identity) continue;
-        if (list.SetRating(source.row, rating)) {
-            playlists_.MarkDirty(source.playlist);
-            changed = true;
-        }
-    }
-    if (media_library_playback_active_ &&
-        SetMediaLibraryPlaybackRating(media_library_playback_,
-                                      item.identity, rating) != 0)
-        changed = true;
+    changed |= SetMediaLibraryPlaybackRating(media_library_playback_, id, rating) != 0;
     return changed;
 }
 
@@ -1161,6 +1115,7 @@ bool PlayerWindow::CommitMediaLibraryTracks(
         const auto identity = MediaLibraryState::Identity(track);
         if (!incoming.insert(identity).second) continue;
         state.excluded.erase(identity);
+        state.removed_files.erase(identity);
 
         auto item = std::find_if(state.items.begin(), state.items.end(),
             [&identity](const auto& candidate) {
@@ -1187,6 +1142,7 @@ bool PlayerWindow::CommitMediaLibraryTracks(
             });
         if (!persisted) state.persisted_tracks.push_back(track);
         state.pending_tracks.push_back(track);
+        state.RecordEdit(track);
     }
     if (additions.empty()) {
         state.refresh_pending = true;
@@ -1234,8 +1190,12 @@ bool PlayerWindow::UpdateMediaLibraryTrackPath(
         const auto old_identity = item.identity;
         item.track.path = target;
         item.identity = MediaLibraryState::Identity(item.track);
-        if (state.excluded.erase(old_identity) != 0)
-            state.excluded.insert(item.identity);
+        const bool removed = state.excluded.contains(old_identity);
+        state.excluded.insert(old_identity); // Reject the old path in an in-flight result.
+        state.removed_files.erase(old_identity);
+        state.edits.erase(old_identity);
+        if (removed) state.excluded.insert(item.identity);
+        else state.RecordEdit(item.track);
         changed = true;
     }
     changed |= ReplaceMediaLibraryTrackPath(
@@ -1290,6 +1250,8 @@ bool PlayerWindow::UpdateMediaLibraryTrackByIdentity(
     // this is the observable 00483C59 library branch without aliasing the
     // result ordinal onto an unrelated active-list item.
     item.track = updated;
+    state.RecordEdit(updated);
+    state.tree_dirty = true;
     bool changed = true;
     for (auto& result : state.result_tracks) {
         if (MediaLibraryState::Identity(result) == identity) result = updated;
@@ -1298,21 +1260,13 @@ bool PlayerWindow::UpdateMediaLibraryTrackByIdentity(
         if (MediaLibraryState::Identity(persisted) == identity)
             persisted = updated;
     }
-    for (const auto& origin : item.sources) {
-        if (origin.playlist >= playlists_.Size()) continue;
-        auto& list = playlists_.At(origin.playlist);
-        if (origin.row >= list.Tracks().size() ||
-            MediaLibraryState::Identity(list.Tracks()[origin.row]) !=
-                identity)
-            continue;
-        changed |= list.SetDuration(origin.row, updated.duration_ms);
-        changed |= list.SetMetadata(origin.row, updated.title, updated.artist,
-                                    updated.album);
-        changed |= list.SetExtendedMetadata(
-            origin.row, updated.metadata, updated.media_type,
-            updated.bitrate_bps, updated.sample_rate_hz);
-        changed |= list.SetRating(origin.row, updated.rating);
-        playlists_.MarkDirty(origin.playlist);
+    for (size_t list_index=0; list_index<playlists_.Size(); ++list_index) {
+        auto& list = playlists_.At(list_index);
+        for (size_t row=0; row<list.Tracks().size(); ++row) {
+            if (MediaLibraryState::Identity(list.Tracks()[row]) == identity && list.SetTrack(row,updated)) {
+                playlists_.MarkDirty(list_index); changed = true;
+            }
+        }
     }
     if (media_library_playback_active_) {
         for (size_t row = 0;
@@ -1320,14 +1274,7 @@ bool PlayerWindow::UpdateMediaLibraryTrackByIdentity(
             if (MediaLibraryState::Identity(
                     media_library_playback_.Tracks()[row]) != identity)
                 continue;
-            changed |= media_library_playback_.SetDuration(
-                row, updated.duration_ms);
-            changed |= media_library_playback_.SetMetadata(
-                row, updated.title, updated.artist, updated.album);
-            changed |= media_library_playback_.SetExtendedMetadata(
-                row, updated.metadata, updated.media_type,
-                updated.bitrate_bps, updated.sample_rate_hz);
-            changed |= media_library_playback_.SetRating(row, updated.rating);
+            changed |= media_library_playback_.SetTrack(row, updated);
         }
     }
     return changed;
@@ -1351,6 +1298,13 @@ void PlayerWindow::InitializeMediaLibraryTree() {
     if (!playlist_tree_control_) return;
     if (!media_library_) media_library_ = std::make_shared<MediaLibraryState>();
     auto& state = *media_library_;
+    std::set<std::wstring> selected;
+    for (const auto row : playlist_selected_rows_)
+        if (row < state.result_tracks.size()) selected.insert(MediaLibraryTrackIdentity(state.result_tracks[row]));
+    std::wstring caret;
+    if (playlist_selection_ && *playlist_selection_ < state.result_tracks.size())
+        caret = MediaLibraryTrackIdentity(state.result_tracks[*playlist_selection_]);
+    state.tree_dirty = false;
 
     SendMessageW(playlist_tree_control_, TVM_SETBKCOLOR, 0,
                  settings_.playlist.background_color);
@@ -1422,6 +1376,13 @@ void PlayerWindow::InitializeMediaLibraryTree() {
         }
     }
     TreeView_SelectItem(playlist_tree_control_, select);
+    for (size_t row=0; row<state.result_tracks.size(); ++row) {
+        const auto id = MediaLibraryTrackIdentity(state.result_tracks[row]);
+        if (selected.contains(id)) playlist_selected_rows_.insert(row);
+        if (id == caret) playlist_selection_ = row;
+    }
+    playlist_selection_anchor_ = playlist_selection_;
+    EnsurePlaylistSelectionVisible();
 }
 
 void PlayerWindow::SetMediaLibraryMode(bool enabled) {
@@ -1477,13 +1438,17 @@ void PlayerWindow::PollMediaLibraryWorkers() {
     if (completed_without_result &&
         *completed_without_result == state.generation && state.indexing)
         state.indexing = false;
+    if (!state.shutting_down && state.tree_dirty && !state.indexing) {
+        state.tree_dirty = false;
+        if (settings_.playlist.library_mode) InitializeMediaLibraryTree();
+    }
     if (!state.shutting_down && !state.indexing && state.refresh_pending)
         StartMediaLibraryRefresh();
 }
 
 void PlayerWindow::StartMediaLibraryRefresh() {
     if (!window_) return;
-    if (!settings_.library.enabled) {
+    if (!settings_.library.enabled && !settings_.library.monitor_directories) {
         if (media_library_) {
             media_library_->refresh_pending = false;
             for (const auto& worker : media_library_->workers)
@@ -1507,12 +1472,13 @@ void PlayerWindow::StartMediaLibraryRefresh() {
     MediaLibraryState::BuildRequest request;
     request.instance = state.instance;
     request.generation = ++state.generation;
+    request.revision = state.revision;
+    request.runtime = MediaLibraryStoragePath().parent_path();
+    request.mp3.read_priority = static_cast<std::uint32_t>(settings_.general.mp3_read_tag_priority);
     request.control = std::make_shared<MediaLibraryState::WorkerControl>();
     request.control->receiver = window_;
     request.control->instance = request.instance;
     request.control->generation = request.generation;
-    if (sound_library_)
-        request.sound_library = sound_library_->RetainForBackground();
     // Native startup 004C03FD passes DAT_00547D60 (Library/MaxItemCount) to
     // 004AF271.  004AF271 calls 004AF1C5 to choose a prime bucket count (at
     // least 257); no insertion path compares against the setting.  Preserve
@@ -1521,14 +1487,17 @@ void PlayerWindow::StartMediaLibraryRefresh() {
         request.expected_item_count = static_cast<size_t>(
             settings_.library.max_item_count);
     }
-    if (state.persistence_loaded) {
+    if (settings_.library.enabled && state.persistence_loaded) {
         for (const auto& track : state.persisted_tracks)
             request.seeds.push_back({track, {}});
     } else if (settings_.library.enabled) {
         request.persistence_path = MediaLibraryStoragePath();
         request.load_persistence = !request.persistence_path.empty();
     }
+    if (!settings_.library.enabled)
+        request.numbered_target = playlists_.Entries()[MediaLibraryMonitorPlaylist()].slot;
     for (size_t list = 0; list < playlists_.Size(); ++list) {
+        if (request.numbered_target && playlists_.Entries()[list].slot != *request.numbered_target) continue;
         const auto& tracks = playlists_.At(list).Tracks();
         for (size_t row = 0; row < tracks.size(); ++row)
             request.seeds.push_back({tracks[row], {list, row}});
@@ -1542,18 +1511,12 @@ void PlayerWindow::StartMediaLibraryRefresh() {
             if (!IsSameOrBelowPath(item.track.path, path) ||
                 !IsSameOrBelowPath(path, item.track.path)) continue;
             auto refreshed = item.track;
-            // A Shell property store describes the physical file, not one
-            // CUE subtrack. Replacing subtrack tags with container metadata
-            // would corrupt its stable result identity/title; those entries
-            // retain their CUE fields until the segmented source is reparsed.
-            if (refreshed.subtrack == 0)
-                MediaLibraryState::ResetShellMetadata(refreshed);
             request.priority_seeds.push_back(
-                {std::move(refreshed), {}});
+                {std::move(refreshed), {}, true});
             copied_known = true;
         }
         if (!copied_known)
-            request.priority_seeds.push_back({playlist::Track{path}, {}});
+            request.priority_seeds.push_back({playlist::Track{path}, {}, true});
     }
     request.directories = std::move(state.pending_directories);
     state.pending_files.clear();
@@ -1564,11 +1527,7 @@ void PlayerWindow::StartMediaLibraryRefresh() {
     const auto request_instance = request.instance;
     const auto request_generation = request.generation;
     state.workers.push_back(control);
-    // Sound readers and property handlers supplied by codecs/shell extensions
-    // are outside our control and can block indefinitely.  A detached worker
-    // plus the receiver handshake above keeps window destruction bounded;
-    // BuildRequest also retains each AddIn/DLL until its last reader session
-    // has left the worker.
+    // The coordinator owns values only; reader work runs in a cancellable process.
     try {
         std::thread([request = std::move(request), control,
                      request_instance, request_generation]() mutable {
@@ -1605,39 +1564,56 @@ void PlayerWindow::StartMediaLibraryRefresh() {
     }
 }
 
+size_t PlayerWindow::MediaLibraryMonitorPlaylist() {
+    auto title = settings_.general.default_list;
+    if (title.empty()) title = ResourceText(0x813a);
+    for (size_t i = 0; i < playlists_.Size(); ++i)
+        if (_wcsicmp(playlists_.At(i).Title().c_str(), title.c_str()) == 0) return i;
+    const size_t active = playlists_.ActiveIndex();
+    const size_t result = playlists_.NewList(title);
+    if (active < playlists_.Size()) playlists_.SetActive(active);
+    return result;
+}
+
+void PlayerWindow::QueueMediaLibraryDirectory(const std::filesystem::path& path, bool recursive) {
+    if (!media_library_) media_library_ = std::make_shared<MediaLibraryState>();
+    auto& pending = media_library_->pending_directories;
+    const auto identity = NormalizedLocalPath(path);
+    auto found = std::find_if(pending.begin(), pending.end(), [&](const auto& directory) {
+        return NormalizedLocalPath(directory.path) == identity;
+    });
+    if (found == pending.end()) pending.push_back({path, recursive});
+    else found->recursive = recursive;
+    media_library_->refresh_pending = true;
+}
+
 void PlayerWindow::StartMediaLibraryMonitoring(bool scan_new_directories) {
     if (!media_library_) {
-        if (!settings_.library.enabled ||
-            !settings_.library.monitor_directories) return;
+        if (!settings_.library.monitor_directories) return;
         media_library_ = std::make_shared<MediaLibraryState>();
     }
     auto& state = *media_library_;
-    state.monitor.Stop();
-    if (!settings_.library.enabled ||
-        !settings_.library.monitor_directories || !window_) {
+    if (!settings_.library.monitor_directories || !window_) {
+        state.monitor.Stop();
         state.monitored_directories.clear();
         return;
     }
-
-    std::vector<std::filesystem::path> directories;
-    directories.reserve(std::min<size_t>(
-        settings_.library.directories.size(), 63));
+    std::vector<DirectoryWatchPath> directories;
+    std::map<std::wstring, bool> current;
     for (const auto& directory : settings_.library.directories) {
-        if (!directory.enabled || directory.path.empty()) continue;
-        directories.push_back(directory.path);
+        if (directory.path.empty()) continue;
+        const auto identity = NormalizedLocalPath(directory.path);
+        if (current.contains(identity)) continue;
+        directories.push_back({directory.path, directory.recursive});
+        current.emplace(identity, directory.recursive);
+        if (scan_new_directories && (!state.monitored_directories.contains(identity) ||
+            state.monitored_directories.at(identity) != directory.recursive))
+            QueueMediaLibraryDirectory(directory.path, directory.recursive);
         if (directories.size() == 63) break;
     }
-    std::set<std::wstring> current;
-    for (const auto& directory : directories) {
-        const auto identity = NormalizedLocalPath(directory);
-        current.insert(identity);
-        if (scan_new_directories &&
-            !state.monitored_directories.contains(identity))
-            state.pending_directories.push_back(directory);
-    }
+    if (current == state.monitored_directories) return;
     state.monitored_directories = std::move(current);
-    static_cast<void>(state.monitor.Start(
-        window_, kMsgMediaLibraryChanged, directories));
+    static_cast<void>(state.monitor.Start(window_, kMsgMediaLibraryChanged, directories));
 }
 
 void PlayerWindow::ApplyMediaLibraryConfiguration() {
@@ -1645,6 +1621,12 @@ void PlayerWindow::ApplyMediaLibraryConfiguration() {
         if (media_library_) {
             auto& state = *media_library_;
             state.monitor.Stop();
+            state.monitored_directories.clear();
+            ++state.generation;
+            state.indexing = false;
+            state.items.clear(); state.persisted_tracks.clear();
+            state.edits.clear(); state.excluded.clear(); state.removed_files.clear(); state.file_changes.clear();
+            state.persistence_loaded = false;
             state.refresh_pending = false;
             state.pending_tracks.clear();
             state.pending_files.clear();
@@ -1656,6 +1638,9 @@ void PlayerWindow::ApplyMediaLibraryConfiguration() {
         if (!persistence_path.empty()) DeleteFileW(persistence_path.c_str());
         settings_.library.valid = false;
         if (settings_.playlist.library_mode) SetMediaLibraryMode(false);
+        media_library_startup_pending_ = false;
+        StartMediaLibraryMonitoring(true);
+        if (settings_.library.monitor_directories) StartMediaLibraryRefresh();
         return;
     }
     StartMediaLibraryMonitoring(true);
@@ -1680,27 +1665,43 @@ LRESULT PlayerWindow::HandleMediaLibraryDirectoryChange(
             if (IsSameOrBelowPath(item.track.path, path))
                 identities.push_back(item.identity);
         }
+        const auto revision = ++state.revision;
+        state.file_changes.push_back({revision,path,true});
         RemoveMediaLibraryTracksByIdentity(identities);
+        for (const auto& id : identities) state.removed_files.insert_or_assign(id,revision);
+        if (!settings_.library.enabled) {
+            state.refresh_pending = true;
+            if (!state.indexing) StartMediaLibraryRefresh();
+        }
         return 0;
     }
 
+    if (file_action == kDirectoryRescan) {
+        const auto root = state.monitored_directories.find(NormalizedLocalPath(path));
+        if (root != state.monitored_directories.end()) {
+            QueueMediaLibraryDirectory(path, root->second);
+            if (!state.indexing) StartMediaLibraryRefresh();
+        }
+        return 0;
+    }
     if (file_action != FILE_ACTION_ADDED &&
         file_action != FILE_ACTION_RENAMED_NEW_NAME &&
         file_action != FILE_ACTION_MODIFIED) return 0;
     const DWORD attributes = GetFileAttributesW(path.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) return 0;
 
-    // A native add/rename notification revives a previously tombstoned
-    // identity.  Clear only identities at/below this exact path; unrelated
-    // user removals in the same monitored directory remain absent.
-    for (const auto& item : state.items) {
-        if (IsSameOrBelowPath(item.track.path, path))
-            state.excluded.erase(item.identity);
+    if (file_action == FILE_ACTION_ADDED || file_action == FILE_ACTION_RENAMED_NEW_NAME) {
+        state.file_changes.push_back({++state.revision,path,false});
+        state.RevivePath(path);
     }
     const bool directory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     if (directory) {
-        if (file_action != FILE_ACTION_MODIFIED)
-            state.pending_directories.push_back(path);
+        // A nonrecursive root reports a child directory name, but its contents
+        // are outside that watch. Only recursive parents admit that subtree.
+        if (file_action != FILE_ACTION_MODIFIED && std::any_of(
+                state.monitored_directories.begin(), state.monitored_directories.end(),
+                [&](const auto& root) { return root.second && IsSameOrBelowPath(path, root.first); }))
+            QueueMediaLibraryDirectory(path, true);
     } else {
         const auto extensions = LibraryReaderExtensions(reader_formats_);
         if (!extensions.contains(Fold(path.extension().wstring()))) return 0;
@@ -1806,18 +1807,26 @@ void PlayerWindow::ShutdownMediaLibrary() {
         // is false, even if the media-library UI was never entered.
         if (!persistence_path.empty())
             DeleteFileW(persistence_path.c_str());
-    } else if (media_library_ && media_library_->persistence_loaded &&
-               !persistence_path.empty()) {
+    } else if (media_library_ && !persistence_path.empty()) {
         // 004AF838 first synthesizes a playlist from every live CPlayItem
         // whose tombstone (+0x90) is zero, then saves it through the ordinary
         // TTBL writer.  `excluded` is the rebuilt tombstone set.
-        playlist::Playlist persisted;
-        persisted.SetTitle(ResourceText(0x81ce));
-        for (const auto& item : media_library_->items) {
-            if (!media_library_->excluded.contains(item.identity))
-                persisted.Add(item.track);
-        }
         try {
+            std::map<std::wstring, playlist::Track> tracks;
+            if (!media_library_->persistence_loaded && std::filesystem::exists(persistence_path)) {
+                playlist::Playlist cached;
+                cached.LoadTtbl(persistence_path); // Failure preserves the previous file.
+                for (const auto& track : cached.Tracks()) tracks.emplace(MediaLibraryTrackIdentity(track),track);
+            }
+            for (const auto& item : media_library_->items) tracks.insert_or_assign(item.identity,item.track);
+            for (const auto& [id, edit] : media_library_->edits) {
+                if (edit.rating_only && tracks.contains(id)) tracks.at(id).rating = edit.track.rating;
+                else if (!edit.rating_only) tracks.insert_or_assign(id,edit.track);
+            }
+            playlist::Playlist persisted;
+            persisted.SetTitle(ResourceText(0x81ce));
+            for (auto& [id, track] : tracks)
+                if (!media_library_->excluded.contains(id)) persisted.Add(std::move(track));
             persisted.SaveTtbl(persistence_path);
             settings_.library.valid = true;
         } catch (const std::exception&) {
@@ -1848,36 +1857,121 @@ void PlayerWindow::ShutdownMediaLibrary() {
 LRESULT PlayerWindow::ApplyMediaLibraryIndex(LPARAM value) {
     std::unique_ptr<MediaLibraryState::BuildResult> result(
         reinterpret_cast<MediaLibraryState::BuildResult*>(value));
-    if (!result || !media_library_ ||
-        result->instance != media_library_->instance ||
+    if (!result || !media_library_ || result->instance != media_library_->instance ||
         result->generation != media_library_->generation) return 0;
-    media_library_->indexing = false;
-    if (!settings_.library.enabled) {
-        media_library_->refresh_pending = false;
-        return 0;
-    }
+    auto& state = *media_library_;
+    state.indexing = !result->complete;
     if (result->failed) {
-        if (!media_library_->shutting_down &&
-            media_library_->refresh_pending) StartMediaLibraryRefresh();
+        if (!state.shutting_down && state.refresh_pending) StartMediaLibraryRefresh();
         return 0;
     }
-    media_library_->items = std::move(result->items);
-    if (result->persistence_attempted)
-        media_library_->persistence_loaded = true;
-    if (media_library_->persistence_loaded) {
-        media_library_->persisted_tracks.clear();
-        media_library_->persisted_tracks.reserve(media_library_->items.size());
-        for (const auto& item : media_library_->items) {
-            if (!media_library_->excluded.contains(item.identity))
-                media_library_->persisted_tracks.push_back(item.track);
+    if (result->numbered_target.has_value() == settings_.library.enabled) {
+        state.refresh_pending = true;
+        if (!state.shutting_down) StartMediaLibraryRefresh();
+        return 0;
+    }
+    for (const auto& id : result->missing) {
+        const auto edit = state.edits.find(id);
+        if (edit != state.edits.end() && edit->second.revision > result->revision) continue;
+        state.excluded.insert(id);
+        state.removed_files.insert_or_assign(id,result->revision);
+    }
+    for (const auto& item : result->items) {
+        for (const auto& change : state.file_changes) {
+            if (change.revision <= result->revision || !IsSameOrBelowPath(item.track.path,change.path)) continue;
+            if (change.removed) {
+                state.excluded.insert(item.identity);
+                state.removed_files.insert_or_assign(item.identity,change.revision);
+            } else {
+                state.excluded.erase(item.identity);
+                state.removed_files.erase(item.identity);
+            }
         }
     }
-    settings_.library.valid = true;
-    if (!media_library_->shutting_down && settings_.playlist.library_mode)
-        InitializeMediaLibraryTree();
-    if (media_library_ && !media_library_->shutting_down &&
-        media_library_->refresh_pending)
-        StartMediaLibraryRefresh();
+    std::erase_if(state.removed_files, [&](const auto& entry) {
+        const auto& id = entry.first;
+        if (entry.second > result->revision ||
+            std::find(result->missing.begin(),result->missing.end(),id) != result->missing.end()) return false;
+        const auto separator = id.rfind(L'\x1f');
+        if (separator == std::wstring::npos ||
+            !result->observed.contains(NormalizedLocalPath(id.substr(0,separator)))) return false;
+        state.excluded.erase(id);
+        return true;
+    });
+    std::unordered_map<std::wstring, size_t> indexed;
+    for (size_t i = 0; i < result->items.size(); ++i) indexed.emplace(result->items[i].identity, i);
+    for (const auto& [id, edit] : state.edits) {
+        if (edit.revision <= result->revision || state.excluded.contains(id)) continue;
+        const auto found = indexed.find(id);
+        if (found == indexed.end()) {
+            if (!edit.rating_only) result->items.push_back({edit.track, id, {}});
+        } else if (edit.rating_only) result->items[found->second].track.rating = edit.track.rating;
+        else result->items[found->second].track = edit.track;
+    }
+    if (result->complete) {
+        std::erase_if(state.edits, [&](const auto& entry) { return entry.second.revision <= result->revision; });
+        std::erase_if(state.file_changes, [&](const auto& change) { return change.revision <= result->revision; });
+    }
+    state.items = std::move(result->items);
+    if (result->numbered_target) {
+        const auto target = playlists_.IndexOfSlot(*result->numbered_target);
+        if (target) {
+            auto& list = playlists_.At(*target);
+            std::set<size_t> removed;
+            for (size_t i = 0; i < list.Tracks().size(); ++i)
+                if (state.excluded.contains(MediaLibraryTrackIdentity(list.Tracks()[i]))) removed.insert(i);
+            if (*target == playlists_.ActiveIndex()) RemovePlaylistRowsPreservingView(removed);
+            else for (auto row = removed.rbegin(); row != removed.rend(); ++row) {
+                if (playing_playlist_index_ == target && current_) {
+                    if (*current_ == *row) DetachPlayingPlaylistItem();
+                    else if (*current_ > *row) --*current_;
+                }
+                list.Remove(*row);
+            }
+            std::unordered_map<std::wstring,size_t> existing;
+            for (size_t i=0; i<list.Tracks().size(); ++i)
+                existing.emplace(MediaLibraryTrackIdentity(list.Tracks()[i]),i);
+            for (const auto& item : state.items) {
+                if (state.excluded.contains(item.identity)) continue;
+                const auto found = existing.find(item.identity);
+                if (found != existing.end()) {
+                    auto track = item.track;
+                    track.rating = list.Tracks()[found->second].rating;
+                    list.SetTrack(found->second, std::move(track));
+                } else if (item.sources.empty()) {
+                    existing.emplace(item.identity,list.Tracks().size());
+                    list.Add(item.track);
+                }
+            }
+            playlists_.MarkDirty(*target);
+            if (*target == playlists_.ActiveIndex() && !state.shutting_down) RefreshPlaylist();
+        }
+    } else {
+        if (result->persistence_attempted) state.persistence_loaded = true;
+        if (state.persistence_loaded) {
+            state.persisted_tracks.clear();
+            state.persisted_tracks.reserve(state.items.size());
+            for (const auto& item : state.items)
+                if (!state.excluded.contains(item.identity)) state.persisted_tracks.push_back(item.track);
+        }
+        for (size_t row=0; row<media_library_playback_.Tracks().size(); ++row) {
+            const auto id = MediaLibraryTrackIdentity(media_library_playback_.Tracks()[row]);
+            const auto found = std::find_if(state.items.begin(),state.items.end(),
+                [&](const auto& item) { return item.identity == id; });
+            if (found != state.items.end() && !state.excluded.contains(id))
+                media_library_playback_.SetTrack(row,found->track);
+        }
+        settings_.library.valid = true;
+        if (!state.shutting_down && settings_.playlist.library_mode) {
+            InitializeMediaLibraryTree();
+
+        }
+        if (!state.shutting_down && media_library_startup_pending_ && state.persistence_loaded) {
+            media_library_startup_pending_ = false;
+            RestoreStartupPlayback();
+        }
+    }
+    if (!state.shutting_down && state.refresh_pending) StartMediaLibraryRefresh();
     return 0;
 }
 
@@ -1990,13 +2084,9 @@ bool PlayerWindow::HandleMediaLibraryTreeNotification(
                 include = true;
                 break;
             case MediaLibraryState::NodeKind::category:
-                // A category selection is the aggregate of its populated
-                // children; blank fields are not members of Artist/Album/
-                // Genre/Date, and the Rating root contains only rated items.
-                // Value/rating leaves below refine this same set.
-                include = node->key == "Rating"
-                    ? item.track.rating > 0
-                    : !MetadataValue(item.track, node->key).empty();
+                // 0048A44C creates an empty Rating CPlayList. Other parents
+                // pass an empty primary value to 004AF46A (0048A48A..0048A4C2).
+                include = node->key != "Rating" && MetadataValue(item.track, node->key).empty();
                 break;
             case MediaLibraryState::NodeKind::value:
                 include = _wcsicmp(MetadataValue(item.track, node->key).c_str(),
@@ -2084,6 +2174,52 @@ bool PlayerWindow::HandleMediaLibraryTreeNotification(
     return false;
 }
 
+bool PlayerWindow::RestoreMediaLibraryPlayback() {
+    if (!settings_.library.enabled || settings_.player.playing_file_name.empty()) return false;
+    if (!media_library_ || !media_library_->persistence_loaded) {
+        media_library_startup_pending_ = true;
+        StartMediaLibraryRefresh();
+        return true;
+    }
+    playlist::Track remembered;
+    remembered.path = settings_.player.playing_file_name;
+    remembered.subtrack = settings_.player.playing_file_subtrack;
+    const auto id = MediaLibraryTrackIdentity(remembered);
+    auto& state = *media_library_;
+    const auto live = std::find_if(state.items.begin(),state.items.end(),
+        [&](const auto& item) { return item.identity == id && !state.excluded.contains(id); });
+    if (live == state.items.end()) {
+        if (state.indexing || state.refresh_pending) {
+            media_library_startup_pending_ = true;
+            return true;
+        }
+        return false;
+    }
+    auto tracks = state.result_tracks;
+    const auto contains = [&](const auto& track) { return MediaLibraryTrackIdentity(track) == id; };
+    auto found = std::find_if(tracks.begin(),tracks.end(),contains);
+    if (found == tracks.end()) {
+        tracks.clear();
+        for (const auto& item : state.items)
+            if (!state.excluded.contains(item.identity)) tracks.push_back(item.track);
+        std::stable_sort(tracks.begin(),tracks.end(),[&](const auto& left,const auto& right) {
+            return LogicalCompare(PlaylistDisplayText(left),PlaylistDisplayText(right)) < 0;
+        });
+        found = std::find_if(tracks.begin(),tracks.end(),contains);
+    }
+    const auto plan = settings::MakeStartupPlaybackPlan(settings_);
+    const size_t row = static_cast<size_t>(found-tracks.begin());
+    media_library_playback_ = BuildMediaLibraryPlaybackSnapshot(tracks,row);
+    media_library_playback_active_ = true;
+    media_library_startup_pending_ = false;
+    SelectMediaLibraryPlaybackTrack(row,false);
+    if (plan.should_play && PlayCurrent() && plan.resume_position_ms > 0) {
+        audio_.Seek(std::chrono::milliseconds(plan.resume_position_ms));
+        settings_.player.playing_time = 0;
+    }
+    return true;
+}
+
 void PlayerWindow::ActivateMediaLibraryResult(size_t index,
                                                bool start_playback) {
     if (!media_library_ || index >= media_library_->result_tracks.size())
@@ -2097,6 +2233,7 @@ void PlayerWindow::ActivateMediaLibraryResult(size_t index,
     // Even when an item is shared with a numbered list, Next/Previous follows
     // this query's complete order rather than the source list's order.  Keep
     // the whole result as a transient playback owner outside PlaylistStore.
+    media_library_startup_pending_ = false;
     media_library_playback_ = BuildMediaLibraryPlaybackSnapshot(
         media_library_->result_tracks, index);
     media_library_playback_active_ = true;
@@ -2562,6 +2699,8 @@ bool PlayerWindow::HandleMediaLibraryCommand(UINT command) {
         return true;
     }
     if (command == 0x7fee) {
+        for (const auto& directory : settings_.library.directories)
+            if (!directory.path.empty()) QueueMediaLibraryDirectory(directory.path, directory.recursive);
         StartMediaLibraryRefresh();
         return true;
     }

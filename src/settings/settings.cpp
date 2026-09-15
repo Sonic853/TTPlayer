@@ -176,7 +176,7 @@ std::wstring HotKeyBindingText(const HotKeyBinding& binding) {
 MediaLibraryDirectory ParseMediaLibraryDirectory(std::wstring text) {
     MediaLibraryDirectory result;
     if(!text.empty() && text.front()==L'*') {
-        result.enabled=true;
+        result.recursive=true;
         text.erase(text.begin());
     }
     result.path=std::move(text);
@@ -186,7 +186,7 @@ MediaLibraryDirectory ParseMediaLibraryDirectory(std::wstring text) {
 std::wstring MediaLibraryDirectoryText(
     const MediaLibraryDirectory& directory) {
     std::wstring result=directory.path.wstring();
-    if(directory.enabled) result.insert(result.begin(),L'*');
+    if(directory.recursive) result.insert(result.begin(),L'*');
     return result;
 }
 

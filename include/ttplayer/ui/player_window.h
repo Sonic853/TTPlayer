@@ -401,6 +401,9 @@ private:
     void StartMediaLibraryRefresh();
     void PollMediaLibraryWorkers();
     void StartMediaLibraryMonitoring(bool scan_new_directories = false);
+    void QueueMediaLibraryDirectory(const std::filesystem::path& path, bool recursive);
+    size_t MediaLibraryMonitorPlaylist();
+    bool RestoreMediaLibraryPlayback();
     void ApplyMediaLibraryConfiguration();
     void ShutdownMediaLibrary();
     LRESULT ApplyMediaLibraryIndex(LPARAM result);
@@ -814,6 +817,7 @@ private:
     // owns their playback order but is intentionally outside PlaylistStore.
     playlist::Playlist media_library_playback_;
     bool media_library_playback_active_{};
+    bool media_library_startup_pending_{};
     // The decoder retains the opened CPlayItem independently of its source
     // list.  This full copy backs UI and replay after that row is detached;
     // current_ remains strictly a list index and is never forged as zero.

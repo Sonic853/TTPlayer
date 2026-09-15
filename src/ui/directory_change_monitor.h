@@ -8,6 +8,14 @@
 
 namespace ttplayer::ui::detail {
 
+struct DirectoryWatchPath {
+    std::filesystem::path path;
+    bool recursive{};
+};
+
+// Lost notifications, a newly opened watch, or a failed watch require a scan.
+inline constexpr DWORD kDirectoryRescan = 0x10000;
+
 struct DirectoryChangeNotification {
     std::uintptr_t generation{};
     DWORD action{};
@@ -36,7 +44,7 @@ public:
     DirectoryChangeMonitor& operator=(const DirectoryChangeMonitor&) = delete;
 
     bool Start(HWND receiver, UINT message,
-               std::span<const std::filesystem::path> directories);
+               std::span<const DirectoryWatchPath> directories);
     void Stop() noexcept;
 
     // Returns true only for a notification produced by the current worker.

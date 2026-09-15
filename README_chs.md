@@ -53,5 +53,6 @@ build/Release/TTPlayerRebuild.exe
 
 ## TODO List:
 
+- [ ] 鼠标在控件上的样式
 - [ ] 音乐窗（非优先计划，目前需要先完善本地功能）
 - [ ] 高 DPI 支持（目前受限于图片皮肤）

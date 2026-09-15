@@ -40,9 +40,11 @@ struct Track {
     // CPlayItem's arbitrary metadata bag (the TTBL 0x20 key/value segment).
     // Keep original spellings/order while lookups remain ASCII-insensitive.
     std::vector<std::pair<std::string, std::string>> metadata;
-    // Runtime decoder information used by %(Format). It is not part of the
-    // v5 TTBL item payload and is repopulated when sound information is read.
+    // TTBL v5 0x10: sample rate, channels, bits per sample, encoded bitrate.
     std::uint32_t sample_rate_hz{};
+    std::uint16_t channels{};
+    std::uint16_t bits_per_sample{};
+    bool operator==(const Track&) const = default;
 };
 
 enum class SortKey {
@@ -68,6 +70,7 @@ public:
     void Insert(size_t index, Track track);
     void InsertRange(size_t index, std::vector<Track> tracks);
     bool Remove(size_t index);
+    bool SetTrack(size_t index, Track track);
     void Clear();
     // Returns an old-index -> new-index map for callers which need to follow
     // item identity.  The native ListCtrl itself keeps selected/focused row

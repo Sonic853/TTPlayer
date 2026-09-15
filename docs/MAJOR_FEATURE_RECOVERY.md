@@ -110,10 +110,13 @@ waveOut/DirectSound 执行完整过渡。ASIO 的 unity 行为由原 vtable 证�
 - `0048A38E/0048A818/00483C59/004843CC`：查询、树菜单、命令和目录。
 
 重建版已实现库树、分类/查询结果、播放快照、评分、排序、复制、重命名、回收站
-删除、属性编辑、目录初扫和 `ReadDirectoryChangesW` 监视。后台扫描持有
-`PluginManager` 生命周期租约；匹配 AddIn 的文件通过原 reader metadata ABI，
-只有没有匹配 reader 的内建格式才使用 Shell property store。`MaxItemCount`
-仅是下一次 hash capacity hint，不截断结果。
+删除、属性编辑、目录初扫和 `ReadDirectoryChangesW` 监视。后台扫描通过有超时和
+取消边界的内嵌文件信息工作进程，统一读取内建格式与 AddIn 元数据；扫描提交
+合并较新的用户修改和文件事件。目录复选框控制是否包括子目录，未勾选仍监视
+该目录。`MaxItemCount` 仅是下一次 hash capacity hint，不截断结果。
+
+2026-09-16 的数据同步、启动恢复、目录故障恢复、分类父节点语义和 TTBL 详细
+字段修复及验证见 [MEDIA_LIBRARY_FIXES.md](MEDIA_LIBRARY_FIXES.md)。
 
 ## 6. 文件信息与标签编辑
 

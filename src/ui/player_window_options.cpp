@@ -4354,7 +4354,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             AddListText(list, static_cast<int>(index),
                         directory.path.wstring());
             ListView_SetCheckState(list, static_cast<int>(index),
-                                   directory.enabled);
+                                   directory.recursive);
         }
         if (list && ListView_GetItemCount(list) > 0)
             ListView_SetItemState(list, 0, LVIS_SELECTED | LVIS_FOCUSED,

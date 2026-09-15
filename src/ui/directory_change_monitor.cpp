@@ -33,22 +33,22 @@ struct DirectoryWatch {
     HANDLE event{};
     OVERLAPPED overlapped{};
     std::filesystem::path path;
-    std::array<unsigned char, 4096> buffer{};
+    bool recursive{};
+    bool pending{};
+    std::array<DWORD, 1024> buffer{};
 
     DirectoryWatch() = default;
     DirectoryWatch(const DirectoryWatch&) = delete;
     DirectoryWatch& operator=(const DirectoryWatch&) = delete;
-    DirectoryWatch(DirectoryWatch&& other) noexcept
-        : directory(std::exchange(other.directory, INVALID_HANDLE_VALUE)),
-          event(std::exchange(other.event, nullptr)),
-          overlapped(other.overlapped), path(std::move(other.path)),
-          buffer(other.buffer) {
-        overlapped.hEvent = event;
-    }
+    DirectoryWatch(DirectoryWatch&&) = delete;
     DirectoryWatch& operator=(DirectoryWatch&&) = delete;
     ~DirectoryWatch() {
         if (directory != INVALID_HANDLE_VALUE) {
-            CancelIoEx(directory, &overlapped);
+            if (pending) {
+                CancelIoEx(directory, &overlapped);
+                DWORD ignored{};
+                GetOverlappedResult(directory, &overlapped, &ignored, TRUE);
+            }
             CloseHandle(directory);
         }
         if (event) CloseHandle(event);
@@ -60,12 +60,13 @@ bool Arm(DirectoryWatch& watch) noexcept {
     watch.overlapped = {};
     watch.overlapped.hEvent = watch.event;
     // 0x13 == FILE_NOTIFY_CHANGE_FILE_NAME | DIRECTORY_NAME | LAST_WRITE,
-    // exactly the mask passed at 0041AD0D.  `TRUE` is the original recursive
-    // watch flag stored in OVERLAPPED::InternalHigh by 0041AC7B.
-    return ReadDirectoryChangesW(
+    // 0041AC7B stores the per-directory checkbox at object +0x18;
+    // 0041AD0D passes it as bWatchSubtree. Unchecked still watches this folder.
+    watch.pending = ReadDirectoryChangesW(
         watch.directory, watch.buffer.data(),
-        static_cast<DWORD>(watch.buffer.size()), TRUE, 0x13, nullptr,
+        static_cast<DWORD>(sizeof(watch.buffer)), watch.recursive, 0x13, nullptr,
         &watch.overlapped, nullptr) != FALSE;
+    return watch.pending;
 }
 
 void Notify(const std::shared_ptr<DirectoryChangeMonitor::Control>& control,
@@ -82,77 +83,72 @@ void Notify(const std::shared_ptr<DirectoryChangeMonitor::Control>& control,
 }
 
 void Run(std::shared_ptr<DirectoryChangeMonitor::Control> control,
-         std::vector<std::filesystem::path> directories) {
-    std::vector<DirectoryWatch> watches;
-    watches.reserve(directories.size());
-    for (const auto& path : directories) {
-        if (WaitForSingleObject(control->stop_event, 0) == WAIT_OBJECT_0)
-            return;
-        watches.emplace_back();
-        auto& watch = watches.back();
-        watch.path = path;
-        // 0041AC7B uses access 1, sharing 7, OPEN_EXISTING and
-        // FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED (0x42000000).
-        watch.directory = CreateFileW(
-            path.c_str(), FILE_LIST_DIRECTORY,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
-        if (watch.directory == INVALID_HANDLE_VALUE) {
-            watches.pop_back();
-            continue;
-        }
-        watch.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!watch.event || !Arm(watch)) {
-            watches.pop_back();
-            continue;
-        }
-    }
-    if (watches.empty()) return;
-
-    std::vector<HANDLE> waits;
-    waits.reserve(watches.size() + 1);
-    waits.push_back(control->stop_event);
-    for (const auto& watch : watches) waits.push_back(watch.event);
-
+         std::vector<DirectoryWatchPath> directories) {
+    // Keep OVERLAPPED and its buffer at a stable address while I/O is pending.
+    std::vector<std::unique_ptr<DirectoryWatch>> watches(directories.size());
+    ULONGLONG next_retry{};
     for (;;) {
+        if (WaitForSingleObject(control->stop_event, 0) == WAIT_OBJECT_0) return;
+        const auto now = GetTickCount64();
+        if (now >= next_retry) {
+            next_retry = now + 1000;
+            for (size_t i = 0; i < directories.size(); ++i) {
+                if (watches[i]) continue;
+                if (WaitForSingleObject(control->stop_event, 0) == WAIT_OBJECT_0) return;
+                auto watch = std::make_unique<DirectoryWatch>();
+                watch->path = directories[i].path;
+                watch->recursive = directories[i].recursive;
+                watch->directory = CreateFileW(watch->path.c_str(), FILE_LIST_DIRECTORY,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
+                if (watch->directory == INVALID_HANDLE_VALUE) continue;
+                watch->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                if (!watch->event || !Arm(*watch)) continue;
+                watches[i] = std::move(watch);
+                // Arm before scanning so changes during reconciliation are retained.
+                Notify(control, kDirectoryRescan, directories[i].path);
+            }
+        }
+        std::vector<HANDLE> waits{control->stop_event};
+        std::vector<size_t> indices;
+        for (size_t i = 0; i < watches.size(); ++i) {
+            if (!watches[i]) continue;
+            waits.push_back(watches[i]->event);
+            indices.push_back(i);
+        }
         const DWORD result = WaitForMultipleObjects(
-            static_cast<DWORD>(waits.size()), waits.data(), FALSE, INFINITE);
-        if (result == WAIT_OBJECT_0) return;
-        if (result < WAIT_OBJECT_0 + 1 ||
-            result >= WAIT_OBJECT_0 + waits.size()) return;
-        const size_t index = static_cast<size_t>(result - WAIT_OBJECT_0 - 1);
+            static_cast<DWORD>(waits.size()), waits.data(), FALSE, 1000);
+        if (result == WAIT_TIMEOUT) continue;
+        if (result == WAIT_OBJECT_0 || result == WAIT_FAILED) return;
+        if (result < WAIT_OBJECT_0 + 1 || result >= WAIT_OBJECT_0 + waits.size()) return;
+        const size_t index = indices[result - WAIT_OBJECT_0 - 1];
+        auto& watch = *watches[index];
         DWORD bytes{};
-        if (GetOverlappedResult(watches[index].directory,
-                                &watches[index].overlapped, &bytes, FALSE) &&
-            bytes >= sizeof(FILE_NOTIFY_INFORMATION)) {
+        const bool completed = GetOverlappedResult(watch.directory,
+            &watch.overlapped, &bytes, FALSE) != FALSE;
+        bool rescan = !completed || bytes < sizeof(FILE_NOTIFY_INFORMATION);
+        if (!rescan) {
             size_t offset{};
-            while (offset + offsetof(FILE_NOTIFY_INFORMATION, FileName) <=
-                   bytes) {
-                const auto* item = reinterpret_cast<const
-                    FILE_NOTIFY_INFORMATION*>(
-                        watches[index].buffer.data() + offset);
-                const size_t available = bytes - offset -
-                    offsetof(FILE_NOTIFY_INFORMATION, FileName);
-                if ((item->FileNameLength & 1U) != 0 ||
-                    item->FileNameLength > available) break;
-                std::wstring relative(item->FileName,
-                    item->FileNameLength / sizeof(wchar_t));
-                Notify(control, item->Action,
-                       watches[index].path / relative);
+            while (offset + offsetof(FILE_NOTIFY_INFORMATION, FileName) <= bytes) {
+                const auto* item = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(
+                    reinterpret_cast<const unsigned char*>(watch.buffer.data()) + offset);
+                const size_t available = bytes - offset - offsetof(FILE_NOTIFY_INFORMATION, FileName);
+                if ((item->FileNameLength & 1U) || item->FileNameLength > available) {
+                    rescan = true; break;
+                }
+                Notify(control, item->Action, watch.path / std::wstring(
+                    item->FileName, item->FileNameLength / sizeof(wchar_t)));
                 if (item->NextEntryOffset == 0) break;
-                if (item->NextEntryOffset > bytes - offset) break;
+                if (item->NextEntryOffset > bytes - offset ||
+                    item->NextEntryOffset < offsetof(FILE_NOTIFY_INFORMATION, FileName)) {
+                    rescan = true; break;
+                }
                 offset += item->NextEntryOffset;
             }
         }
-        if (!Arm(watches[index])) {
-            // A removed/unmounted directory makes its event permanently
-            // unusable.  Keep the remaining native handles alive by parking
-            // this slot on the stop event; the subsequent full index rebuild
-            // will reconcile the missing directory.
-            Notify(control, FILE_ACTION_MODIFIED, watches[index].path);
-            return;
-        }
+        const bool armed = Arm(watch);
+        if (rescan || !armed) Notify(control, kDirectoryRescan, watch.path);
+        if (!armed) watches[index].reset(); // Retry only this directory; retain the others.
     }
 }
 
@@ -162,7 +158,7 @@ DirectoryChangeMonitor::~DirectoryChangeMonitor() { Stop(); }
 
 bool DirectoryChangeMonitor::Start(
     HWND receiver, UINT message,
-    std::span<const std::filesystem::path> directories) {
+    std::span<const DirectoryWatchPath> directories) {
     Stop();
     if (!receiver || message == 0 || directories.empty()) return false;
     auto control = std::make_shared<Control>();
@@ -174,10 +170,10 @@ bool DirectoryChangeMonitor::Start(
     control->generation = next_generation.fetch_add(
         1, std::memory_order_relaxed);
 
-    std::vector<std::filesystem::path> paths;
+    std::vector<DirectoryWatchPath> paths;
     paths.reserve(std::min<size_t>(directories.size(), 63));
     for (const auto& path : directories) {
-        if (path.empty()) continue;
+        if (path.path.empty()) continue;
         paths.push_back(path);
         if (paths.size() == 63) break;
     }
