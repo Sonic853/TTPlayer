@@ -53,7 +53,9 @@ configuration is bundled in the GitHub Actions artifact.
 
 The CMake target remains `ttplayer_rebuild` for build-command compatibility.
 Its output is `TTPlayerRebuild.exe`, with `TTPlayerRebuild.pdb` when generated.
-The manual workflow's artifact collection and SHA256SUMS use these names.
+The manual workflow packages the EXE as `TTPlayerRebuild-<version>.zip` or
+`TTPlayerRebuild-XP-Win7-<version>.zip`; the executable name inside each ZIP
+stays `TTPlayerRebuild.exe`. The outer SHA256SUMS lists the two ZIP filenames.
 Self-hosted decoder/output/tag workers keep using the running executable path;
 they do not acquire a dependency on a second EXE with the previous filename.
 

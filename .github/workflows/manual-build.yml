@@ -46,9 +46,10 @@ jobs:
 
       - name: Validate release configuration and capture Beijing date
         id: release_date
-        if: inputs.release_a_version
+        env:
+          PUBLISH_RELEASE: ${{ inputs.release_a_version }}
         run: |
-          if ($env:BUILD_CONFIGURATION -ne 'Release') {
+          if ($env:PUBLISH_RELEASE -eq 'true' -and $env:BUILD_CONFIGURATION -ne 'Release') {
             throw 'Release a Version requires the Release build configuration.'
           }
           $releaseDate = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString(
@@ -96,29 +97,41 @@ jobs:
         run: cmake --build build-legacy --config Release --target ttplayer_rebuild --parallel 4
 
       - name: Prepare artifact
+        env:
+          PACKAGE_VERSION: ${{ steps.release_date.outputs.value }}
         run: |
+          if ($env:PACKAGE_VERSION -notmatch '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$') {
+            throw 'Missing Beijing build date for package names.'
+          }
           $output = Join-Path 'build' $env:BUILD_CONFIGURATION
           $executable = Join-Path $output 'TTPlayerRebuild.exe'
           if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
             throw 'The player executable was not produced.'
           }
           New-Item -ItemType Directory -Path artifact | Out-Null
-          Copy-Item -LiteralPath $executable -Destination artifact
-          Copy-Item -LiteralPath LICENSE -Destination artifact
-          Copy-Item -LiteralPath docs/BUILDING.md -Destination artifact
-          ./cmake/package_legacy.ps1 -BuildDirectory build-legacy -Destination artifact/TTPlayerRebuild-XP-Win7.zip
+          $modernName = "TTPlayerRebuild-$env:PACKAGE_VERSION.zip"
+          $legacyName = "TTPlayerRebuild-XP-Win7-$env:PACKAGE_VERSION.zip"
+          $modernArchive = Join-Path artifact $modernName
+          $legacyArchive = Join-Path artifact $legacyName
+          $package = Join-Path build modern-package
+          New-Item -ItemType Directory -Path $package | Out-Null
+          Copy-Item -LiteralPath $executable, LICENSE, docs/BUILDING.md -Destination $package
+          $executableHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$executableHash  TTPlayerRebuild.exe" | Set-Content -LiteralPath (Join-Path $package SHA256SUMS.txt) -Encoding utf8
+          Compress-Archive -Path (Join-Path $package '*') -DestinationPath $modernArchive
+          ./cmake/package_legacy.ps1 -BuildDirectory build-legacy -Destination $legacyArchive
           $symbols = Join-Path $output 'TTPlayerRebuild.pdb'
           if (Test-Path -LiteralPath $symbols) {
             Copy-Item -LiteralPath $symbols -Destination artifact
           }
-          $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  TTPlayerRebuild.exe" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
-          $legacyHash = (Get-FileHash -LiteralPath artifact/TTPlayerRebuild-XP-Win7.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$legacyHash  TTPlayerRebuild-XP-Win7.zip" | Add-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
+          $hash = (Get-FileHash -LiteralPath $modernArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $legacyHash = (Get-FileHash -LiteralPath $legacyArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $modernName`n$legacyHash  $legacyName" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
           [ordered]@{
             commit = $env:GITHUB_SHA
             ref = $env:GITHUB_REF
             configuration = $env:BUILD_CONFIGURATION
+            package_version = $env:PACKAGE_VERSION
             architecture = 'x86'
             generator = 'Visual Studio 18 2026'
             legacy_configuration = 'Release'
@@ -176,7 +189,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_INSTALL_NOTES: |
             使用该程序前确保本地已安装有 5.7.9 版本的千千静听，请按照以下步骤安装重建版：
-            1. Windows XP / Windows 7 下载并解压 TTPlayerRebuild-XP-Win7.zip；现代 Windows 下载 TTPlayerRebuild.exe。
+            1. Windows XP / Windows 7 下载并解压 TTPlayerRebuild-XP-Win7-{version}.zip；现代 Windows 下载并解压 TTPlayerRebuild-{version}.zip。
             2. 打开开始菜单。
             3. 打开所有程序——千千静听——右键千千静听程序图标。
             4. 在菜单选择“打开文件位置”
@@ -187,13 +200,17 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $info = Get-Content -LiteralPath artifact/build-info.json -Raw | ConvertFrom-Json
           if ($info.commit -ne $env:GITHUB_SHA -or $info.configuration -ne 'Release' -or
-              $info.legacy_configuration -ne 'Release') {
+              $info.legacy_configuration -ne 'Release' -or $info.package_version -cne $env:RELEASE_DATE) {
             throw 'The downloaded artifact does not match this Release build.'
           }
-          $hash = (Get-FileHash -LiteralPath artifact/TTPlayerRebuild.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          $legacyHash = (Get-FileHash -LiteralPath artifact/TTPlayerRebuild-XP-Win7.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $modernName = "TTPlayerRebuild-$($info.package_version).zip"
+          $legacyName = "TTPlayerRebuild-XP-Win7-$($info.package_version).zip"
+          $modernArchive = "artifact/$modernName"
+          $legacyArchive = "artifact/$legacyName"
+          $hash = (Get-FileHash -LiteralPath $modernArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $legacyHash = (Get-FileHash -LiteralPath $legacyArchive -Algorithm SHA256).Hash.ToLowerInvariant()
           $expectedHash = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw).Trim()
-          $actualHashes = "$hash  TTPlayerRebuild.exe`n$legacyHash  TTPlayerRebuild-XP-Win7.zip"
+          $actualHashes = "$hash  $modernName`n$legacyHash  $legacyName"
           if (($expectedHash -replace "`r", '') -cne $actualHashes) { throw 'Player SHA-256 verification failed.' }
 
           function Read-VersionTag([string]$name) {
@@ -224,16 +241,27 @@ jobs:
             if ($sameDay[0].Patch -eq [long]::MaxValue) { throw 'Version patch number is exhausted.' }
             $version += 'p' + ($sameDay[0].Patch + 1).ToString([Globalization.CultureInfo]::InvariantCulture)
           }
+          # The final patch number is known only inside this publication slot.
+          # Renaming preserves the verified ZIP bytes; update the outer manifest.
+          $modernName = "TTPlayerRebuild-$version.zip"
+          $legacyName = "TTPlayerRebuild-XP-Win7-$version.zip"
+          if ($version -cne $info.package_version) {
+            Rename-Item -LiteralPath $modernArchive -NewName $modernName
+            Rename-Item -LiteralPath $legacyArchive -NewName $legacyName
+          }
+          $modernArchive = "artifact/$modernName"
+          $legacyArchive = "artifact/$legacyName"
+          "$hash  $modernName`n$legacyHash  $legacyName" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
           # Compare real version tags, sorted by date and numeric patch, never API ordering.
           $previous = $versions | Sort-Object Date, Patch -Descending | Select-Object -First 1
           $repoUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
           $logUrl = if ($previous) { "$repoUrl/compare/$($previous.Name)...$version" }
                     else { "$repoUrl/commits/$version" }
-          $notes = "**完整更新日志**: $logUrl`n`n" + $env:RELEASE_INSTALL_NOTES
+          $notes = "**完整更新日志**: $logUrl`n`n" + $env:RELEASE_INSTALL_NOTES.Replace('{version}', $version)
           Write-Output "Publishing $version; changelog: $logUrl"
           $notes | Set-Content -LiteralPath artifact/release-notes.md -Encoding utf8
           # Create only: never edit an existing release or overwrite its assets.
-          gh release create "$version" artifact/TTPlayerRebuild.exe artifact/TTPlayerRebuild-XP-Win7.zip artifact/SHA256SUMS.txt `
+          gh release create "$version" $modernArchive $legacyArchive artifact/SHA256SUMS.txt `
             --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" `
             --title "$version" --notes-file artifact/release-notes.md
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed; existing releases are not overwritten.' }

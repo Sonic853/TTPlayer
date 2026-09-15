@@ -1,6 +1,6 @@
 # XP / Windows 7 兼容版
 
-下载 `TTPlayerRebuild-XP-Win7.zip`，解压后把其中的 `TTPlayerRebuild.exe`
+下载 `TTPlayerRebuild-XP-Win7-版本号.zip`，解压后把其中的 `TTPlayerRebuild.exe`
 放入已安装的千千静听 5.7.9 目录，与 `TTPlayer.exe`、`ttpcomm.dll`、
 `ttpres.dll`、`AddIn`、`Skin` 放在一起。运行目录内的 `TTPlayerRebuild.exe`。
 压缩包不包含原版插件和个人配置；设置文件仍为 `TTPlayerRebuild.xml`。
@@ -9,8 +9,8 @@
 
 | 附件 | 适用系统 | 运行库 |
 | --- | --- | --- |
-| `TTPlayerRebuild.exe` | 现代 Windows（建议 Windows 10 / 11） | 当前 MSVC 运行库 |
-| `TTPlayerRebuild-XP-Win7.zip` 内的 EXE | Windows XP SP3 / Windows 7，也可用于更新系统 | VC-LTL 5.3.1 + YY-Thunks 1.2.2，使用系统 `msvcrt.dll` |
+| `TTPlayerRebuild-版本号.zip` 内的 EXE | 现代 Windows（建议 Windows 10 / 11） | 当前 MSVC 运行库 |
+| `TTPlayerRebuild-XP-Win7-版本号.zip` 内的 EXE | Windows XP SP3 / Windows 7，也可用于更新系统 | VC-LTL 5.3.1 + YY-Thunks 1.2.2，使用系统 `msvcrt.dll` |
 
 两者均为 x86。兼容版保留现代系统上的可用功能；缺少组件时使用后备实现：
 

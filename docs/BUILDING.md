@@ -11,6 +11,8 @@
 3. 选择分支及配置：`Release`（默认）、`RelWithDebInfo` 或 `Debug`。
 4. 构建完成后，从该次运行的 **Artifacts** 下载
    `TTPlayer-Windows-x86-配置-运行编号`，产物保留 14 天。
+   其中包含 `TTPlayerRebuild-yyyy.MM.dd.zip` 和
+   `TTPlayerRebuild-XP-Win7-yyyy.MM.dd.zip`，日期取构建开始时的北京时间。
 
 如需发布，选择 `Release` 配置并勾选 **Release a Version**，不需要输入版本号。
 在构建任务开始时记录北京时间（UTC+08:00）的日期，版本号和 Release 标题使用
@@ -19,9 +21,13 @@
 草稿 Release 也占用版本号。发布任务串行执行，在获得发布名额后重新分页读取全部
 tag/Release；新标签始终指向本次构建提交，不移动旧标签、不覆盖已有 Release。
 Debug / RelWithDebInfo 仍可只构建，不用于发布；每次工作流也会额外构建旧系统 Release 版。
-附件为现代版 `TTPlayerRebuild.exe`、旧系统版 `TTPlayerRebuild-XP-Win7.zip` 与
-包含两者校验值的 `SHA256SUMS.txt`，原 Actions 产物也会保留。
-**XP / Win7 请下载 ZIP 并使用其中的 EXE**；详见 [兼容版说明](LEGACY_WINDOWS.md)。
+Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
+`TTPlayerRebuild-XP-Win7-版本号.zip` 与包含两个 ZIP 校验值的 `SHA256SUMS.txt`。
+例如发布 `2026.09.05p1` 时，两个附件分别为 `TTPlayerRebuild-2026.09.05p1.zip`、
+`TTPlayerRebuild-XP-Win7-2026.09.05p1.zip`。发布步骤在分配最终版本号后重命名 ZIP，
+同步更新校验文件和正文下载说明；原 Actions 构建产物仍保留构建日期名称。
+两种 ZIP 解压后的程序名均为 `TTPlayerRebuild.exe`。
+**XP / Win7 请使用名称中带 XP-Win7 的包**；详见 [兼容版说明](LEGACY_WINDOWS.md)。
 完整更新日志链接自动使用仓库中最近的版本 tag 与本次新 tag 对比，例如
 `compare/2026.09.05...2026.09.05p1`。历史版本 tag 必须符合 `yyyy.MM.dd` 或
 `yyyy.MM.ddpN`，按日期和数值补丁号排序（`p10` 晚于 `p2`），不依赖 API 返回顺序。
@@ -30,6 +36,7 @@ Debug / RelWithDebInfo 仍可只构建，不用于发布；每次工作流也会
 
 工作流会先运行 `cmake/test_manual_release.ps1`，离线检查北京时间边界、同日补丁号、
 动态对比链接、安装说明和模拟发布保护逻辑，包括两个附件的 SHA-256 和 Release 配置。
+同时用隔离目录实际打包、解压两个版本，检查 ZIP 内容、版本化文件名及内外校验文件。
 本地也可运行该脚本；测试不调用远程 API，不创建标签或 Release。
 
 工作流必须先存在于默认分支，手动运行入口才会显示，见
@@ -56,7 +63,9 @@ VS 2026 生成器要求 CMake 4.2 或更新版本，Runner 已提供相应工具
 修改工作流后，请提交并在 **Run workflow** 中选择含修复的分支发起新运行；
 直接 **Re-run jobs** 重跑旧失败记录仍使用旧提交中的工作流。
 
-产物包含 EXE、许可证、本说明、SHA-256 校验值、提交信息，以及生成时的 PDB。
+现代版 ZIP 包含 EXE、许可证、本说明和 EXE 的 SHA-256 校验值；兼容版 ZIP
+另附兼容说明、导入报告及依赖许可。Actions 产物还包含两个 ZIP 的校验文件、
+提交和构建信息，以及生成时的 PDB。
 **这不是包含原版运行依赖的安装包**：请把 `TTPlayerRebuild.exe` 放入已有
 TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一起使用。
 不会上传原版 DLL、编码器、歌曲、播放列表或 `TTPlayerRebuild.xml` 等个人配置。
