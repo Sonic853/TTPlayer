@@ -107,6 +107,18 @@ struct PackedRuntimeOption {
     return !stop_when_fail;
 }
 
+// FUN_0045AD86 preserves three private reader HRESULTs before falling back
+// to the source's local/network classification. Never parse diagnostics.
+[[nodiscard]] constexpr UINT PlaybackErrorResource(
+    HRESULT result, bool network) noexcept {
+    switch (static_cast<std::uint32_t>(result)) {
+    case 0x8004006fU: return 0x8290;
+    case 0x80040070U: return 0x828f;
+    case 0x80040071U: return 0x8291;
+    default: return network ? 0x8291 : 0x828e;
+    }
+}
+
 // SnapWindows and TitleSlideInterval store their checkbox in bit 16 and the
 // edit value in the low WORD (FUN_00491E98/FUN_0046228D).
 [[nodiscard]] constexpr PackedRuntimeOption DecodePackedRuntimeOption(

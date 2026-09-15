@@ -169,6 +169,7 @@ public:
     [[nodiscard]] virtual AudioFormat DisplayFormat() const = 0;
     [[nodiscard]] virtual std::chrono::milliseconds Duration() const = 0;
     [[nodiscard]] virtual std::wstring Error() const = 0;
+    [[nodiscard]] virtual HRESULT ErrorResult() const { return E_FAIL; }
     [[nodiscard]] virtual AudioMetadata Metadata() const { return {}; }
 };
 
@@ -243,6 +244,7 @@ public:
         return std::chrono::milliseconds(duration_ms_.load());
     }
     [[nodiscard]] std::wstring LastError() const;
+    [[nodiscard]] HRESULT LastErrorResult() const;
     // Successful fallback is intentionally separate from LastError: choosing
     // an unavailable/unsupported legacy backend must not make playback look
     // failed, but callers and diagnostic probes still need an audit trail.
@@ -281,7 +283,7 @@ private:
     void PublishVisualization(VisualizationSamples samples);
     void ClearVisualization();
     void RecordDiagnostic(std::wstring message);
-    void SetError(std::wstring message);
+    void SetError(std::wstring message, HRESULT result = E_FAIL);
 
     std::atomic<PlaybackState> state_{PlaybackState::stopped};
     std::atomic<int64_t> position_ms_{};
@@ -295,6 +297,7 @@ private:
     std::condition_variable fade_condition_;
     bool open_complete_{};
     std::wstring error_;
+    HRESULT error_result_{S_OK};
     std::wstring diagnostic_;
     AudioFormat format_{};
     AudioMetadata metadata_{};

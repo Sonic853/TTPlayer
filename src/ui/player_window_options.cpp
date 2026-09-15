@@ -5911,7 +5911,7 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
         }
         ApplyOptionsRuntime();
         if (output_restart != OutputRestartState::none &&
-            PlayCurrent(false)) {
+            PlayCurrent()) {
             audio_.RestoreAfterOutputRestart(
                 output_restart_position,
                 output_restart == OutputRestartState::paused);
@@ -5934,7 +5934,7 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
     if ((mask & 0x0400U) != 0) ApplyOptionsRuntime(260);
     if ((mask & 0x4000U) != 0) ApplyOptionsRuntime(385);
     if (output_restart != OutputRestartState::none &&
-        PlayCurrent(false)) {
+        PlayCurrent()) {
         audio_.RestoreAfterOutputRestart(
             output_restart_position,
             output_restart == OutputRestartState::paused);

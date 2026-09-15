@@ -2244,14 +2244,7 @@ void PlayerWindow::ReloadApplicationIcons() {
 
 bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
     instance_ = instance;
-    const HMODULE resources = ResourceModule();
-    display_title_ = LoadResourceText(resources, 0x80);
-    const auto version = LoadResourceText(resources, 0x8299);
-    if (!version.empty()) {
-        if (!display_title_.empty()) display_title_ += L" ";
-        display_title_ += version;
-    }
-    if (display_title_.empty()) display_title_ = L"TTPlayer";
+    display_title_ = DefaultPlayerTitle();
     ReloadApplicationIcons();
     WNDCLASSEXW type{sizeof(type)};
     // Runtime GetClassLongW(GCL_STYLE) on the original class is exactly 0x8:
@@ -3008,6 +3001,28 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             PollCloseAudioFade();
         } else if (wparam == kSkinMenuToolTipTimer) {
             ShowQueuedSkinMenuToolTip();
+        } else if (wparam == kPlaybackErrorTimer) {
+            // A timer message queued before a retry must not expire the new notice.
+            if (!playback_error_text_.empty() && GetTickCount64() -
+                playback_error_started_tick_ < kPlaybackErrorDurationMs) return 0;
+            KillTimer(window_, kPlaybackErrorTimer);
+            if (!playback_error_text_.empty() && !playback_source_open_) {
+                playback_error_text_.clear();
+                // FUN_0046010E restores DAT_00547500 and clears the status.
+                display_title_ = DefaultPlayerTitle();
+                RebuildSkinInfoItems(false);
+                ResetSkinInfoScroll();
+                if (title_) SetWindowTextW(title_, display_title_.c_str());
+                RefreshPlaybackUi();
+            }
+        } else if (wparam == kFailedAdvanceTimer) {
+            if (pending_failed_advance_ && GetTickCount64() -
+                playback_error_started_tick_ < kFailedAdvanceDelayMs) return 0;
+            KillTimer(window_, kFailedAdvanceTimer);
+            if (pending_failed_advance_ && !close_after_skin_window_fade_) {
+                pending_failed_advance_ = false;
+                AdvanceAfterNaturalEnd();
+            }
         } else if (wparam == kInfoItemTimer || wparam == kInfoTransitionTimer ||
             wparam == kInfoScrollTimer) {
             AdvanceSkinInfoScroll(static_cast<UINT_PTR>(wparam));
@@ -3033,7 +3048,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             if (pending_natural_play_ &&
                 GetTickCount64() >= pending_natural_play_tick_) {
                 pending_natural_play_ = false;
-                static_cast<void>(PlayCurrent(false));
+                static_cast<void>(PlayCurrent());
                 return 0;
             }
             const auto state = audio_.State();
@@ -3050,6 +3065,12 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                 return 0;
             }
             if (state == audio::PlaybackState::failed) {
+                // An already-open decoder can also fail while reading.
+                // Publish once on the transition, never rearm on each UI tick.
+                if (playback_was_active_) {
+                    const auto* track = PlaybackTrackForUi();
+                    ShowAudioError(track ? track->path : std::filesystem::path{});
+                }
                 playback_was_active_ = false;
                 playback_source_open_ = false;
                 opened_track_.reset();
@@ -3058,11 +3079,6 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                 // failed source, but CPlayList +0x1c remains the requested
                 // row and continues to gate later if-idle imports.
                 ClearPersistedPlaybackIdentity();
-                if (pending_failed_advance_) {
-                    pending_failed_advance_ = false;
-                    AdvanceAfterNaturalEnd();
-                    return 0;
-                }
             }
             playback_was_active_ = state == audio::PlaybackState::opening ||
                                    state == audio::PlaybackState::playing ||
@@ -3073,6 +3089,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         return 0;
     case WM_CLOSE:
         if (close_after_skin_window_fade_) return 0;
+        ClearAudioError();
         CompleteSkinWindowFadeForReplacement();
         if (!window_ || !IsWindow(window_)) return 0;
         LeaveFullScreen();
@@ -3155,6 +3172,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         RevokeFileDropTarget(window_);
         StopVisualWorker();
         KillTimer(window_, kUiTimer);
+        ClearAudioError();
         KillTimer(window_, kInfoItemTimer);
         KillTimer(window_, kInfoTransitionTimer);
         KillTimer(window_, kInfoScrollTimer);
@@ -3715,10 +3733,11 @@ bool PlayerWindow::IsSkinElementChecked(std::wstring_view name) const noexcept {
 std::wstring PlayerWindow::PlaybackStatusText() const {
     if (!equalizer_tracking_status_.empty())
         return equalizer_tracking_status_;
+    if (!playback_error_text_.empty()) return ResourceText(0x8285);
     switch (audio_.State()) {
     case audio::PlaybackState::playing: return ResourceText(0x81b9);
     case audio::PlaybackState::paused: return ResourceText(0x81ba);
-    case audio::PlaybackState::failed: return ResourceText(0x8285);
+    case audio::PlaybackState::failed: return {};
     case audio::PlaybackState::stopped:
         return PlaybackTrackForUi() ? ResourceText(0x81bb) : std::wstring{};
     case audio::PlaybackState::opening: return L"";
@@ -5734,8 +5753,7 @@ void PlayerWindow::RefreshPlaybackUi() {
             try { current_line = core::Utf8ToWide(lyrics_.lines[*line].text); }
             catch (const std::exception&) {}
         } else if (lyrics_.lines.empty()) {
-            if (const auto* track = PlaybackTrackForUi())
-                current_line = DisplayName(*track);
+            current_line = LyricFallbackText();
         }
         if (lyric_control_) {
             SetWindowTextW(lyric_control_, current_line.c_str());
@@ -5743,7 +5761,8 @@ void PlayerWindow::RefreshPlaybackUi() {
                 InvalidateRect(lyric_control_, nullptr, FALSE);
         }
     }
-    desktop_lyrics_.SetFallbackText(current_line);
+    desktop_lyrics_.SetFallbackText(lyrics_.lines.empty()
+        ? LyricFallbackText(true) : current_line);
     desktop_lyrics_.UpdatePlayback(
         audio_.Position(), audio_.State() == audio::PlaybackState::playing);
     UpdateDiscordPresence();
@@ -5816,6 +5835,10 @@ void PlayerWindow::RotateMainWindowCaption() {
 
 void PlayerWindow::RebuildSkinInfoItems(bool include_audio_details) {
     info_items_.clear();
+    if (!playback_error_text_.empty()) {
+        info_items_.push_back(playback_error_text_);
+        return;
+    }
     info_items_.push_back(display_title_);
     const auto* playback_track = PlaybackTrackForUi();
     if (!include_audio_details || !playback_track) return;
@@ -5883,7 +5906,7 @@ void PlayerWindow::StartSkinInfoItem() {
     info_scroll_direction_ = 0;
     info_scroll_hold_ticks_ = 0;
     info_vertical_offset_ = 0;
-    if (!skin_ || info_items_.empty()) return;
+    if (!skin_ || info_items_.empty() || !playback_error_text_.empty()) return;
     if (info_item_index_ >= info_items_.size()) info_item_index_ = 0;
     const auto* info = FindActiveSkinElement(L"info");
     if (!info) return;
@@ -5922,7 +5945,7 @@ void PlayerWindow::StartSkinInfoItem() {
 }
 
 void PlayerWindow::AdvanceSkinInfoScroll(UINT_PTR timer) {
-    if (!window_ || !skin_ || info_items_.empty()) {
+    if (!window_ || !skin_ || info_items_.empty() || !playback_error_text_.empty()) {
         if (window_) KillTimer(window_, timer);
         return;
     }
@@ -5986,7 +6009,9 @@ void PlayerWindow::AdvanceSkinInfoScroll(UINT_PTR timer) {
     InvalidateRect(window_, &info->bounds, FALSE);
 }
 
-bool PlayerWindow::PlayCurrent(bool report_error) {
+bool PlayerWindow::PlayCurrent() {
+    // Both explicit and automatic requests use the same nonmodal notice.
+    ClearAudioError();
     if (natural_completion_dispatch_) {
         // Playback/@TracksInterval is expressed in seconds by dialog 259.
         // Defer only the actual decoder request: OnPlayComplete still chooses
@@ -6029,9 +6054,8 @@ bool PlayerWindow::PlayCurrent(bool report_error) {
         // FUN_0047FEA3:0047FF9E publishes +0x1c through 0047FB0C even
         // when the synchronous player request reports failure.
         ClearPersistedPlaybackIdentity();
-        pending_failed_advance_ = ShouldAdvanceAfterPlaybackFailure(
-            settings_.playback.stop_when_fail);
-        if (report_error && settings_.playback.stop_when_fail) ShowAudioError();
+        playback_was_active_ = false;
+        ShowAudioError(requested_track.path);
         return false;
     }
     // CSettings_SerializeXml persists these adjacent Player fields at
@@ -6184,6 +6208,7 @@ void PlayerWindow::SelectTrackFrom(size_t playlist_index, size_t index,
                                    bool start_playback) {
     if (playlist_index >= playlists_.Size() ||
         index >= playlists_.At(playlist_index).Tracks().size()) return;
+    ClearAudioError();
     media_library_playback_active_ = false;
     media_library_playback_.Clear();
     playing_playlist_index_ = playlist_index;
@@ -6314,7 +6339,7 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
     const auto restart = [this, source, &list]() {
         if (const auto playing = list.PlayingRow()) current_ = *playing;
         playing_playlist_index_ = source;
-        static_cast<void>(PlayCurrent(false));
+        static_cast<void>(PlayCurrent());
     };
     const auto exit_fullscreen_only = [this]() {
         if (fullscreen_mode_ != 0) LeaveFullScreen();
@@ -6382,7 +6407,7 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
             return;
         }
         if (switch_list(false)) {
-            static_cast<void>(PlayCurrent(false));
+            static_cast<void>(PlayCurrent());
             return;
         }
         Stop();
@@ -6396,7 +6421,7 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
             return;
         }
         if (switch_list(true)) {
-            static_cast<void>(PlayCurrent(false));
+            static_cast<void>(PlayCurrent());
             return;
         }
         Stop();
@@ -6419,7 +6444,7 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
             auto& target_list = playlists_.At(*target);
             if (!target_list.Tracks().empty()) {
                 current_ = 0;
-                static_cast<void>(PlayCurrent(false));
+                static_cast<void>(PlayCurrent());
                 return;
             }
         }
@@ -6442,19 +6467,62 @@ void PlayerWindow::Stop() {
     playback_source_open_ = false;
     natural_completion_dispatch_ = false;
     pending_natural_play_ = false;
-    pending_failed_advance_ = false;
+    ClearAudioError();
     audio_.StopWithFade();
     UpdateVisualFrame();
     RefreshPlaybackUi();
 }
 
-void PlayerWindow::ShowAudioError() const {
-    // The decoder's internal diagnostic is not a UI string.  The original
-    // maps an ordinary open failure to ttpres.dll string 0x828e (with the
-    // neighbouring 0x828f/0x8290/0x8291 reserved for specific engine error
-    // codes) before presenting it to the user.
-    const auto message = ResourceText(0x828e);
-    MessageBoxW(window_, message.c_str(), ResourceText(0x80).c_str(),
-                MB_OK | MB_ICONERROR);
+std::wstring PlayerWindow::DefaultPlayerTitle() const {
+    auto title = ResourceText(0x80);
+    const auto version = ResourceText(0x8299);
+    if (!title.empty() && !version.empty()) title += L" ";
+    title += version;
+    return title.empty() ? L"TTPlayer" : title;
+}
+
+std::wstring PlayerWindow::LyricFallbackText(bool desktop) const {
+    if (const auto* track = PlaybackTrackForUi()) return DisplayName(*track);
+    // 0044A0E8 uses the versioned title for LyricCtrl, the slogan for DeskLrc.
+    if (!desktop) return DefaultPlayerTitle();
+    auto title = ResourceText(0x80);
+    const auto slogan = ResourceText(0x86);
+    if (!title.empty() && !slogan.empty()) title += L" ";
+    title += slogan;
+    return title.empty() ? DefaultPlayerTitle() : title;
+}
+
+void PlayerWindow::ClearAudioError() {
+    if (window_) {
+        KillTimer(window_, kPlaybackErrorTimer);
+        KillTimer(window_, kFailedAdvanceTimer);
+    }
+    const bool had_error = !playback_error_text_.empty();
+    playback_error_text_.clear();
+    pending_failed_advance_ = false;
+    if (had_error) {
+        RebuildSkinInfoItems(false);
+        ResetSkinInfoScroll();
+        if (title_) SetWindowTextW(title_, display_title_.c_str());
+    }
+}
+
+void PlayerWindow::ShowAudioError(const std::filesystem::path& path) {
+    ClearAudioError();
+    // FUN_0045AD86 writes the localized reason into CScrollingStatic and
+    // stops all three animation timers; it does not open a message box.
+    playback_error_text_ = ResourceText(PlaybackErrorResource(audio_.LastErrorResult(),
+        audio::AudioEngine::IsNetworkMediaLocation(path)));
+    playback_error_started_tick_ = GetTickCount64();
+    RebuildSkinInfoItems(false);
+    ResetSkinInfoScroll();
+    if (title_) SetWindowTextW(title_, playback_error_text_.c_str());
+    pending_failed_advance_ = ShouldAdvanceAfterPlaybackFailure(settings_.playback.stop_when_fail);
+    if (window_) {
+        SetTimer(window_, kPlaybackErrorTimer, kPlaybackErrorDurationMs, nullptr);
+        if (pending_failed_advance_)
+            SetTimer(window_, kFailedAdvanceTimer, kFailedAdvanceDelayMs, nullptr);
+    }
+    RefreshPlaybackUi();
 }
 } // namespace ttplayer::ui

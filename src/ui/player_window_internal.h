@@ -99,6 +99,12 @@ constexpr UINT kLyricVerticalIntervalMs = 50;
 constexpr UINT_PTR kInfoItemTimer = 7;
 constexpr UINT_PTR kInfoTransitionTimer = 8;
 constexpr UINT_PTR kInfoScrollTimer = 9;
+// CPlayerWnd: 0045AD86 displays the error for 5 seconds and, unless
+// StopWhenFail is set, waits 3 seconds before requesting the next item.
+constexpr UINT_PTR kPlaybackErrorTimer = 0x10;
+constexpr UINT kPlaybackErrorDurationMs = 5000;
+constexpr UINT_PTR kFailedAdvanceTimer = 0x0b;
+constexpr UINT kFailedAdvanceDelayMs = 3000;
 // FUN_0046228D arms the daily auto-shutdown check with timer identifier 0x0c.
 constexpr UINT_PTR kAutoShutdownTimer = 0x0c;
 // WTL's popup-menu tooltip filter uses this exact timer identifier in

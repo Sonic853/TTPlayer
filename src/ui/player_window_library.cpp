@@ -2108,6 +2108,7 @@ void PlayerWindow::SelectMediaLibraryPlaybackTrack(size_t index,
                                                     bool start_playback) {
     if (!media_library_playback_active_ ||
         index >= media_library_playback_.Tracks().size()) return;
+    ClearAudioError();
     playing_playlist_index_.reset();
     current_ = index;
     media_library_playback_.SetCurrentRow(index);

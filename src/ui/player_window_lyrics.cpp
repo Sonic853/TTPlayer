@@ -1120,7 +1120,7 @@ void PlayerWindow::CreateLyricControls() {
     // particular, destroying LyricCtrl also destroyed the unsaved RichEdit
     // document, its selection/undo history and the full-screen HWND.
     if (!lyric_control_ || !IsWindow(lyric_control_))
-        lyric_control_ = CreateWindowExW(0, kLyricControlClass, nullptr,
+        lyric_control_ = CreateWindowExW(0, kLyricControlClass, LyricFallbackText().c_str(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, lyric_window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLyricControlId)),
             instance_, this);
@@ -1734,26 +1734,21 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
             }
         };
 
-        if (const auto* fallback = PlaybackTrackForUi();
-            lyrics_.lines.empty() && fallback) {
-            LOGFONTW active_font{};
-            const LONG configured_height = lyric_font_ &&
-                    GetObjectW(lyric_font_, sizeof(active_font), &active_font)
-                ? active_font.lfHeight
-                : (fullscreen_lyric_detached_
-                    ? settings_.lyric.fullscreen_font.lfHeight
-                    : (settings_.lyric.font_valid
-                        ? settings_.lyric.font.lfHeight : layout.font.lfHeight));
-            const int line_height = std::max(1L, std::labs(configured_height));
-            RECT line{3, height / 2 - line_height / 2,
-                      std::max(3, width - 3), height / 2 + line_height / 2};
-            UINT format = DT_SINGLELINE | DT_NOPREFIX | DT_VCENTER;
-            if (ActiveLyricScrollMode() != 0) format |= DT_CENTER;
-            else if (ActiveLyricTextAlign() == 1) format |= DT_CENTER;
-            else if (ActiveLyricTextAlign() >= 2) format |= DT_RIGHT;
-            SetTextColor(canvas, highlight_color);
-            const auto text = DisplayName(*fallback);
-            draw_text(text, line, format);
+        if (lyrics_.lines.empty()) {
+            // FUN_0043FB27: ordinary window text, normal color, full client
+            // rectangle. Horizontal scrolling swaps the alignment axis.
+            UINT format = DT_SINGLELINE | DT_NOPREFIX;
+            if (ActiveLyricScrollMode() != 0) {
+                format |= DT_CENTER;
+                if (ActiveLyricTextAlign() == 1) format |= DT_VCENTER;
+                else if (ActiveLyricTextAlign() >= 2) format |= DT_BOTTOM;
+            } else {
+                format |= DT_VCENTER;
+                if (ActiveLyricTextAlign() == 1) format |= DT_CENTER;
+                else if (ActiveLyricTextAlign() >= 2) format |= DT_RIGHT;
+            }
+            SetTextColor(canvas, text_color);
+            draw_text(LyricFallbackText(), client, format);
         } else if (!lyrics_.lines.empty()) {
             if (ActiveLyricScrollMode() != 0) {
                 // XML ScrollMode=1 maps to CLyricCtrl's internal +0x6c == 0;
@@ -1844,7 +1839,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
             DeleteObject(pen);
         }
 
-        if (lyric_pixels && !ActiveLyricTransparent() &&
+        if (!lyrics_.lines.empty() && lyric_pixels && !ActiveLyricTransparent() &&
             ActiveLyricFadeIndex() > 0) {
             // FUN_004416E0 divides the active axis by FadeIndex, then blends
             // every edge pixel toward BkgndColor.  It is a bitmap gradient,
@@ -3740,11 +3735,12 @@ void PlayerWindow::ClearLyrics() {
     lyric_path_.clear();
     lyrics_embedded_ = false;
     if (lyric_control_) {
-        SetWindowTextW(lyric_control_, L"");
+        SetWindowTextW(lyric_control_, LyricFallbackText().c_str());
         if (fullscreen_lyric_detached_)
             RebuildLyricFont(false);
         InvalidateRect(lyric_control_, nullptr, FALSE);
     }
+    desktop_lyrics_.SetFallbackText(LyricFallbackText(true));
 }
 
 void PlayerWindow::ApplyAutoLyricVisibility() {

@@ -1185,7 +1185,7 @@ bool PlayerWindow::CommitImportedTracks(std::vector<playlist::Track> tracks,
         // 0047FEA3 directly.  A failed auto-open clears the persisted source
         // identity but does not enter the interactive play-command error UI.
         SelectTrackFrom(playlist_index, first, false);
-        PlayCurrent(false);
+        PlayCurrent();
     }
     return true;
 }

@@ -188,6 +188,14 @@ endif()
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
 if(BUILD_TESTING)
+add_executable(idle_error_tests src/ui/idle_error_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(idle_error_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(idle_error_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(idle_error_tests PRIVATE ttplayer_core)
+add_test(NAME idle_error_tests COMMAND idle_error_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(idle_error_tests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+
 add_executable(default_colors_tests src/skin/default_colors_tests.cpp)
 target_compile_definitions(default_colors_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(default_colors_tests PRIVATE /W4 /permissive- /EHsc /utf-8)

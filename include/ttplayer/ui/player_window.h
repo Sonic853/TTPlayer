@@ -635,14 +635,17 @@ private:
     void ResetSkinInfoScroll();
     void AdvanceSkinInfoScroll(UINT_PTR timer);
     void StartSkinInfoItem();
-    bool PlayCurrent(bool report_error = true);
+    bool PlayCurrent();
     void ClearPersistedPlaybackIdentity() noexcept;
     void SelectTrack(size_t index, bool start_playback);
     void SelectTrackFrom(size_t playlist_index, size_t index, bool start_playback);
     void SelectRelative(bool next);
     void AdvanceAfterNaturalEnd();
     void Stop();
-    void ShowAudioError() const;
+    [[nodiscard]] std::wstring DefaultPlayerTitle() const;
+    [[nodiscard]] std::wstring LyricFallbackText(bool desktop = false) const;
+    void ShowAudioError(const std::filesystem::path& path);
+    void ClearAudioError();
     [[nodiscard]] const playlist::Track* OpenedTrack() const noexcept {
         return opened_track_ ? &*opened_track_ : nullptr;
     }
@@ -831,6 +834,8 @@ private:
     UINT pending_skin_tooltip_command_{};
     std::wstring skin_menu_tooltip_text_;
     std::wstring display_title_;
+    std::wstring playback_error_text_;
+    ULONGLONG playback_error_started_tick_{};
     std::wstring display_artist_;
     std::wstring equalizer_tracking_status_;
     std::wstring window_caption_source_;

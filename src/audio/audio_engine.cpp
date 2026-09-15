@@ -448,6 +448,7 @@ public:
     [[nodiscard]] AudioFormat DisplayFormat() const override { return display_format_; }
     [[nodiscard]] std::chrono::milliseconds Duration() const override { return duration_; }
     [[nodiscard]] std::wstring Error() const override { return error_; }
+    [[nodiscard]] HRESULT ErrorResult() const override { return error_result_; }
     [[nodiscard]] AudioMetadata Metadata() const override { return metadata_; }
 
 private:
@@ -467,6 +468,7 @@ private:
 
     bool Fail(std::wstring_view operation, HRESULT result) {
         error_ = HResultMessage(operation, result);
+        error_result_ = result;
         return false;
     }
 
@@ -482,6 +484,7 @@ private:
     size_t pending_offset_{};
     bool source_end_{};
     std::wstring error_;
+    HRESULT error_result_{E_FAIL};
 };
 
 class LegacyPluginSource final : public DecodedAudioSource {
@@ -609,11 +612,13 @@ public:
         return duration_;
     }
     [[nodiscard]] std::wstring Error() const override { return error_; }
+    [[nodiscard]] HRESULT ErrorResult() const override { return error_result_; }
     [[nodiscard]] AudioMetadata Metadata() const override { return metadata_; }
 
 private:
     bool Fail(std::wstring_view operation, HRESULT result) {
         error_ = HResultMessage(operation, result);
+        error_result_ = result;
         return false;
     }
 
@@ -624,6 +629,7 @@ private:
     std::chrono::milliseconds duration_{};
     AudioMetadata metadata_;
     std::wstring error_;
+    HRESULT error_result_{E_FAIL};
 };
 
 class PcmFileSource final : public DecodedAudioSource {
@@ -2051,6 +2057,7 @@ bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
     {
         std::scoped_lock lock(mutex_);
         error_.clear();
+        error_result_ = S_OK;
         diagnostic_.clear();
         format_ = {};
         metadata_ = {};
@@ -2174,7 +2181,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         return;
     }
     if (!source->Open(path, options)) {
-        if (!stop_requested_) SetError(source->Error());
+        if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
         return;
     }
     if (stop_requested_) return;
@@ -2375,7 +2382,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                     std::max<DWORD>(1, wave_format.nAvgBytesPerSec) +
                     source_format.nBlockAlign);
             if (!source->Read(native_request, native, decoder_eof)) {
-                if (!stop_requested_) SetError(source->Error());
+                if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                 return false;
             }
             const uint64_t latest_revision = processor_revision_.load();
@@ -2497,7 +2504,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                     break;
                 }
                 if (!source->Seek(std::chrono::milliseconds(position_base_ms))) {
-                    if (!stop_requested_) SetError(source->Error());
+                    if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                     break;
                 }
                 std::fill(ring_shadow.begin(), ring_shadow.end(), silence);
@@ -2711,7 +2718,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 decoded.clear();
                 decoded_offset = 0;
                 if (!source->Read(output.data.size() - written, decoded, decoder_eof)) {
-                    if (!stop_requested_) SetError(source->Error());
+                    if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                     return false;
                 }
                 if (stop_requested_) return false;
@@ -2920,7 +2927,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 break;
             }
             if (!source->Seek(std::chrono::milliseconds(position_base_ms))) {
-                if (!stop_requested_) SetError(source->Error());
+                if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                 break;
             }
             processors.Reset();
@@ -3154,6 +3161,7 @@ bool AudioEngine::PublishOpened(Backend backend, const AudioFormat& format,
             format_ = format;
             duration_ms_ = std::max<int64_t>(0, duration.count());
             error_.clear();
+            error_result_ = S_OK;
             state_ = PlaybackState::playing;
             track_gain_ = 1.0F;
             if ((options_.sound_fade_mode & 0x01) != 0 &&
@@ -3610,6 +3618,11 @@ std::wstring AudioEngine::LastError() const {
     return error_;
 }
 
+HRESULT AudioEngine::LastErrorResult() const {
+    std::scoped_lock lock(mutex_);
+    return error_result_;
+}
+
 std::wstring AudioEngine::LastDiagnostic() const {
     std::scoped_lock lock(mutex_);
     return diagnostic_;
@@ -3654,10 +3667,11 @@ void AudioEngine::RecordDiagnostic(std::wstring message) {
     diagnostic_ += std::move(message);
 }
 
-void AudioEngine::SetError(std::wstring message) {
+void AudioEngine::SetError(std::wstring message, HRESULT result) {
     {
         std::scoped_lock lock(mutex_);
         error_ = std::move(message);
+        error_result_ = result;
         CancelSeekLocked();
         state_ = PlaybackState::failed;
         open_complete_ = true;
