@@ -939,12 +939,13 @@ PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
     // selected.bmp clipped and restarted for every item.
     result.row_height = 16;
     const int available_height = std::max<LONG>(0, result.list.bottom - result.list.top);
+    result.page_rows = std::max(1, available_height / result.row_height);
     result.visible_rows = std::max(1, (available_height + result.row_height - 1) /
                                       result.row_height);
     // The original track ListCtrl creates its vertical scrollbar only when
     // its item count exceeds the page.  Reserving this strip unconditionally
     // shortens a one-row selection by 15 px in LX-iPlay (9 px in TT2012).
-    result.scrollbar_width = track_count > static_cast<size_t>(result.visible_rows) &&
+    result.scrollbar_width = track_count > static_cast<size_t>(result.page_rows) &&
                              layout.scrollbar_buttons.size.cx >= 3
         ? layout.scrollbar_buttons.size.cx / 3 : 0;
     // SplitterCtrl retains its five-pixel default renderer when a skin omits

@@ -450,6 +450,7 @@ private:
     void UpdateMainToolRects();
     void UpdatePlaylistToolRects();
     void UpdatePlaylistItemTipRects();
+    [[nodiscard]] bool RoutePlaylistMouseWheel(const MSG& message) const;
     void QueuePlaylistInfoRange(size_t playlist_index, size_t first,
                                 size_t count, bool priority = false, bool visible_only = false);
     void RequestPlaylistTrackInfo(size_t playlist_index, size_t row,

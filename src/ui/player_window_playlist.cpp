@@ -1583,11 +1583,8 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
         if (!catalogue && !tracks) return 0;
         RECT client{};
         GetClientRect(control, &client);
-        constexpr size_t row_height = 16;
-        return static_cast<LRESULT>(std::max<size_t>(1,
-            (static_cast<size_t>(std::max<LONG>(
-                 0, client.bottom - client.top)) + row_height - 1) /
-                row_height));
+        // SysListView32 counts complete rows, excluding a clipped bottom row.
+        return std::max<LONG>(0, client.bottom - client.top) / 16;
     }
     case LVM_GETITEMSTATE: {
         if (!list_control) break;
@@ -1772,10 +1769,8 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
         RECT client{};
         GetClientRect(control, &client);
         constexpr size_t row_height = 16;
-        const size_t visible = std::max<size_t>(1,
-            (static_cast<size_t>(std::max<LONG>(
-                0, client.bottom - client.top)) + row_height - 1) /
-            row_height);
+        const size_t height = static_cast<size_t>(std::max<LONG>(0, client.bottom - client.top));
+        const size_t visible = std::max<size_t>(1, height / row_height);
         const size_t maximum = count > visible ? count - visible : 0;
         if (catalogue)
             playlist_list_scroll_ = std::min(playlist_list_scroll_, maximum);
@@ -1793,13 +1788,13 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
             RECT client{};
             GetClientRect(control, &client);
             constexpr size_t row_height = 16;
-            const size_t visible = std::max<size_t>(1,
-                (static_cast<size_t>(std::max<LONG>(0,
-                    client.bottom - client.top)) + row_height - 1) /
-                    row_height);
+            const size_t height = static_cast<size_t>(std::max<LONG>(0, client.bottom - client.top));
+            const size_t visible = std::max<size_t>(1, height / row_height);
             const size_t index = static_cast<size_t>(wparam);
-            playlist_list_scroll_ = OwnerDataListEnsureVisibleTop(
-                playlist_list_scroll_, visible, playlists_.Size(), index);
+            const size_t painted = (height + row_height - 1) / row_height;
+            if (!lparam || index < playlist_list_scroll_ || index - playlist_list_scroll_ >= painted)
+                playlist_list_scroll_ = OwnerDataListEnsureVisibleTop(
+                    playlist_list_scroll_, visible, playlists_.Size(), index);
             LayoutPlaylistListEdit();
             InvalidateRect(parent, nullptr, FALSE);
             return TRUE;
@@ -1808,14 +1803,14 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
             RECT client{};
             GetClientRect(control, &client);
             constexpr size_t row_height = 16;
-            const size_t visible = std::max<size_t>(1,
-                (static_cast<size_t>(std::max<LONG>(0,
-                    client.bottom - client.top)) + row_height - 1) /
-                    row_height);
+            const size_t height = static_cast<size_t>(std::max<LONG>(0, client.bottom - client.top));
+            const size_t visible = std::max<size_t>(1, height / row_height);
             const size_t previous = playlist_scroll_;
-            playlist_scroll_ = OwnerDataListEnsureVisibleTop(
-                playlist_scroll_, visible, VisiblePlaylistTrackCount(),
-                static_cast<size_t>(wparam));
+            const size_t index = static_cast<size_t>(wparam);
+            const size_t painted = (height + row_height - 1) / row_height;
+            if (!lparam || index < playlist_scroll_ || index - playlist_scroll_ >= painted)
+                playlist_scroll_ = OwnerDataListEnsureVisibleTop(
+                    playlist_scroll_, visible, VisiblePlaylistTrackCount(), index);
             if (playlist_scroll_ != previous) UpdatePlaylistItemTipRects();
             InvalidateRect(parent, nullptr, FALSE);
             return TRUE;
@@ -1884,8 +1879,12 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
         }
         break;
     case WM_KEYDOWN:
-    case WM_MOUSEWHEEL:
         if (list_control) return SendMessageW(parent, message, wparam, lparam);
+        break;
+    case WM_MOUSEWHEEL:
+        // Wheel coordinates are screen coordinates; retain the source HWND
+        // without the client-coordinate conversion used by button messages.
+        if (list_control) return HandlePlaylistMessage(message, wparam, lparam, control);
         break;
     case WM_MOUSELEAVE:
         return HandlePlaylistMessage(message, wparam, lparam, control);
@@ -1916,7 +1915,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         const auto bounds = geometry();
         const size_t count = VisiblePlaylistTrackCount();
         const size_t page = static_cast<size_t>(
-            std::max(1, bounds.visible_rows));
+            std::max(1, bounds.page_rows));
         return ResolvePlaylistScrollbarMetrics(
             bounds, skin_->Playlist(), count, page, playlist_scroll_);
     };
@@ -2436,7 +2435,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         }
         if (metrics.scrollbar_width > 0 && PtInRect(&metrics.scrollbar, point) &&
             VisiblePlaylistTrackCount() > static_cast<size_t>(
-                std::max(1, metrics.visible_rows))) {
+                std::max(1, metrics.page_rows))) {
             const auto state = scrollbar_metrics();
             const auto part = HitTestPlaylistScrollbar(state, point.y);
             if (part != PlaylistScrollbarPart::none) {
@@ -2664,15 +2663,21 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         ScreenToClient(playlist_window_, &point);
         const auto metrics = geometry();
         const HWND focus = GetFocus();
-        const bool catalogue = !settings_.playlist.library_mode &&
-            (PtInRect(&metrics.list_titles, point) ||
-             focus == playlist_list_control_ ||
-             focus == playlist_list_edit_);
+        const bool over_tracks = PtInRect(&metrics.tracks, point) ||
+            PtInRect(&metrics.scrollbar, point);
+        const bool over_catalogue = PtInRect(&metrics.list_titles, point);
+        // 00482BAF creates separate native PlayLists/Files ListViews. Their
+        // wheel target must not be replaced by the other pane's key focus.
+        // Outside either pane retain the receiving control's normal fallback.
+        const bool catalogue = !settings_.playlist.library_mode && !over_tracks &&
+            (over_catalogue || mouse_source == playlist_list_control_ ||
+             (mouse_source != playlist_track_control_ &&
+              (focus == playlist_list_control_ || focus == playlist_list_edit_)));
         if (!catalogue) {
             ScrollPlaylist(rows);
             return 0;
         }
-        const size_t visible = static_cast<size_t>(metrics.visible_rows);
+        const size_t visible = static_cast<size_t>(metrics.page_rows);
         const size_t maximum = playlists_.Size() > visible
             ? playlists_.Size() - visible : 0;
         const auto next = static_cast<long long>(playlist_list_scroll_) + rows;
@@ -2748,7 +2753,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
             const size_t count = VisiblePlaylistTrackCount();
             size_t target = playlist_selection_.value_or(0);
             const size_t page = std::max<size_t>(1,
-                static_cast<size_t>(geometry().visible_rows));
+                static_cast<size_t>(geometry().page_rows));
             if (wparam == VK_UP && target > 0) --target;
             else if (wparam == VK_DOWN && target + 1 < count) ++target;
             else if (wparam == VK_HOME) target = 0;
@@ -3129,7 +3134,7 @@ void PlayerWindow::LayoutPlaylistListControls() {
         settings_.playlist.split_on_lists, client.right, client.bottom,
         VisiblePlaylistTrackCount());
     const size_t visible = static_cast<size_t>(
-        std::max(1, metrics.visible_rows));
+        std::max(1, metrics.page_rows));
     const size_t maximum = playlists_.Size() > visible
         ? playlists_.Size() - visible : 0;
     playlist_list_scroll_ = std::min(playlist_list_scroll_, maximum);
@@ -3214,7 +3219,43 @@ void PlayerWindow::AddToolTipTool(HWND owner, UINT_PTR identifier,
     }
 }
 
+bool PlayerWindow::RoutePlaylistMouseWheel(const MSG& message) const {
+    if (message.message != WM_MOUSEWHEEL || !message.hwnd || GetCapture() ||
+        GetWindowThreadProcessId(message.hwnd, nullptr) != GetCurrentThreadId()) return false;
+    // A disabled owner means a modal operation is in progress. Auxiliary
+    // windows can still be individually enabled; do not bypass that boundary.
+    if (window_ && !IsWindowEnabled(window_)) return false;
+    const POINT screen{GET_X_LPARAM(message.lParam), GET_Y_LPARAM(message.lParam)};
+    const HWND hit = WindowFromPoint(screen);
+    if (!hit) return false;
+    const auto within = [hit](HWND window) {
+        return window && (window == hit || IsChild(window, hit));
+    };
+    HWND target{};
+    if (within(playlist_view_)) {
+        target = playlist_view_;
+    } else if (within(playlist_window_) && skin_ && skin_->Playlist().valid) {
+        RECT client{}; GetClientRect(playlist_window_, &client);
+        const auto metrics = MakePlaylistGeometry(skin_->Playlist(), settings_.playlist.split_on_lists,
+            client.right, client.bottom, VisiblePlaylistTrackCount());
+        POINT point = screen; ScreenToClient(playlist_window_, &point);
+        if (PtInRect(&metrics.list_titles, point))
+            target = settings_.playlist.library_mode ? playlist_tree_control_ : playlist_list_control_;
+        else if (PtInRect(&metrics.tracks, point) || PtInRect(&metrics.scrollbar, point))
+            target = playlist_track_control_;
+    }
+    if (!target || target == message.hwnd || !IsWindowVisible(target)) return false;
+    for (HWND owner = target; owner; owner = GetParent(owner))
+        if (!IsWindowEnabled(owner)) return false;
+    // Consume only the redirected message. A message already addressed to the
+    // hovered control takes its usual dispatch path exactly once. Never focus
+    // or activate a window as a side effect of scrolling.
+    SendMessageW(target, WM_MOUSEWHEEL, message.wParam, message.lParam);
+    return true;
+}
+
 bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
+    if (RoutePlaylistMouseWheel(message)) return true;
     if (TranslateLyricUploadMessage(message)) return true;
     auto* queued = const_cast<MSG*>(&message);
     if (lyric_service_editor_ && IsWindow(lyric_service_editor_) && IsWindowEnabled(lyric_service_editor_) &&
@@ -3817,7 +3858,7 @@ void PlayerWindow::RestorePlaylistRowSelection() {
             settings_.playlist.split_on_lists, client.right, client.bottom,
             ActivePlaylist().Tracks().size());
         if (*visible < playlist_scroll_) playlist_scroll_ = *visible;
-        const size_t rows = static_cast<size_t>(metrics.visible_rows);
+        const size_t rows = static_cast<size_t>(metrics.page_rows);
         if (*visible >= playlist_scroll_ + rows)
             playlist_scroll_ = *visible - rows + 1;
         return;
@@ -3843,7 +3884,7 @@ void PlayerWindow::EnsurePlaylistSelectionVisible() {
         VisiblePlaylistTrackCount());
     const size_t previous = playlist_scroll_;
     if (*playlist_selection_ < playlist_scroll_) playlist_scroll_ = *playlist_selection_;
-    const size_t visible = static_cast<size_t>(metrics.visible_rows);
+    const size_t visible = static_cast<size_t>(metrics.page_rows);
     if (*playlist_selection_ >= playlist_scroll_ + visible)
         playlist_scroll_ = *playlist_selection_ - visible + 1;
     if (playlist_scroll_ != previous) UpdatePlaylistItemTipRects();
@@ -4027,7 +4068,7 @@ void PlayerWindow::ScrollPlaylist(int rows) {
         settings_.playlist.split_on_lists, client.right, client.bottom,
         VisiblePlaylistTrackCount());
     const size_t visible = static_cast<size_t>(
-        std::max(1, metrics.visible_rows));
+        std::max(1, metrics.page_rows));
     const size_t count = VisiblePlaylistTrackCount();
     const size_t maximum = count > visible ? count - visible : 0;
     const auto next = static_cast<long long>(playlist_scroll_) + rows;
@@ -4351,12 +4392,12 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
     const size_t track_count = VisiblePlaylistTrackCount();
     if (metrics.scrollbar_width > 0 &&
         track_count > static_cast<size_t>(
-            std::max(1, metrics.visible_rows))) {
+            std::max(1, metrics.page_rows))) {
         if (layout.scrollbar_bar.image)
             TileBitmap(canvas, layout.scrollbar_bar, metrics.scrollbar);
         const auto state = ResolvePlaylistScrollbarMetrics(
             metrics, layout, track_count,
-            static_cast<size_t>(std::max(1, metrics.visible_rows)),
+            static_cast<size_t>(std::max(1, metrics.page_rows)),
             playlist_scroll_);
         if (layout.scrollbar_buttons.image) {
             const int source_frame_width = std::max(
@@ -5724,7 +5765,7 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
                 settings_.playlist.split_on_lists, client.right,
                 client.bottom, ActivePlaylist().Tracks().size());
             if (*playing < playlist_scroll_) playlist_scroll_ = *playing;
-            const size_t visible = static_cast<size_t>(metrics.visible_rows);
+            const size_t visible = static_cast<size_t>(metrics.page_rows);
             if (*playing >= playlist_scroll_ + visible)
                 playlist_scroll_ = *playing - visible + 1;
         }

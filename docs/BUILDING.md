@@ -143,3 +143,11 @@ XP／Win7 版始终单份随机索引循环，以及跨轮回退、
 无需私有测试代码、原版 DLL 或音频设备，使用生成的 WAV/CUE 和隔离故障进程验证会话复用、
 缓存失效、取消恢复、读取队列及编辑竞争。Actions 在两个构建中均执行该测试。
 实现与测量见 [PLAYLIST_INFO_LOADING_OPTIMIZATION.md](PLAYLIST_INFO_LOADING_OPTIMIZATION.md)。
+
+### 独立列表滚轮与底部边界回归
+
+配置 `-DTTPLAYER_BUILD_WHEEL_TESTS=ON`，构建 `playlist_wheel_tests`，运行
+`ctest --test-dir <构建目录> -C Release -R '^playlist_wheel_tests$' --output-on-failure`。
+测试真实窗口失焦滚动、面板命中、焦点保持、原生树和经典列表，并对照原生 ListView 验证
+不同高度／曲目数量下的完整页数、末行位置、底部留白和滚动条拖动。已接入两种 Actions 构建。
+原版分析与修复说明见 [PLAYLIST_MOUSE_WHEEL.md](PLAYLIST_MOUSE_WHEEL.md)。

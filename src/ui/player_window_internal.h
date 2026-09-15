@@ -395,6 +395,9 @@ struct PlaylistGeometry {
     RECT close{};
     RECT title{};
     int row_height{19};
+    // Full rows determine scroll limits. visible_rows also includes the
+    // partially visible bottom row for painting, hit testing and metadata.
+    int page_rows{1};
     int visible_rows{1};
     int scrollbar_width{};
 };

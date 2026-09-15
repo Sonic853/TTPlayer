@@ -7,6 +7,7 @@ option(TTPLAYER_LEGACY_WINDOWS "Build the separate Windows XP SP3 / Windows 7 ed
 option(TTPLAYER_BUILD_LIBRARY_TESTS "Build media library regression tests without the private test suite" OFF)
 option(TTPLAYER_BUILD_NAVIGATION_TESTS "Build playback navigation regression tests without the private test suite" OFF)
 option(TTPLAYER_BUILD_INFO_TESTS "Build playlist information regression tests without the private test suite" OFF)
+option(TTPLAYER_BUILD_WHEEL_TESTS "Build playlist mouse wheel tests without the private test suite" OFF)
 
 if(NOT WIN32)
   message(FATAL_ERROR "TTPlayerRebuild currently targets Windows")
@@ -191,6 +192,16 @@ endif()
 # Standalone development/test front ends only. The shipped player embeds all
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
+if(BUILD_TESTING OR TTPLAYER_BUILD_WHEEL_TESTS)
+enable_testing()
+add_executable(playlist_wheel_tests src/ui/playlist_wheel_tests.cpp)
+target_compile_definitions(playlist_wheel_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(playlist_wheel_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(playlist_wheel_tests PRIVATE ttplayer_core)
+add_test(NAME playlist_wheel_tests COMMAND playlist_wheel_tests)
+set_tests_properties(playlist_wheel_tests PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
 if(BUILD_TESTING OR TTPLAYER_BUILD_INFO_TESTS)
 enable_testing()
 add_executable(playlist_info_tests src/ui/playlist_info_tests.cpp)
