@@ -5,6 +5,7 @@ include(CTest)
 option(TTPLAYER_STAGE_RUNTIME "Rebuild/copy local original DLLs, skins and configuration beside the EXE" ON)
 option(TTPLAYER_LEGACY_WINDOWS "Build the separate Windows XP SP3 / Windows 7 edition" OFF)
 option(TTPLAYER_BUILD_LIBRARY_TESTS "Build media library regression tests without the private test suite" OFF)
+option(TTPLAYER_BUILD_NAVIGATION_TESTS "Build playback navigation regression tests without the private test suite" OFF)
 
 if(NOT WIN32)
   message(FATAL_ERROR "TTPlayerRebuild currently targets Windows")
@@ -66,6 +67,7 @@ add_library(ttplayer_core
   src/lyrics/service_catalog.cpp
   src/lyrics/lyric_http.cpp
   src/playlist/playlist.cpp
+  src/playlist/playback_order.cpp
   src/playlist/playlist_store.cpp
   src/platform/optional_windows_api.cpp
   src/plugins/plugin_manager.cpp
@@ -188,6 +190,16 @@ endif()
 # Standalone development/test front ends only. The shipped player embeds all
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
+if(BUILD_TESTING OR TTPLAYER_BUILD_NAVIGATION_TESTS)
+enable_testing()
+add_executable(playback_navigation_tests src/ui/playback_navigation_tests.cpp)
+target_compile_definitions(playback_navigation_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(playback_navigation_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(playback_navigation_tests PRIVATE ttplayer_core)
+add_test(NAME playback_navigation_tests COMMAND playback_navigation_tests)
+set_tests_properties(playback_navigation_tests PROPERTIES TIMEOUT 30)
+endif()
+
 if(BUILD_TESTING OR TTPLAYER_BUILD_LIBRARY_TESTS)
 enable_testing()
 add_executable(media_library_tests src/ui/media_library_tests.cpp

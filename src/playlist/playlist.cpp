@@ -849,11 +849,6 @@ bool Playlist::SetPath(size_t index, std::filesystem::path path) {
 std::optional<size_t> Playlist::Next(size_t current, PlayMode mode) {
     if (tracks_.empty()) return std::nullopt;
     if (mode == PlayMode::repeat_one && current < tracks_.size()) return current;
-    if (mode == PlayMode::shuffle && tracks_.size() > 1) {
-        static thread_local std::mt19937 generator{std::random_device{}()};
-        std::uniform_int_distribution<size_t> pick(0, tracks_.size() - 2);
-        const size_t value = pick(generator); return value >= current ? value + 1 : value;
-    }
     if (current + 1 < tracks_.size()) return current + 1;
     return mode == PlayMode::repeat_all ? std::optional<size_t>{0} : std::nullopt;
 }
@@ -861,7 +856,6 @@ std::optional<size_t> Playlist::Next(size_t current, PlayMode mode) {
 std::optional<size_t> Playlist::Previous(size_t current, PlayMode mode) {
     if (tracks_.empty()) return std::nullopt;
     if (mode == PlayMode::repeat_one && current < tracks_.size()) return current;
-    if (mode == PlayMode::shuffle) return Next(current, mode);
     if (current > 0 && current <= tracks_.size()) return current - 1;
     return mode == PlayMode::repeat_all ? std::optional<size_t>{tracks_.size() - 1} : std::nullopt;
 }

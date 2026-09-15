@@ -7,6 +7,7 @@
 #include "ttplayer/lyrics/local_search.h"
 #include "ttplayer/lyrics/online_search.h"
 #include "ttplayer/playlist/playlist_store.h"
+#include "ttplayer/playlist/playback_order.h"
 #include "ttplayer/plugins/plugin_manager.h"
 #include "ttplayer/settings/settings.h"
 #include "ttplayer/skin/skin.h"
@@ -643,6 +644,14 @@ private:
     void SelectTrack(size_t index, bool start_playback);
     void SelectTrackFrom(size_t playlist_index, size_t index, bool start_playback);
     void SelectRelative(bool next);
+    void SetPlaybackMode(int mode, bool reset_random_order = true);
+    [[nodiscard]] size_t NavigationTrackCount() const noexcept;
+    [[nodiscard]] std::optional<size_t> NavigationPlayingRow() const;
+    [[nodiscard]] bool NavigationEnabled(bool next) const;
+    void SelectNavigationTrack(size_t row);
+    bool FollowPlaybackCursor();
+    bool SwitchNavigationList(bool wrap);
+    bool SwitchMediaLibraryCatalogue(bool wrap);
     void AdvanceAfterNaturalEnd();
     void Stop();
     [[nodiscard]] std::wstring DefaultPlayerTitle() const;
@@ -816,6 +825,7 @@ private:
     // TTBL merely to satisfy the playback engine.  This transient query copy
     // owns their playback order but is intentionally outside PlaylistStore.
     playlist::Playlist media_library_playback_;
+    playlist::RandomPlaybackOrder random_playback_order_;
     bool media_library_playback_active_{};
     bool media_library_startup_pending_{};
     // The decoder retains the opened CPlayItem independently of its source

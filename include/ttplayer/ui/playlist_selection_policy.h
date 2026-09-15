@@ -9,8 +9,9 @@ enum class PlaylistSelectionTrigger {
 };
 
 // Files/LVS_OWNERDATA never starts playback from LVN_ITEMCHANGED.  The
-// PlayFollowCursor option is consulted only by the natural-completion path;
-// explicit activation (double-click/Enter/LVN_ITEMACTIVATE) always plays.
+// For these selection triggers, PlayFollowCursor is consulted only at natural
+// completion; explicit activation (double-click/Enter/LVN_ITEMACTIVATE) always
+// plays. The separate manual Next handler also consults selected focus.
 [[nodiscard]] constexpr bool ShouldStartPlaylistPlayback(
     PlaylistSelectionTrigger trigger, bool play_follow_cursor) noexcept {
     return trigger == PlaylistSelectionTrigger::item_activated ||

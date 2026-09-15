@@ -6004,7 +6004,7 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
         return true;
     }
     if (command >= kPlaylistModeSingle && command <= kPlaylistModeShuffle) {
-        settings_.player.play_mode = static_cast<int>(command - kPlaylistModeSingle);
+        SetPlaybackMode(static_cast<int>(command - kPlaylistModeSingle), false);
         return true;
     }
     if (command == kPlaylistAutoSwitchList) {

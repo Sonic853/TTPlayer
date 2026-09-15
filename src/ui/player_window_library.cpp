@@ -2220,6 +2220,19 @@ bool PlayerWindow::RestoreMediaLibraryPlayback() {
     return true;
 }
 
+bool PlayerWindow::SwitchMediaLibraryCatalogue(bool wrap) {
+    // 0047F5D6 uses TVGN_CARET -> TVGN_NEXTVISIBLE (not the next leaf or
+    // next sibling), expands the target, then selects it. At the end, modes
+    // 3/4 wrap to TVGN_FIRSTVISIBLE. Preserve empty category results too.
+    if (!media_library_ || !playlist_tree_control_) return false;
+    const auto selected = TreeView_GetSelection(playlist_tree_control_);
+    auto target = TreeView_GetNextVisible(playlist_tree_control_, selected);
+    if (target) TreeView_Expand(playlist_tree_control_, target, TVE_EXPAND);
+    else if (wrap) target = TreeView_GetFirstVisible(playlist_tree_control_);
+    if (!target) return false;
+    return TreeView_SelectItem(playlist_tree_control_, target) != FALSE;
+}
+
 void PlayerWindow::ActivateMediaLibraryResult(size_t index,
                                                bool start_playback) {
     if (!media_library_ || index >= media_library_->result_tracks.size())

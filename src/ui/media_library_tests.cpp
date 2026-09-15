@@ -283,8 +283,110 @@ struct ProgressSeekAccess {
         }
         FreeLibrary(resources);
     }
+    static void CheckCursorNavigation() {
+        Fixture fixture; auto& p=fixture.p; auto& state=*p.media_library_;
+        const std::vector<playlist::Track> tracks{Song(L"first"),Song(L"second"),Song(L"third")};
+        for(const auto& track:tracks)
+            state.items.push_back({track,State::Identity(track),{}});
+        state.result_tracks=tracks; state.result_items={0,1,2};
+        p.settings_.player.play_mode=1; p.settings_.player.play_follow_cursor=true;
+        p.natural_completion_dispatch_=true; // Verify selection without decoder/network I/O.
+        const auto prepare=[&](std::vector<playlist::Track> snapshot,size_t playing,size_t focus) {
+            p.media_library_playback_=ui::BuildMediaLibraryPlaybackSnapshot(snapshot,playing);
+            p.media_library_playback_.SetPlayingRow(playing);
+            p.media_library_playback_active_=true; p.playing_playlist_index_.reset(); p.current_=playing;
+            p.playlist_selection_=focus; p.playlist_selected_rows_={focus};
+            p.pending_natural_play_=false;
+        };
+        prepare({tracks[2],tracks[1],tracks[0]},1,2);
+        p.SelectRelative(true);
+        Require(p.PlaybackPlaylist().Tracks().at(*p.current_).path==tracks[2].path &&
+                p.pending_natural_play_,"library next did not follow selected query identity");
+        // Visible row 1 and playback row 2 are both the same song. Next must
+        // advance from that identity in the displayed query (0048A38E maps
+        // the playing item back to the newly materialized query's +0x1c).
+        prepare({tracks[2],tracks[0],tracks[1]},2,1);
+        p.SelectRelative(true);
+        Require(p.current_==size_t{2} && p.PlaybackPlaylist().Tracks()[2].path==tracks[2].path,
+                "library next compared row numbers instead of playing identity");
+        prepare({tracks[2],tracks[1],tracks[0]},1,2);
+        p.SelectRelative(false);
+        Require(p.current_==size_t{0} && p.PlaybackPlaylist().Tracks()[0].path==tracks[0].path,
+                "library previous incorrectly followed the selected focus");
+        for(int mode=0; mode<=4; ++mode) {
+            prepare({tracks[2],tracks[1],tracks[0]},1,0);
+            p.SetPlaybackMode(mode); p.natural_completion_dispatch_=true;
+            p.AdvanceAfterNaturalEnd();
+            if(mode==0) Require(!p.pending_natural_play_,"single mode must ignore library focus at completion");
+            else Require(p.current_==size_t{0} && p.PlaybackPlaylist().Tracks()[0].path==tracks[0].path,
+                    "library completion did not follow selected focus");
+        }
+    }
+    static LRESULT CALLBACK CatalogueTestProc(HWND window,UINT message,WPARAM wparam,LPARAM lparam) {
+        if(message==WM_NCCREATE) SetWindowLongPtrW(window,GWLP_USERDATA,
+            reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams));
+        auto* p=reinterpret_cast<ui::PlayerWindow*>(GetWindowLongPtrW(window,GWLP_USERDATA));
+        if(p && message==WM_NOTIFY && p->HandleMediaLibraryTreeNotification(reinterpret_cast<NMHDR*>(lparam))) return 0;
+        return DefWindowProcW(window,message,wparam,lparam);
+    }
+    static void CheckCataloguePlayback() {
+        Fixture fixture; auto& p=fixture.p; auto& state=*p.media_library_;
+        WNDCLASSW wc{}; wc.lpfnWndProc=CatalogueTestProc; wc.hInstance=GetModuleHandleW(nullptr);
+        wc.lpszClassName=L"TTPlayerLibraryModeRegression"; RegisterClassW(&wc);
+        struct Windows {
+            ui::PlayerWindow& p;
+            ~Windows() {
+                const auto window=p.window_; p.playlist_tree_control_=nullptr; p.window_=nullptr;
+                if(window) DestroyWindow(window);
+            }
+        } cleanup{p};
+        p.window_=CreateWindowExW(0,wc.lpszClassName,L"",WS_OVERLAPPED,0,0,400,600,nullptr,nullptr,wc.hInstance,&p);
+        p.playlist_tree_control_=CreateWindowExW(0,WC_TREEVIEWW,L"",WS_CHILD|TVS_HASBUTTONS,
+            0,0,380,560,p.window_,nullptr,wc.hInstance,nullptr);
+        Require(p.window_ && p.playlist_tree_control_,"library catalogue test windows");
+        auto a=Song(L"artist-a"); a.artist="A"; a.album="Album A";
+        auto b=Song(L"artist-b"); b.artist="B"; b.album="Album B";
+        for(const auto& track:{a,b}) state.items.push_back({track,State::Identity(track),{}});
+        const auto insert=[&](std::wstring artist) {
+            auto node=std::make_unique<State::Node>(); node->kind=State::NodeKind::value;
+            node->key="Artist"; node->text=artist; node->value=artist;
+            TVINSERTSTRUCTW item{}; item.hParent=TVI_ROOT; item.hInsertAfter=TVI_LAST;
+            item.item.mask=TVIF_TEXT|TVIF_PARAM|TVIF_CHILDREN; item.item.pszText=node->text.data();
+            item.item.lParam=reinterpret_cast<LPARAM>(node.get()); item.item.cChildren=1;
+            node->item=TreeView_InsertItem(p.playlist_tree_control_,&item);
+            const auto handle=node->item; state.nodes.push_back(std::move(node)); return handle;
+        };
+        const auto first=insert(L"A"), second=insert(L"B"), empty=insert(L"C");
+        p.settings_.player.auto_switch_list=true; p.settings_.player.play_follow_cursor=false;
+        const auto start=[&](HTREEITEM item,int mode) {
+            TreeView_SelectItem(p.playlist_tree_control_,item);
+            p.SetPlaybackMode(mode); p.natural_completion_dispatch_=true;
+            p.SelectNavigationTrack(0); p.pending_natural_play_=false;
+        };
+        start(first,2); p.AdvanceAfterNaturalEnd();
+        Require(TreeView_GetSelection(p.playlist_tree_control_)==second && p.pending_natural_play_ &&
+                p.PlaybackPlaylist().Tracks().at(*p.current_).path==b.path,"library sequential catalogue switch");
+        const auto album=TreeView_GetChild(p.playlist_tree_control_,second);
+        Require(album!=nullptr,"next visible category must be expanded before selecting");
+        p.pending_natural_play_=false; p.AdvanceAfterNaturalEnd();
+        Require(TreeView_GetSelection(p.playlist_tree_control_)==album && p.pending_natural_play_,
+                "automatic library traversal skipped a visible child");
+        p.pending_natural_play_=false; p.AdvanceAfterNaturalEnd();
+        Require(TreeView_GetSelection(p.playlist_tree_control_)==empty && !p.pending_natural_play_,
+                "empty library category was skipped or replayed the old song");
+        p.AdvanceAfterNaturalEnd();
+        Require(!p.pending_natural_play_ && TreeView_GetSelection(p.playlist_tree_control_)==empty,
+                "sequential library catalogue incorrectly wrapped");
+        for(int mode:{3,4}) {
+            TreeView_SelectItem(p.playlist_tree_control_,empty);
+            p.SetPlaybackMode(mode); p.natural_completion_dispatch_=true; p.pending_natural_play_=false;
+            p.AdvanceAfterNaturalEnd();
+            Require(TreeView_GetSelection(p.playlist_tree_control_)==first && p.pending_natural_play_,
+                    "repeat/random library catalogue did not wrap to first visible node");
+        }
+    }
     static void Run(const fs::path& root) {
-        CheckTransactions(root); CheckReadAndScan(root);
+        CheckTransactions(root); CheckReadAndScan(root); CheckCursorNavigation(); CheckCataloguePlayback();
         if(fs::exists(root/L"ttpres.dll")) {
             CheckWindowsLifecycle(root);
             std::ofstream("validation.txt") << "Core and original-resource window lifecycle tests passed.\n";

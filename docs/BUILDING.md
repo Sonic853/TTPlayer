@@ -108,7 +108,7 @@ VS 2022 配置，请改用新的空构建目录，不要复用旧的生成器缓
 
 本地完整恢复工作区的原有两个选项默认仍为 ON，保留测试和运行文件复制流程；
 它需要仓库旁的 `reverse/`、原版 DLL、皮肤等数据以及本地测试/工具源码。
-GitHub 工作流在现代版和旧系统版构建后运行媒体库核心回归；依赖私有原版资源
+GitHub 工作流在现代版和旧系统版构建后运行媒体库和手动切歌核心回归；依赖私有原版资源
 的完整窗口测试只在本地资源可用时运行，不等同于 XP／Win7 实机验收。
 
 ### 独立媒体库回归
@@ -123,3 +123,12 @@ ctest --test-dir build-library-tests -C Release -R '^media_library_tests$' --out
 
 测试在独立临时目录运行。原版 DLL 可用时追加完整窗口的启动、关闭期间保存和
 重新打开验证；资源不可用时明确报告跳过该部分，核心数据／文件监视测试仍执行。
+
+### 独立切歌回归
+
+配置时设置 `-DTTPLAYER_BUILD_NAVIGATION_TESTS=ON`，构建目标
+`playback_navigation_tests`，再运行
+`ctest --test-dir <构建目录> -C Release -R '^playback_navigation_tests$' --output-on-failure`。
+测试无需原版 DLL、私有测试源码或音频设备，覆盖五种播放模式、随机序列前后回退、
+首尾边界、播放跟随光标、自然结束和自动切换列表。媒体库测试另验证可见树节点切换。
+分析与验证记录见 [PLAYBACK_MODES_AUDIT_AND_FIXES.md](PLAYBACK_MODES_AUDIT_AND_FIXES.md)。

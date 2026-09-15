@@ -18,7 +18,9 @@ namespace ttplayer::playlist {
 [[nodiscard]] int CompareLegacyLogicalText(const wchar_t* left,
                                            const wchar_t* right) noexcept;
 
-enum class PlayMode { sequential, repeat_all, repeat_one, shuffle };
+// Nonrandom index traversal. Random playback has a shared player-owned order
+// (RandomPlaybackOrder), separate from a playlist's destructive Shuffle().
+enum class PlayMode { sequential, repeat_all, repeat_one };
 struct Track {
     std::filesystem::path path;
     std::string title;

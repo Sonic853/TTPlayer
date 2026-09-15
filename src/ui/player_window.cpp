@@ -7,6 +7,7 @@
 #include "ttplayer/core/text.h"
 #include "ttplayer/skin/skin_package.h"
 #include "ttplayer/ui/playback_track_state.h"
+#include "ttplayer/ui/media_library_playback.h"
 #include "ttplayer/ui/playlist_transforms.h"
 #include "ttplayer/ui/player_runtime_policy.h"
 #include "ttplayer/ui/tooltip_policy.h"
@@ -3708,11 +3709,7 @@ bool PlayerWindow::IsSkinElementEnabled(std::wstring_view name) const {
                                       (state == audio::PlaybackState::playing ||
                                        state == audio::PlaybackState::paused);
     if (name == L"prev" || name == L"next") {
-        const auto count = PlaybackPlaylist().Tracks().size();
-        if (count == 0) return false;
-        if (settings_.player.play_mode == 3 || settings_.player.play_mode == 4) return true;
-        if (!current_) return false;
-        return name == L"prev" ? *current_ > 0 : *current_ + 1 < count;
+        return NavigationEnabled(name == L"next");
     }
     return true;
 }
@@ -3852,7 +3849,7 @@ void PlayerWindow::InvokeSkinAction(std::wstring_view action) {
         else PlayCurrent();
     }
     else if (action.starts_with(L"mode_")) {
-        settings_.player.play_mode = (settings_.player.play_mode + 1) % 5;
+        SetPlaybackMode((settings_.player.play_mode + 1) % 5);
         ResetSkinControlAnimations();
         UpdateMainToolRects();
     }
@@ -4782,8 +4779,8 @@ void PlayerWindow::PrepareContextMenu(HMENU menu) {
         DeleteMenu(player, playing ? kCmdPlay : kCmdPause, MF_BYCOMMAND);
     EnableCommand(menu, kCmdPause, playing || paused);
     EnableCommand(menu, kCmdStopPlayback, playing || paused);
-    EnableCommand(menu, kCmdPrevious, !PlaybackPlaylist().Tracks().empty());
-    EnableCommand(menu, kCmdNext, !PlaybackPlaylist().Tracks().empty());
+    EnableCommand(menu, kCmdPrevious, NavigationEnabled(false));
+    EnableCommand(menu, kCmdNext, NavigationEnabled(true));
     EnableCommand(menu, kCmdCloseFile, have_track);
     EnableCommand(menu, kCmdFileProperties, have_track);
     const bool seekable = (playing || paused) &&
@@ -4930,7 +4927,7 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
         return true;
     }
     if (command >= kCmdPlayModeFirst && command <= kCmdPlayModeLast) {
-        settings_.player.play_mode = static_cast<int>(command - kCmdPlayModeFirst);
+        SetPlaybackMode(static_cast<int>(command - kCmdPlayModeFirst));
         ResetSkinControlAnimations();
         UpdateMainToolRects();
         InvalidateRect(window_, nullptr, FALSE);
@@ -5734,6 +5731,12 @@ void PlayerWindow::RefreshPlaylist() {
 }
 
 void PlayerWindow::RefreshPlaybackUi() {
+    if (window_) {
+        if (const HWND previous = GetDlgItem(window_, kPrevious))
+            EnableWindow(previous, NavigationEnabled(false));
+        if (const HWND next = GetDlgItem(window_, kNext))
+            EnableWindow(next, NavigationEnabled(true));
+    }
     UpdateTaskbarPlayback();
     UpdateMainWindowCaption();
     const auto text = PlaybackStatusText();
@@ -6012,16 +6015,6 @@ bool PlayerWindow::PlayCurrent() {
     media_library_startup_pending_ = false;
     // Both explicit and automatic requests use the same nonmodal notice.
     ClearAudioError();
-    if (natural_completion_dispatch_) {
-        // Playback/@TracksInterval is expressed in seconds by dialog 259.
-        // Defer only the actual decoder request: OnPlayComplete still chooses
-        // the next row/list synchronously, while the existing UI timer keeps
-        // the window responsive during the silent interval.
-        pending_natural_play_ = true;
-        pending_natural_play_tick_ = GetTickCount64() +
-            TrackIntervalMilliseconds(settings_.playback.track_interval);
-        return true;
-    }
     pending_natural_play_ = false;
     pending_failed_advance_ = false;
     if (!media_library_playback_active_) {
@@ -6045,6 +6038,14 @@ bool PlayerWindow::PlayCurrent() {
     if (indexed_playback && PlaybackPlaylist().SetPlayingRow(*current_) &&
         playback_playlist_index)
         playlists_.MarkDirty(*playback_playlist_index);
+    if (natural_completion_dispatch_) {
+        // Publish the chosen row before waiting between tracks. A manual
+        // Next during this interval must use that row, not the old marker.
+        pending_natural_play_ = true;
+        pending_natural_play_tick_ = GetTickCount64() +
+            TrackIntervalMilliseconds(settings_.playback.track_interval);
+        return true;
+    }
     if (!audio_.Play(requested_track.path, requested_track.subtrack)) {
         playback_source_open_ = false;
         opened_track_.reset();
@@ -6249,212 +6250,152 @@ void PlayerWindow::SelectTrackFrom(size_t playlist_index, size_t index,
     if (start_playback) PlayCurrent();
 }
 
-void PlayerWindow::SelectRelative(bool next) {
-    if (media_library_playback_active_) {
-        auto& list = media_library_playback_;
-        if (list.Tracks().empty()) return;
-        const size_t selected = current_.value_or(
-            next ? list.Tracks().size() - 1 : 0);
-        playlist::PlayMode mode = playlist::PlayMode::sequential;
-        if (settings_.player.play_mode == 1)
-            mode = playlist::PlayMode::repeat_one;
-        else if (settings_.player.play_mode == 3)
-            mode = playlist::PlayMode::repeat_all;
-        else if (settings_.player.play_mode == 4)
-            mode = playlist::PlayMode::shuffle;
-        const auto target = next ? list.Next(selected, mode)
-                                 : list.Previous(selected, mode);
-        if (target) SelectMediaLibraryPlaybackTrack(*target, true);
-        return;
+void PlayerWindow::SetPlaybackMode(int mode, bool reset_random_order) {
+    if (mode < 0 || mode > 4) return;
+    settings_.player.play_mode = mode;
+    // 004655FE resets on the main command/skin path even if random was
+    // already selected. 00483AF8's playlist submenu only assigns the mode.
+    if (mode == 4 && reset_random_order) random_playback_order_.Reset();
+    RefreshPlaybackUi();
+}
+
+size_t PlayerWindow::NavigationTrackCount() const noexcept {
+    if (settings_.playlist.library_mode && media_library_) return VisiblePlaylistTrackCount();
+    if (settings_.playlist.library_mode && !media_library_ && media_library_playback_active_)
+        return media_library_playback_.Tracks().size();
+    return playlists_.Empty() ? 0 : ActivePlaylist().Tracks().size();
+}
+
+std::optional<size_t> PlayerWindow::NavigationPlayingRow() const {
+    if (settings_.playlist.library_mode && media_library_) return VisiblePlaylistPlayingRow();
+    if (settings_.playlist.library_mode && !media_library_ && media_library_playback_active_)
+        return media_library_playback_.PlayingRow();
+    return playlists_.Empty() ? std::nullopt : ActivePlaylist().PlayingRow();
+}
+
+bool PlayerWindow::NavigationEnabled(bool next) const {
+    const size_t count = NavigationTrackCount();
+    if (count == 0) return false;
+    if (settings_.player.play_mode == 3 || settings_.player.play_mode == 4) return true;
+    const auto playing = NavigationPlayingRow();
+    // 0045A6xx disables the end buttons in modes 0..2; a missing marker
+    // (-1) disables Previous but enables Next. Commands themselves wrap.
+    return next ? !playing || *playing + 1 < count : playing && *playing > 0;
+}
+
+void PlayerWindow::SelectNavigationTrack(size_t row) {
+    if (row >= NavigationTrackCount()) return;
+    if (settings_.playlist.library_mode && media_library_) {
+        ActivateMediaLibraryResult(row, true);
+    } else if (settings_.playlist.library_mode && media_library_playback_active_) {
+        SelectMediaLibraryPlaybackTrack(row, true);
+    } else if (!playlists_.Empty()) {
+        SelectTrackFrom(playlists_.ActiveIndex(), row, true);
     }
-    const size_t playlist_index = playing_playlist_index_.value_or(playlists_.ActiveIndex());
-    auto& list = playlists_.At(playlist_index);
-    if (list.Tracks().empty()) return;
-    const size_t current = current_.value_or(next ? list.Tracks().size() - 1 : 0);
-    playlist::PlayMode mode = playlist::PlayMode::sequential;
-    if (settings_.player.play_mode == 1) mode = playlist::PlayMode::repeat_one;
-    else if (settings_.player.play_mode == 3) mode = playlist::PlayMode::repeat_all;
-    else if (settings_.player.play_mode == 4) mode = playlist::PlayMode::shuffle;
-    const auto selected = next ? list.Next(current, mode) : list.Previous(current, mode);
-    if (selected) SelectTrackFrom(playlist_index, *selected, true);
+}
+
+bool PlayerWindow::FollowPlaybackCursor() {
+    // 0047FCA6 asks for both LVNI_SELECTED and LVNI_FOCUSED. Merely moving
+    // the caret, or selecting a catalogue rather than a song, is insufficient.
+    if (!settings_.player.play_follow_cursor || !playlist_selection_ ||
+        !playlist_selected_rows_.contains(*playlist_selection_) ||
+        *playlist_selection_ >= NavigationTrackCount()) return false;
+    const size_t focused = *playlist_selection_;
+    const auto playing = NavigationPlayingRow();
+    playlist_selected_rows_.clear();
+    playlist_selection_.reset();
+    if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
+    if (playing == std::optional<size_t>{focused}) return false;
+    SelectNavigationTrack(focused);
+    return true;
+}
+
+bool PlayerWindow::SwitchNavigationList(bool wrap) {
+    // 0047F5D6 uses the currently displayed catalogue, which can differ
+    // from the decoder's retained playback owner. It does not skip empties.
+    if (settings_.playlist.library_mode) return SwitchMediaLibraryCatalogue(wrap);
+    if (playlists_.Empty()) return false;
+    size_t target = playlists_.ActiveIndex() + 1;
+    if (target >= playlists_.Size()) {
+        if (!wrap) return false;
+        target = 0;
+    }
+    // A one-list catalogue may wrap back to itself (0047F294 accepts it).
+    SwitchPlaylist(target);
+    return true;
+}
+
+void PlayerWindow::SelectRelative(bool next) {
+    const size_t count = NavigationTrackCount();
+    if (count == 0) return;
+    if (next && FollowPlaybackCursor()) return;
+    const auto playing = NavigationPlayingRow();
+    std::optional<size_t> selected;
+    if (settings_.player.play_mode == 4) {
+        selected = random_playback_order_.Select(count, playing, next
+            ? playlist::RandomPlaybackOrder::Request::next
+            : playlist::RandomPlaybackOrder::Request::previous);
+    } else {
+        // 00465230/0046528B special-case only random mode. Commands in
+        // modes 0..3 wrap; their enabled/disabled UI state is separate.
+        selected = next ? (playing && *playing + 1 < count ? *playing + 1 : 0)
+                        : (playing && *playing > 0 && *playing <= count ? *playing - 1 : count - 1);
+    }
+    if (selected) SelectNavigationTrack(*selected);
 }
 
 void PlayerWindow::AdvanceAfterNaturalEnd() {
-    // CPlayerWnd::OnPlayComplete (0045BD69) is not the same operation as a
-    // user pressing Next.  In particular, single mode stops, sequential mode
-    // does not wrap, and AutoSwitchList advances the catalogue with different
-    // wrap rules for sequential and repeat-all.
-    if (media_library_playback_active_) {
-        auto& list = media_library_playback_;
-        const size_t count = list.Tracks().size();
-        const size_t playing = list.PlayingRow().value_or(
-            current_.value_or(0));
-        const size_t next = playing + 1;
-        const auto restart = [this, playing]() {
-            SelectMediaLibraryPlaybackTrack(playing, true);
-        };
-        switch (settings_.player.play_mode) {
-        case 0:
-            Stop();
-            return;
-        case 1:
-            if (count != 0) restart(); else Stop();
-            return;
-        case 2:
-            if (next < count)
-                SelectMediaLibraryPlaybackTrack(next, true);
-            else {
-                if (fullscreen_mode_ != 0) LeaveFullScreen();
-                RefreshPlaybackUi();
-            }
-            return;
-        case 3:
-            if (count != 0)
-                SelectMediaLibraryPlaybackTrack(next < count ? next : 0, true);
-            else
-                Stop();
-            return;
-        case 4:
-            if (count > 1) {
-                const auto target = list.Next(
-                    playing, playlist::PlayMode::shuffle);
-                if (target) SelectMediaLibraryPlaybackTrack(*target, true);
-                else Stop();
-            } else if (count == 1) {
-                restart();
-            } else {
-                Stop();
-            }
-            return;
-        default:
-            return;
-        }
-    }
-    const size_t source = playing_playlist_index_.value_or(
-        playlists_.ActiveIndex());
-    if (source >= playlists_.Size()) {
-        Stop();
-        return;
-    }
-    auto& list = playlists_.At(source);
-    const size_t count = list.Tracks().size();
+    // 0045BD69 shares a transition policy between numbered lists and the
+    // library's materialized tree query. Repeat-one restarts the decoder's
+    // actual song; traversal uses the displayed list's playing marker.
+    const size_t count = NavigationTrackCount();
     const int mode = settings_.player.play_mode;
-
-    const auto restart = [this, source, &list]() {
-        if (const auto playing = list.PlayingRow()) current_ = *playing;
-        playing_playlist_index_ = source;
-        static_cast<void>(PlayCurrent());
-    };
-    const auto exit_fullscreen_only = [this]() {
+    const bool auto_switch = settings_.player.auto_switch_list;
+    const auto restart = [this]() { static_cast<void>(PlayCurrent()); };
+    const auto finished = [this]() {
         if (fullscreen_mode_ != 0) LeaveFullScreen();
         RefreshPlaybackUi();
     };
-    const auto switch_list = [this, source](bool wrap)
-        -> std::optional<size_t> {
-        if (playlists_.Size() == 0) return std::nullopt;
-        size_t target = source + 1;
-        if (target >= playlists_.Size()) {
-            if (!wrap) return std::nullopt;
-            target = 0;
-        }
-        if (target == source) return std::nullopt;
-        SwitchPlaylist(target);
-        playing_playlist_index_ = target;
-        current_ = playlists_.At(target).Tracks().empty()
-            ? std::nullopt : std::optional<size_t>{0};
-        return target;
+    const auto switch_and_play = [this](bool wrap, bool random) {
+        if (!SwitchNavigationList(wrap)) { Stop(); return; }
+        if (random) random_playback_order_.Reset(); // 0045BBF6(0) returns row 0.
+        if (NavigationTrackCount() != 0) SelectNavigationTrack(0);
+        // 0047FEA3 rejects row zero in an empty list without reopening the
+        // retained sound or taking 0045BF3A's leave-fullscreen branch.
+        else RefreshPlaybackUi();
     };
-
-    if (count == 0 &&
-        (!settings_.player.auto_switch_list || mode < 2 || mode > 4)) {
-        if (mode == 1 || mode == 2) restart();
-        else Stop();
+    if (count == 0 && (!auto_switch || mode < 2 || mode > 4)) {
+        if (mode == 1 || mode == 2) restart(); else Stop();
         return;
     }
-
-    // When PlayFollowCursor is enabled, 0045BD69 gives a focused Files row
-    // precedence over the normal end-of-track transition (except in Single
-    // mode), first clearing LVIS_SELECTED just like command 0x7F36.
-    if (ShouldStartPlaylistPlayback(
-            PlaylistSelectionTrigger::natural_completion,
-            settings_.player.play_follow_cursor) && mode != 0 &&
-        source == playlists_.ActiveIndex() && playlist_selection_ &&
-        *playlist_selection_ < count) {
-        const size_t focused = *playlist_selection_;
-        playlist_selected_rows_.clear();
-        if (playlist_window_)
-            InvalidateRect(playlist_window_, nullptr, FALSE);
-        if (list.PlayingRow() != std::optional<size_t>{focused}) {
-            SelectTrackFrom(source, focused, true);
-            return;
-        }
-    }
-
-    const size_t next = list.PlayingRow()
-        ? *list.PlayingRow() + 1 : 0;
+    if (mode != 0 && FollowPlaybackCursor()) return;
+    const auto playing = NavigationPlayingRow();
+    const size_t next = playing ? *playing + 1 : 0;
     switch (mode) {
-    case 0: // Single
+    case 0:
         Stop();
         return;
-    case 1: // Repeat one
+    case 1:
         restart();
         return;
-    case 2: // Sequential
-        if (next < count) {
-            SelectTrackFrom(source, next, true);
-            return;
-        }
-        if (!settings_.player.auto_switch_list) {
-            // 0045BF3A exits full-screen without running the complete stop
-            // reset a second time; the decoder has already reported stopped.
-            exit_fullscreen_only();
-            return;
-        }
-        if (switch_list(false)) {
-            static_cast<void>(PlayCurrent());
-            return;
-        }
-        Stop();
+    case 2:
+        if (next < count) SelectNavigationTrack(next);
+        else if (auto_switch) switch_and_play(false, false);
+        else finished();
         return;
-    case 3: // Repeat all
-        if (!settings_.player.auto_switch_list || next < count) {
-            if (count != 0)
-                SelectTrackFrom(source, next < count ? next : 0, true);
-            else
-                Stop();
-            return;
-        }
-        if (switch_list(true)) {
-            static_cast<void>(PlayCurrent());
-            return;
-        }
-        Stop();
+    case 3:
+        if (auto_switch && next >= count) switch_and_play(true, false);
+        else if (count != 0) SelectNavigationTrack(next < count ? next : 0);
+        else Stop();
         return;
-    case 4: { // Shuffle
-        if (count > 1) {
-            const size_t current = list.PlayingRow().value_or(0);
-            const auto selected = list.Next(current,
-                                             playlist::PlayMode::shuffle);
-            if (selected) SelectTrackFrom(source, *selected, true);
-            else Stop();
-            return;
-        }
-        if (!settings_.player.auto_switch_list) {
-            if (count == 1) restart();
-            else Stop();
-            return;
-        }
-        if (const auto target = switch_list(true)) {
-            auto& target_list = playlists_.At(*target);
-            if (!target_list.Tracks().empty()) {
-                current_ = 0;
-                static_cast<void>(PlayCurrent());
-                return;
-            }
-        }
-        Stop();
+    case 4:
+        if (auto_switch && (count <= 1 || random_playback_order_.AtEnd(count))) {
+            switch_and_play(true, true);
+        } else if (const auto target = random_playback_order_.Select(
+                count, playing, playlist::RandomPlaybackOrder::Request::next)) {
+            SelectNavigationTrack(*target);
+        } else Stop();
         return;
-    }
     default:
         return;
     }
