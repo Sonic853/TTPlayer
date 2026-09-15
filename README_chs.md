@@ -50,3 +50,8 @@ build/Release/TTPlayerRebuild.exe
 这组命令只构建播放器，不构建测试、不复制原版运行资源。运行时，将 EXE 放到包含 ```ttpcomm.dll```、```ttpres.dll```、```AddIn```、```Skin``` 的原播放器目录。
 
 更多详细信息请参考 [README](README.md)
+
+## TODO List:
+
+- [ ] 音乐窗（非优先计划，目前需要先完善本地功能）
+- [ ] 高 DPI 支持（目前受限于图片皮肤）
