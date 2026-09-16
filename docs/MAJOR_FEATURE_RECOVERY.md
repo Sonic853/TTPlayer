@@ -219,6 +219,11 @@ C++ 对象布局/message-map。菜单访问键和 ListCtrl 的 SysListView32 基
 `#32768` 的经典菜单边框，并非主窗体阴影；现已补回 CBT 安装及非客户区绘制。
 普通按钮继续使用 ComCtl32 v6。详见 [WTL 行为恢复](WTL_BEHAVIOR_RECOVERY.md)。
 
+后续已按阶段接入官方 WTL 10.01：消息循环、主要窗口及 ListCtrl 的 ATL 绑定、
+设置和曲目属性页、非模态资源对话框、定制命令栏、命令状态、经典文件对话框及
+上传窗口 ActiveX 宿主。保留上述原版行为，而不复制旧编译器的对象布局。
+范围和验证见 [WTL 10.01 接入](WTL_10_01_MIGRATION.md)。
+
 ## 12. 宿主机验证
 
 - Win32 Release 全量构建成功；CTest 20/20 通过（13.12 秒）。

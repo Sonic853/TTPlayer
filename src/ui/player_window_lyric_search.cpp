@@ -1,3 +1,4 @@
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "player_window_internal.h"
 #include "ttplayer/core/text.h"
 
@@ -68,7 +69,7 @@ void PlayerWindow::ShowOnlineLyricSearch(bool automatic_results) {
     }
     // CLrcSearchDlg::0043AB9B selects RT_DIALOG 208 (automatic result
     // choice) or 209 (manual search). Preserve the original template/layout.
-    lyric_search_dialog_ = CreateDialogParamW(ResourceModule(),
+    lyric_search_dialog_ = CreateWtlDialog(ResourceModule(),
         MAKEINTRESOURCEW(automatic_results ? 208 : 209), window_,
         OnlineLyricDialogProc, reinterpret_cast<LPARAM>(this));
     if (lyric_search_dialog_) {

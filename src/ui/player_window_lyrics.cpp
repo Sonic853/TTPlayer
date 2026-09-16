@@ -1,3 +1,5 @@
+#include "ttplayer/ui/wtl_menu.h"
+#include "ttplayer/ui/wtl_window.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
@@ -1046,7 +1048,7 @@ bool PlayerWindow::CreateDesktopLyrics() {
         // DeskLrcBar's track popup must receive WM_INITMENUPOPUP and forward
         // it to 00461BAE. RETURNCMD already prevents WM_COMMAND dispatch;
         // adding NONOTIFY leaves the root track resource uninitialised.
-        const UINT command = TrackPopupMenuEx(
+        const UINT command = TrackPlayerPopupMenuEx(
             menu, TPM_RIGHTBUTTON | TPM_RETURNCMD,
             point.x, point.y, owner, nullptr);
         EndPopupMenuStyle();
@@ -3274,7 +3276,7 @@ void PlayerWindow::ShowLyricContextMenu(POINT screen_point) {
     const HWND owner = lyric_window_;
     SetForegroundWindow(owner);
     BeginPopupMenuStyle(menu, true);
-    const UINT command = TrackPopupMenuEx(menu,
+    const UINT command = TrackPlayerPopupMenuEx(menu,
         TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
         screen_point.x, screen_point.y, owner, nullptr);
     EndPopupMenuStyle();
@@ -3299,7 +3301,7 @@ void PlayerWindow::ShowFullScreenLyricContextMenu(POINT screen_point) {
     // to the (hidden) CPlayerWnd owner through ordinary WM_COMMAND routing.
     context_menu_open_ = true;
     SetForegroundWindow(lyric_control_);
-    TrackPopupMenu(menu, TPM_RIGHTBUTTON, screen_point.x, screen_point.y,
+    TrackPlayerPopupMenu(menu, TPM_RIGHTBUTTON, screen_point.x, screen_point.y,
                    0, window_, nullptr);
     DestroyMenu(menu);
     context_menu_open_ = false;
@@ -4018,17 +4020,13 @@ LRESULT CALLBACK PlayerWindow::LyricEditorProc(
 }
 
 LRESULT CALLBACK PlayerWindow::LyricWindowProc(HWND window, UINT message,
-                                                WPARAM wparam, LPARAM lparam) {
-    PlayerWindow* self = reinterpret_cast<PlayerWindow*>(
-        GetWindowLongPtrW(window, GWLP_USERDATA));
-    if (message == WM_NCCREATE) {
-        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
-        self = static_cast<PlayerWindow*>(create->lpCreateParams);
-        self->lyric_window_ = window;
-        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-    }
-    return self ? self->HandleLyricMessage(message, wparam, lparam)
-                : DefWindowProcW(window, message, wparam, lparam);
+        WPARAM wparam, LPARAM lparam) {
+    return WindowBinding<PlayerWindow>::Start(window, message, wparam, lparam,
+        &PlayerWindow::lyric_window_,
+        [](PlayerWindow* self, HWND window, UINT message, WPARAM wp, LPARAM lp) -> LRESULT {
+            (void)window;
+            return self->HandleLyricMessage(message, wp, lp);
+        });
 }
 
 } // namespace ttplayer::ui

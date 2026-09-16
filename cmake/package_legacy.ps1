@@ -27,6 +27,7 @@ New-Item -ItemType Directory -Path $licenses | Out-Null
 Copy-Item -LiteralPath (Join-Path $BuildDirectory 'legacy-licenses/YY-Thunks-LICENSE.txt') -Destination $licenses
 Copy-Item -LiteralPath (Join-Path $source 'docs/licenses/VC-LTL-LICENSE.txt') -Destination $licenses
 Copy-Item -LiteralPath (Join-Path $source 'docs/licenses/legacy-third-party.md') -Destination $licenses
+Copy-Item -LiteralPath (Join-Path $source 'docs/licenses/WTL-MS-PL.txt') -Destination $licenses
 "$hash  TTPlayerRebuild.exe" | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
 $parent = Split-Path ([IO.Path]::GetFullPath($Destination)) -Parent
 New-Item -ItemType Directory -Force -Path $parent | Out-Null

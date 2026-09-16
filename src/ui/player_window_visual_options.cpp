@@ -1,3 +1,4 @@
+#include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
@@ -643,7 +644,7 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
             const HMENU menu = LoadMenuW(
                 resources, MAKEINTRESOURCEW(kVisualProfileMenu));
             const HMENU popup = menu ? GetSubMenu(menu, 0) : nullptr;
-            const UINT selected = popup ? TrackPopupMenu(
+            const UINT selected = popup ? TrackPlayerPopupMenu(
                 popup, TPM_RIGHTBUTTON | TPM_RETURNCMD, bounds.left,
                 bounds.bottom, 0, dialog, nullptr) : 0;
             if (menu) DestroyMenu(menu);

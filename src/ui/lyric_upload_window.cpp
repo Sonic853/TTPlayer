@@ -1,3 +1,5 @@
+#include "ttplayer/ui/wtl_runtime.h"
+#include <atlhost.h>
 #include "lyric_upload_window.h"
 #include "../app/resource_ids.h"
 #include <commctrl.h>
@@ -25,14 +27,12 @@ std::wstring Text(UINT id) {
     return text;
 }
 
-// A small SDK-only OLE container replaces the original AtlAxWin71 wrapper.
-// No ATL redistributable, external EXE, or installed IE desktop application
-// is launched. COM references and event connections belong to this window.
-class UploadWindow final : public IOleClientSite, public IOleInPlaceSite,
-                           public IOleInPlaceFrame, public IDispatch {
+// ATL owns the WebBrowser's OLE container. This object retains only the
+// application event sink, target validation and document population policy.
+class UploadWindow final : public IDispatch {
 public:
     HWND window{}, status{}, progress{};
-    ComPtr<IOleObject> object;
+    ATL::CAxWindow browser_host;
     ComPtr<IWebBrowser2> browser;
     ComPtr<IConnectionPoint> connection;
     DWORD cookie{};
@@ -44,60 +44,18 @@ public:
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) override {
         if (!result) return E_POINTER;
         *result = nullptr;
-        if (iid == IID_IUnknown || iid == IID_IOleClientSite) *result = static_cast<IOleClientSite*>(this);
-        else if (iid == IID_IOleWindow || iid == IID_IOleInPlaceSite) *result = static_cast<IOleInPlaceSite*>(this);
-        else if (iid == IID_IOleInPlaceUIWindow || iid == IID_IOleInPlaceFrame) *result = static_cast<IOleInPlaceFrame*>(this);
-        else if (iid == IID_IDispatch || iid == DIID_DWebBrowserEvents2) *result = static_cast<IDispatch*>(this);
-        else return E_NOINTERFACE;
+        if (iid != IID_IUnknown && iid != IID_IDispatch && iid != DIID_DWebBrowserEvents2)
+            return E_NOINTERFACE;
+        *result = static_cast<IDispatch*>(this);
         AddRef(); return S_OK;
     }
     ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
     ULONG STDMETHODCALLTYPE Release() override { const auto n = --references; if (!n) delete this; return n; }
-    HRESULT STDMETHODCALLTYPE SaveObject() override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetMoniker(DWORD, DWORD, IMoniker** p) override { if (p) *p = nullptr; return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetContainer(IOleContainer** p) override { if (!p) return E_POINTER; *p = nullptr; return E_NOINTERFACE; }
-    HRESULT STDMETHODCALLTYPE ShowObject() override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE OnShowWindow(BOOL) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE RequestNewObjectLayout() override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetWindow(HWND* p) override { if (!p) return E_POINTER; *p = window; return S_OK; }
-    HRESULT STDMETHODCALLTYPE ContextSensitiveHelp(BOOL) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE CanInPlaceActivate() override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE OnInPlaceActivate() override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE OnUIActivate() override { return S_OK; }
     RECT ContentRect() const {
         RECT bounds{}, bar{}; GetClientRect(window, &bounds); GetWindowRect(status, &bar);
         bounds.bottom = std::max(bounds.top, bounds.bottom - (bar.bottom - bar.top));
         return bounds;
     }
-    HRESULT STDMETHODCALLTYPE GetWindowContext(IOleInPlaceFrame** frame, IOleInPlaceUIWindow** doc,
-            LPRECT pos, LPRECT clip, LPOLEINPLACEFRAMEINFO info) override {
-        if (!frame || !doc || !pos || !clip || !info) return E_POINTER;
-        *frame = this; AddRef(); *doc = nullptr; *pos = *clip = ContentRect();
-        info->cb = sizeof(*info); info->fMDIApp = FALSE; info->hwndFrame = window;
-        info->haccel = nullptr; info->cAccelEntries = 0; return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE Scroll(SIZE) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE OnUIDeactivate(BOOL) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE OnInPlaceDeactivate() override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE DiscardUndoState() override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE DeactivateAndUndo() override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE OnPosRectChange(LPCRECT rect) override {
-        ComPtr<IOleInPlaceObject> inplace;
-        return object && SUCCEEDED(object.As(&inplace)) ? inplace->SetObjectRects(rect, rect) : E_FAIL;
-    }
-    HRESULT STDMETHODCALLTYPE GetBorder(LPRECT rect) override { if (!rect) return E_POINTER; *rect = ContentRect(); return S_OK; }
-    HRESULT STDMETHODCALLTYPE RequestBorderSpace(LPCBORDERWIDTHS) override { return INPLACE_E_NOTOOLSPACE; }
-    HRESULT STDMETHODCALLTYPE SetBorderSpace(LPCBORDERWIDTHS) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE SetActiveObject(IOleInPlaceActiveObject*, LPCOLESTR) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE InsertMenus(HMENU, LPOLEMENUGROUPWIDTHS) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE SetMenu(HMENU, HOLEMENU, HWND) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE RemoveMenus(HMENU) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE SetStatusText(LPCOLESTR text) override {
-        if (!closed && !filled) SendMessageW(status, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(text));
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE EnableModeless(BOOL) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE TranslateAccelerator(LPMSG, WORD) override { return S_FALSE; }
     HRESULT STDMETHODCALLTYPE GetTypeInfoCount(UINT* n) override { if (!n) return E_POINTER; *n = 0; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT, LCID, ITypeInfo**) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID, LPOLESTR*, UINT, LCID, DISPID*) override { return DISP_E_UNKNOWNNAME; }
@@ -110,7 +68,10 @@ public:
     HRESULT STDMETHODCALLTYPE Invoke(DISPID id, REFIID, LCID, WORD, DISPPARAMS* args,
             VARIANT*, EXCEPINFO*, UINT*) override {
         if (closed || !args) return S_OK;
-        if (id == DISPID_DOCUMENTCOMPLETE && args->cArgs == 2 &&
+        if (id == DISPID_STATUSTEXTCHANGE && args->cArgs == 1 &&
+            args->rgvarg[0].vt == VT_BSTR && !filled) {
+            WTL::CStatusBarCtrl(status).SetText(0, args->rgvarg[0].bstrVal);
+        } else if (id == DISPID_DOCUMENTCOMPLETE && args->cArgs == 2 &&
             args->rgvarg[1].vt == VT_DISPATCH && IsTopDocument(args->rgvarg[1].pdispVal)) {
             KillTimer(window, 1); ShowWindow(progress, SW_HIDE);
             BSTR address{};
@@ -146,7 +107,9 @@ public:
         const int parts[]{std::max(0L, bounds.right - 120), bounds.right};
         SendMessageW(status, SB_SETPARTS, 2, reinterpret_cast<LPARAM>(parts));
         MoveWindow(progress, std::max(0L, bounds.right - 116), 2, 100, std::max(0L, bounds.bottom - 4), TRUE);
-        const auto content = ContentRect(); OnPosRectChange(&content);
+        const auto content = ContentRect();
+        if (browser_host.IsWindow())
+            browser_host.SetWindowPos(nullptr, &content, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     bool Initialize() {
         status = CreateWindowExW(0, STATUSCLASSNAMEW, nullptr, WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
@@ -155,14 +118,15 @@ public:
             0, 0, 0, 0, status, reinterpret_cast<HMENU>(2), GetModuleHandleW(nullptr), nullptr);
         if (!status || !progress) return false;
         Layout(); Status(IDS_LYRIC_UPLOAD_LOADING);
-        HRESULT hr = CoCreateInstance(CLSID_WebBrowser, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&object));
-        if (FAILED(hr) || FAILED(object->SetClientSite(this)) || FAILED(object.As(&browser))) return false;
-        OleSetContainedObject(object.Get(), TRUE);
+        if (FAILED(EnsureWtlRuntime()) || !ATL::AtlAxWinInit()) return false;
+        auto bounds = ContentRect();
+        if (!browser_host.Create(window, bounds, nullptr,
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN)) return false;
+        HRESULT hr = browser_host.CreateControl(L"Shell.Explorer.2");
+        if (FAILED(hr) || FAILED(browser_host.QueryControl(browser.GetAddressOf()))) return false;
         ComPtr<IConnectionPointContainer> events;
         if (FAILED(browser.As(&events)) || FAILED(events->FindConnectionPoint(DIID_DWebBrowserEvents2, &connection)) ||
             FAILED(connection->Advise(static_cast<IDispatch*>(this), &cookie))) return false;
-        const auto bounds = ContentRect();
-        if (FAILED(object->DoVerb(OLEIVERB_SHOW, nullptr, this, 0, window, &bounds))) return false;
         browser->put_Silent(VARIANT_TRUE);
         VARIANT url{}, headers{}, empty{};
         url.vt = headers.vt = VT_BSTR;
@@ -182,8 +146,8 @@ public:
         if (connection && cookie) connection->Unadvise(cookie);
         cookie = 0; connection.Reset();
         if (browser) browser->Stop();
-        if (object) { object->Close(OLECLOSE_NOSAVE); object->SetClientSite(nullptr); }
-        browser.Reset(); object.Reset();
+        if (browser_host.IsWindow()) browser_host.DestroyWindow();
+        browser.Reset();
     }
     static LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         auto* self = reinterpret_cast<UploadWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));

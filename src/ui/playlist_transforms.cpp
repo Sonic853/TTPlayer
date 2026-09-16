@@ -1,3 +1,4 @@
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/ui/playlist_transforms.h"
 
@@ -1822,7 +1823,7 @@ bool ShowPlaylistConverter(
     state->results.resize(state->tracks.size());
     for (auto& result:state->results) result.result=kConversionPending;
     auto* holder=new ConvertLifetime(state);
-    const HWND dialog=CreateDialogParamW(resources,MAKEINTRESOURCEW(kConvertProgressDialog),
+    const HWND dialog=CreateWtlDialog(resources,MAKEINTRESOURCEW(kConvertProgressDialog),
         owner,ConvertProgressProc,reinterpret_cast<LPARAM>(holder));
     if (!dialog) {
         // WM_NCDESTROY normally consumes the holder after WM_INITDIALOG.
@@ -1879,7 +1880,7 @@ bool ShowPlaylistReplayGainScanner(
         if (retained_ttpcomm) FreeLibrary(retained_ttpcomm);
         return false;
     }
-    const HWND dialog = CreateDialogParamW(
+    const HWND dialog = CreateWtlDialog(
         resources, MAKEINTRESOURCEW(kScanDialog), owner,
         ScanDialogProc, reinterpret_cast<LPARAM>(holder));
     if (!dialog) {

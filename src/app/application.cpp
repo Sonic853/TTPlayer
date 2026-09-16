@@ -4,6 +4,7 @@
 #include "ttplayer/settings/settings.h"
 #include "ttplayer/ui/player_window.h"
 #include "ttplayer/ui/player_runtime_policy.h"
+#include "ttplayer/ui/wtl_runtime.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -12,11 +13,6 @@
 
 namespace ttplayer::app {
 namespace {
-// WinUser.h does not expose this user-mode-internal timer message in every
-// supported SDK. CMessageLoop_ShouldResumeIdle (004B54F2) compares the
-// literal 0x0118 alongside WM_TIMER.
-constexpr UINT kWmSysTimer = 0x0118;
-
 std::wstring Lower(std::wstring value) {
     std::transform(value.begin(), value.end(), value.begin(), towlower);
     return value;
@@ -59,6 +55,7 @@ int TTPlayer_RunApplicationSession(HINSTANCE instance, int show_command,
                                    HMODULE resource_module,
                                    HMODULE ttpcomm_module,
     const plugins::PluginManager& sound_library) {
+    if (FAILED(ui::EnsureWtlRuntime())) return -1;
     const auto command_line = ParseCommandLine();
     auto settings = LoadSettingsIfPresent();
     if (command_line.HasSwitch(L"reg") || command_line.HasSwitch(L"unreg")) {
@@ -100,50 +97,20 @@ int TTPlayer_RunApplicationSession(HINSTANCE instance, int show_command,
     if (!command_line.smoke_test) player.CheckStartupAssociations();
     if (command_line.smoke_test) PostMessageW(player.Handle(), WM_CLOSE, 0, 0);
 
-    MSG message{};
-    bool run_idle = true;
-    while (true) {
-        // CMessageLoop_Run (004B5470) performs one WTL idle phase whenever
-        // the queue becomes empty.  The original PlayerWindow idle handler
-        // updates command-bar enable/check caches; this rebuild computes the
-        // same state synchronously when each owner-drawn menu is opened, so
-        // there is no private cache to mutate here.  Preserve the scheduling
-        // boundary nevertheless: it is what prevents paint/mouse/timer
-        // traffic from continuously restarting idle work.
-        while (!PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE) &&
-               run_idle) {
-            run_idle = false;
+    struct PlayerFilter final : WTL::CMessageFilter {
+        ui::PlayerWindow& player;
+        explicit PlayerFilter(ui::PlayerWindow& value) : player(value) {}
+        BOOL PreTranslateMessage(MSG* message) override {
+            return player.PreTranslateMessage(*message);
         }
-
-        BOOL result{};
-        // The decompiled loop retries GetMessage after -1 rather than
-        // interpreting the stale MSG or terminating the player session.
-        do {
-            result = GetMessageW(&message, nullptr, 0, 0);
-        } while (result == -1);
-        if (result == 0) break;
-        // CPlayerWnd::PreTranslateMessage (00449DA8) first gives the active
-        // lyric editor/dialog its private accelerator path, then relays the
-        // untouched queued MSG to the tooltip filter.  Consumed accelerator
-        // messages must not reach TranslateMessage/DispatchMessage again.
-        if (!player.PreTranslateMessage(message)) {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-
-        // CMessageLoop_ShouldResumeIdle (004B54F2) excludes exactly these
-        // high-frequency messages.  Keep the literal message set rather than
-        // replacing it with a broad range test: WM_NCMOUSEMOVE is the only
-        // non-client mouse message suppressed by the original.
-        if (message.message != WM_PAINT &&
-            message.message != WM_NCMOUSEMOVE &&
-            message.message != WM_TIMER &&
-            message.message != kWmSysTimer &&
-            message.message != WM_MOUSEMOVE) {
-            run_idle = true;
-        }
-    }
+    } filter(player);
+    ui::PlayerMessageLoop loop;
+    if (!_Module.AddMessageLoop(&loop)) return -1;
+    loop.AddMessageFilter(&filter);
+    const int result = loop.Run();
+    loop.RemoveMessageFilter(&filter);
+    _Module.RemoveMessageLoop();
     single_instance.PublishWindow(nullptr);
-    return static_cast<int>(message.wParam);
+    return result;
 }
 } // namespace ttplayer::app

@@ -65,9 +65,9 @@ jobs:
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
           if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe is missing from the runner.' }
           $installation = & $vswhere -latest -products '*' -version '[18.0,19.0)' `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.ATL -property installationPath
           if ($LASTEXITCODE -ne 0 -or -not $installation) {
-            throw 'Visual Studio 2026 with x86/x64 C++ tools was not found. Use the windows-2025-vs2026 runner.'
+            throw 'Visual Studio 2026 with x86/x64 C++ tools and ATL was not found. Use the windows-2025-vs2026 runner.'
           }
           $installation = $installation.Trim()
           Write-Output "Visual Studio 2026: $installation"
@@ -113,6 +113,8 @@ jobs:
           $package = Join-Path build modern-package
           New-Item -ItemType Directory -Path $package | Out-Null
           Copy-Item -LiteralPath $executable, LICENSE, docs/BUILDING.md -Destination $package
+          New-Item -ItemType Directory -Path (Join-Path $package 'licenses') | Out-Null
+          Copy-Item -LiteralPath docs/licenses/WTL-MS-PL.txt -Destination (Join-Path $package 'licenses')
           $executableHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
           "$executableHash  TTPlayerRebuild.exe" | Set-Content -LiteralPath (Join-Path $package SHA256SUMS.txt) -Encoding utf8
           Compress-Archive -Path (Join-Path $package '*') -DestinationPath $modernArchive
@@ -135,6 +137,7 @@ jobs:
             legacy_minimum_windows = 'XP SP3 / Windows 7'
             yy_thunks = '1.2.2'
             vc_ltl = '5.3.1'
+            wtl = '10.01'
             run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           } | ConvertTo-Json | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
 

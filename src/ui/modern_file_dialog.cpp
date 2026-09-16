@@ -1,3 +1,5 @@
+#include "ttplayer/ui/wtl_runtime.h"
+#include <atldlgs.h>
 #include "modern_file_dialog.h"
 
 #include <algorithm>
@@ -33,7 +35,8 @@ std::optional<std::vector<std::filesystem::path>> ClassicFiles(
     const bool initial_is_directory = !initial.empty() &&
         std::filesystem::is_directory(options.initial_path, error);
     if (!initial_is_directory) std::copy(initial.begin(), initial.end(), buffer.begin());
-    OPENFILENAMEW dialog{sizeof(dialog)};
+    WTL::CFileDialog chooser(!save);
+    auto& dialog = chooser.m_ofn;
     dialog.hwndOwner = options.owner;
     dialog.lpstrFilter = options.filters.empty() ? nullptr : filter.c_str();
     dialog.nFilterIndex = 1;
@@ -44,11 +47,11 @@ std::optional<std::vector<std::filesystem::path>> ClassicFiles(
     const wchar_t* extension = options.default_extension.c_str();
     while (*extension == L'.') ++extension;
     dialog.lpstrDefExt = *extension ? extension : nullptr;
-    dialog.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
+    dialog.Flags = OFN_EXPLORER | OFN_ENABLEHOOK | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
     if (!save) dialog.Flags |= OFN_FILEMUSTEXIST;
     if (multiple) dialog.Flags |= OFN_ALLOWMULTISELECT;
     if (overwrite) dialog.Flags |= OFN_OVERWRITEPROMPT;
-    if (!(save ? GetSaveFileNameW(&dialog) : GetOpenFileNameW(&dialog)))
+    if (chooser.DoModal(options.owner) != IDOK)
         return std::nullopt;
     std::vector<std::filesystem::path> paths;
     const std::filesystem::path first(buffer.data());
@@ -58,25 +61,14 @@ std::optional<std::vector<std::filesystem::path>> ClassicFiles(
     return paths;
 }
 
-int CALLBACK ClassicFolderCallback(HWND window, UINT message, LPARAM, LPARAM data) {
-    if (message == BFFM_INITIALIZED && data)
-        SendMessageW(window, BFFM_SETSELECTIONW, TRUE, data);
-    return 0;
-}
-
 std::optional<ModernFolderResult> ClassicFolder(const ModernFolderOptions& options) {
-    BROWSEINFOW dialog{};
-    dialog.hwndOwner = options.owner;
-    dialog.lpszTitle = options.title.empty() ? nullptr : options.title.c_str();
-    dialog.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    dialog.lpfn = ClassicFolderCallback;
-    dialog.lParam = reinterpret_cast<LPARAM>(options.initial_path.c_str());
-    PIDLIST_ABSOLUTE selection = SHBrowseForFolderW(&dialog);
-    if (!selection) return std::nullopt;
-    wchar_t path[MAX_PATH]{};
-    const BOOL valid = SHGetPathFromIDListW(selection, path);
-    CoTaskMemFree(selection);
-    if (!valid) return std::nullopt;
+    WTL::CFolderDialog chooser(options.owner,
+        options.title.empty() ? nullptr : options.title.c_str(),
+        BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE);
+    chooser.SetInitialFolder(options.initial_path.c_str(), false);
+    if (chooser.DoModal(options.owner) != IDOK) return std::nullopt;
+    const wchar_t* path = chooser.GetFolderPath();
+    if (!path || !*path) return std::nullopt;
     bool checked = options.checkbox_checked;
     if (!options.checkbox_label.empty()) {
         // The XP folder browser has no IFileDialogCustomize checkbox. Ask for

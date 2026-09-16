@@ -1,3 +1,4 @@
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "player_window_internal.h"
 #include "file_info_cover_policy.h"
 #include "file_info_probe_protocol.h"
@@ -1539,7 +1540,7 @@ void PlayerWindow::ShowPlaylistProperties(
     header.pszCaption = initial_title.c_str();
     header.nPages = static_cast<UINT>(pages.size());
     header.ppsp = pages.data();
-    const INT_PTR created = PropertySheetW(&header);
+    const INT_PTR created = ShowWtlPropertySheet(header);
     if (created <= 0) return;
     context->sheet = reinterpret_cast<HWND>(created);
     context->post_target.store(context->sheet, std::memory_order_release);

@@ -1,3 +1,4 @@
+#include "ttplayer/ui/wtl_runtime.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 
@@ -9,6 +10,28 @@ namespace {
 using namespace detail;
 constexpr wchar_t kNativeListState[] = L"TTPlayer.NativeListState";
 WNDPROC native_list_proc{};
+
+// A native list HWND owns one ATL/WTL binding. NativeListState remains the
+// skin/model projection, and no additional song data is stored by this class.
+class NativeListWindow final : public ATL::CWindowImpl<NativeListWindow, WTL::CListViewCtrl> {
+public:
+    WNDPROC handler{};
+    BOOL ProcessWindowMessage(HWND window, UINT message, WPARAM wp, LPARAM lp,
+                              LRESULT& result, DWORD = 0) override {
+        result = handler(window, message, wp, lp);
+        if (message == WM_NCDESTROY) m_dwState |= WINSTATE_DESTROYED;
+        return TRUE;
+    }
+    void OnFinalMessage(HWND) override { delete this; }
+    static bool Bind(HWND window, WNDPROC handler) {
+        auto binding = std::unique_ptr<NativeListWindow>(new (std::nothrow) NativeListWindow);
+        if (!binding) return false;
+        binding->handler = handler;
+        if (!binding->SubclassWindow(window)) return false;
+        binding.release();
+        return true;
+    }
+};
 
 // The skin/model remains the owner of rows and playback selection. This is
 // only the native control's cached projection, updated at the default-proc
@@ -61,6 +84,7 @@ LRESULT CALLBACK PlayerWindow::PlaylistListWindowProc(
         if (!SetPropW(window, kNativeListState, state)) { delete state; return FALSE; }
         const auto result = Native(window, message, wparam, lparam);
         if (!result) { RemovePropW(window, kNativeListState); delete state; }
+        else if (!NativeListWindow::Bind(window, PlaylistListWindowProc)) return FALSE;
         return result;
     }
     if (message == WM_NCDESTROY) {
@@ -78,6 +102,13 @@ LRESULT CALLBACK PlayerWindow::PlaylistListWindowProc(
     // scrolling/state still run, but must not reserve/draw a second scrollbar.
     if (message == WM_NCCALCSIZE || message == WM_NCPAINT) return 0;
     if (message == WM_NCHITTEST) return DefWindowProcW(window, message, wparam, lparam);
+    // Native right-button handling can enter the popup menu's nested message
+    // loop before DefaultPlaylistListMessage returns. The synchronization
+    // guard must not give client painting back to SysListView32 during that
+    // loop: it would erase the skin and draw the system's white/black list.
+    if (state && state->ready && state->owner &&
+        (message == WM_PAINT || message == WM_ERASEBKGND))
+        return state->owner->HandlePlaylistControlMessage(window, message, wparam, lparam);
     if (!state || !state->ready || state->synchronizing || !state->owner ||
         message == WM_DESTROY)
         return Native(window, message, wparam, lparam);

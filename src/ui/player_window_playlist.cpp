@@ -1,3 +1,5 @@
+#include "ttplayer/ui/wtl_menu.h"
+#include "ttplayer/ui/wtl_window.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
@@ -4631,7 +4633,7 @@ void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_poin
         PreparePlaylistMenu(menu);
     }
     BeginPopupMenuStyle(menu);
-    const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+    const UINT command = TrackPlayerPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
         screen_point.x, screen_point.y, 0, playlist_window_, nullptr);
     EndPopupMenuStyle();
     DestroyMenu(menu);
@@ -6098,7 +6100,7 @@ void PlayerWindow::InvokePlaylistToolbar(size_t button, POINT screen_point) {
     if (!menu) return;
     PreparePlaylistMenu(menu);
     BeginPopupMenuStyle(menu);
-    const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+    const UINT command = TrackPlayerPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
         screen_point.x, screen_point.y, 0, playlist_window_, nullptr);
     EndPopupMenuStyle();
     DestroyMenu(menu);
@@ -6206,17 +6208,13 @@ void PlayerWindow::SaveStoredPlaylist() {
 }
 
 LRESULT CALLBACK PlayerWindow::PlaylistWindowProc(HWND window, UINT message,
-                                                   WPARAM wparam, LPARAM lparam) {
-    PlayerWindow* self = reinterpret_cast<PlayerWindow*>(
-        GetWindowLongPtrW(window, GWLP_USERDATA));
-    if (message == WM_NCCREATE) {
-        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
-        self = static_cast<PlayerWindow*>(create->lpCreateParams);
-        self->playlist_window_ = window;
-        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-    }
-    return self ? self->HandlePlaylistMessage(message, wparam, lparam, window)
-                : DefWindowProcW(window, message, wparam, lparam);
+        WPARAM wparam, LPARAM lparam) {
+    return WindowBinding<PlayerWindow>::Start(window, message, wparam, lparam,
+        &PlayerWindow::playlist_window_,
+        [](PlayerWindow* self, HWND window, UINT message, WPARAM wp, LPARAM lp) -> LRESULT {
+            (void)window;
+            return self->HandlePlaylistMessage(message, wp, lp, window);
+        });
 }
 
 LRESULT CALLBACK PlayerWindow::PlaylistEditProc(HWND window, UINT message,

@@ -1,5 +1,8 @@
+#include "ttplayer/ui/wtl_menu.h"
+#include "ttplayer/ui/wtl_window.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
+#include "ttplayer/ui/wtl_runtime.h"
 #include "project_links.h"
 #include "lyric_upload_window.h"
 
@@ -385,13 +388,12 @@ HMENU FindCommandMenu(HMENU menu, UINT command) {
 
 void EnableCommand(HMENU root, UINT command, bool enabled) {
     if (const HMENU menu = FindCommandMenu(root, command))
-        EnableMenuItem(menu, command, MF_BYCOMMAND |
-            (enabled ? MF_ENABLED : MF_DISABLED | MF_GRAYED));
+        SetMenuCommandEnabled(menu, command, enabled);
 }
 
 void CheckCommand(HMENU root, UINT command, bool checked) {
     if (const HMENU menu = FindCommandMenu(root, command))
-        CheckMenuItem(menu, command, MF_BYCOMMAND | (checked ? MF_CHECKED : MF_UNCHECKED));
+        SetMenuCommandChecked(menu, command, checked);
 }
 
 COLORREF InterpolateMenuColor(COLORREF first, COLORREF second, int numerator,
@@ -1309,6 +1311,7 @@ bool RequestSystemPowerOff() {
 using namespace detail;
 
 PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(settings)) {
+    if (FAILED(EnsureWtlRuntime())) throw std::runtime_error("WTL initialization failed");
     lyric_editor_new_line_ = settings_.lyric.new_line_after_tag;
     // OPENFILENAMEW::lpstrInitialDir in 0048059D points at CSettings
     // Histroy/SoundPath (+0x750).
@@ -2477,16 +2480,14 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
     return true;
 }
 
-LRESULT CALLBACK PlayerWindow::WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
-    PlayerWindow* self = reinterpret_cast<PlayerWindow*>(GetWindowLongPtrW(window, GWLP_USERDATA));
-    if (message == WM_NCCREATE) {
-        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
-        self = static_cast<PlayerWindow*>(create->lpCreateParams);
-        self->window_ = window;
-        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-    }
-    return self ? self->HandleMessage(message, wparam, lparam)
-                : DefWindowProcW(window, message, wparam, lparam);
+LRESULT CALLBACK PlayerWindow::WindowProc(HWND window, UINT message,
+        WPARAM wparam, LPARAM lparam) {
+    return WindowBinding<PlayerWindow>::Start(window, message, wparam, lparam,
+        &PlayerWindow::window_,
+        [](PlayerWindow* self, HWND window, UINT message, WPARAM wp, LPARAM lp) -> LRESULT {
+            (void)window;
+            return self->HandleMessage(message, wp, lp);
+        });
 }
 
 LRESULT CALLBACK PlayerWindow::PlaybackTipWindowProc(
@@ -4946,7 +4947,7 @@ void PlayerWindow::ShowContextMenu(POINT screen_point, HWND origin) {
     // RETURNCMD is sufficient; keep initialization notifications for the
     // shared dynamic track submenu even when this menu is forwarded.
     const bool forwarded = main_context_menu_origin_ != window_;
-    const UINT selected = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON |
+    const UINT selected = TrackPlayerPopupMenuEx(menu, TPM_RIGHTBUTTON |
         (forwarded ? TPM_RETURNCMD : 0),
         screen_point.x, screen_point.y, window_, nullptr);
     if (forwarded && selected)

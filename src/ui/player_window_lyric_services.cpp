@@ -1,3 +1,4 @@
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "player_window_internal.h"
 #include "../app/resource_ids.h"
 #include <algorithm>
@@ -164,7 +165,7 @@ void PlayerWindow::ShowLyricServiceEditor(HWND owner_window) {
     const HWND modal_owner = IsWindow(owner_window) ? owner_window :
         IsWindow(options_window_) ? options_window_ :
         IsWindow(lyric_search_dialog_) ? lyric_search_dialog_ : window_;
-    lyric_service_editor_ = CreateDialogParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_LYRIC_SERVICES),
+    lyric_service_editor_ = CreateWtlDialog(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_LYRIC_SERVICES),
         modal_owner, LyricServiceEditorProc, reinterpret_cast<LPARAM>(this));
     if (lyric_service_editor_) {
         if (modal_owner == lyric_search_dialog_) CancelOnlineLyricCountdown();

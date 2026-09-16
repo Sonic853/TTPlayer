@@ -29,6 +29,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(TTPLAYER_LEGACY_WINDOWS)
   include(cmake/legacy_windows.cmake)
 endif()
+include(cmake/wtl.cmake)
 
 # Re-evaluate at build time, not just when CMake configures. The generator
 # updates the header only if the Beijing calendar date changes, so same-day
@@ -45,6 +46,9 @@ add_custom_target(ttplayer_build_date
 )
 
 add_library(ttplayer_core
+  src/ui/wtl_runtime.cpp
+  src/ui/wtl_dialogs.cpp
+  src/ui/wtl_menu.cpp
   src/app/dsp_worker.cpp
   src/app/file_info_worker.cpp
   src/app/output_device_worker.cpp
@@ -125,6 +129,7 @@ add_dependencies(ttplayer_core ttplayer_build_date)
 target_compile_definitions(ttplayer_core PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(ttplayer_core PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_core PUBLIC
+  ttplayer_wtl_headers
   winmm ole32 oleaut32 comsuppw uuid msimg32 shell32 shlwapi comctl32 comdlg32
   windowscodecs gdiplus dsound setupapi dwmapi uxtheme
   mfplat mfreadwrite mfuuid propsys winhttp
@@ -389,6 +394,13 @@ target_compile_options(wtl_behavior_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(wtl_behavior_tests PRIVATE ttplayer_core ttpcomm_api)
 add_test(NAME wtl_behavior_tests COMMAND wtl_behavior_tests)
 set_tests_properties(wtl_behavior_tests PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_executable(wtl_migration_tests tests/ui/wtl_migration_tests.cpp)
+target_compile_definitions(wtl_migration_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(wtl_migration_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(wtl_migration_tests PRIVATE ttplayer_core)
+add_test(NAME wtl_migration_tests COMMAND wtl_migration_tests)
+set_tests_properties(wtl_migration_tests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
 
 add_executable(skin_png_tests tests/skin/skin_png_tests.cpp)
 target_compile_definitions(skin_png_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

@@ -1,3 +1,4 @@
+#include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/desktop_lyrics.h"
 #include "ttplayer/ui/desktop_lyric_layout.h"
 #include "ttplayer/ui/window_drag.h"
@@ -1341,7 +1342,7 @@ private:
         SetForegroundWindow(bar_);
         // 0041914F uses TPM_RETURNCMD (0x100). TPM_NONOTIFY suppresses
         // the root WM_INITMENUPOPUP needed to replace resource 0x7ef4.
-        const UINT selected = TrackPopupMenuEx(menu,
+        const UINT selected = TrackPlayerPopupMenuEx(menu,
             TPM_RIGHTBUTTON | TPM_RETURNCMD,
             point.x, point.y, bar_, nullptr);
         PostMessageW(bar_, WM_NULL, 0, 0);

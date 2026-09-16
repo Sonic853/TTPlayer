@@ -1,5 +1,20 @@
 # Reconstruction status
 
+2026-09-16: fix white/black native ListView painting while either playlist
+column's right-click menu is open. Keep skin paint/erase handling active during
+the native input handler's nested menu loop, ahead of model synchronization
+bypass. Real right-button, multi-select, blank-area and keyboard-menu regressions
+pass: 6 modern checks and 4 legacy-host checks; XP/Win7 import audit remains clean.
+See [WTL migration](WTL_10_01_MIGRATION.md) for the cause and regression coverage.
+
+2026-09-16: integrate pinned WTL 10.01 and ATL window/dialog lifetimes. Preserve
+the original timer idle exclusion, native ListCtrl model projection, resource
+modules, owner-drawn menus and command routing. Use a customized command bar,
+CDynamicUpdateUI, classic file/folder wrappers and CAxWindow for lyric upload.
+Modern Release UI regressions: 7 passed; legacy host regressions: 3 passed.
+The x86 subsystem-5.01 EXE passes XP/Win7 checks for 637 imports from 18 DLLs.
+See [WTL migration](WTL_10_01_MIGRATION.md) for scope and retained custom behavior.
+
 2026-09-15: restore Files ListCtrl background marquee selection from the
 00482BAF/00425DEC native multi-select report contract. Host SysListView32 input
 confirms plain replacement, Ctrl XOR and Shift union without changing the caret.

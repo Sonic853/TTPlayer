@@ -1,3 +1,5 @@
+#include "ttplayer/ui/wtl_menu.h"
+#include "ttplayer/ui/wtl_window.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
@@ -940,7 +942,7 @@ void PlayerWindow::ShowEqualizerProfileMenu(POINT screen_point) {
     context_menu_open_ = true;
     SetForegroundWindow(equalizer_window_);
     BeginPopupMenuStyle(menu, true);
-    const UINT command = TrackPopupMenuEx(menu,
+    const UINT command = TrackPlayerPopupMenuEx(menu,
         TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
         screen_point.x, screen_point.y, equalizer_window_, nullptr);
     EndPopupMenuStyle();
@@ -1050,17 +1052,13 @@ void PlayerWindow::InvokeEqualizerControl(int control, POINT screen_point) {
 }
 
 LRESULT CALLBACK PlayerWindow::EqualizerWindowProc(HWND window, UINT message,
-                                                    WPARAM wparam, LPARAM lparam) {
-    PlayerWindow* self = reinterpret_cast<PlayerWindow*>(
-        GetWindowLongPtrW(window, GWLP_USERDATA));
-    if (message == WM_NCCREATE) {
-        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
-        self = static_cast<PlayerWindow*>(create->lpCreateParams);
-        self->equalizer_window_ = window;
-        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-    }
-    return self ? self->HandleEqualizerMessage(message, wparam, lparam)
-                : DefWindowProcW(window, message, wparam, lparam);
+        WPARAM wparam, LPARAM lparam) {
+    return WindowBinding<PlayerWindow>::Start(window, message, wparam, lparam,
+        &PlayerWindow::equalizer_window_,
+        [](PlayerWindow* self, HWND window, UINT message, WPARAM wp, LPARAM lp) -> LRESULT {
+            (void)window;
+            return self->HandleEqualizerMessage(message, wp, lp);
+        });
 }
 
 LRESULT CALLBACK PlayerWindow::EqualizerControlProc(HWND window, UINT message,

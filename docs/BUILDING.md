@@ -82,6 +82,14 @@ TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一�
 不会变化。本地和 GitHub Actions 共用同一生成步骤；跨日增量构建会更新日期，
 同日重复构建不重复写入生成头文件，也不需要手工改源码或重新配置 CMake。
 
+## WTL 10.01 / ATL
+
+UI 基础代码使用 WTL 10.01 和 Visual Studio ATL。安装 C++ 桌面开发工具时，须同时安装当前工具集的 ATL（x86/x64）组件；Actions 会检查该组件。
+
+CMake 从官方发布地址下载 WTL，并固定 SHA-256 校验值。库为头文件依赖，不需要分发 WTL DLL。普通版和兼容版压缩包均附带 `licenses/WTL-MS-PL.txt`。
+
+离线构建可使用 `-DFETCHCONTENT_SOURCE_DIR_TTPLAYER_WTL=<已解压的 WTL 10.01 目录>`，目录内应有 `Include/atlapp.h` 和 `MS-PL.txt`。替换范围和原版行为约束见 [WTL 接入文档](WTL_10_01_MIGRATION.md)。
+
 ## 干净源码构建
 
 在此仓库根目录（本地即 `rebuild`）执行：

@@ -1,3 +1,5 @@
+#include "ttplayer/ui/wtl_menu.h"
+#include "ttplayer/ui/wtl_runtime.h"
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/ui/player_window.h"
 #include "ttplayer/ui/media_library_playback.h"
@@ -1346,7 +1348,7 @@ void PlayerWindow::InitializeMediaLibraryTree() {
 
     const auto rebuild = [this, &state]() {
         state.rebuilding = true;
-        TreeView_DeleteAllItems(playlist_tree_control_);
+        WTL::CTreeViewCtrl(playlist_tree_control_).DeleteAllItems();
         state.nodes.clear();
         auto node = std::make_unique<MediaLibraryState::Node>();
         node->kind = MediaLibraryState::NodeKind::root;
@@ -1358,11 +1360,11 @@ void PlayerWindow::InitializeMediaLibraryTree() {
         insert.item.pszText = node->text.data();
         insert.item.lParam = reinterpret_cast<LPARAM>(node.get());
         insert.item.cChildren = 1;
-        node->item = TreeView_InsertItem(playlist_tree_control_, &insert);
+        node->item = WTL::CTreeViewCtrl(playlist_tree_control_).InsertItem(&insert);
         state.root = node.get();
         state.nodes.push_back(std::move(node));
         state.rebuilding = false;
-        TreeView_Expand(playlist_tree_control_, state.root->item, TVE_EXPAND);
+        WTL::CTreeViewCtrl(playlist_tree_control_).Expand(state.root->item, TVE_EXPAND);
     };
     rebuild();
     HTREEITEM select = state.root ? state.root->item : nullptr;
@@ -1370,14 +1372,14 @@ void PlayerWindow::InitializeMediaLibraryTree() {
     if (!path.empty() && !path[0].empty() && state.root) {
         HTREEITEM parent = state.root->item;
         for (size_t level = 0; level < path.size(); ++level) {
-            TreeView_Expand(playlist_tree_control_, parent, TVE_EXPAND);
+            WTL::CTreeViewCtrl(playlist_tree_control_).Expand(parent, TVE_EXPAND);
             HTREEITEM found{};
-            for (HTREEITEM child = TreeView_GetChild(playlist_tree_control_, parent);
-                 child; child = TreeView_GetNextSibling(playlist_tree_control_, child)) {
+            for (HTREEITEM child = WTL::CTreeViewCtrl(playlist_tree_control_).GetChildItem(parent);
+                 child; child = WTL::CTreeViewCtrl(playlist_tree_control_).GetNextSiblingItem(child)) {
                 TVITEMW item{};
                 item.mask = TVIF_PARAM;
                 item.hItem = child;
-                TreeView_GetItem(playlist_tree_control_, &item);
+                WTL::CTreeViewCtrl(playlist_tree_control_).GetItem(&item);
                 auto* data = reinterpret_cast<MediaLibraryState::Node*>(item.lParam);
                 if (!data) continue;
                 const bool match = level == 0
@@ -1390,7 +1392,7 @@ void PlayerWindow::InitializeMediaLibraryTree() {
             parent = found;
         }
     }
-    TreeView_SelectItem(playlist_tree_control_, select);
+    WTL::CTreeViewCtrl(playlist_tree_control_).SelectItem(select);
     for (size_t row=0; row<state.result_tracks.size(); ++row) {
         const auto id = MediaLibraryTrackIdentity(state.result_tracks[row]);
         if (selected.contains(id)) playlist_selected_rows_.insert(row);
@@ -1852,7 +1854,7 @@ void PlayerWindow::ShutdownMediaLibrary() {
     if (!media_library_) return;
     if (playlist_tree_control_ && IsWindow(playlist_tree_control_)) {
         media_library_->rebuilding = true;
-        TreeView_DeleteAllItems(playlist_tree_control_);
+        WTL::CTreeViewCtrl(playlist_tree_control_).DeleteAllItems();
         SendMessageW(playlist_tree_control_, WM_SETFONT,
                      reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),
                      FALSE);
@@ -2016,7 +2018,7 @@ bool PlayerWindow::HandleMediaLibraryTreeNotification(
         insert.item.pszText = node->text.data();
         insert.item.lParam = reinterpret_cast<LPARAM>(node.get());
         insert.item.cChildren = children;
-        node->item = TreeView_InsertItem(playlist_tree_control_, &insert);
+        node->item = WTL::CTreeViewCtrl(playlist_tree_control_).InsertItem(&insert);
         auto* result = node.get();
         state.nodes.push_back(std::move(node));
         return result;
@@ -2042,7 +2044,7 @@ bool PlayerWindow::HandleMediaLibraryTreeNotification(
         return result;
     };
     const auto populate = [&](MediaLibraryState::Node* node) {
-        if (!node || TreeView_GetChild(playlist_tree_control_, node->item)) return;
+        if (!node || WTL::CTreeViewCtrl(playlist_tree_control_).GetChildItem(node->item)) return;
         const auto labels = LibraryLabels(ResourceText(0x81cc));
         if (node->kind == MediaLibraryState::NodeKind::root) {
             static constexpr std::string_view keys[] = {
@@ -2174,8 +2176,8 @@ bool PlayerWindow::HandleMediaLibraryTreeNotification(
     if (notification->code == NM_DBLCLK) {
         TVITEMW item{};
         item.mask = TVIF_PARAM;
-        item.hItem = TreeView_GetSelection(playlist_tree_control_);
-        if (item.hItem && TreeView_GetItem(playlist_tree_control_, &item)) {
+        item.hItem = WTL::CTreeViewCtrl(playlist_tree_control_).GetSelectedItem();
+        if (item.hItem && WTL::CTreeViewCtrl(playlist_tree_control_).GetItem(&item)) {
             auto* node = node_from_item(item);
             if (node && node->kind != MediaLibraryState::NodeKind::root &&
                 !state.result_tracks.empty()) ActivateMediaLibraryResult(0, true);
@@ -2241,12 +2243,12 @@ bool PlayerWindow::SwitchMediaLibraryCatalogue(bool wrap) {
     // next sibling), expands the target, then selects it. At the end, modes
     // 3/4 wrap to TVGN_FIRSTVISIBLE. Preserve empty category results too.
     if (!media_library_ || !playlist_tree_control_) return false;
-    const auto selected = TreeView_GetSelection(playlist_tree_control_);
+    const auto selected = WTL::CTreeViewCtrl(playlist_tree_control_).GetSelectedItem();
     auto target = TreeView_GetNextVisible(playlist_tree_control_, selected);
-    if (target) TreeView_Expand(playlist_tree_control_, target, TVE_EXPAND);
+    if (target) WTL::CTreeViewCtrl(playlist_tree_control_).Expand(target, TVE_EXPAND);
     else if (wrap) target = TreeView_GetFirstVisible(playlist_tree_control_);
     if (!target) return false;
-    return TreeView_SelectItem(playlist_tree_control_, target) != FALSE;
+    return WTL::CTreeViewCtrl(playlist_tree_control_).SelectItem(target) != FALSE;
 }
 
 void PlayerWindow::ActivateMediaLibraryResult(size_t index,
@@ -2328,16 +2330,16 @@ bool PlayerWindow::ShowMediaLibraryTreeContextMenu(POINT screen_point) {
     ScreenToClient(playlist_tree_control_, &client);
     TVHITTESTINFO hit{};
     hit.pt = client;
-    HTREEITEM item = TreeView_HitTest(playlist_tree_control_, &hit);
-    if (!item) item = TreeView_GetSelection(playlist_tree_control_);
+    HTREEITEM item = WTL::CTreeViewCtrl(playlist_tree_control_).HitTest(&hit);
+    if (!item) item = WTL::CTreeViewCtrl(playlist_tree_control_).GetSelectedItem();
     if (!item) return true;
-    TreeView_SelectItem(playlist_tree_control_, item);
+    WTL::CTreeViewCtrl(playlist_tree_control_).SelectItem(item);
     SetFocus(playlist_tree_control_);
 
     TVITEMW tree_item{};
     tree_item.mask = TVIF_PARAM;
     tree_item.hItem = item;
-    TreeView_GetItem(playlist_tree_control_, &tree_item);
+    WTL::CTreeViewCtrl(playlist_tree_control_).GetItem(&tree_item);
     auto* node = reinterpret_cast<MediaLibraryState::Node*>(tree_item.lParam);
     HMENU owner = LoadMenuW(ResourceModule(), MAKEINTRESOURCEW(kMenuLibrary));
     if (!owner) return true;
@@ -2350,12 +2352,12 @@ bool PlayerWindow::ShowMediaLibraryTreeContextMenu(POINT screen_point) {
         DeleteMenu(menu, kPlaylistClear, MF_BYCOMMAND);
     if (screen_point.x == -1 && screen_point.y == -1) {
         RECT bounds{};
-        TreeView_GetItemRect(playlist_tree_control_, item, &bounds, TRUE);
+        WTL::CTreeViewCtrl(playlist_tree_control_).GetItemRect(item, &bounds, TRUE);
         screen_point = {bounds.left, bounds.bottom};
         ClientToScreen(playlist_tree_control_, &screen_point);
     }
     BeginPopupMenuStyle(menu);
-    const UINT command = TrackPopupMenu(menu,
+    const UINT command = TrackPlayerPopupMenu(menu,
         TPM_RETURNCMD | TPM_RIGHTBUTTON, screen_point.x, screen_point.y,
         0, playlist_window_, nullptr);
     EndPopupMenuStyle();

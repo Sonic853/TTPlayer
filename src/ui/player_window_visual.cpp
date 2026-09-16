@@ -1,3 +1,5 @@
+#include "ttplayer/ui/wtl_menu.h"
+#include "ttplayer/ui/wtl_window.h"
 #include "ttplayer/platform/optional_windows_api.h"
 #include "player_window_internal.h"
 #include "album_background.h"
@@ -1458,24 +1460,14 @@ void PlayerWindow::SetTtpCommModule(HMODULE module) noexcept {
     if (visual_runtime_) visual_runtime_->SetModule(module);
 }
 
-LRESULT CALLBACK PlayerWindow::VisualWindowProc(
-    HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
-    auto* self = reinterpret_cast<PlayerWindow*>(
-        GetWindowLongPtrW(window, GWLP_USERDATA));
-    if (message == WM_NCCREATE) {
-        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
-        self = static_cast<PlayerWindow*>(create->lpCreateParams);
-        SetWindowLongPtrW(window, GWLP_USERDATA,
-                          reinterpret_cast<LONG_PTR>(self));
-        // CreateWindowExW does not return until WM_NCCREATE/WM_CREATE have
-        // completed.  Keep the native handle available during that interval;
-        // otherwise the default branch would call DefWindowProcW(nullptr,
-        // WM_NCCREATE, ...) and reject creation before visual_window_ can be
-        // assigned by the caller.
-        if (self) self->visual_window_ = window;
-    }
-    return self ? self->HandleVisualMessage(message, wparam, lparam)
-                : DefWindowProcW(window, message, wparam, lparam);
+LRESULT CALLBACK PlayerWindow::VisualWindowProc(HWND window, UINT message,
+        WPARAM wparam, LPARAM lparam) {
+    return WindowBinding<PlayerWindow>::Start(window, message, wparam, lparam,
+        &PlayerWindow::visual_window_,
+        [](PlayerWindow* self, HWND window, UINT message, WPARAM wp, LPARAM lp) -> LRESULT {
+            (void)window;
+            return self->HandleVisualMessage(message, wp, lp);
+        });
 }
 
 LRESULT PlayerWindow::HandleVisualMessage(
@@ -2164,7 +2156,7 @@ void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
             static_cast<UINT>(kCmdVisualFirst + settings_.visual.type),
             MF_BYCOMMAND | MF_CHECKED);
         context_menu_open_ = true;
-        TrackPopupMenu(popup, TPM_RIGHTBUTTON, screen_point.x, screen_point.y,
+        TrackPlayerPopupMenu(popup, TPM_RIGHTBUTTON, screen_point.x, screen_point.y,
                        0, window_, nullptr);
         DestroyMenu(popup);
         context_menu_open_ = false;
@@ -2193,7 +2185,7 @@ void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
     context_menu_open_ = true;
     SetForegroundWindow(window_);
     BeginPopupMenuStyle(popup, true);
-    TrackPopupMenu(popup, TPM_RIGHTBUTTON, screen_point.x, screen_point.y,
+    TrackPlayerPopupMenu(popup, TPM_RIGHTBUTTON, screen_point.x, screen_point.y,
                    0, window_, nullptr);
     EndPopupMenuStyle();
     DestroyMenu(popup);

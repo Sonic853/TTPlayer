@@ -1,3 +1,6 @@
+#include "ttplayer/ui/wtl_menu.h"
+#include "ttplayer/ui/wtl_dialogs.h"
+#include "ttplayer/ui/wtl_runtime.h"
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
@@ -1048,8 +1051,10 @@ void DrawOptionsHeader(const DRAWITEMSTRUCT& item) {
     // GDI's text compositing rather than the STATIC's themed target format.
     const int width = item.rcItem.right - item.rcItem.left;
     const int height = item.rcItem.bottom - item.rcItem.top;
-    const HDC memory = CreateCompatibleDC(item.hDC);
-    const HBITMAP bitmap = CreateCompatibleBitmap(item.hDC, width, height);
+    WTL::CDC memory;
+    memory.CreateCompatibleDC(item.hDC);
+    WTL::CBitmap bitmap;
+    bitmap.CreateCompatibleBitmap(item.hDC, width, height);
     if (memory && bitmap) {
         const auto previous = SelectObject(memory, bitmap);
         SetViewportOrgEx(memory, -item.rcItem.left, -item.rcItem.top, nullptr);
@@ -1062,8 +1067,6 @@ void DrawOptionsHeader(const DRAWITEMSTRUCT& item) {
     } else {
         DrawOptionsHeaderContent(item);
     }
-    if (bitmap) DeleteObject(bitmap);
-    if (memory) DeleteDC(memory);
 }
 
 void DrawOptionsShellFrames(HWND sheet, HDC dc, HWND navigation, RECT page) {
@@ -2148,7 +2151,7 @@ UINT TrackProfileTransferMenu(HWND dialog, HMODULE resources, int control) {
     if (popup) {
         RECT bounds{};
         GetWindowRect(GetDlgItem(dialog, control), &bounds);
-        command = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+        command = TrackPlayerPopupMenu(popup, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                                  bounds.left, bounds.bottom, 0, dialog,
                                  nullptr);
     }
@@ -2210,7 +2213,7 @@ UINT TrackDesktopProfileMenu(
 
     RECT bounds{};
     GetWindowRect(GetDlgItem(dialog, control), &bounds);
-    const UINT command = TrackPopupMenu(
+    const UINT command = TrackPlayerPopupMenu(
         popup, TPM_RETURNCMD, bounds.left, bounds.bottom, 0, dialog, nullptr);
     DestroyMenu(menu);
     return command;
@@ -3035,7 +3038,7 @@ void PlayerWindow::ShowOptions(int page, UINT focus_control) {
     header.nStartPage = static_cast<UINT>(page);
     header.ppsp = pages.data();
 
-    const INT_PTR result = PropertySheetW(&header);
+    const INT_PTR result = ShowWtlPropertySheet(header);
     if (result <= 0 || result == -1) {
         options_window_ = nullptr;
         return;
@@ -3106,7 +3109,7 @@ int PlayerWindow::ShowRegistrationOptions(HINSTANCE instance) {
         ~InitializingScope() { registration_sheet_initializing = previous; }
     } initializing;
     registration_sheet_initializing = this;
-    const INT_PTR result = PropertySheetW(&header);
+    const INT_PTR result = ShowWtlPropertySheet(header);
     options_window_ = nullptr;
     CloseOptions();
     options_registration_mode_ = false;
@@ -4393,7 +4396,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             const UINT child_id = options_focus_control_ == 385 ? 385 : 384;
             TabCtrl_SetCurSel(tab, child_id == 385 ? 1 : 0);
             OptionsChildInit init{this, child_id};
-            options_lyric_child_ = CreateDialogParamW(
+            options_lyric_child_ = CreateWtlDialog(
                 resources, MAKEINTRESOURCEW(child_id), dialog,
                 OptionsChildDialogProc, reinterpret_cast<LPARAM>(&init));
             PositionNestedDialog(dialog, tab, options_lyric_child_);
@@ -4453,7 +4456,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             const UINT child_id = options_focus_control_ == 382 ? 382 : 381;
             TabCtrl_SetCurSel(tab, child_id == 382 ? 1 : 0);
             OptionsChildInit init{this, child_id};
-            options_network_child_ = CreateDialogParamW(
+            options_network_child_ = CreateWtlDialog(
                 resources, MAKEINTRESOURCEW(child_id), dialog,
                 OptionsChildDialogProc, reinterpret_cast<LPARAM>(&init));
             PositionNestedDialog(dialog, tab, options_network_child_);
@@ -6207,7 +6210,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 DestroyWindow(options_lyric_child_);
             }
             OptionsChildInit init{this, child_id};
-            options_lyric_child_ = CreateDialogParamW(
+            options_lyric_child_ = CreateWtlDialog(
                 resources, MAKEINTRESOURCEW(child_id), dialog,
                 OptionsChildDialogProc, reinterpret_cast<LPARAM>(&init));
             PositionNestedDialog(dialog, tab, options_lyric_child_);
@@ -6225,7 +6228,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 DestroyWindow(options_network_child_);
             }
             OptionsChildInit init{this, child_id};
-            options_network_child_ = CreateDialogParamW(
+            options_network_child_ = CreateWtlDialog(
                 resources, MAKEINTRESOURCEW(child_id), dialog,
                 OptionsChildDialogProc, reinterpret_cast<LPARAM>(&init));
             PositionNestedDialog(dialog, tab, options_network_child_);
@@ -6825,7 +6828,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                         MF_BYCOMMAND);
                     RECT bounds{};
                     GetWindowRect(GetDlgItem(dialog, 2106), &bounds);
-                    command = TrackPopupMenu(
+                    command = TrackPlayerPopupMenu(
                         popup, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                         bounds.left, bounds.bottom, 0, dialog, nullptr);
                 }
