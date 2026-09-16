@@ -43,6 +43,14 @@ public:
         if (!started) ATL::_AtlWinModule.ExtractCreateWndData();
         return window;
     }
+    INT_PTR ModalResource(HINSTANCE resources, LPCWSTR name, HWND parent, LPARAM data) {
+        if (!m_thunk.Init(nullptr, nullptr)) return -1;
+        ATL::_AtlWinModule.AddCreateWndData(&m_thunk.cd,
+            static_cast<ATL::CDialogImplBase*>(this));
+        const INT_PTR result = ::DialogBoxParamW(resources, name, parent, StartDialogProc, data);
+        if (!started) ATL::_AtlWinModule.ExtractCreateWndData();
+        return result;
+    }
     void OnFinalMessage(HWND) override { if (!creating) delete this; }
 };
 
@@ -131,5 +139,13 @@ INT_PTR ShowWtlPropertySheet(const PROPSHEETHEADERW& header) {
     if (!window || window == reinterpret_cast<HWND>(-1)) return -1;
     sheet.release(); // ATL releases the modeless object at final destruction.
     return reinterpret_cast<INT_PTR>(window);
+}
+
+INT_PTR ShowWtlModalDialog(HINSTANCE resources, LPCWSTR name, HWND parent,
+                          DLGPROC handler, LPARAM data) {
+    if (FAILED(EnsureWtlRuntime())) return -1;
+    ResourceDialog dialog; // Lives until DialogBox's nested loop has unwound.
+    dialog.handler = handler;
+    return dialog.ModalResource(resources, name, parent, data);
 }
 }

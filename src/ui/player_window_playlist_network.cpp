@@ -17,83 +17,38 @@ constexpr int kReportUnavailable = 1170;
 constexpr int kReportWrongSong = 1171;
 constexpr int kReportStatus = 1172;
 constexpr int kReportTrack = 2276;
-constexpr UINT_PTR kReportCloseTimer = 1;
-
 struct ReportDialogState {
     std::wstring track;
-    std::wstring submitted_text;
-    int reason{1};
-    bool submitted{};
 };
 
 INT_PTR CALLBACK ReportDialogProc(HWND dialog, UINT message,
                                   WPARAM wparam, LPARAM lparam) {
-    auto* state = reinterpret_cast<ReportDialogState*>(
-        GetWindowLongPtrW(dialog, DWLP_USER));
     switch (message) {
-    case WM_INITDIALOG:
-        state = reinterpret_cast<ReportDialogState*>(lparam);
-        SetWindowLongPtrW(dialog, DWLP_USER,
-                          reinterpret_cast<LONG_PTR>(state));
+    case WM_INITDIALOG: {
+        const auto* state = reinterpret_cast<const ReportDialogState*>(lparam);
         if (!state) return FALSE;
         SetDlgItemTextW(dialog, kReportTrack, state->track.c_str());
-        CheckRadioButton(dialog, kReportUnavailable, kReportWrongSong,
-                         kReportUnavailable);
-        return TRUE;
-
+        CheckRadioButton(dialog, kReportUnavailable, kReportWrongSong, kReportUnavailable);
+        // The resource's 0x84D0 acknowledgement is only valid AFTER an
+        // actual submission. The optional reporting backend is absent.
+        SetDlgItemTextW(dialog, kReportStatus, L"报告服务不可用，尚未提交。");
+        for (int control : {IDOK, kReportUnavailable, kReportWrongSong})
+            EnableWindow(GetDlgItem(dialog, control), FALSE);
+        SendMessageW(dialog, DM_SETDEFID, IDCANCEL, 0);
+        SetFocus(GetDlgItem(dialog, IDCANCEL));
+        return FALSE;
+    }
     case WM_COMMAND:
-        switch (LOWORD(wparam)) {
-        case kReportUnavailable:
-        case kReportWrongSong:
-            if (state && !state->submitted) {
-                state->reason = LOWORD(wparam) == kReportUnavailable ? 1 : 2;
-                CheckRadioButton(dialog, kReportUnavailable, kReportWrongSong,
-                                 LOWORD(wparam));
-            }
-            return TRUE;
-        case IDOK:
-            if (!state || state->submitted) return TRUE;
-            state->reason = IsDlgButtonChecked(dialog, kReportWrongSong) ==
-                                    BST_CHECKED
-                                ? 2
-                                : 1;
-            state->submitted = true;
-            SetDlgItemTextW(dialog, kReportStatus,
-                            state->submitted_text.c_str());
-            EnableWindow(GetDlgItem(dialog, IDOK), FALSE);
-            EnableWindow(GetDlgItem(dialog, kReportUnavailable), FALSE);
-            EnableWindow(GetDlgItem(dialog, kReportWrongSong), FALSE);
-            InvalidateRect(GetDlgItem(dialog, kReportStatus), nullptr, TRUE);
-            SetTimer(dialog, kReportCloseTimer, 3000, nullptr);
-            return TRUE;
-        case IDCANCEL:
-            EndDialog(dialog, IDCANCEL);
-            return TRUE;
-        default:
-            break;
-        }
-        break;
-
+        if (LOWORD(wparam) == IDCANCEL) EndDialog(dialog, IDCANCEL);
+        return TRUE; // Directly dispatched IDOK must not simulate success.
     case WM_CTLCOLORSTATIC:
-        if (state && state->submitted &&
-            reinterpret_cast<HWND>(lparam) ==
-                GetDlgItem(dialog, kReportStatus)) {
+        if (reinterpret_cast<HWND>(lparam) == GetDlgItem(dialog, kReportStatus)) {
             const HDC dc = reinterpret_cast<HDC>(wparam);
-            // FUN_0047DED9 draws the acknowledgement using COLORREF 0xff.
             SetTextColor(dc, RGB(255, 0, 0));
             SetBkMode(dc, TRANSPARENT);
             return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
         }
         break;
-
-    case WM_TIMER:
-        if (wparam == kReportCloseTimer) {
-            KillTimer(dialog, kReportCloseTimer);
-            EndDialog(dialog, IDYES); // 0047DBC9 returns the native value 6.
-            return TRUE;
-        }
-        break;
-
     case WM_CLOSE:
         EndDialog(dialog, IDCANCEL);
         return TRUE;
@@ -135,7 +90,6 @@ bool PlayerWindow::HandleLegacyPlaylistNetworkCommand(UINT command) {
         ReportDialogState state;
         state.track = BuildLegacyReportTrackText(
             *track, ResourceText(0x84d1));
-        state.submitted_text = ResourceText(0x84d0);
         const INT_PTR result = DialogBoxParamW(
             ResourceModule(), MAKEINTRESOURCEW(kReportDialog),
             playlist_window_ ? playlist_window_ : window_, ReportDialogProc,

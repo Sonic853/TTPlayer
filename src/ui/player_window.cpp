@@ -3071,6 +3071,10 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             wparam == kInfoScrollTimer) {
             AdvanceSkinInfoScroll(static_cast<UINT_PTR>(wparam));
         } else if (wparam == kUiTimer) {
+            // A save-policy MessageBox pumps messages. Defer completions and
+            // track navigation until it returns, so neither a downloaded lyric
+            // nor natural EOF can replace the document being saved.
+            if (lyric_save_in_progress_) return 0;
             // StopWithFade publishes the logical stopped state before its
             // physical volume ramp completes. Do not mistake that close-only
             // transition for natural EOF and start another playlist item.
@@ -3135,6 +3139,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         return 0;
     case WM_CLOSE:
         if (close_after_skin_window_fade_) return 0;
+        if (lyric_save_in_progress_) return 0;
+        FinishLyricDocument();
         ClearAudioError();
         CompleteSkinWindowFadeForReplacement();
         if (!window_ || !IsWindow(window_)) return 0;
@@ -3195,6 +3201,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         }
         return 0;
     case WM_DESTROY:
+        if (playlist_find_dialog_ && IsWindow(playlist_find_dialog_))
+            EndDialog(playlist_find_dialog_, IDCANCEL);
         CloseOnlineLyricSearch();
         CloseLyricServiceEditor();
         ClosePlaylistConverter(window_);
@@ -6059,6 +6067,7 @@ void PlayerWindow::AdvanceSkinInfoScroll(UINT_PTR timer) {
 }
 
 bool PlayerWindow::PlayCurrent() {
+    if (lyric_save_in_progress_) return false;
     if (!random_navigation_dispatch_) random_navigation_requests_.clear();
     media_library_startup_pending_ = false;
     // Both explicit and automatic requests use the same nonmodal notice.
@@ -6080,6 +6089,7 @@ bool PlayerWindow::PlayCurrent() {
     // The decoder request may replace the object which backs opened_track_.
     // Keep a stable value while the engine and metadata paths run.
     const playlist::Track requested_track = *requested;
+    FinishLyricDocument();
     // 0047FEA3 sends the play request and then 0047FB0C publishes +0x1c.
     // Publish the per-list marker at request time; the failed-open path below
     // performs the later invalidation.
@@ -6263,6 +6273,8 @@ void PlayerWindow::SelectTrackFrom(size_t playlist_index, size_t index,
                                    bool start_playback) {
     if (playlist_index >= playlists_.Size() ||
         index >= playlists_.At(playlist_index).Tracks().size()) return;
+    if (lyric_save_in_progress_) return;
+    FinishLyricDocument();
     media_library_startup_pending_ = false;
     ClearAudioError();
     media_library_playback_active_ = false;
@@ -6506,6 +6518,8 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
 }
 
 void PlayerWindow::Stop() {
+    if (lyric_save_in_progress_) return;
+    FinishLyricDocument(false);
     random_navigation_requests_.clear();
     media_library_startup_pending_ = false;
     // FUN_00465169 first leaves whichever full-screen host is active, then

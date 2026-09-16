@@ -1,5 +1,6 @@
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_window.h"
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
@@ -1897,17 +1898,6 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         if (rating < 1 || rating > 5) return std::nullopt;
         return PlaylistRatingHit{*row, rating};
     };
-    static const UINT find_message = RegisterWindowMessageW(FINDMSGSTRINGW);
-    if (message == find_message) {
-        const auto* find = reinterpret_cast<const FINDREPLACEW*>(lparam);
-        if (find && (find->Flags & FR_DIALOGTERM) != 0) {
-            playlist_find_dialog_ = nullptr;
-        } else if (find && (find->Flags & FR_FINDNEXT) != 0 &&
-                   playlist_find_text_[0] != L'\0') {
-            static_cast<void>(FindNextPlaylistTrack(find->Flags));
-        }
-        return 0;
-    }
     switch (message) {
     case WM_ACTIVATE:
         RaiseSkinOwnerOnActivation(playlist_window_, wparam, lparam);
@@ -4457,7 +4447,8 @@ void PlayerWindow::PreparePlaylistMenu(HMENU menu) const {
     EnableCommand(menu, kPlaylistSelectInvert, has_tracks);
     EnableCommand(menu, kPlaylistFind, has_tracks);
     EnableCommand(menu, kPlaylistFindNext,
-        has_tracks && playlist_find_text_[0] != L'\0');
+        has_tracks && (playlist_find_text_[0] != L'\0' || (!playlist_find_quick_ &&
+            (!playlist_find_artist_.empty() || !playlist_find_album_.empty()))));
     EnableCommand(menu, kPlaylistQuickFind, has_tracks);
     EnableCommand(menu, kPlaylistDeleteList, playlists_.Size() > 1);
     const auto catalogue_row = playlist_context_list_
@@ -4761,91 +4752,165 @@ void PlayerWindow::ClearActivePlaylist() {
     RefreshPlaylist();
 }
 
-bool PlayerWindow::FindNextPlaylistTrack(DWORD flags) {
-    const std::wstring_view needle(playlist_find_text_);
+bool PlayerWindow::FindNextPlaylistTrack(DWORD flags, bool all) {
+    const std::wstring_view title(playlist_find_text_);
+    const bool empty = title.empty() && (playlist_find_quick_ ||
+        (playlist_find_artist_.empty() && playlist_find_album_.empty()));
     const size_t count = VisiblePlaylistTrackCount();
-    if (needle.empty() || count == 0) return false;
-
+    if (empty || count == 0) return false; // 0047AFDA
+    const auto matches = [flags](std::wstring_view value, std::wstring_view needle) {
+        if (needle.empty()) return false;
+        if (flags & FR_MATCHCASE)
+            return flags & FR_WHOLEWORD ? value == needle : value.find(needle) != value.npos;
+        if (flags & FR_WHOLEWORD)
+            return value.size() == needle.size() &&
+                _wcsnicmp(value.data(), needle.data(), value.size()) == 0;
+        return PlaylistWideContains(value, needle);
+    };
     const bool forward = (flags & FR_DOWN) != 0;
     size_t start = forward ? 0 : count - 1;
-    if (playlist_selection_ && *playlist_selection_ < count) {
+    if (!all && playlist_selection_ && *playlist_selection_ < count)
         start = forward ? (*playlist_selection_ + 1) % count
                         : (*playlist_selection_ + count - 1) % count;
-    }
-    const std::wstring unknown_title_format = ResourceText(0x81c8);
+    std::set<size_t> selected;
     for (size_t offset = 0; offset < count; ++offset) {
-        const size_t index = forward
-            ? (start + offset) % count
-            : (start + count - offset) % count;
-        const auto* visible_track = VisiblePlaylistTrack(index);
-        if (!visible_track) continue;
-        const auto& track = *visible_track;
-        const auto matches = [needle](std::wstring_view value) {
-            return PlaylistWideContains(value, needle);
-        };
-
-        const auto display_title = FormatPlaylistTitle(
-            track, settings_.playlist, unknown_title_format).text;
-        const auto file_name = track.path.filename().wstring();
-        if (matches(display_title) || matches(file_name)) {
-            SelectPlaylistRow(index);
-            return true;
-        }
-
-        // FUN_004860E5 keeps quick-find on the lightweight visible-title
-        // path.  Ordinary find additionally examines the file source and
-        // the title/artist/album fields already resident on CPlayItem.  It
-        // deliberately does not synchronously open a reader on the UI STA.
-        if (playlist_find_quick_) continue;
-        if (matches(track.path.wstring()) ||
-            matches(PlaylistUtf8Field(track.title)) ||
-            matches(PlaylistUtf8Field(track.artist)) ||
-            matches(PlaylistUtf8Field(track.album)) ||
-            matches(PlaylistMetadataValue(track, "Title")) ||
-            matches(PlaylistMetadataValue(track, "Artist")) ||
-            matches(PlaylistMetadataValue(track, "Album"))) {
-            SelectPlaylistRow(index);
-            return true;
-        }
+        const size_t row = all ? offset : forward ? (start + offset) % count
+                                                    : (start + count - offset) % count;
+        const auto* track = VisiblePlaylistTrack(row);
+        if (!track) continue;
+        // 004826AD combines the populated fields with OR, not AND.
+        bool match = matches(FormatPlaylistTitle(*track, settings_.playlist,
+                                 ResourceText(0x81c8)).text, title) ||
+                     matches(PlaylistUtf8Field(track->title), title);
+        if (!playlist_find_quick_)
+            match = match || matches(PlaylistUtf8Field(track->artist), playlist_find_artist_) ||
+                matches(PlaylistUtf8Field(track->album), playlist_find_album_) ||
+                matches(PlaylistMetadataValue(*track, "Artist"), playlist_find_artist_) ||
+                matches(PlaylistMetadataValue(*track, "Album"), playlist_find_album_);
+        if (!match) continue;
+        if (!all) { SelectPlaylistRow(row); return true; }
+        selected.insert(row);
     }
-
-    // FUN_004860E5 reports resource 0x8198 only for the ordinary Find path.
-    // Quick Find deliberately treats a miss as a silent selection update.
-    // The native code also guards the modal notification against re-entry.
+    if (all) {
+        playlist_selected_rows_ = std::move(selected);
+        playlist_selection_ = playlist_selected_rows_.empty() ? std::nullopt
+            : std::optional<size_t>{*playlist_selected_rows_.rbegin()};
+        playlist_selection_anchor_ = playlist_selection_;
+        if (playlist_selection_) EnsurePlaylistSelectionVisible();
+        if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
+        return !playlist_selected_rows_.empty();
+    }
     if (!playlist_find_quick_) {
         static bool showing_not_found{};
         if (!showing_not_found) {
             showing_not_found = true;
-            const HWND owner = playlist_find_dialog_ &&
-                    IsWindow(playlist_find_dialog_)
-                ? playlist_find_dialog_ : playlist_window_;
-            MessageBoxW(owner, ResourceText(0x8198).c_str(),
-                ResourceText(0x80).c_str(), MB_OK | MB_ICONINFORMATION);
+            // 0x8198 is the progress caption, NOT the no-match message.
+            MessageBoxW(playlist_find_dialog_ ? playlist_find_dialog_ : playlist_window_,
+                ResourceText(0x8193).c_str(), ResourceText(0x80).c_str(), MB_OK | MB_ICONINFORMATION);
             showing_not_found = false;
         }
     }
     return false;
 }
 
-void PlayerWindow::ShowPlaylistFindDialog(bool quick) {
-    if (playlist_find_dialog_ && IsWindow(playlist_find_dialog_)) {
-        // FUN_00486056 always ends the previous modeless find controller
-        // before opening another one.  This is observable when switching
-        // between Find and Quick Find; merely foregrounding the old dialog
-        // leaves it bound to the wrong search semantics.
-        const HWND previous = playlist_find_dialog_;
-        SendMessageW(previous, WM_CLOSE, 0, 0);
-        if (IsWindow(previous)) DestroyWindow(previous);
+INT_PTR CALLBACK PlayerWindow::PlaylistFindDialogProc(HWND dialog, UINT message,
+                                                      WPARAM wp, LPARAM lp) {
+    auto* self = reinterpret_cast<PlayerWindow*>(GetWindowLongPtrW(dialog, DWLP_USER));
+    constexpr int fields[]{1009, 1021, 1025};
+    if (message == WM_INITDIALOG) {
+        self = reinterpret_cast<PlayerWindow*>(lp);
+        SetWindowLongPtrW(dialog, DWLP_USER, lp);
+        self->playlist_find_dialog_ = dialog;
+        for (size_t i = 0; i < std::size(fields); ++i) {
+            for (const auto& entry : self->playlist_find_history_[i])
+                SendDlgItemMessageW(dialog, fields[i], CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.c_str()));
+            SendDlgItemMessageW(dialog, fields[i], CB_LIMITTEXT, i == 0 ? 127 : 2047, 0);
+        }
+        SetDlgItemTextW(dialog, 1009, self->playlist_find_text_);
+        SetDlgItemTextW(dialog, 1021, self->playlist_find_artist_.c_str());
+        SetDlgItemTextW(dialog, 1025, self->playlist_find_album_.c_str());
+        CheckDlgButton(dialog, 1103, self->playlist_find_.Flags & FR_MATCHCASE ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dialog, 1104, self->playlist_find_.Flags & FR_WHOLEWORD ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dialog, 1102, self->playlist_find_.Flags & FR_DOWN ? BST_UNCHECKED : BST_CHECKED);
+        if (self->playlist_find_quick_) {
+            SetWindowTextW(dialog, self->ResourceText(0x7f3b).c_str());
+            for (HWND child = GetWindow(dialog, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
+                ShowWindow(child, GetDlgCtrlID(child) == 1009 || GetDlgCtrlID(child) == 1107 ||
+                    GetDlgCtrlID(child) == 1052 ? SW_SHOW : SW_HIDE);
+            RECT box{}; GetWindowRect(GetDlgItem(dialog, 1009), &box);
+            MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&box), 2);
+            SetWindowPos(GetDlgItem(dialog, 1009), nullptr, 10, box.top,
+                box.right - 10, box.bottom - box.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            GetWindowRect(GetDlgItem(dialog, 1002), &box);
+            MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&box), 2);
+            SetWindowPos(GetDlgItem(dialog, 1107), nullptr, box.left, box.top,
+                box.right - box.left, box.bottom - box.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            SendMessageW(dialog, DM_SETDEFID, 1107, 0);
+            GetClientRect(dialog, &box); box.bottom /= 2;
+            AdjustWindowRectEx(&box, static_cast<DWORD>(GetWindowLongPtrW(dialog, GWL_STYLE)),
+                FALSE, static_cast<DWORD>(GetWindowLongPtrW(dialog, GWL_EXSTYLE)));
+            SetWindowPos(dialog, nullptr, 0, 0, box.right - box.left, box.bottom - box.top,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            if (self->playlist_find_text_[0]) PostMessageW(dialog, WM_COMMAND, MAKEWPARAM(1009, CBN_EDITCHANGE), 0);
+        }
+        SetFocus(GetDlgItem(dialog, 1009));
+        return FALSE;
     }
-    playlist_find_dialog_ = nullptr;
+    if (!self) return FALSE;
+    if (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wp) == IDCANCEL)) {
+        EndDialog(dialog, IDCANCEL);
+        if (IsWindow(self->playlist_window_)) SetActiveWindow(self->playlist_window_);
+        return TRUE;
+    }
+    if (message == WM_NCDESTROY) {
+        if (self->playlist_find_dialog_ == dialog) self->playlist_find_dialog_ = nullptr;
+        SetWindowLongPtrW(dialog, DWLP_USER, 0);
+        return FALSE;
+    }
+    if (message != WM_COMMAND) return FALSE;
+    const auto control = LOWORD(wp);
+    const bool live = self->playlist_find_quick_ && control == 1009 && HIWORD(wp) == CBN_EDITCHANGE;
+    if (!live && control != 1002 && control != 1107 && control != IDOK) return FALSE;
+    GetDlgItemTextW(dialog, 1009, self->playlist_find_text_, static_cast<int>(std::size(self->playlist_find_text_)));
+    if (!self->playlist_find_quick_) {
+        wchar_t text[2048]{};
+        GetDlgItemTextW(dialog, 1021, text, static_cast<int>(std::size(text))); self->playlist_find_artist_ = text;
+        GetDlgItemTextW(dialog, 1025, text, static_cast<int>(std::size(text))); self->playlist_find_album_ = text;
+        self->playlist_find_.Flags = (IsDlgButtonChecked(dialog, 1102) ? 0 : FR_DOWN) |
+            (IsDlgButtonChecked(dialog, 1103) ? FR_MATCHCASE : 0) |
+            (IsDlgButtonChecked(dialog, 1104) ? FR_WHOLEWORD : 0);
+    }
+    if (!live) for (size_t i = 0; i < (self->playlist_find_quick_ ? 1U : 3U); ++i) {
+        wchar_t text[2048]{}; GetDlgItemTextW(dialog, fields[i], text, static_cast<int>(std::size(text)));
+        if (!text[0]) continue;
+        auto& history = self->playlist_find_history_[i];
+        std::erase(history, std::wstring(text)); history.insert(history.begin(), text);
+        const LRESULT old = SendDlgItemMessageW(dialog, fields[i], CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(text));
+        if (old != CB_ERR) SendDlgItemMessageW(dialog, fields[i], CB_DELETESTRING, old, 0);
+        SendDlgItemMessageW(dialog, fields[i], CB_INSERTSTRING, 0, reinterpret_cast<LPARAM>(text));
+        if (!GetWindowTextLengthW(GetDlgItem(dialog, fields[i])))
+            SetDlgItemTextW(dialog, fields[i], text);
+    }
+    self->FindNextPlaylistTrack(self->playlist_find_.Flags, live || control == 1107);
+    if (self->playlist_find_quick_ && !live) {
+        EndDialog(dialog, IDCANCEL);
+        if (IsWindow(self->playlist_window_)) SetActiveWindow(self->playlist_window_);
+    }
+    return TRUE;
+}
+
+void PlayerWindow::ShowPlaylistFindDialog(bool quick) {
+    if (playlist_find_dialog_ && IsWindow(playlist_find_dialog_))
+        EndDialog(playlist_find_dialog_, IDCANCEL);
     playlist_find_quick_ = quick;
-    playlist_find_ = {};
-    playlist_find_.lStructSize = sizeof(playlist_find_);
-    playlist_find_.hwndOwner = playlist_window_;
-    playlist_find_.lpstrFindWhat = playlist_find_text_;
-    playlist_find_.wFindWhatLen = static_cast<WORD>(std::size(playlist_find_text_));
-    playlist_find_.Flags = FR_DOWN | FR_HIDEWHOLEWORD | FR_HIDEMATCHCASE;
-    playlist_find_dialog_ = FindTextW(&playlist_find_);
+    if (!playlist_find_.lStructSize) {
+        playlist_find_.lStructSize = sizeof(playlist_find_);
+        playlist_find_.Flags = FR_DOWN;
+    }
+    // 00486056 -> 0048ABBD: resource 203 with no disabled parent. Its modal
+    // loop continues to dispatch the player's timers and other HWNDs.
+    ShowWtlModalDialog(ResourceModule(), MAKEINTRESOURCEW(203), nullptr,
+        PlaylistFindDialogProc, reinterpret_cast<LPARAM>(this));
 }
 
 void PlayerWindow::BeginPlaylistOleDrag() {
@@ -6025,7 +6090,8 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
     if (command == kPlaylistFindNext) {
         if (playlist_find_dialog_ && IsWindow(playlist_find_dialog_)) {
             PostMessageW(playlist_find_dialog_, WM_COMMAND, IDOK, 0);
-        } else if (playlist_find_text_[0] != L'\0') {
+        } else if (playlist_find_text_[0] != L'\0' || (!playlist_find_quick_ &&
+                   (!playlist_find_artist_.empty() || !playlist_find_album_.empty()))) {
             static_cast<void>(FindNextPlaylistTrack(playlist_find_.Flags));
         } else {
             ShowPlaylistFindDialog(playlist_find_quick_);

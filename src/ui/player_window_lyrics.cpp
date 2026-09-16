@@ -2077,7 +2077,7 @@ unsigned int PlayerWindow::LyricDragHitTest(POINT point) const {
 }
 
 std::filesystem::path PlayerWindow::DefaultLyricEditorPath() const {
-    const auto* track = PlaybackTrackForUi();
+    const auto* track = lyric_document_track_ ? &*lyric_document_track_ : PlaybackTrackForUi();
     if (!track)
         return std::filesystem::path(L"New Lyrics.lrc");
     auto path = track->path;
@@ -2653,11 +2653,14 @@ void PlayerWindow::DestroyLyricEditor() {
     lyric_editor_edit_kind_ = 0;
 }
 
-bool PlayerWindow::SaveLyricEditor(bool save_as) {
-    if (!lyric_editor_) return false;
+bool PlayerWindow::SaveLyricEditor(bool save_as, bool automatic) {
     if (!save_as && lyrics_embedded_)
-        return WriteEmbeddedLyrics(LyricEditorText(), false);
-    auto target = lyric_editor_path_;
+        return WriteEmbeddedLyrics(lyric_editor_ ? LyricEditorText()
+            : SerializeLyricDocument(lyrics_, true), false);
+    auto target = lyric_editor_ ? lyric_editor_path_ : lyric_path_;
+    // 0044A6E6 sends the lyric HWND as lParam to 0044D824: policy saves
+    // use the existing/suggested target directly, without a Save As dialog.
+    if (automatic && target.empty()) target = DefaultLyricEditorPath();
     if (save_as || target.empty()) {
         const auto suggested = target.empty() ? DefaultLyricEditorPath() : target;
         auto filter = BuildDialogFilter(ResourceModule(), {
@@ -2672,7 +2675,8 @@ bool PlayerWindow::SaveLyricEditor(bool save_as) {
         if (!selected) return false;
         target = *selected;
     }
-    const std::wstring text = NormalizeEditorNewlines(LyricEditorText());
+    const std::wstring text = NormalizeEditorNewlines(lyric_editor_
+        ? LyricEditorText() : SerializeLyricDocument(lyrics_, settings_.lyric.save_compress));
     if (!WriteEditorFile(target, text, lyric_editor_encoding_,
                          lyric_editor_bom_)) {
         // FUN_0044D6F1 uses 0x8181 for Save As; the ordinary 0x8022 path in
@@ -2693,26 +2697,65 @@ bool PlayerWindow::SaveLyricEditor(bool save_as) {
         associated_lyric_path_ = target;
         lyrics_embedded_ = false;
     }
-    SendMessageW(lyric_editor_, EM_SETMODIFY, FALSE, 0);
+    if (lyric_editor_) SendMessageW(lyric_editor_, EM_SETMODIFY, FALSE, 0);
+    lyric_document_modified_ = false;
     return true;
+}
+
+bool PlayerWindow::SaveModifiedLyrics() {
+    // 0044A6E6: a clean document is already saved. Mode 0 and No retain
+    // the dirty result; a successful external save may additionally embed it.
+    const bool modified = lyric_editor_
+        ? SendMessageW(lyric_editor_, EM_GETMODIFY, 0, 0) != FALSE
+        : lyric_document_modified_;
+    if (!modified) return true;
+    if (lyric_save_in_progress_ || settings_.lyric.lyric_save_mode == 0) return false;
+    lyric_save_in_progress_ = true;
+    struct Reset { bool& value; ~Reset() { value = false; } } reset{lyric_save_in_progress_};
+    if (settings_.lyric.lyric_save_mode == 1) {
+        auto question = ResourceText(lyrics_embedded_ ? 0x817c : 0x817d);
+        if (question.empty()) question = L"The lyric file was modified. Save it?";
+        if (MessageBoxW(lyric_window_ ? lyric_window_ : window_, question.c_str(),
+            ResourceText(0x80).c_str(), MB_ICONQUESTION | MB_YESNO) != IDYES) return false;
+    }
+    const bool external = !lyrics_embedded_;
+    if (!SaveLyricEditor(false, true)) return false;
+    if (external && settings_.lyric.auto_save_lyric_tag)
+        WriteEmbeddedLyrics(lyric_editor_ ? LyricEditorText()
+            : SerializeLyricDocument(lyrics_, true), false, true);
+    return true; // An optional tag failure does not undo the external save.
+}
+
+void PlayerWindow::FinishLyricDocument(bool close_editor) {
+    if (lyric_save_in_progress_) return;
+    SaveModifiedLyrics();
+    // 0045B69B calls 0044A09E after the policy, even after No/failure.
+    // Finish before changing the track identity or closing its reader.
+    lyric_document_modified_ = false;
+    if (lyric_editor_) {
+        SendMessageW(lyric_editor_, EM_SETMODIFY, FALSE, 0);
+        if (close_editor) {
+            // Do not reload/auto-embed the old file while a caller is in the
+            // middle of publishing a new playlist identity.
+            DestroyLyricEditor();
+            if (lyric_control_) ShowWindow(lyric_control_, SW_SHOW);
+            if (lyric_desklrc_) EnableWindow(lyric_desklrc_, TRUE);
+        }
+    }
+}
+
+void PlayerWindow::AutoEmbedLoadedLyrics() {
+    // 0044A370 also embeds successfully loaded external lyrics, not only
+    // edited documents. Automatic writes do not display manual-command errors.
+    if (settings_.lyric.auto_save_lyric_tag && !lyrics_embedded_ && !lyrics_.lines.empty())
+        WriteEmbeddedLyrics(SerializeLyricDocument(lyrics_, true), false, true);
 }
 
 void PlayerWindow::LeaveLyricEditor(bool prompt_to_save) {
     if (!lyric_editor_) return;
     const bool modified = SendMessageW(
         lyric_editor_, EM_GETMODIFY, 0, 0) != FALSE;
-    bool saved = false;
-    if (modified && prompt_to_save) {
-        std::wstring question = ResourceText(
-            lyrics_embedded_ ? 0x817c : 0x817d);
-        if (question.empty())
-            question = L"The lyric file was modified. Save it?";
-        wchar_t caption[128]{};
-        GetWindowTextW(window_, caption, static_cast<int>(std::size(caption)));
-        if (MessageBoxW(lyric_window_, question.c_str(), caption,
-                        MB_ICONQUESTION | MB_YESNO) == IDYES)
-            saved = SaveLyricEditor(false);
-    }
+    const bool saved = !modified || (prompt_to_save && SaveModifiedLyrics());
     const auto edited_path = lyric_editor_path_;
     const bool associated = !associated_lyric_path_.empty();
     const bool embedded = lyrics_embedded_;
@@ -2737,17 +2780,18 @@ void PlayerWindow::LeaveLyricEditor(bool prompt_to_save) {
     if (lyric_editor_toolbar_) ShowWindow(lyric_editor_toolbar_, SW_HIDE);
     if (lyric_control_) ShowWindow(lyric_control_, SW_SHOW);
     EnableWindow(lyric_desklrc_, TRUE);
-    if (embedded) {
-        if (!modified || saved) {
-            try {
-                lyrics_ = lyrics::ParseLrc(core::WideToUtf8(editor_text));
-                ApplyLyricTrimSpaces(lyrics_, settings_.lyric.trim_spaces);
-                desktop_lyrics_.SetLyrics(&lyrics_);
-            }
-            catch (const std::exception&) {}
+    if (embedded || (modified && !saved)) {
+        try {
+            lyrics_ = lyrics::ParseLrc(core::WideToUtf8(editor_text));
+            ApplyLyricTrimSpaces(lyrics_, settings_.lyric.trim_spaces);
+            desktop_lyrics_.SetLyrics(&lyrics_);
         }
-        lyric_path_.clear();
-        associated_lyric_path_.clear();
+        catch (const std::exception&) {}
+        lyric_document_modified_ = modified && !saved;
+        if (embedded) {
+            lyric_path_.clear();
+            associated_lyric_path_.clear();
+        }
         if (lyric_control_) InvalidateRect(lyric_control_, nullptr, FALSE);
     } else {
         std::error_code error;
@@ -3152,8 +3196,8 @@ std::optional<std::wstring> PlayerWindow::ReadEmbeddedLyrics() const {
 }
 
 bool PlayerWindow::WriteEmbeddedLyrics(std::wstring_view text,
-                                       bool deleting) {
-    const auto* track = PlaybackTrackForUi();
+                                       bool deleting, bool silent) {
+    const auto* track = lyric_document_track_ ? &*lyric_document_track_ : PlaybackTrackForUi();
     if (!sound_library_ || !track)
         return false;
     if (!deleting && text.empty()) return false;
@@ -3169,7 +3213,11 @@ bool PlayerWindow::WriteEmbeddedLyrics(std::wstring_view text,
             result = HRESULT_FROM_WIN32(GetLastError());
     }
     std::unique_ptr<plugins::LegacyReaderSession> reader;
-    if (SUCCEEDED(result)) {
+    const auto shared = SUCCEEDED(result)
+        ? audio_.WriteCurrentLyrics(path, track->subtrack, deleting ? std::wstring_view{} : text)
+        : std::optional<HRESULT>{result};
+    if (shared) result = *shared;
+    if (!shared && SUCCEEDED(result)) {
         reader = sound_library_->OpenReaderForMetadata(path, &result);
         if (!reader && SUCCEEDED(result)) result = E_NOINTERFACE;
     }
@@ -3181,7 +3229,7 @@ bool PlayerWindow::WriteEmbeddedLyrics(std::wstring_view text,
         reader.reset(); // Some AddIns flush tags on final reader Release.
     }
     if (FAILED(result)) {
-        if (!deleting) {
+        if (!deleting && !silent) {
             const UINT resource = result == E_NOINTERFACE ? 0x817f : 0x8180;
             const auto message = ResourceText(resource);
             wchar_t caption[128]{};
@@ -3203,6 +3251,7 @@ bool PlayerWindow::WriteEmbeddedLyrics(std::wstring_view text,
     }
     if (lyric_editor_ && !deleting)
         SendMessageW(lyric_editor_, EM_SETMODIFY, FALSE, 0);
+    if (!deleting) lyric_document_modified_ = false;
     RefreshPlaybackUi();
     return true;
 }
@@ -3736,6 +3785,7 @@ void PlayerWindow::ClearLyrics() {
     CancelLocalLyricSearch();
     lyrics_ = {};
     lyric_document_modified_ = false;
+    lyric_document_track_.reset();
     desktop_lyrics_.SetLyrics(&lyrics_);
     lyric_path_.clear();
     lyrics_embedded_ = false;
@@ -3777,6 +3827,8 @@ void PlayerWindow::LoadLyricsFrom(const std::filesystem::path& path,
         desktop_lyrics_.SetLyrics(&lyrics_);
         lyric_path_ = path;
         associated_lyric_path_ = associated ? path : std::filesystem::path{};
+        if (const auto* track = PlaybackTrackForUi()) lyric_document_track_ = *track;
+        AutoEmbedLoadedLyrics();
     } catch (const std::exception&) {
         lyrics_ = {};
         desktop_lyrics_.SetLyrics(&lyrics_);
@@ -3814,6 +3866,7 @@ void PlayerWindow::LoadDroppedLyrics(const std::filesystem::path& path) {
 }
 
 void PlayerWindow::LoadCurrentLyrics(bool force) {
+    if (lyric_save_in_progress_) return;
     const auto* requested_track = PlaybackTrackForUi();
     if (lyric_search_ && (!requested_track ||
         requested_track->path != lyric_search_track_.path ||
@@ -3829,6 +3882,7 @@ void PlayerWindow::LoadCurrentLyrics(bool force) {
         return;
     }
     const auto& track = *playback_track;
+    lyric_document_track_ = track;
     // 004AD30E: Lyrics, then Lyric. Use the metadata already read by the
     // playback worker; never open a second decoder on the UI thread here.
     if (!settings_.lyric.dont_load_lyric_tag) {
@@ -3883,7 +3937,7 @@ void PlayerWindow::CancelLocalLyricSearch() {
 }
 
 void PlayerWindow::PollLocalLyricSearch() {
-    if (!local_lyric_search_ || lyric_association_open_) return;
+    if (!local_lyric_search_ || lyric_association_open_ || lyric_save_in_progress_) return;
     const auto* track = PlaybackTrackForUi();
     if (!track || !(local_lyric_song_ == lyrics::SongKey{track->path, track->subtrack}) || lyric_editor_) {
         CancelLocalLyricSearch(); return;
@@ -3901,6 +3955,7 @@ void PlayerWindow::PollLocalLyricSearch() {
         lyrics_ = std::move(result->lyric); lyrics_embedded_ = false;
         ApplyLyricTrimSpaces(lyrics_, settings_.lyric.trim_spaces);
         desktop_lyrics_.SetLyrics(&lyrics_);
+        AutoEmbedLoadedLyrics();
         if (lyric_control_) {
             if (fullscreen_lyric_detached_) RebuildLyricFont(false);
             InvalidateRect(lyric_control_, nullptr, FALSE);

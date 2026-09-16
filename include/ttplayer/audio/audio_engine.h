@@ -171,6 +171,8 @@ public:
     [[nodiscard]] virtual std::wstring Error() const = 0;
     [[nodiscard]] virtual HRESULT ErrorResult() const { return E_FAIL; }
     [[nodiscard]] virtual AudioMetadata Metadata() const { return {}; }
+    // Called only by the source's owning playback thread, between reads.
+    virtual HRESULT WriteLyrics(std::wstring_view) { return E_NOINTERFACE; }
 };
 
 // Creates (but does not open) the recovered source selected for `path`.
@@ -251,6 +253,10 @@ public:
     [[nodiscard]] std::wstring LastDiagnostic() const;
     [[nodiscard]] AudioFormat Format() const;
     [[nodiscard]] AudioMetadata Metadata() const;
+    // nullopt: no matching live source, caller may open a metadata reader.
+    // A live-source failure must not retry through a conflicting file handle.
+    std::optional<HRESULT> WriteCurrentLyrics(const std::filesystem::path& path,
+                                            int subtrack, std::wstring_view text);
     [[nodiscard]] VisualizationSamples Visualization() const;
 
 private:
@@ -263,6 +269,17 @@ private:
     };
     void PlaybackWorker(std::filesystem::path path, int subtrack);
     void WaveOutWorker(const std::filesystem::path& path, int subtrack);
+    struct LyricWriteRequest {
+        std::wstring text;
+        HRESULT result{E_PENDING};
+        bool finished{};
+        bool canceled{};
+    };
+    struct LyricSourceRegistration {
+        AudioEngine& owner;
+        ~LyricSourceRegistration();
+    };
+    void ProcessLyricWrite(DecodedAudioSource& source);
     void MciWorker(const std::filesystem::path& path);
     [[nodiscard]] bool PublishOpened(Backend backend, const AudioFormat& format,
                                      std::chrono::milliseconds duration);
@@ -293,6 +310,10 @@ private:
     uint64_t seek_revision_{}; // guarded by mutex_; also invalidates stale ACKs
     std::atomic<bool> stop_requested_{true};
     mutable std::mutex mutex_;
+    std::condition_variable lyric_write_condition_;
+    std::shared_ptr<LyricWriteRequest> lyric_write_request_;
+    std::filesystem::path lyric_source_path_;
+    int lyric_source_subtrack_{};
     std::condition_variable open_condition_;
     std::condition_variable fade_condition_;
     bool open_complete_{};

@@ -1,3 +1,4 @@
+#include "options_buttons.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/ui/playlist_transforms.h"
@@ -49,38 +50,10 @@ constexpr UINT kConvertPrompt = WM_APP + 0x2a3;
 constexpr UINT kConvertRefresh = WM_APP + 0x2a4;
 HWND g_convert_dialog{};
 
-LRESULT CALLBACK ConvertButtonImageProc(HWND button, UINT message, WPARAM wparam,
-    LPARAM lparam, UINT_PTR subclass, DWORD_PTR data) {
-    if (message != WM_NCDESTROY)
-        return DefSubclassProc(button,message,wparam,lparam);
-    RemoveWindowSubclass(button,ConvertButtonImageProc,subclass);
-    const LRESULT result=DefSubclassProc(button,message,wparam,lparam);
-    if (data) ImageList_Destroy(reinterpret_cast<HIMAGELIST>(data));
-    return result;
-}
-
+// 0047D682 installs 0x160 through the same 00434754/0046E0C9
+// image-button path used by the ordinary resource-dialog buttons.
 void InstallConvertBitmap(HWND dialog, int control, HMODULE resources, UINT resource) {
-    const HWND button=GetDlgItem(dialog,control);
-    const HBITMAP bitmap=static_cast<HBITMAP>(LoadImageW(resources,
-        MAKEINTRESOURCEW(resource),IMAGE_BITMAP,0,0,LR_CREATEDIBSECTION));
-    if (!button || !bitmap) { if (bitmap) DeleteObject(bitmap); return; }
-    BITMAP details{};
-    GetObjectW(bitmap,sizeof(details),&details);
-    const HIMAGELIST images=ImageList_Create(details.bmWidth,details.bmHeight,
-                                            ILC_COLOR24|ILC_MASK,1,0);
-    const int added=images ? ImageList_AddMasked(images,bitmap,RGB(192,192,192)) : -1;
-    DeleteObject(bitmap);
-    if (added<0) { if (images) ImageList_Destroy(images); return; }
-    BUTTON_IMAGELIST layout{};
-    layout.himl=images;
-    layout.margin={3,0,3,0};
-    layout.uAlign=GetWindowTextLengthW(button) ? BUTTON_IMAGELIST_ALIGN_LEFT
-                                            : BUTTON_IMAGELIST_ALIGN_CENTER;
-    if (!SetWindowSubclass(button,ConvertButtonImageProc,0x54544342,
-                           reinterpret_cast<DWORD_PTR>(images))) {
-        ImageList_Destroy(images); return;
-    }
-    SendMessageW(button,BCM_SETIMAGELIST,0,reinterpret_cast<LPARAM>(&layout));
+    detail::InstallOptionsBitmapButton(dialog, control, resources, resource);
 }
 
 constexpr int kConvertEncoder = 0x802;

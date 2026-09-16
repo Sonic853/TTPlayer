@@ -489,6 +489,18 @@ private:
 
 class LegacyPluginSource final : public DecodedAudioSource {
 public:
+    HRESULT WriteLyrics(std::wstring_view text) override {
+        if (!reader_) return E_NOINTERFACE;
+        const HRESULT result = reader_->SetMetadataValueDirect("Lyrics", text);
+        if (SUCCEEDED(result)) {
+            reader_->SetMetadataValueDirect("Lyric", {});
+            std::erase_if(metadata_.entries, [](const auto& entry) {
+                return MetadataKeyEquals(entry.first, L"Lyrics") || MetadataKeyEquals(entry.first, L"Lyric");
+            });
+            if (!text.empty()) metadata_.entries.emplace_back(L"Lyrics", text);
+        }
+        return result;
+    }
     LegacyPluginSource(const plugins::PluginManager& manager, HMODULE ttpcomm)
         : manager_(manager), ttpcomm_(ttpcomm) {}
 
@@ -1955,6 +1967,55 @@ AudioEngine::AudioEngine() : dsp_chain_(std::make_unique<WinampDspChain>()) {
         [this](std::stop_token stop_token) { FadeWorker(stop_token); });
 }
 
+AudioEngine::LyricSourceRegistration::~LyricSourceRegistration() {
+    std::scoped_lock lock(owner.mutex_);
+    owner.lyric_source_path_.clear();
+    if (auto request = std::exchange(owner.lyric_write_request_, {})) {
+        request->result = HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
+        request->finished = true;
+    }
+    owner.lyric_write_condition_.notify_all();
+}
+
+std::optional<HRESULT> AudioEngine::WriteCurrentLyrics(
+    const std::filesystem::path& path, int subtrack, std::wstring_view text) {
+    auto request = std::make_shared<LyricWriteRequest>();
+    request->text = text;
+    std::unique_lock lock(mutex_);
+    if (lyric_source_path_.empty() || lyric_source_path_ != path ||
+        lyric_source_subtrack_ != subtrack) return std::nullopt;
+    if (stop_requested_) return HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
+    if (lyric_write_request_) return HRESULT_FROM_WIN32(ERROR_BUSY);
+    lyric_write_request_ = request;
+    if (completion_event_) SetEvent(completion_event_);
+    if (!lyric_write_condition_.wait_for(lock, std::chrono::seconds(3),
+        [&] { return request->finished; })) {
+        request->canceled = true;
+        if (lyric_write_request_ == request) lyric_write_request_.reset();
+        return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    }
+    return request->result;
+}
+
+void AudioEngine::ProcessLyricWrite(DecodedAudioSource& source) {
+    std::shared_ptr<LyricWriteRequest> request;
+    {
+        std::scoped_lock lock(mutex_);
+        request = std::exchange(lyric_write_request_, {});
+        if (!request || request->canceled) return;
+    }
+    HRESULT result = E_FAIL;
+    try { result = source.WriteLyrics(request->text); }
+    catch (...) { result = E_FAIL; }
+    {
+        std::scoped_lock lock(mutex_);
+        if (SUCCEEDED(result)) metadata_ = source.Metadata();
+        request->result = result;
+        request->finished = true;
+    }
+    lyric_write_condition_.notify_all();
+}
+
 AudioEngine::~AudioEngine() {
     {
         std::scoped_lock lock(mutex_);
@@ -2185,6 +2246,12 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         return;
     }
     if (stop_requested_) return;
+    LyricSourceRegistration lyric_registration{*this};
+    {
+        std::scoped_lock lock(mutex_);
+        lyric_source_path_ = path;
+        lyric_source_subtrack_ = subtrack;
+    }
     const WAVEFORMATEX& source_format = source->OutputFormat();
     if (source_format.nAvgBytesPerSec == 0 || source_format.nBlockAlign == 0) {
         if (!stop_requested_)
@@ -2479,6 +2546,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
 
         bool natural_replay_gain_end{};
         while (usable && !stop_requested_) {
+            ProcessLyricWrite(*source);
             source->SetPaused(state_.load() == PlaybackState::paused);
             const auto request = TakeSeekRequest();
             const int64_t requested = request.position_ms;
@@ -2888,6 +2956,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
 
     bool natural_replay_gain_end{};
     while (usable && !stop_requested_) {
+        ProcessLyricWrite(*source);
         source->SetPaused(state_.load() == PlaybackState::paused);
         const auto request = TakeSeekRequest();
         const int64_t requested = request.position_ms;

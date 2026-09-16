@@ -552,7 +552,10 @@ private:
                                  std::wstring_view replacement,
                                  bool can_undo = true,
                                  bool reformat = true);
-    bool SaveLyricEditor(bool save_as);
+    bool SaveLyricEditor(bool save_as, bool automatic = false);
+    bool SaveModifiedLyrics();
+    void FinishLyricDocument(bool close_editor = true);
+    void AutoEmbedLoadedLyrics();
     void EditLyricTimestamp(UINT command);
     void ShiftLyricEditorTimestamps(std::chrono::milliseconds delta);
     void ReflowLyricEditor(bool expand);
@@ -560,7 +563,7 @@ private:
     void ShowLyricFindDialog(bool replace);
     void HandleLyricFindRequest(const FINDREPLACEW& request);
     [[nodiscard]] std::optional<std::wstring> ReadEmbeddedLyrics() const;
-    bool WriteEmbeddedLyrics(std::wstring_view text, bool deleting);
+    bool WriteEmbeddedLyrics(std::wstring_view text, bool deleting, bool silent = false);
     void LoadCurrentLyrics(bool force = false);
     void LoadLyricsFrom(const std::filesystem::path& path, bool associated);
     void ClearLyrics();
@@ -631,7 +634,8 @@ private:
     void DetachPlayingPlaylistItem();
     void ClearActivePlaylist();
     void ShowPlaylistFindDialog(bool quick);
-    bool FindNextPlaylistTrack(DWORD flags);
+    bool FindNextPlaylistTrack(DWORD flags, bool all = false);
+    static INT_PTR CALLBACK PlaylistFindDialogProc(HWND, UINT, WPARAM, LPARAM);
     bool HandlePlaylistTypeToSelect(bool catalogue, wchar_t character);
     [[nodiscard]] int FindPlaylistControlPrefix(
         bool catalogue, int start, const LVFINDINFOW& find) const;
@@ -966,6 +970,8 @@ private:
     int lyric_line_drag_offset_{};
     lyrics::Lyrics lyrics_;
     bool lyric_document_modified_{};
+    bool lyric_save_in_progress_{};
+    std::optional<playlist::Track> lyric_document_track_;
     std::unique_ptr<LyricUploadData> lyric_upload_pending_;
     std::filesystem::path lyric_path_;
     std::filesystem::path associated_lyric_path_;
@@ -1078,6 +1084,8 @@ private:
     wchar_t playlist_find_text_[128]{};
     HWND playlist_find_dialog_{};
     bool playlist_find_quick_{};
+    std::wstring playlist_find_artist_, playlist_find_album_;
+    std::array<std::vector<std::wstring>, 3> playlist_find_history_;
     FileDropTarget* player_drop_target_{};
     FileDropTarget* playlist_drop_target_{};
     FileDropTarget* lyric_drop_target_{};

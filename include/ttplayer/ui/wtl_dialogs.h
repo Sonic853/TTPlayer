@@ -7,4 +7,6 @@ namespace ttplayer::ui {
 INT_PTR ShowWtlPropertySheet(const PROPSHEETHEADERW& header);
 HWND CreateWtlDialog(HINSTANCE resources, LPCWSTR name, HWND parent,
                      DLGPROC handler, LPARAM data);
+INT_PTR ShowWtlModalDialog(HINSTANCE resources, LPCWSTR name, HWND parent,
+                          DLGPROC handler, LPARAM data);
 }
