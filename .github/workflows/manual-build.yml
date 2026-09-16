@@ -80,6 +80,7 @@ jobs:
           cmake -S . -B build -G "Visual Studio 18 2026" -A Win32
           "-DCMAKE_GENERATOR_INSTANCE=$env:TTPLAYER_VS_INSTANCE"
           -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF
+          -DTTPLAYER_OPTIMIZE_SIZE=ON
 
       - name: Build
         run: cmake --build build --config "$env:BUILD_CONFIGURATION" --target ttplayer_rebuild --parallel 4
@@ -89,6 +90,7 @@ jobs:
           cmake -S . -B build-legacy -G "Visual Studio 18 2026" -A Win32
           "-DCMAKE_GENERATOR_INSTANCE=$env:TTPLAYER_VS_INSTANCE"
           -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF -DTTPLAYER_LEGACY_WINDOWS=ON
+          -DTTPLAYER_OPTIMIZE_SIZE=ON
 
       - name: Build and audit XP and Windows 7 edition
         run: cmake --build build-legacy --config Release --target ttplayer_rebuild --parallel 4
@@ -138,6 +140,7 @@ jobs:
             yy_thunks = '1.2.2'
             vc_ltl = '5.3.1'
             wtl = '10.01'
+            release_size_optimization = $true
             run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           } | ConvertTo-Json | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
 

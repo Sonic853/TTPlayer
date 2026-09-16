@@ -4,6 +4,7 @@
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
+#include "options_buttons.h"
 #include "project_links.h"
 #include "output_devices.h"
 #include "modern_file_dialog.h"
@@ -1191,31 +1192,49 @@ void SelectFullscreenProfileControls(
             static_cast<WPARAM>(lyric_size - 1), 0);
 }
 
-void MakeOwnerDrawButton(HWND dialog, int control) {
+void MakeColorButton(HWND dialog, int control) {
     const HWND button = GetDlgItem(dialog, control);
     if (!button) return;
     const LONG_PTR style = GetWindowLongPtrW(button, GWL_STYLE);
     SetWindowLongPtrW(button, GWL_STYLE,
-        (style & ~static_cast<LONG_PTR>(BS_TYPEMASK)) | BS_OWNERDRAW);
+        (style & ~static_cast<LONG_PTR>(BS_TYPEMASK)) | BS_PUSHBUTTON);
+    // Keep native push-button/default-button state, as the original subclass
+    // does. Route paint to the page's color handler without BS_OWNERDRAW.
+    SetPropW(button, L"TTPlayer.OptionsColorButton", reinterpret_cast<HANDLE>(1));
+    SetWindowSubclass(button, OptionsImageButtonSubclassProc,
+                      kOptionsImageButtonSubclass, 0);
 }
 
-void DrawOptionsImageButton(HWND button, HDC dc, HIMAGELIST images, bool captioned) {
+void DrawOptionsImageButton(HWND button, HDC dc, HIMAGELIST images, bool captioned,
+                            const DRAWITEMSTRUCT* draw = nullptr) {
+    const int saved = SaveDC(dc);
     RECT client{};
     int width{}, height{};
-    if (!GetClientRect(button, &client) || !ImageList_GetIconSize(images, &width, &height)) return;
+    if (!GetClientRect(button, &client) || !ImageList_GetIconSize(images, &width, &height)) {
+        RestoreDC(dc, saved);
+        return;
+    }
+    IntersectClipRect(dc, client.left, client.top, client.right, client.bottom);
+    const LONG_PTR style = GetWindowLongPtrW(button, GWL_STYLE);
+    const bool flat = (style & BS_FLAT) != 0;
+    const bool default_button = (style & BS_TYPEMASK) == BS_DEFPUSHBUTTON && (style & WS_TABSTOP);
     const LRESULT state = SendMessageW(button, BM_GETSTATE, 0, 0);
-    const bool enabled = IsWindowEnabled(button) != FALSE;
-    const bool pressed = enabled && (state & BST_PUSHED);
-    const bool hot = enabled && (state & BST_HOT);
-    const int theme_state = !enabled ? PBS_DISABLED : pressed ? PBS_PRESSED : hot ? PBS_HOT : PBS_NORMAL;
-    const HTHEME theme = GetWindowTheme(button);
+    const bool enabled = draw ? !(draw->itemState & ODS_DISABLED) : IsWindowEnabled(button) != FALSE;
+    const bool pressed = enabled && (draw ? (draw->itemState & ODS_SELECTED) : (state & BST_PUSHED));
+    const bool hot = enabled && !pressed &&
+        GetPropW(button, L"TTPlayer.OptionsButtonHot") != nullptr;
+    const int theme_state = !enabled ? PBS_DISABLED : pressed ? PBS_PRESSED : hot ? PBS_HOT :
+                            default_button ? PBS_DEFAULTED : PBS_NORMAL;
+    // Own the theme lookup for owner-drawn controls too. Native BUTTON can
+    // retain a different theme handle after a per-window WM_THEMECHANGED.
+    const HTHEME theme = OpenThemeData(button, L"Button");
     FillRect(dc, &client, GetSysColorBrush(COLOR_BTNFACE));
-    if (theme && IsThemeBackgroundPartiallyTransparent(theme, BP_PUSHBUTTON, theme_state))
-        DrawThemeParentBackground(button, dc, &client);
+    // 0046E055 composites theme transparency over COLOR_BTNFACE, including
+    // rounded corners. Drawing the parent here changes the border pixels.
     if (!theme || FAILED(DrawThemeBackground(theme, dc, BP_PUSHBUTTON, theme_state, &client, nullptr))) {
-        const bool flat = (GetWindowLongPtrW(button, GWL_STYLE) & BS_FLAT) != 0;
         if (!flat || hot || pressed)
-            DrawEdge(dc, &client, pressed ? EDGE_SUNKEN : flat ? BDR_RAISEDINNER : EDGE_RAISED, BF_RECT);
+            DrawEdge(dc, &client, pressed ? (flat ? BDR_SUNKENOUTER : EDGE_SUNKEN) :
+                hot && !flat ? EDGE_RAISED : BDR_RAISEDINNER, BF_RECT);
     }
     // Port the no-caption branch of 0046E0C9 directly. BCM image layout adds
     // theme-dependent padding/rounding, so CENTER alone is not pixel-equivalent.
@@ -1250,32 +1269,78 @@ void DrawOptionsImageButton(HWND button, HDC dc, HIMAGELIST images, bool caption
                 DrawStateW(dc, nullptr, nullptr, reinterpret_cast<LPARAM>(caption), length,
                     text.left, text.top, text_size.right, text_size.bottom, DST_TEXT | DSS_DISABLED);
             else {
+                if (default_button && !theme) {
+                    RECT shadow = text;
+                    ++shadow.left;
+                    ++shadow.top;
+                    SetTextColor(dc, GetSysColor(COLOR_BTNSHADOW));
+                    DrawTextW(dc, caption, length, &shadow, 0);
+                }
                 SetTextColor(dc, GetSysColor(hot ? COLOR_HIGHLIGHT : COLOR_BTNTEXT));
                 DrawTextW(dc, caption, length, &text, 0);
             }
         }
-        if (GetFocus() == button && (GetWindowLongPtrW(button, GWL_STYLE) & WS_TABSTOP)) {
+        const bool focused = draw ? (draw->itemState & ODS_FOCUS) != 0
+                                  : GetFocus() == button;
+        if (focused && (style & WS_TABSTOP)) {
             RECT focus = client;
-            InflateRect(&focus, -3, -3);
+            InflateRect(&focus, flat ? -2 : -3, flat ? -2 : -3);
+            SetTextColor(dc, RGB(0, 0, 0));
+            SelectObject(dc, GetStockObject(NULL_BRUSH));
             DrawFocusRect(dc, &focus);
         }
     }
     if (old_font) SelectObject(dc, old_font);
+    if (theme) CloseThemeData(theme);
+    RestoreDC(dc, saved);
 }
 
 LRESULT CALLBACK OptionsImageButtonSubclassProc(
     HWND button, UINT message, WPARAM wparam, LPARAM lparam,
     UINT_PTR subclass, DWORD_PTR data) {
-    const bool captioned = subclass == kOptionsAssociationButtonSubclass;
-    if ((message == WM_PAINT || message == WM_PRINTCLIENT || message == WM_ERASEBKGND) &&
-        (captioned || GetWindowTextLengthW(button) == 0)) {
+    if (message == WM_MOUSEMOVE) {
+        RECT client{}; GetClientRect(button, &client);
+        const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        const bool hot = IsWindowEnabled(button) && PtInRect(&client, point);
+        if (hot != (GetPropW(button, L"TTPlayer.OptionsButtonHot") != nullptr)) {
+            if (hot) {
+                SetPropW(button, L"TTPlayer.OptionsButtonHot", reinterpret_cast<HANDLE>(1));
+                TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, button, 0};
+                TrackMouseEvent(&track);
+            } else RemovePropW(button, L"TTPlayer.OptionsButtonHot");
+            InvalidateRect(button, nullptr, FALSE);
+        }
+    } else if (message == WM_MOUSELEAVE || message == WM_CANCELMODE ||
+               (message == WM_ENABLE && !wparam)) {
+        if (RemovePropW(button, L"TTPlayer.OptionsButtonHot"))
+            InvalidateRect(button, nullptr, FALSE);
+    }
+    if (message == WM_PAINT || message == WM_PRINTCLIENT || message == WM_ERASEBKGND) {
+        const bool captioned = GetWindowTextLengthW(button) != 0;
         BUTTON_IMAGELIST layout{};
-        if (SendMessageW(button, BCM_GETIMAGELIST, 0, reinterpret_cast<LPARAM>(&layout)) &&
-            layout.himl && layout.himl != BCCL_NOGLYPH &&
-            (captioned || layout.uAlign == BUTTON_IMAGELIST_ALIGN_CENTER)) {
+        const bool image = SendMessageW(button, BCM_GETIMAGELIST, 0, reinterpret_cast<LPARAM>(&layout)) &&
+                           layout.himl && layout.himl != BCCL_NOGLYPH;
+        if (image || GetPropW(button, L"TTPlayer.OptionsColorButton")) {
+            const auto draw = [&](HDC target) {
+                if (image) DrawOptionsImageButton(button, target, layout.himl, captioned);
+                else {
+                    const LRESULT state = SendMessageW(button, BM_GETSTATE, 0, 0);
+                    DRAWITEMSTRUCT item{};
+                    item.CtlType = ODT_BUTTON;
+                    item.CtlID = static_cast<UINT>(GetDlgCtrlID(button));
+                    item.itemAction = ODA_DRAWENTIRE;
+                    item.itemState = (IsWindowEnabled(button) ? 0 : ODS_DISABLED) |
+                        (GetFocus() == button ? ODS_FOCUS : 0) |
+                        ((state & BST_PUSHED) ? ODS_SELECTED : 0);
+                    item.hwndItem = button;
+                    item.hDC = target;
+                    GetClientRect(button, &item.rcItem);
+                    SendMessageW(GetParent(button), WM_DRAWITEM, item.CtlID, reinterpret_cast<LPARAM>(&item));
+                }
+            };
             if (message == WM_ERASEBKGND) return TRUE; // Paint the full surface once.
             if (message == WM_PRINTCLIENT) {
-                DrawOptionsImageButton(button, reinterpret_cast<HDC>(wparam), layout.himl, captioned);
+                draw(reinterpret_cast<HDC>(wparam));
             } else {
                 PAINTSTRUCT paint{};
                 const HDC dc = BeginPaint(button, &paint);
@@ -1284,10 +1349,10 @@ LRESULT CALLBACK OptionsImageButtonSubclassProc(
                 const HBITMAP bitmap = CreateCompatibleBitmap(dc, client.right, client.bottom);
                 if (buffer && bitmap) {
                     const auto previous = SelectObject(buffer, bitmap);
-                    DrawOptionsImageButton(button, buffer, layout.himl, captioned);
+                    draw(buffer);
                     BitBlt(dc, 0, 0, client.right, client.bottom, buffer, 0, 0, SRCCOPY);
                     SelectObject(buffer, previous);
-                } else DrawOptionsImageButton(button, dc, layout.himl, captioned);
+                } else draw(dc);
                 if (bitmap) DeleteObject(bitmap);
                 if (buffer) DeleteDC(buffer);
                 EndPaint(button, &paint);
@@ -1298,9 +1363,31 @@ LRESULT CALLBACK OptionsImageButtonSubclassProc(
     if (message != WM_NCDESTROY)
         return DefSubclassProc(button, message, wparam, lparam);
     RemoveWindowSubclass(button, OptionsImageButtonSubclassProc, subclass);
+    RemovePropW(button, L"TTPlayer.OptionsButtonHot");
+    RemovePropW(button, L"TTPlayer.OptionsColorButton");
     const LRESULT result = DefSubclassProc(button, message, wparam, lparam);
     if (data) ImageList_Destroy(reinterpret_cast<HIMAGELIST>(data));
     return result;
+}
+
+bool InstallOwnedOptionsButtonImage(HWND button, HIMAGELIST images, BUTTON_IMAGELIST layout) {
+    BUTTON_IMAGELIST previous_layout{};
+    SendMessageW(button, BCM_GETIMAGELIST, 0, reinterpret_cast<LPARAM>(&previous_layout));
+    DWORD_PTR previous{};
+    GetWindowSubclass(button, OptionsImageButtonSubclassProc, kOptionsImageButtonSubclass, &previous);
+    layout.himl = images;
+    if (!SendMessageW(button, BCM_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(&layout))) {
+        ImageList_Destroy(images);
+        return false;
+    }
+    if (!SetWindowSubclass(button, OptionsImageButtonSubclassProc,
+                           kOptionsImageButtonSubclass, reinterpret_cast<DWORD_PTR>(images))) {
+        SendMessageW(button, BCM_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(&previous_layout));
+        ImageList_Destroy(images);
+        return false;
+    }
+    if (previous) ImageList_Destroy(reinterpret_cast<HIMAGELIST>(previous));
+    return true;
 }
 
 bool InstallButtonBitmap(HWND dialog, int control, HMODULE module,
@@ -1319,7 +1406,7 @@ bool InstallButtonBitmap(HWND dialog, int control, HMODULE module,
         return false;
     }
     const HIMAGELIST images = ImageList_Create(
-        source.bmWidth, source.bmHeight, ILC_COLOR24 | ILC_MASK, 1, 0);
+        source.bmWidth, source.bmHeight, ILC_COLOR32 | ILC_MASK, 1, 0);
     if (!images) {
         DeleteObject(bitmap);
         return false;
@@ -1339,15 +1426,7 @@ bool InstallButtonBitmap(HWND dialog, int control, HMODULE module,
         layout.margin = {3, 0, 3, 0};
         layout.uAlign = BUTTON_IMAGELIST_ALIGN_LEFT;
     }
-    if (!SendMessageW(button, BCM_SETIMAGELIST, 0,
-                      reinterpret_cast<LPARAM>(&layout))) {
-        ImageList_Destroy(images);
-        return false;
-    }
-    SetWindowSubclass(button, OptionsImageButtonSubclassProc,
-                      kOptionsImageButtonSubclass,
-                      reinterpret_cast<DWORD_PTR>(images));
-    return true;
+    return InstallOwnedOptionsButtonImage(button, images, layout);
 }
 
 bool InstallButtonIcon(HWND dialog, int control, HMODULE module,
@@ -1368,15 +1447,7 @@ bool InstallButtonIcon(HWND dialog, int control, HMODULE module,
     layout.himl = images;
     layout.margin = {3, 0, 3, 0};
     layout.uAlign = BUTTON_IMAGELIST_ALIGN_LEFT;
-    if (!SendMessageW(button, BCM_SETIMAGELIST, 0,
-                      reinterpret_cast<LPARAM>(&layout))) {
-        ImageList_Destroy(images);
-        return false;
-    }
-    SetWindowSubclass(button, OptionsImageButtonSubclassProc,
-                      kOptionsImageButtonSubclass,
-                      reinterpret_cast<DWORD_PTR>(images));
-    return true;
+    return InstallOwnedOptionsButtonImage(button, images, layout);
 }
 
 void MakeOptionsHyperlink(HWND dialog, int control) {
@@ -1413,25 +1484,50 @@ void AddListText(HWND list, int row, std::wstring_view text) {
     ListView_InsertItem(list, &item);
 }
 
+void DrawOptionsSwatchButton(const DRAWITEMSTRUCT& item, int size, int count,
+                             const std::array<COLORREF, 3>& colors,
+                             COLORREF transparent) {
+    // 00491FEF uses a 15x15 solid swatch; 00494C9D uses 16x16 horizontal
+    // color bands, not an interpolated gradient, for the desktop presets.
+    WTL::CDC bitmap_dc;
+    bitmap_dc.CreateCompatibleDC(item.hDC);
+    WTL::CBitmap bitmap;
+    bitmap.CreateCompatibleBitmap(item.hDC, size, size);
+    if (!bitmap_dc || !bitmap) return;
+    const auto old_bitmap = SelectObject(bitmap_dc, bitmap);
+    RECT swatch{0, 0, size, size};
+    FillRect(bitmap_dc, &swatch, GetSysColorBrush(COLOR_BTNFACE));
+    FrameRect(bitmap_dc, &swatch, static_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
+    InflateRect(&swatch, -2, -2);
+    count = std::clamp(count, 1, static_cast<int>(colors.size()));
+    const int band_height = (swatch.bottom - swatch.top) / count;
+    for (int band = 0; band < count; ++band) {
+        RECT part{swatch.left, swatch.top + band * band_height, swatch.right,
+                  band + 1 == count ? swatch.bottom : swatch.top + (band + 1) * band_height};
+        FillOptionsColor(bitmap_dc, part, colors[static_cast<size_t>(band)]);
+    }
+    SelectObject(bitmap_dc, old_bitmap);
+    const HIMAGELIST images = ImageList_Create(size, size, ILC_COLOR32 | ILC_MASK, 1, 0);
+    if (!images) return;
+    if (ImageList_AddMasked(images, bitmap, transparent) >= 0) {
+        WTL::CDC buffer;
+        buffer.CreateCompatibleDC(item.hDC);
+        WTL::CBitmap surface;
+        const int width = item.rcItem.right - item.rcItem.left;
+        const int height = item.rcItem.bottom - item.rcItem.top;
+        surface.CreateCompatibleBitmap(item.hDC, width, height);
+        if (buffer && surface) {
+            const auto old = SelectObject(buffer, surface);
+            DrawOptionsImageButton(item.hwndItem, buffer, images, true, &item);
+            BitBlt(item.hDC, item.rcItem.left, item.rcItem.top, width, height, buffer, 0, 0, SRCCOPY);
+            SelectObject(buffer, old);
+        } else DrawOptionsImageButton(item.hwndItem, item.hDC, images, true, &item);
+    }
+    ImageList_Destroy(images);
+}
+
 void DrawColorButton(const DRAWITEMSTRUCT& item, COLORREF color) {
-    RECT bounds = item.rcItem;
-    DrawFrameControl(item.hDC, &bounds, DFC_BUTTON,
-        DFCS_BUTTONPUSH | ((item.itemState & ODS_SELECTED) ? DFCS_PUSHED : 0));
-    InflateRect(&bounds, -4, -4);
-    RECT swatch = bounds;
-    swatch.right = std::min(swatch.right, swatch.left + 14);
-    const HBRUSH brush = CreateSolidBrush(color);
-    FillRect(item.hDC, &swatch, brush);
-    DeleteObject(brush);
-    FrameRect(item.hDC, &swatch,
-              reinterpret_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
-    bounds.left = swatch.right + 3;
-    wchar_t text[64]{};
-    GetWindowTextW(item.hwndItem, text, static_cast<int>(std::size(text)));
-    SetBkMode(item.hDC, TRANSPARENT);
-    DrawTextW(item.hDC, text, -1, &bounds,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    if ((item.itemState & ODS_FOCUS) != 0) DrawFocusRect(item.hDC, &bounds);
+    DrawOptionsSwatchButton(item, 15, 1, {color, color, color}, (~color) & 0xffffff);
 }
 
 // CColorSelectCtrl, recovered from 0048CD60..0048D0A5 and the common
@@ -1808,22 +1904,7 @@ void FillGradientStops(HDC dc, RECT bounds, int count,
 
 void DrawGradientButton(const DRAWITEMSTRUCT& item, int count,
                         const std::array<COLORREF, 3>& colors) {
-    RECT bounds = item.rcItem;
-    DrawFrameControl(item.hDC, &bounds, DFC_BUTTON,
-        DFCS_BUTTONPUSH | ((item.itemState & ODS_SELECTED) ? DFCS_PUSHED : 0));
-    InflateRect(&bounds, -4, -4);
-    RECT swatch = bounds;
-    swatch.right = std::min(swatch.right, swatch.left + 14);
-    FillGradientStops(item.hDC, swatch, count, colors);
-    FrameRect(item.hDC, &swatch,
-              reinterpret_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
-    bounds.left = swatch.right + 3;
-    wchar_t label[64]{};
-    GetWindowTextW(item.hwndItem, label, static_cast<int>(std::size(label)));
-    SetBkMode(item.hDC, TRANSPARENT);
-    DrawTextW(item.hDC, label, -1, &bounds,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    if ((item.itemState & ODS_FOCUS) != 0) DrawFocusRect(item.hDC, &bounds);
+    DrawOptionsSwatchButton(item, 16, count, colors, RGB(192,192,192));
 }
 
 struct GradientProfileDialogContext {
@@ -1863,7 +1944,7 @@ INT_PTR CALLBACK GradientProfileDialogProc(
                          reinterpret_cast<LPARAM>(text.c_str()));
         }
         for (int index = 0; index < 3; ++index)
-            MakeOwnerDrawButton(dialog, 2264 + index);
+            MakeColorButton(dialog, 2264 + index);
         RefreshGradientProfileDialog(dialog, *value);
         return TRUE;
     }
@@ -1986,8 +2067,8 @@ INT_PTR CALLBACK DesktopProfileDialogProc(
                           reinterpret_cast<LONG_PTR>(value));
         if (!value) return FALSE;
         SendDlgItemMessageW(dialog, 1005, EM_SETLIMITTEXT, 12, 0);
-        MakeOwnerDrawButton(dialog, 1155);
-        MakeOwnerDrawButton(dialog, 1156);
+        MakeColorButton(dialog, 1155);
+        MakeColorButton(dialog, 1156);
         InstallButtonBitmap(dialog, 2094, value->resources, 1098);
         RefreshDesktopProfileDialog(dialog, *value);
         return TRUE;
@@ -2067,15 +2148,18 @@ bool EditDesktopProfile(HWND owner, HMODULE resources,
     return true;
 }
 
-void PositionNestedDialog(HWND parent, HWND tab, HWND child) {
+void PositionNestedDialog(HWND parent, HWND tab, HWND child,
+                          UINT flags = SWP_SHOWWINDOW) {
     if (!parent || !tab || !child) return;
     RECT bounds{};
     GetClientRect(tab, &bounds);
     TabCtrl_AdjustRect(tab, FALSE, &bounds);
     MapWindowPoints(tab, parent, reinterpret_cast<POINT*>(&bounds), 2);
-    SetWindowPos(child, nullptr, bounds.left, bounds.top,
+    // The tab and its page are siblings. The page must be in front so the
+    // tab's WS_CLIPSIBLINGS excludes it from background painting.
+    SetWindowPos(child, HWND_TOP, bounds.left, bounds.top,
                  bounds.right - bounds.left, bounds.bottom - bounds.top,
-                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
+                 SWP_NOACTIVATE | flags);
 }
 
 std::optional<std::filesystem::path> BrowseForFolder(HWND owner) {
@@ -2711,6 +2795,17 @@ LRESULT CALLBACK OptionsSkinPreviewSubclassProc(
 
 } // namespace
 
+void detail::DrawOptionsColorButton(const DRAWITEMSTRUCT& item, COLORREF color) {
+    DrawColorButton(item, color);
+}
+void detail::MakeOptionsColorButton(HWND dialog, int control) {
+    MakeColorButton(dialog, control);
+}
+bool detail::InstallOptionsBitmapButton(HWND dialog, int control, HMODULE resources,
+                                       UINT identifier) {
+    return InstallButtonBitmap(dialog, control, resources, identifier);
+}
+
 HBITMAP detail::RenderSkinPreview(const skin::LegacySkin& source,
                                 HMODULE resources, HICON fallback_icon) {
     return RenderLegacySkinPreview(source, resources, fallback_icon);
@@ -3009,7 +3104,9 @@ void PlayerWindow::ShowOptions(int page, UINT focus_control) {
     options_deferred_apply_mask_ = 0;
     options_pages_.fill(nullptr);
     options_lyric_child_ = nullptr;
+    options_lyric_pages_.fill(nullptr);
     options_network_child_ = nullptr;
+    options_network_pages_.fill(nullptr);
     options_hotkey_selection_ = -1;
     options_dsp_paths_.clear();
     options_dsp_scan_complete_ = false;
@@ -3520,7 +3617,9 @@ void PlayerWindow::CloseOptions() {
     options_page_bounds_ = {};
     options_pages_.fill(nullptr);
     options_lyric_child_ = nullptr;
+    options_lyric_pages_.fill(nullptr);
     options_network_child_ = nullptr;
+    options_network_pages_.fill(nullptr);
     options_hotkey_selection_ = -1;
     options_deferred_apply_mask_ = 0;
     options_skin_entries_.clear();
@@ -3824,7 +3923,9 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
             options_page_bounds_ = {};
             options_pages_.fill(nullptr);
             options_lyric_child_ = nullptr;
+            options_lyric_pages_.fill(nullptr);
             options_network_child_ = nullptr;
+            options_network_pages_.fill(nullptr);
             options_deferred_apply_mask_ = 0;
             options_skin_entries_.clear();
             if (options_skin_preview_) DeleteObject(options_skin_preview_);
@@ -4123,6 +4224,43 @@ void PlayerWindow::SelectOptionsPage(int page, UINT focus_control) {
     options_focus_control_ = 0;
 }
 
+void PlayerWindow::SelectOptionsLyricMode(HWND dialog, UINT template_id) {
+    const bool desktop = template_id == 385;
+    const HWND next = options_lyric_pages_[desktop ? 1 : 0];
+    if (!next || !IsWindow(next)) return;
+    if (options_lyric_child_ && options_lyric_child_ != next) {
+        const UINT previous = options_lyric_child_ == options_lyric_pages_[1] ? 385 : 384;
+        CommitOptionsPage(options_lyric_child_, previous);
+        FlushDeferredOptionsRuntime(previous);
+    }
+    // 004974F0 creates both pages once; 00497779 only changes visibility and
+    // the two outer window-mode options. Keep each page's controls alive.
+    const HWND previous = options_lyric_pages_[desktop ? 0 : 1];
+    if (previous) ShowWindow(previous, SW_HIDE);
+    options_lyric_child_ = next;
+    ShowWindow(next, SW_SHOW);
+    TabCtrl_SetCurSel(GetDlgItem(dialog, 2256), desktop ? 1 : 0);
+    EnableWindow(GetDlgItem(dialog, 2021), !desktop);
+    EnableWindow(GetDlgItem(dialog, 2024), !desktop);
+}
+
+void PlayerWindow::SelectOptionsNetworkMode(HWND dialog, UINT template_id) {
+    const bool download = template_id == 382;
+    const HWND next = options_network_pages_[download ? 1 : 0];
+    if (!next || !IsWindow(next)) return;
+    if (options_network_child_ && options_network_child_ != next) {
+        const UINT previous = options_network_child_ == options_network_pages_[1] ? 382 : 381;
+        CommitOptionsPage(options_network_child_, previous);
+        FlushDeferredOptionsRuntime(previous);
+    }
+    // 0049885A creates both resource-sized pages; 00498BD1 only shows/hides them.
+    const HWND previous = options_network_pages_[download ? 0 : 1];
+    if (previous) ShowWindow(previous, SW_HIDE);
+    options_network_child_ = next;
+    ShowWindow(next, SW_SHOW);
+    TabCtrl_SetCurSel(GetDlgItem(dialog, 1181), download ? 1 : 0);
+}
+
 void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
     const HMODULE resources = ResourceModule();
     const auto ready = [&] {
@@ -4231,7 +4369,9 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetSpinRange(dialog, 1078, 1, 100);
         SetSpinRange(dialog, 1044, 1, 100);
         EnableWindow(GetDlgItem(dialog, 1077), IsChecked(dialog, 1076));
+        EnableWindow(GetDlgItem(dialog, 1078), IsChecked(dialog, 1076));
         EnableWindow(GetDlgItem(dialog, 1084), IsChecked(dialog, 1083));
+        EnableWindow(GetDlgItem(dialog, 1044), IsChecked(dialog, 1083));
         EnableWindow(GetDlgItem(dialog, 2138), IsChecked(dialog, 2137));
         EnableWindow(GetDlgItem(dialog, 2183), IsChecked(dialog, 2182));
         break;
@@ -4341,7 +4481,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetDlgItemTextW(dialog, 1089, value.default_title_format.c_str());
         EnableWindow(GetDlgItem(dialog, 1097), IsChecked(dialog, 1099));
         for (const int control : {1155,1156,1159,1160,1158,1162,1161})
-            MakeOwnerDrawButton(dialog, control);
+            MakeColorButton(dialog, control);
         InstallButtonBitmap(dialog, 1036, resources, 0x161);
         InstallButtonBitmap(dialog, 2154, resources, 0x160);
         break;
@@ -4394,12 +4534,17 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                 TabCtrl_InsertItem(tab, index, &item);
             }
             const UINT child_id = options_focus_control_ == 385 ? 385 : 384;
-            TabCtrl_SetCurSel(tab, child_id == 385 ? 1 : 0);
-            OptionsChildInit init{this, child_id};
-            options_lyric_child_ = CreateWtlDialog(
-                resources, MAKEINTRESOURCEW(child_id), dialog,
-                OptionsChildDialogProc, reinterpret_cast<LPARAM>(&init));
-            PositionNestedDialog(dialog, tab, options_lyric_child_);
+            // Match 004974F0's desktop-then-window creation order. Each
+            // child's 00495F5C/00496A32 initialization positions it at HWND_TOP
+            // with SWP_NOSIZE, retaining its resource-defined dimensions.
+            for (const UINT identifier : {385U, 384U}) {
+                OptionsChildInit init{this, identifier};
+                auto& child = options_lyric_pages_[identifier - 384];
+                child = CreateWtlDialog(resources, MAKEINTRESOURCEW(identifier),
+                    dialog, OptionsChildDialogProc, reinterpret_cast<LPARAM>(&init));
+                PositionNestedDialog(dialog, tab, child, SWP_NOSIZE);
+            }
+            SelectOptionsLyricMode(dialog, child_id);
         }
         for (const int control : {2087, 2089, 2091})
             MakeOptionsHyperlink(dialog, control);
@@ -4454,12 +4599,14 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                 TabCtrl_InsertItem(tab, index, &item);
             }
             const UINT child_id = options_focus_control_ == 382 ? 382 : 381;
-            TabCtrl_SetCurSel(tab, child_id == 382 ? 1 : 0);
-            OptionsChildInit init{this, child_id};
-            options_network_child_ = CreateWtlDialog(
-                resources, MAKEINTRESOURCEW(child_id), dialog,
-                OptionsChildDialogProc, reinterpret_cast<LPARAM>(&init));
-            PositionNestedDialog(dialog, tab, options_network_child_);
+            for (const UINT identifier : {381U, 382U}) {
+                OptionsChildInit init{this, identifier};
+                auto& child = options_network_pages_[identifier - 381];
+                child = CreateWtlDialog(resources, MAKEINTRESOURCEW(identifier), dialog,
+                    OptionsChildDialogProc, reinterpret_cast<LPARAM>(&init));
+                PositionNestedDialog(dialog, tab, child, SWP_NOSIZE);
+            }
+            SelectOptionsNetworkMode(dialog, child_id);
         }
         CheckRadioButton(dialog, 2190, 2192,
                          2190 + std::clamp(settings_.network.proxy_type, 0, 2));
@@ -4747,7 +4894,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         }
         SetChecked(dialog, IDC_FULLSCREEN_LYRIC_DRAG, settings_.lyric.fullscreen_drag_lyric);
         for (const int control : {1155,1156,1158})
-            MakeOwnerDrawButton(dialog, control);
+            MakeColorButton(dialog, control);
         EnableWindow(GetDlgItem(dialog, 2232), !unified);
         EnableWindow(GetDlgItem(dialog, 2151), layered);
         InstallButtonBitmap(dialog, 1036, resources, 0x161);
@@ -4910,7 +5057,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetChecked(dialog, 2022, settings_.lyric.auto_width);
         SetChecked(dialog, 2023, settings_.lyric.auto_width_only_vertical);
         for (const int control : {1155,1156,1158})
-            MakeOwnerDrawButton(dialog, control);
+            MakeColorButton(dialog, control);
         const bool layered = LayeredWindowsAvailableForOptions();
         EnableWindow(GetDlgItem(dialog, 2151), layered);
         EnableWindow(GetDlgItem(dialog, 2152),
@@ -4940,7 +5087,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetChecked(dialog, 2261, settings_.desktop_lyric.background_show);
         SetChecked(dialog, 2023, settings_.desktop_lyric.unlock_when_close);
         for (const int control : {1155,1156,1038,1158})
-            MakeOwnerDrawButton(dialog, control);
+            MakeColorButton(dialog, control);
         EnableWindow(GetDlgItem(dialog, 1038),
                      settings_.desktop_lyric.border);
         EnableWindow(GetDlgItem(dialog, 1158),
@@ -5109,10 +5256,9 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         settings_.lyric.save_compress = IsChecked(dialog, 2066);
         settings_.lyric.lyric_save_mode = ComboSelection(dialog, 2196,
             settings_.lyric.lyric_save_mode);
-        if (options_lyric_child_)
-            CommitOptionsPage(options_lyric_child_, static_cast<UINT>(
-                reinterpret_cast<ULONG_PTR>(GetPropW(
-                    options_lyric_child_, kPageTemplateProperty))));
+        for (size_t index = 0; index < options_lyric_pages_.size(); ++index)
+            if (const HWND child = options_lyric_pages_[index]; child && IsWindow(child))
+                CommitOptionsPage(child, 384 + static_cast<UINT>(index));
         break;
     case 257: {
         settings_.lyric.auto_download = IsChecked(dialog, 2065);
@@ -5172,10 +5318,9 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
                 settings_.network.server_list.push_back(std::move(server));
             }
         }
-        if (options_network_child_)
-            CommitOptionsPage(options_network_child_, static_cast<UINT>(
-                reinterpret_cast<ULONG_PTR>(GetPropW(
-                    options_network_child_, kPageTemplateProperty))));
+        for (size_t index = 0; index < options_network_pages_.size(); ++index)
+            if (const HWND child = options_network_pages_[index]; child && IsWindow(child))
+                CommitOptionsPage(child, static_cast<UINT>(381 + index));
         break;
     case 259: {
         settings_.plugin.folder = GetText(dialog, 1028);
@@ -6195,43 +6340,18 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         return nullptr;
     };
     const auto switch_nested = [this, dialog, template_id](UINT requested) {
-        const HMODULE resources = ResourceModule();
         if (template_id == 256) {
             const HWND tab = GetDlgItem(dialog, 2256);
             UINT child_id = requested;
             if (child_id != 384 && child_id != 385)
                 child_id = TabCtrl_GetCurSel(tab) == 1 ? 385 : 384;
-            if (options_lyric_child_ && IsWindow(options_lyric_child_)) {
-                const UINT previous = static_cast<UINT>(
-                    reinterpret_cast<ULONG_PTR>(GetPropW(
-                        options_lyric_child_, kPageTemplateProperty)));
-                CommitOptionsPage(options_lyric_child_, previous);
-                FlushDeferredOptionsRuntime(previous);
-                DestroyWindow(options_lyric_child_);
-            }
-            OptionsChildInit init{this, child_id};
-            options_lyric_child_ = CreateWtlDialog(
-                resources, MAKEINTRESOURCEW(child_id), dialog,
-                OptionsChildDialogProc, reinterpret_cast<LPARAM>(&init));
-            PositionNestedDialog(dialog, tab, options_lyric_child_);
+            SelectOptionsLyricMode(dialog, child_id);
         } else if (template_id == 258) {
             const HWND tab = GetDlgItem(dialog, 1181);
             UINT child_id = requested;
             if (child_id != 381 && child_id != 382)
                 child_id = TabCtrl_GetCurSel(tab) == 1 ? 382 : 381;
-            if (options_network_child_ && IsWindow(options_network_child_)) {
-                const UINT previous = static_cast<UINT>(
-                    reinterpret_cast<ULONG_PTR>(GetPropW(
-                        options_network_child_, kPageTemplateProperty)));
-                CommitOptionsPage(options_network_child_, previous);
-                FlushDeferredOptionsRuntime(previous);
-                DestroyWindow(options_network_child_);
-            }
-            OptionsChildInit init{this, child_id};
-            options_network_child_ = CreateWtlDialog(
-                resources, MAKEINTRESOURCEW(child_id), dialog,
-                OptionsChildDialogProc, reinterpret_cast<LPARAM>(&init));
-            PositionNestedDialog(dialog, tab, options_network_child_);
+            SelectOptionsNetworkMode(dialog, child_id);
         }
     };
 
@@ -6343,7 +6463,9 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         }
         COLORREF* color = item ? color_target(item->CtlID) : nullptr;
         if (!item || !color) break;
-        DrawColorButton(*item, *color);
+        if (template_id == 385)
+            DrawGradientButton(*item, 1, {*color, *color, *color});
+        else DrawColorButton(*item, *color);
         return TRUE;
     }
     case WM_CTLCOLORSTATIC: {
@@ -6402,11 +6524,13 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
             if (control == 2188)
                 EnableWindow(GetDlgItem(dialog, kOptionsDiscordLyrics),
                              IsChecked(dialog, 2188));
-            else if (control == 1076)
+            else if (control == 1076) {
                 EnableWindow(GetDlgItem(dialog, 1077), IsChecked(dialog, 1076));
-            else if (control == 1083)
+                EnableWindow(GetDlgItem(dialog, 1078), IsChecked(dialog, 1076));
+            } else if (control == 1083) {
                 EnableWindow(GetDlgItem(dialog, 1084), IsChecked(dialog, 1083));
-            else if (control == 2137)
+                EnableWindow(GetDlgItem(dialog, 1044), IsChecked(dialog, 1083));
+            } else if (control == 2137)
                 EnableWindow(GetDlgItem(dialog, 2138), IsChecked(dialog, 2137));
             else if (control == 2182)
                 EnableWindow(GetDlgItem(dialog, 2183), IsChecked(dialog, 2182));
@@ -7361,6 +7485,16 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         break;
     }
     case WM_DESTROY: {
+        if (template_id == 381 || template_id == 382) {
+            auto& child = options_network_pages_[template_id - 381];
+            if (child == dialog) child = nullptr;
+            if (options_network_child_ == dialog) options_network_child_ = nullptr;
+        }
+        if (template_id == 384 || template_id == 385) {
+            auto& child = options_lyric_pages_[template_id - 384];
+            if (child == dialog) child = nullptr;
+            if (options_lyric_child_ == dialog) options_lyric_child_ = nullptr;
+        }
         if (template_id == 259) {
             KillTimer(dialog, kOptionsDspPollTimer);
             CancelOptionsDspScan();

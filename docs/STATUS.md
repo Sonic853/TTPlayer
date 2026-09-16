@@ -1,5 +1,34 @@
 # Reconstruction status
 
+2026-09-16: implement the options drawing audit in priority order. Synchronize
+General edit/spin enable states; restore original solid/banded swatches, shared
+image/text layout, theme/classic borders, hover, pressed, disabled, focus and
+default-button rendering. Keep native push-button styles and release replaced
+image lists. Retain both network pages at resource size and commit hidden edits.
+The host pixel matrix matches original RGB in 960/960 cases, including four
+geometry scales (not changes to actual system DPI). Preserve community additions.
+Modern and legacy Release each pass the drawing audit, nested-page regressions
+and complete options suite; the XP/Win7 static audit passes 641 imports in 18 DLLs.
+See [options drawing audit](OPTIONS_DRAWING_PARITY_AUDIT.md) for evidence and limits.
+
+2026-09-16: restore the original lyric options mode-page lifetime and sibling
+Z-order. Create templates 385/384 once, retain their resource dimensions and
+switch visibility instead of recreating dialogs behind the tab. Restore the
+two window-mode-only checkboxes and commit both pages on Apply/Close. Focused
+tests pass in modern and legacy Release; related UI checks and the 644-import
+XP/Win7 audit pass. See [lyric mode-page audit](LYRIC_OPTIONS_TAB_PAINT_AUDIT.md)
+for original addresses, reproduction, scope and validation limits.
+
+2026-09-16: enable compile-time size optimization for both Release editions and
+Actions builds. Use /O1, /Gw and full LTCG; keep src/audio/ at /O2. The modern EXE
+shrinks from 3,193,344 to 2,573,824 bytes (19.4%); legacy from 3,439,104 to
+2,799,104 bytes (18.6%). Resources, public exports/ordinals and PE compatibility
+flags match the baseline. Modern regressions cover 11 checks (native hover
+needed one isolated retry), legacy host checks 8; 644 imports pass XP/Win7 audit.
+The local workflow regression also passes ZIP/checksum and mocked publication
+checks after updating its fixture to include the existing WTL license.
+See [build settings and measurements](BUILDING.md).
+
 2026-09-16: fix white/black native ListView painting while either playlist
 column's right-click menu is open. Keep skin paint/erase handling active during
 the native input handler's nested menu loop, ahead of model synchronization

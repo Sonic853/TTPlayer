@@ -1,6 +1,7 @@
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
+#include "options_buttons.h"
 #include "modern_file_dialog.h"
 
 #include <algorithm>
@@ -41,8 +42,6 @@ constexpr UINT kSaveAllOptions = 0x04d2;
 constexpr UINT kResetAllOptions = 0x04d3;
 constexpr int kPropertySheetApply = 0x3021;
 constexpr UINT_PTR kVisualOptionsSheetSubclass = 0x5454564f;
-constexpr wchar_t kVisualButtonImageProperty[] =
-    L"TTPlayer.VisualOptions.ButtonImage";
 
 constexpr std::array<UINT, 6> kColorControls{
     kPeakColor, kTopColor, kMiddleColor, kBottomColor, kScopeColor,
@@ -63,77 +62,6 @@ COLORREF* VisualColor(settings::VisualSettings& visual, UINT control) {
 const COLORREF* VisualColor(const settings::VisualSettings& visual,
                             UINT control) {
     return VisualColor(const_cast<settings::VisualSettings&>(visual), control);
-}
-
-void DrawColorButton(const DRAWITEMSTRUCT& item, COLORREF color) {
-    RECT bounds = item.rcItem;
-    UINT state = DFCS_BUTTONPUSH;
-    if ((item.itemState & ODS_SELECTED) != 0) state |= DFCS_PUSHED;
-    if ((item.itemState & ODS_DISABLED) != 0) state |= DFCS_INACTIVE;
-    DrawFrameControl(item.hDC, &bounds, DFC_BUTTON, state);
-
-    InflateRect(&bounds, -4, -4);
-    RECT swatch = bounds;
-    swatch.right = std::min(swatch.right, swatch.left + 14);
-    const HBRUSH brush = CreateSolidBrush(color);
-    FillRect(item.hDC, &swatch, brush);
-    DeleteObject(brush);
-    FrameRect(item.hDC, &swatch,
-              reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-
-    wchar_t caption[64]{};
-    GetWindowTextW(item.hwndItem, caption,
-                   static_cast<int>(std::size(caption)));
-    bounds.left = swatch.right + 3;
-    SetBkMode(item.hDC, TRANSPARENT);
-    SetTextColor(item.hDC, GetSysColor(
-        (item.itemState & ODS_DISABLED) ? COLOR_GRAYTEXT : COLOR_BTNTEXT));
-    DrawTextW(item.hDC, caption, -1, &bounds,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    if ((item.itemState & ODS_FOCUS) != 0)
-        DrawFocusRect(item.hDC, &bounds);
-}
-
-void InstallButtonBitmap(HWND dialog, UINT control, UINT resource) {
-    const HWND button = GetDlgItem(dialog, static_cast<int>(control));
-    if (!button || GetPropW(button, kVisualButtonImageProperty)) return;
-    const HMODULE module = reinterpret_cast<HMODULE>(
-        GetWindowLongPtrW(dialog, GWLP_HINSTANCE));
-    const HBITMAP bitmap = static_cast<HBITMAP>(LoadImageW(
-        module, MAKEINTRESOURCEW(resource), IMAGE_BITMAP, 0, 0,
-        LR_CREATEDIBSECTION));
-    BITMAP details{};
-    if (!bitmap || !GetObjectW(bitmap, sizeof(details), &details)) {
-        if (bitmap) DeleteObject(bitmap);
-        return;
-    }
-    const HIMAGELIST images = ImageList_Create(
-        details.bmWidth, details.bmHeight, ILC_COLOR24 | ILC_MASK, 1, 0);
-    if (!images) {
-        DeleteObject(bitmap);
-        return;
-    }
-    ImageList_AddMasked(images, bitmap, RGB(192, 192, 192));
-    DeleteObject(bitmap);
-    BUTTON_IMAGELIST layout{};
-    layout.himl = images;
-    layout.margin = {3, 0, 3, 0};
-    layout.uAlign = BUTTON_IMAGELIST_ALIGN_LEFT;
-    if (!SendMessageW(button, BCM_SETIMAGELIST, 0,
-                      reinterpret_cast<LPARAM>(&layout))) {
-        ImageList_Destroy(images);
-        return;
-    }
-    SetPropW(button, kVisualButtonImageProperty,
-             reinterpret_cast<HANDLE>(images));
-}
-
-void DestroyButtonBitmap(HWND dialog, UINT control) {
-    const HWND button = GetDlgItem(dialog, static_cast<int>(control));
-    if (!button) return;
-    const auto images = reinterpret_cast<HIMAGELIST>(
-        RemovePropW(button, kVisualButtonImageProperty));
-    if (images) ImageList_Destroy(images);
 }
 
 std::wstring XmlAttribute(IXMLDOMNode* node, const wchar_t* name) {
@@ -395,9 +323,7 @@ void SyncVisualPage(HWND dialog, HMODULE resources,
     for (const UINT control : kColorControls) {
         const HWND button = GetDlgItem(dialog, static_cast<int>(control));
         if (first && button) {
-            const LONG_PTR style = GetWindowLongPtrW(button, GWL_STYLE);
-            SetWindowLongPtrW(button, GWL_STYLE,
-                (style & ~static_cast<LONG_PTR>(BS_TYPEMASK)) | BS_OWNERDRAW);
+            MakeOptionsColorButton(dialog, static_cast<int>(control));
         }
         if (button) InvalidateRect(button, nullptr, TRUE);
     }
@@ -547,8 +473,8 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
         const auto description = ResourceText(kVisualOptionsPage);
         if (!description.empty()) SetWindowTextW(dialog, description.c_str());
         SyncVisualPage(dialog, resources, settings_.visual, true);
-        InstallButtonBitmap(dialog, kVisualFont, 0x161);
-        InstallButtonBitmap(dialog, kVisualProfile, 0x160);
+        InstallOptionsBitmapButton(dialog, kVisualFont, resources, 0x161);
+        InstallOptionsBitmapButton(dialog, kVisualProfile, resources, 0x160);
         return TRUE;
     }
     case WM_HSCROLL:
@@ -568,7 +494,7 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
         const COLORREF* color = item
             ? VisualColor(settings_.visual, item->CtlID) : nullptr;
         if (!item || !color) break;
-        DrawColorButton(*item, *color);
+        DrawOptionsColorButton(*item, *color);
         return TRUE;
     }
     case WM_COMMAND: {
@@ -704,8 +630,6 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
         break;
     }
     case WM_DESTROY:
-        DestroyButtonBitmap(dialog, kVisualFont);
-        DestroyButtonBitmap(dialog, kVisualProfile);
         break;
     default:
         break;

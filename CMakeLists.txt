@@ -5,6 +5,7 @@ option(BUILD_TESTING "Build local, unpublished tests" OFF)
 include(CTest)
 option(TTPLAYER_STAGE_RUNTIME "Rebuild/copy local original DLLs, skins and configuration beside the EXE" ON)
 option(TTPLAYER_LEGACY_WINDOWS "Build the separate Windows XP SP3 / Windows 7 edition" OFF)
+option(TTPLAYER_OPTIMIZE_SIZE "Optimize Release player size, retaining fast audio processing" ON)
 option(TTPLAYER_BUILD_LIBRARY_TESTS "Build local media library regression tests" OFF)
 option(TTPLAYER_BUILD_NAVIGATION_TESTS "Build local playback navigation regression tests" OFF)
 option(TTPLAYER_BUILD_INFO_TESTS "Build local playlist information regression tests" OFF)
@@ -153,6 +154,8 @@ set_target_properties(ttplayer_rebuild PROPERTIES
 target_compile_definitions(ttplayer_rebuild PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(ttplayer_rebuild PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_rebuild PRIVATE ttplayer_core ttpcomm_api comctl32 comdlg32 shell32)
+
+include(cmake/size_optimization.cmake)
 
 # Pre-ATL-8 AddIns generate window thunks in ordinary heap memory
 # (ttp_ape!60101C36, also ttp_enc). /NXCOMPAT opts out of Windows' ATL

@@ -88,6 +88,43 @@ UI 基础代码使用 WTL 10.01 和 Visual Studio ATL。安装 C++ 桌面开发�
 
 CMake 从官方发布地址下载 WTL，并固定 SHA-256 校验值。库为头文件依赖，不需要分发 WTL DLL。普通版和兼容版压缩包均附带 `licenses/WTL-MS-PL.txt`。
 
+## Release 体积优化
+
+`TTPLAYER_OPTIMIZE_SIZE` 默认开启，普通版和 XP／Win7 版共用配置；Actions 显式启用。
+它仅作用于 `Release`、`MinSizeRel`，`Debug` 和 `RelWithDebInfo` 保持原来的调试构建配置。
+
+- 主程序及核心库采用 `/O1` 体积优先编译，开启跨文件优化 `/GL`、链接时优化 `/LTCG` 和全局数据优化 `/Gw`。
+- 链接时使用 `/OPT:REF`、`/OPT:ICF` 清理未引用内容、合并相同内容，关闭增量链接。
+- `src/audio/` 继续采用 `/O2` 速度优先编译，保留音频处理和输出回调的优化策略。
+- 完整保留资源、插件导出、运行库方式及旧系统适配。程序仍是普通 Windows EXE，无需启动时解压。
+
+跨文件优化会增加构建耗时。需要与原来的编译配置对比时，可重新配置：
+
+```powershell
+cmake -S . -B build -DTTPLAYER_OPTIMIZE_SIZE=OFF
+cmake --build build --config Release --target ttplayer_rebuild --parallel 4
+```
+
+参考 MSVC 官方说明：[/O1 与 /O2](https://learn.microsoft.com/en-us/cpp/build/reference/o1-o2-minimize-size-maximize-speed)、
+[/LTCG](https://learn.microsoft.com/en-us/cpp/build/reference/ltcg-link-time-code-generation)、
+[/Gw](https://learn.microsoft.com/en-us/cpp/build/reference/gw-optimize-global-data)。
+
+### 本次实测（2026-09-16）
+
+同一份源码、MSVC 14.51.36231、Win32 Release，比较开启优化前后的 EXE：
+
+| 版本 | 优化前 | 优化后 | 减少 |
+| --- | ---: | ---: | ---: |
+| 普通版 | 3,193,344 字节 | 2,573,824 字节 | 19.4% |
+| XP／Win7 版 | 3,439,104 字节 | 2,799,104 字节 | 18.6% |
+
+逐项对比确认 28 项资源的内容、导出接口及序号、PE 系统版本和相关标志一致。
+普通版覆盖 11 项回归，兼容版宿主覆盖 8 项，包括音频数据转换、核心功能、WTL/皮肤菜单、
+内置辅助进程和启动。桌面歌词原生鼠标用例首次未收到 hover 事件，单独重跑通过。
+旧的音频回归用例仍使用已变更接口的占位参数，本次仅在本地测试中更新为正确的回调和网络配置类型。
+兼容版的 18 个 DLL、644 项静态导入通过 XP／Win7 审计；尚未进行旧系统实机验证。
+上述测试源码仅存放于本地 `tests/`，Actions 不构建或运行测试。
+
 离线构建可使用 `-DFETCHCONTENT_SOURCE_DIR_TTPLAYER_WTL=<已解压的 WTL 10.01 目录>`，目录内应有 `Include/atlapp.h` 和 `MS-PL.txt`。替换范围和原版行为约束见 [WTL 接入文档](WTL_10_01_MIGRATION.md)。
 
 ## 干净源码构建

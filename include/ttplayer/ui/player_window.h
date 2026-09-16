@@ -250,6 +250,8 @@ private:
     INT_PTR HandleOptionsPageDialog(HWND, UINT, WPARAM, LPARAM);
     LRESULT HandleOptionsSheetMessage(HWND, UINT, WPARAM, LPARAM);
     void InitializeOptionsPage(HWND dialog, UINT template_id);
+    void SelectOptionsLyricMode(HWND dialog, UINT template_id);
+    void SelectOptionsNetworkMode(HWND dialog, UINT template_id);
     void CommitOptionsPage(HWND dialog, UINT template_id);
     bool CommitOptionsControl(HWND dialog, UINT template_id, UINT control);
     void FlushDeferredOptionsRuntime(UINT template_id = 0);
@@ -734,7 +736,9 @@ private:
     RECT options_page_bounds_{};
     std::array<HWND, 15> options_pages_{};
     HWND options_lyric_child_{};
+    std::array<HWND, 2> options_lyric_pages_{};
     HWND options_network_child_{};
+    std::array<HWND, 2> options_network_pages_{};
     int options_page_index_{};
     bool options_registration_mode_{};
     UINT options_focus_control_{};
