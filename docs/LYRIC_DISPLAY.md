@@ -43,7 +43,9 @@ and `+0x2B4` otherwise. Therefore the normal default is vertical rows while
 the mini default is the single horizontal stream.
 
 The rebuild mirrors that selector for painting, hit testing, drag axis,
-cursor, dynamic menu label and the 50/20 ms animation timer. Entering or
+dynamic menu label and the 50/20 ms animation timer. Cursor shapes instead
+use the original shared hover/drag resources 1109/1108 in both axes (see
+[cursor recovery](MOUSE_CURSOR_PARITY.md)). Entering or
 leaving mini mode cancels an in-progress lyric drag and immediately installs
 the selected mode's timer. Shutdown writes all three XML attributes, so a
 mini-window menu change no longer mutates or overwrites normal mode.

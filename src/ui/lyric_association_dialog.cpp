@@ -247,8 +247,11 @@ INT_PTR CALLBACK AssociateProc(HWND window, UINT message, WPARAM wparam, LPARAM 
         SetBkMode(reinterpret_cast<HDC>(wparam), TRANSPARENT);
         return reinterpret_cast<INT_PTR>(GetSysColorBrush(COLOR_3DFACE));
     }
-    if (!self->blocked && message == WM_SETCURSOR && reinterpret_cast<HWND>(wparam) == GetDlgItem(window, kAll)) {
-        SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE;
+    if (!self->blocked && message == WM_SETCURSOR && LOWORD(lparam) == HTCLIENT &&
+        reinterpret_cast<HWND>(wparam) == GetDlgItem(window, kAll)) {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        SetWindowLongPtrW(window, DWLP_MSGRESULT, TRUE);
+        return TRUE;
     }
     if (message == WM_TIMER && wparam == 1) { self->Poll(window); return TRUE; }
     if (message == kSearchReady) { if (!self->blocked) self->Search(window); return TRUE; }

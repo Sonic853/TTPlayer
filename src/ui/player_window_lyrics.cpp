@@ -39,6 +39,22 @@ namespace ttplayer::ui {
 using namespace detail;
 
 namespace {
+HCURSOR LyricContentCursor(HMODULE resources, bool have_lines, bool dragging) {
+    // CLyricCtrl's constructor (0043EB87) loads the two resource cursors:
+    // +0xD0 = 0x455 (hover), +0xD4 = 0x454 (captured drag). Neither
+    // depends on the scrolling axis. +0xD8 is reserved for prompt links.
+    if (have_lines || dragging) {
+        if (resources) {
+            if (const auto cursor = LoadCursorW(resources,
+                    MAKEINTRESOURCEW(dragging ? 0x454 : 0x455)))
+                return cursor;
+        }
+        // Keep a usable cursor if an incomplete resource DLL is supplied.
+        return LoadCursorW(nullptr, dragging ? IDC_SIZEALL : IDC_ARROW);
+    }
+    return LoadCursorW(nullptr, IDC_ARROW);
+}
+
 constexpr int kEditorEncodingUtf8 = 1;
 constexpr int kEditorEncodingUtf16Le = 2;
 constexpr int kEditorEncodingUtf16Be = 3;
@@ -410,6 +426,10 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
                     ? GET_X_LPARAM(lparam) - lyric_line_drag_origin_.x
                     : GET_Y_LPARAM(lparam) - lyric_line_drag_origin_.y;
                 InvalidateRect(control, nullptr, FALSE);
+            } else if (!lyrics_.lines.empty()) {
+                // 00442A13 also restores the hover cursor on mouse move;
+                // capture suppresses the usual WM_SETCURSOR notifications.
+                SetCursor(LyricContentCursor(ResourceModule(), true, false));
             }
         } else {
             RECT client{};
@@ -455,8 +475,7 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
                 lyric_line_drag_offset_ = 0;
                 SetCapture(control);
                 SetFocus(control);
-                SetCursor(LoadCursorW(nullptr,
-                    ActiveLyricScrollMode() != 0 ? IDC_SIZEWE : IDC_SIZENS));
+                SetCursor(LyricContentCursor(ResourceModule(), true, true));
             }
         } else {
             if (GetCapture() != control) SetCapture(control);
@@ -578,14 +597,15 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
         return SendMessageW(lyric_window_, WM_CONTEXTMENU,
             reinterpret_cast<WPARAM>(lyric_window_), lparam);
     case WM_SETCURSOR:
+        if (reinterpret_cast<HWND>(wparam) != control ||
+            LOWORD(lparam) != HTCLIENT)
+            return DefWindowProcW(control, message, wparam, lparam);
         if (text_control) {
-            // 00442C5A's hand cursor belongs to prompt links, not lyric rows.
-            const LPCWSTR cursor = lyric_line_dragging_
-                ? (ActiveLyricScrollMode() != 0 ? IDC_SIZEWE : IDC_SIZENS)
-                : IDC_ARROW;
-            SetCursor(LoadCursorW(nullptr, cursor));
+            SetCursor(LyricContentCursor(ResourceModule(), !lyrics_.lines.empty(),
+                lyric_line_dragging_ && ActiveLyricDragAllowed()));
         } else {
-            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+            SetCursor(LoadCursorW(nullptr, IsWindowEnabled(control)
+                ? IDC_HAND : IDC_ARROW));
         }
         return TRUE;
     }
@@ -686,6 +706,9 @@ LRESULT PlayerWindow::HandleLyricMessage(UINT message, WPARAM wparam,
     case WM_NCHITTEST:
         return HTCLIENT;
     case WM_SETCURSOR: {
+        if (reinterpret_cast<HWND>(wparam) != lyric_window_)
+            return FALSE;
+        if (LOWORD(lparam) != HTCLIENT) break;
         POINT point{};
         GetCursorPos(&point);
         ScreenToClient(lyric_window_, &point);

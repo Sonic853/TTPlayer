@@ -1298,6 +1298,13 @@ void DrawOptionsImageButton(HWND button, HDC dc, HIMAGELIST images, bool caption
 LRESULT CALLBACK OptionsImageButtonSubclassProc(
     HWND button, UINT message, WPARAM wparam, LPARAM lparam,
     UINT_PTR subclass, DWORD_PTR data) {
+    // 00466427 initializes +0x48 to IDC_HAND; 004664CD handles
+    // WM_SETCURSOR for the shared image/color button implementation.
+    if (message == WM_SETCURSOR && reinterpret_cast<HWND>(wparam) == button &&
+        LOWORD(lparam) == HTCLIENT && IsWindowEnabled(button)) {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+    }
     if (message == WM_MOUSEMOVE) {
         RECT client{}; GetClientRect(button, &client);
         const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -3798,7 +3805,8 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
     case WM_SETCURSOR: {
         const HWND control = reinterpret_cast<HWND>(wparam);
         const UINT identifier = control ? GetDlgCtrlID(control) : 0;
-        if (identifier >= kLinkFirst &&
+        if (LOWORD(lparam) == HTCLIENT && IsWindowEnabled(control) &&
+            GetParent(control) == sheet && identifier >= kLinkFirst &&
             identifier < kLinkFirst + kProjectLinks.size()) {
             SetCursor(LoadCursorW(nullptr, IDC_HAND));
             return TRUE;
@@ -6483,8 +6491,13 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
     case WM_SETCURSOR: {
         const HWND control = reinterpret_cast<HWND>(wparam);
         const UINT identifier = control ? GetDlgCtrlID(control) : 0;
-        if (IsOptionsPageHyperlink(template_id, identifier)) {
+        if (LOWORD(lparam) == HTCLIENT && IsWindowEnabled(control) &&
+            GetParent(control) == dialog && IsOptionsPageHyperlink(template_id, identifier)) {
             SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            // DLGPROC's TRUE means "handled", not the cursor result. The
+            // parent must return TRUE to the Static's default procedure or
+            // it immediately overwrites our hand with its class arrow.
+            SetWindowLongPtrW(dialog, DWLP_MSGRESULT, TRUE);
             return TRUE;
         }
         break;

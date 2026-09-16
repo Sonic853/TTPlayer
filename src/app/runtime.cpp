@@ -78,6 +78,36 @@ void AttachTooltipBehavior(HWND window) noexcept {
 
 constexpr UINT_PTR kMenuBorderSubclassId = 0x00450E67;
 
+bool IsLegacyPushButton(HWND window) noexcept {
+    // 004B5858 excludes checks, radios and group boxes; 004B591D also
+    // excludes owner-drawn buttons. The surviving low-nibble types are
+    // BS_PUSHBUTTON, BS_DEFPUSHBUTTON and the legacy BS_USERBUTTON.
+    const auto type = GetWindowLongPtrW(window, GWL_STYLE) & BS_TYPEMASK;
+    return type == BS_PUSHBUTTON || type == BS_DEFPUSHBUTTON || type == BS_USERBUTTON;
+}
+
+LRESULT CALLBACK ButtonCursorSubclassProc(HWND window, UINT message,
+    WPARAM wparam, LPARAM lparam, UINT_PTR identifier, DWORD_PTR) {
+    if (message == WM_SETCURSOR && reinterpret_cast<HWND>(wparam) == window &&
+        LOWORD(lparam) == HTCLIENT && IsWindowEnabled(window) && IsLegacyPushButton(window)) {
+        // 004C119B -> 00466427 -> 004664CD: all eligible buttons, including
+        // text-only buttons in resource dialogs, use the shared hand cursor.
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+    }
+    if (message == WM_NCDESTROY)
+        RemoveWindowSubclass(window, ButtonCursorSubclassProc, identifier);
+    return DefSubclassProc(window, message, wparam, lparam);
+}
+
+void AttachButtonCursor(HWND window) noexcept {
+    constexpr UINT_PTR identifier = 0x004664CD;
+    DWORD_PTR existing{};
+    if (IsLegacyPushButton(window) &&
+        !GetWindowSubclass(window, ButtonCursorSubclassProc, identifier, &existing))
+        SetWindowSubclass(window, ButtonCursorSubclassProc, identifier, 0);
+}
+
 void PaintMenuBorder(HWND window, HDC dc) noexcept {
     if (!dc) return;
     const int saved = SaveDC(dc);
@@ -209,12 +239,13 @@ LRESULT CALLBACK ThreadMessageHooksRuntime::CallWndProcHook(
         if (event->message == WM_CREATE &&
             WindowClassEquals(event->hwnd, TOOLTIPS_CLASSW))
             AttachTooltipBehavior(event->hwnd);
+        if (event->message == WM_CREATE &&
+            WindowClassEquals(event->hwnd, WC_BUTTONW))
+            AttachButtonCursor(event->hwnd);
     }
 
-    // The other two branches install the old WTL command-bar wrapper for
-    // WM_INITMENU/WM_INITMENUPOPUP and theme eligible BUTTON controls.  The
-    // rebuild's command-bar owner drawing and ComCtl32-v6 buttons already own
-    // those HWNDs; double-subclassing them here would corrupt ownership.
+    // Menu ownership and button painting stay in their existing adapters.
+    // This separate subclass owns no bitmap, theme or business state.
     return CallNextHookEx(nullptr, code, wparam, lparam);
 }
 

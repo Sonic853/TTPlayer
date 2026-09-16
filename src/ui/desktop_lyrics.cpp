@@ -685,6 +685,15 @@ private:
                          reinterpret_cast<LPARAM>(&relay));
         }
         switch (message) {
+        case WM_SETCURSOR:
+            // BarWnd's SkinIcon and SkinButton share the original hand
+            // cursor; the bar background keeps its class cursor.
+            if (reinterpret_cast<HWND>(wparam) == window &&
+                LOWORD(lparam) == HTCLIENT && IsWindowEnabled(window)) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return TRUE;
+            }
+            break;
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: {
             PAINTSTRUCT paint{};

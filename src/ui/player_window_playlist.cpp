@@ -1817,8 +1817,16 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
         return SendMessageW(parent, message, wparam, lparam);
-    case WM_CONTEXTMENU:
     case WM_SETCURSOR:
+        if (reinterpret_cast<HWND>(wparam) != control) return FALSE;
+        if (close_button && LOWORD(lparam) == HTCLIENT &&
+            IsWindowEnabled(control)) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
+        if (SendMessageW(parent, message, wparam, lparam)) return TRUE;
+        return DefaultPlaylistListMessage(control, message, wparam, lparam);
+    case WM_CONTEXTMENU:
     case WM_NOTIFY:
         return SendMessageW(parent, message, wparam, lparam);
     default:
@@ -2032,6 +2040,13 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
     case WM_NCHITTEST:
         return HTCLIENT;
     case WM_SETCURSOR: {
+        const HWND source = reinterpret_cast<HWND>(wparam);
+        // A native label editor forwards this message through ListCtrl.
+        // Do not replace its I-beam with a rating hand or a resize cursor.
+        if (source != playlist_window_ && source != playlist_track_control_ &&
+            source != playlist_list_control_ && source != playlist_tree_control_)
+            return FALSE;
+        if (LOWORD(lparam) != HTCLIENT) return FALSE;
         POINT point{};
         GetCursorPos(&point);
         ScreenToClient(playlist_window_, &point);
@@ -2064,6 +2079,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
             SetCursor(LoadCursorW(nullptr, cursor));
             return TRUE;
         }
+        if (source != playlist_window_) return FALSE;
         break;
     }
     case WM_MOUSEMOVE: {

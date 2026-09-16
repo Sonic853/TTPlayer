@@ -2722,6 +2722,26 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             return HTCLIENT;
         }
         break;
+    case WM_SETCURSOR:
+        if (skin_ && reinterpret_cast<HWND>(wparam) == window_ &&
+            LOWORD(lparam) == HTCLIENT) {
+            POINT point{};
+            GetCursorPos(&point);
+            ScreenToClient(window_, &point);
+            // 0040A156/0040A445 (SkinButton), 00415F2F/004160C2
+            // (SkinIcon), and 00451CEF/00452518 (SkinSlider) all use
+            // IDC_HAND. These controls are painted into our main HWND.
+            const auto hit = HitTestSkin(point);
+            // LEDTimerCtrl toggles elapsed/remaining time, but unlike the
+            // skin button/slider classes it retains the default arrow.
+            if (!hit.empty() && hit != L"led") {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return TRUE;
+            }
+        }
+        // A child Edit/RichEdit/VisualCtrl must retain its own cursor.
+        if (reinterpret_cast<HWND>(wparam) != window_) return FALSE;
+        break;
     case WM_MOUSEMOVE:
         if (skin_) {
             POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};

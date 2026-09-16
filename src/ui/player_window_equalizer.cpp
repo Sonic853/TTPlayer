@@ -60,7 +60,14 @@ LRESULT PlayerWindow::HandleEqualizerControlMessage(HWND control, UINT message,
         // WM_CONTEXTMENU already carries screen coordinates.
         return SendMessageW(parent, message, wparam, lparam);
     case WM_SETCURSOR:
-        return SendMessageW(parent, message, wparam, lparam);
+        // Both SkinButton and SkinSlider store a hand cursor in the
+        // original constructors (0040A156 / 00451CEF).
+        if (reinterpret_cast<HWND>(wparam) == control &&
+            LOWORD(lparam) == HTCLIENT && IsWindowEnabled(control)) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
+        return DefWindowProcW(control, message, wparam, lparam);
     case WM_ENABLE:
         InvalidateRect(parent, nullptr, FALSE);
         return 0;
@@ -85,6 +92,9 @@ LRESULT PlayerWindow::HandleEqualizerMessage(UINT message, WPARAM wparam,
     case WM_NCHITTEST:
         return HTCLIENT;
     case WM_SETCURSOR: {
+        if (reinterpret_cast<HWND>(wparam) != equalizer_window_)
+            return FALSE;
+        if (LOWORD(lparam) != HTCLIENT) break;
         POINT point{};
         GetCursorPos(&point);
         ScreenToClient(equalizer_window_, &point);
