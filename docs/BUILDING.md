@@ -1,5 +1,19 @@
 # 手动构建
 
+## 测试子模块
+
+测试源码由 [TTPlayer_Tests](https://github.com/Sonic853/TTPlayer_Tests) 独立管理，
+通过子模块放在本仓库的 `tests/` 中。在本仓库根目录（本地即 `rebuild`）执行：
+
+```powershell
+git submodule update --init --recursive -- tests
+```
+
+子模块使用 SSH 地址，需要配置 GitHub SSH 访问。测试沿用父仓库的 CMake 目标和
+相对路径；获取测试源码后按需启用 `BUILD_TESTING` 或对应的独立测试选项。
+部分测试还依赖本地 `tools/`、反编译输入或原版运行资源。
+默认播放器构建和 Actions 仍关闭测试，不需要检出测试子模块。
+
 ## GitHub Actions
 
 本地 `rebuild` 是独立 Git 仓库；它在 GitHub 上就是仓库根目录。
@@ -39,7 +53,7 @@ Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 本地可手动运行 `tests/cmake/test_manual_release.ps1`，离线检查北京时间边界、同日补丁号、
 动态对比链接、安装说明和模拟发布保护逻辑，包括两个附件的 SHA-256 和 Release 配置。
 同时用隔离目录实际打包、解压两个版本，检查 ZIP 内容、版本化文件名及内外校验文件。
-该脚本仅保留在本地，Actions 不运行它；测试不调用远程 API，不创建标签或 Release。
+该脚本位于测试子模块，Actions 不运行它；测试不调用远程 API，不创建标签或 Release。
 
 工作流必须先存在于默认分支，手动运行入口才会显示，见
 [GitHub 手动运行工作流说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。
@@ -125,7 +139,7 @@ cmake --build build --config Release --target ttplayer_rebuild --parallel 4
 内置辅助进程和启动。桌面歌词原生鼠标用例首次未收到 hover 事件，单独重跑通过。
 旧的音频回归用例仍使用已变更接口的占位参数，本次仅在本地测试中更新为正确的回调和网络配置类型。
 兼容版的 18 个 DLL、644 项静态导入通过 XP／Win7 审计；尚未进行旧系统实机验证。
-上述测试源码仅存放于本地 `tests/`，Actions 不构建或运行测试。
+上述测试源码存放于 `tests/` 子模块，Actions 不构建或运行测试。
 
 离线构建可使用 `-DFETCHCONTENT_SOURCE_DIR_TTPLAYER_WTL=<已解压的 WTL 10.01 目录>`，目录内应有 `Include/atlapp.h` 和 `MS-PL.txt`。替换范围和原版行为约束见 [WTL 接入文档](WTL_10_01_MIGRATION.md)。
 
@@ -145,7 +159,7 @@ cmake --build out/ci --config Release --target ttplayer_rebuild --parallel 4
 本地同样需要 VS 2026 的 C++ 工具和 CMake 4.2+。如果某个构建目录曾用
 VS 2022 配置，请改用新的空构建目录，不要复用旧的生成器缓存。
 
-- `BUILD_TESTING=OFF`：跳过未提交的 `tests/`、`tools/` 及外部反编译测试输入；
+- `BUILD_TESTING=OFF`：跳过 `tests/` 子模块、本地 `tools/` 及外部反编译测试输入；
   这不关闭播放器内嵌的隔离工作进程功能。
 - `TTPLAYER_STAGE_RUNTIME=OFF`：跳过资源 DLL 重建与原版运行文件、LAME、
   mp3PRO 和配置文件的复制，仍然完整编译播放器 EXE。
