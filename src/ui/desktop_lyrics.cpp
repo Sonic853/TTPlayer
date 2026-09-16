@@ -923,6 +923,7 @@ private:
             break;
         case WM_DRAWITEM:
         case WM_MEASUREITEM:
+        case WM_MENUCHAR:
         case WM_INITMENUPOPUP:
         case WM_MENUSELECT:
         case WM_EXITMENULOOP:

@@ -39,7 +39,6 @@ LRESULT CALLBACK TooltipSubclassProc(HWND window, UINT message,
                                      WPARAM wparam, LPARAM lparam,
                                      UINT_PTR subclass_id,
                                      DWORD_PTR reference_data) {
-    static_cast<void>(reference_data);
     switch (message) {
     case WM_TIMER:
         if (wparam == kTooltipTopmostTimer) {
@@ -50,7 +49,10 @@ LRESULT CALLBACK TooltipSubclassProc(HWND window, UINT message,
         break;
     case WM_PAINT:
         SetTooltipTopmost(window, true);
-        SetTimer(window, kTooltipTopmostTimer, 50, nullptr);
+        // 004B5713 arms this once. Resetting it on every repaint can postpone
+        // the hidden-window check indefinitely during animation.
+        if (!reference_data && SetTimer(window, kTooltipTopmostTimer, 50, nullptr))
+            SetWindowSubclass(window, TooltipSubclassProc, subclass_id, 1);
         break;
     case WM_DESTROY:
         KillTimer(window, kTooltipTopmostTimer);
@@ -72,6 +74,43 @@ void AttachTooltipBehavior(HWND window) noexcept {
                           &existing))
         return;
     SetWindowSubclass(window, TooltipSubclassProc, kTooltipSubclassId, 0);
+}
+
+constexpr UINT_PTR kMenuBorderSubclassId = 0x00450E67;
+
+void PaintMenuBorder(HWND window, HDC dc) noexcept {
+    if (!dc) return;
+    const int saved = SaveDC(dc);
+    if (!saved) return;
+    RECT bounds{}, client{};
+    GetWindowRect(window, &bounds);
+    GetClientRect(window, &client);
+    MapWindowPoints(window, nullptr, reinterpret_cast<POINT*>(&client), 2);
+    OffsetRect(&client, -bounds.left, -bounds.top);
+    OffsetRect(&bounds, -bounds.left, -bounds.top);
+    SetWindowOrgEx(dc, 0, 0, nullptr);
+    ExcludeClipRect(dc, client.left, client.top, client.right, client.bottom);
+    SetDCBrushColor(dc, 0x00F9FCFC);
+    FillRect(dc, &bounds, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    SetDCBrushColor(dc, GetSysColor(COLOR_BTNSHADOW));
+    FrameRect(dc, &bounds, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    RestoreDC(dc, saved);
+}
+
+LRESULT CALLBACK MenuBorderSubclassProc(HWND window, UINT message,
+    WPARAM wparam, LPARAM lparam, UINT_PTR identifier, DWORD_PTR) {
+    if (message == WM_NCPAINT) {
+        const HDC dc = GetWindowDC(window);
+        PaintMenuBorder(window, dc);
+        if (dc) ReleaseDC(window, dc);
+        return 0;
+    }
+    const auto result = DefSubclassProc(window, message, wparam, lparam);
+    if (message == WM_PRINT && (lparam & PRF_NONCLIENT) != 0)
+        PaintMenuBorder(window, reinterpret_cast<HDC>(wparam));
+    if (message == WM_NCDESTROY)
+        RemoveWindowSubclass(window, MenuBorderSubclassProc, identifier);
+    return result;
 }
 } // namespace
 
@@ -180,10 +219,22 @@ LRESULT CALLBACK ThreadMessageHooksRuntime::CallWndProcHook(
 }
 
 LRESULT CALLBACK ThreadMessageHooksRuntime::CbtHook(int code, WPARAM wparam, LPARAM lparam) {
-    // 004B5B13 handles HCBT_CREATEWND by constructing the corresponding
-    // private shadow/theme wrapper and registering it in the same object map.
-    // CS_DROPSHADOW itself is reproduced by PlayerWindow::ApplyWindowShadow;
-    // fabricating the missing wrapper here is not ABI-safe.
+    // 004B5B13 checks SPI_GETFLATMENU (0x1022), then class #32768
+    // (0051E874). It supplies a classic popup-menu border, not the player
+    // window's drop shadow. 00450EF7 handles WM_NCPAINT and WM_PRINT.
+    if (code == HCBT_CREATEWND) {
+        const auto window = reinterpret_cast<HWND>(wparam);
+        BOOL flat = FALSE;
+        SystemParametersInfoW(SPI_GETFLATMENU, 0, &flat, 0);
+        if (!flat && WindowClassEquals(window, L"#32768")) {
+            DWORD_PTR existing{};
+            if (!GetWindowSubclass(window, MenuBorderSubclassProc,
+                                   kMenuBorderSubclassId, &existing) &&
+                SetWindowSubclass(window, MenuBorderSubclassProc, kMenuBorderSubclassId, 0))
+                SetWindowPos(window, nullptr, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+    }
     return CallNextHookEx(nullptr, code, wparam, lparam);
 }
 } // namespace ttplayer::app

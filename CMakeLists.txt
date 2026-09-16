@@ -104,6 +104,7 @@ add_library(ttplayer_core
   src/ui/player_window_library.cpp
   src/ui/player_window_options.cpp
   src/ui/player_window_playlist.cpp
+  src/ui/player_window_playlist_native.cpp
   src/ui/player_window_playlist_info.cpp
   src/ui/player_window_playlist_network.cpp
   src/ui/player_window_playlist_properties.cpp
@@ -380,6 +381,14 @@ target_compile_definitions(project_links_tests PRIVATE UNICODE _UNICODE NOMINMAX
 target_compile_options(project_links_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(project_links_tests PRIVATE ttplayer_core)
 add_test(NAME project_links_tests COMMAND project_links_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
+add_executable(wtl_behavior_tests tests/ui/wtl_behavior_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(wtl_behavior_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(wtl_behavior_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(wtl_behavior_tests PRIVATE ttplayer_core ttpcomm_api)
+add_test(NAME wtl_behavior_tests COMMAND wtl_behavior_tests)
+set_tests_properties(wtl_behavior_tests PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 
 add_executable(skin_png_tests tests/skin/skin_png_tests.cpp)
 target_compile_definitions(skin_png_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

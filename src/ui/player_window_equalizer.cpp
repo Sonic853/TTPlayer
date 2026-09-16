@@ -346,6 +346,9 @@ LRESULT PlayerWindow::HandleEqualizerMessage(UINT message, WPARAM wparam,
     case WM_COMMAND:
         if (HandleEqualizerCommand(LOWORD(wparam))) return 0;
         break;
+    case WM_MENUCHAR:
+        if (const auto result = PopupMenuChar(wparam, lparam)) return *result;
+        break;
     case WM_DRAWITEM:
         // The 0x90 popup is converted to the same owner-draw command-bar
         // records as the player and playlist menus.  TrackPopupMenuEx sends

@@ -149,6 +149,10 @@ private:
     static LRESULT CALLBACK PlaybackTipWindowProc(
         HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK PlaylistWindowProc(HWND, UINT, WPARAM, LPARAM);
+    static bool RegisterPlaylistListClass(HINSTANCE instance);
+    static LRESULT CALLBACK PlaylistListWindowProc(HWND, UINT, WPARAM, LPARAM);
+    LRESULT DefaultPlaylistListMessage(HWND, UINT, WPARAM, LPARAM);
+    [[nodiscard]] std::optional<LRESULT> PlaylistNativeNotification(LPARAM notification);
     static LRESULT CALLBACK LyricWindowProc(HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK FullScreenLyricInputProc(HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK LyricEditorProc(HWND, UINT, WPARAM, LPARAM,
@@ -326,6 +330,7 @@ private:
     [[nodiscard]] const MenuVisualItem* FindPopupMenuItem(ULONG_PTR data) const noexcept;
     [[nodiscard]] bool MeasurePopupMenuItem(MEASUREITEMSTRUCT& item) const;
     [[nodiscard]] bool DrawPopupMenuItem(const DRAWITEMSTRUCT& item) const;
+    [[nodiscard]] std::optional<LRESULT> PopupMenuChar(WPARAM key, LPARAM menu) const;
     [[nodiscard]] std::wstring SkinMenuToolTipText(UINT command) const;
     [[nodiscard]] std::wstring MenuToolTipText(UINT command) const;
     [[nodiscard]] std::wstring ToolTipWithHotKey(

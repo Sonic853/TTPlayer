@@ -213,10 +213,11 @@ DLL 成功加载。
 thread call-window hook 已恢复 `004B56E7/004B5713` 的 tooltip topmost/timer
 行为。
 
-仍不能从伪代码安全构造的是 `00411C0A` 的私有线程诊断对象、`004B591D` 的 WTL
-command-bar/button wrapper、`004B5B13` 的 CBT shadow/theme wrapper，以及
-完整 C++ 对象布局/message-map。重建版在自己的 owner-draw 菜单、ComCtl32 v6
-按钮和 `CS_DROPSHADOW` 层实现相同可见职责，不会向未知私有布局写内存。
+仍未复刻的是 `00411C0A` 的私有线程诊断对象、WTL command-bar/button 的完整
+C++ 对象布局/message-map。菜单访问键和 ListCtrl 的 SysListView32 基础已恢复。
+`004B5B13` 经原始指令和字符串复核，实际是 `SPI_GETFLATMENU` 关闭时针对
+`#32768` 的经典菜单边框，并非主窗体阴影；现已补回 CBT 安装及非客户区绘制。
+普通按钮继续使用 ComCtl32 v6。详见 [WTL 行为恢复](WTL_BEHAVIOR_RECOVERY.md)。
 
 ## 12. 宿主机验证
 

@@ -755,6 +755,9 @@ LRESULT PlayerWindow::HandleLyricMessage(UINT message, WPARAM wparam,
         if (HandleLyricCommand(LOWORD(wparam))) return 0;
         if (HandleContextCommand(LOWORD(wparam))) return 0;
         break;
+    case WM_MENUCHAR:
+        if (const auto result = PopupMenuChar(wparam, lparam)) return *result;
+        break;
     case WM_DRAWITEM:
         if (lparam && DrawPopupMenuItem(
                 *reinterpret_cast<const DRAWITEMSTRUCT*>(lparam))) return TRUE;

@@ -1586,87 +1586,10 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
         // SysListView32 counts complete rows, excluding a clipped bottom row.
         return std::max<LONG>(0, client.bottom - client.top) / 16;
     }
-    case LVM_GETITEMSTATE: {
-        if (!list_control) break;
-        const size_t index = static_cast<size_t>(wparam);
-        UINT state{};
-        if (catalogue) {
-            if (playlist_list_selection_ == index) state |= LVIS_SELECTED;
-            if (playlist_list_focus_ == index)
-                state |= LVIS_FOCUSED;
-        } else if (tracks) {
-            if (playlist_selected_rows_.contains(index)) state |= LVIS_SELECTED;
-            if (playlist_selection_ == index)
-                state |= LVIS_FOCUSED;
-        }
-        return state & static_cast<UINT>(lparam);
-    }
-    case LVM_SETITEMSTATE: {
-        if ((!catalogue && !tracks) || !lparam) return FALSE;
-        const auto* item = reinterpret_cast<const LVITEMW*>(lparam);
-        const int requested = static_cast<int>(wparam);
-        const size_t count = catalogue ? playlists_.Size()
-                                       : VisiblePlaylistTrackCount();
-        if (requested < -1 ||
-            (requested >= 0 && static_cast<size_t>(requested) >= count))
-            return FALSE;
-
-        const bool all = requested == -1;
-        const bool selected = (item->state & LVIS_SELECTED) != 0;
-        const bool focused = (item->state & LVIS_FOCUSED) != 0;
-        if ((item->stateMask & LVIS_SELECTED) != 0) {
-            if (catalogue) {
-                if (!selected || all) playlist_list_selection_.reset();
-                else playlist_list_selection_ =
-                    static_cast<size_t>(requested);
-            } else if (all) {
-                playlist_selected_rows_.clear();
-                if (selected) {
-                    for (size_t index = 0; index < count; ++index)
-                        playlist_selected_rows_.insert(index);
-                }
-            } else if (selected) {
-                playlist_selected_rows_.insert(
-                    static_cast<size_t>(requested));
-            } else {
-                playlist_selected_rows_.erase(
-                    static_cast<size_t>(requested));
-            }
-        }
-        if ((item->stateMask & LVIS_FOCUSED) != 0) {
-            if (catalogue) {
-                if (!focused || all) playlist_list_focus_.reset();
-                else playlist_list_focus_ = static_cast<size_t>(requested);
-            } else {
-                if (!focused || all) playlist_selection_.reset();
-                else playlist_selection_ = static_cast<size_t>(requested);
-            }
-        }
-        if (tracks && !settings_.playlist.library_mode)
-            RememberPlaylistRow(playlists_.ActiveIndex(),
-                                playlist_selection_);
-        if (parent) InvalidateRect(parent, nullptr, FALSE);
-        return TRUE;
-    }
-    case LVM_GETNEXTITEM: {
-        if (!list_control) break;
-        const int first = static_cast<int>(wparam) + 1;
-        const UINT flags = static_cast<UINT>(lparam);
-        const size_t count = catalogue ? playlists_.Size()
-                                      : VisiblePlaylistTrackCount();
-        for (int index = std::max(0, first);
-             index < static_cast<int>(count); ++index) {
-            const bool selected = catalogue
-                ? playlist_list_selection_ == static_cast<size_t>(index)
-                : playlist_selected_rows_.contains(static_cast<size_t>(index));
-            const bool focused = (catalogue
-                ? playlist_list_focus_ == static_cast<size_t>(index)
-                : playlist_selection_ == static_cast<size_t>(index));
-            if (((flags & LVNI_SELECTED) == 0 || selected) &&
-                ((flags & LVNI_FOCUSED) == 0 || focused)) return index;
-        }
-        return -1;
-    }
+    case LVM_GETITEMSTATE:
+    case LVM_SETITEMSTATE:
+    case LVM_GETNEXTITEM:
+        return DefaultPlaylistListMessage(control, message, wparam, lparam);
     case LVM_GETTOPINDEX:
         if (catalogue) return static_cast<LRESULT>(playlist_list_scroll_);
         if (tracks) return static_cast<LRESULT>(playlist_scroll_);
@@ -1896,9 +1819,9 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
     case WM_NOTIFY:
         return SendMessageW(parent, message, wparam, lparam);
     default:
-        return DefWindowProcW(control, message, wparam, lparam);
+        return DefaultPlaylistListMessage(control, message, wparam, lparam);
     }
-    return DefWindowProcW(control, message, wparam, lparam);
+    return DefaultPlaylistListMessage(control, message, wparam, lparam);
 }
 
 LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
@@ -2074,6 +1997,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         return 0;
     }
     case WM_NOTIFY: {
+        if (const auto result = PlaylistNativeNotification(lparam)) return *result;
         const auto* header = reinterpret_cast<const NMHDR*>(lparam);
         if (header && header->code == LVN_ODFINDITEMW &&
             (header->idFrom == static_cast<UINT_PTR>(kPlaylistListId) ||
@@ -2703,11 +2627,17 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         if (GetFocus() == playlist_list_control_ && playlists_.Size() != 0) {
             size_t index = playlist_list_focus_.value_or(
                 playlists_.ActiveIndex());
-            if (wparam == VK_UP && index > 0) --index;
-            else if (wparam == VK_DOWN && index + 1 < playlists_.Size()) ++index;
-            else if (wparam == VK_HOME) index = 0;
-            else if (wparam == VK_END) index = playlists_.Size() - 1;
-            else if (wparam == VK_F2) {
+            if (wparam == VK_UP || wparam == VK_DOWN ||
+                wparam == VK_HOME || wparam == VK_END ||
+                wparam == VK_PRIOR || wparam == VK_NEXT || wparam == VK_SPACE) {
+                const auto previous = playlist_list_selection_;
+                DefaultPlaylistListMessage(playlist_list_control_, WM_KEYDOWN, wparam, lparam);
+                // Native Ctrl+navigation only moves the caret. The original
+                // catalogue changes the active list when selection changes.
+                if (playlist_list_selection_ && playlist_list_selection_ != previous)
+                    SwitchPlaylist(*playlist_list_selection_);
+                return 0;
+            } else if (wparam == VK_F2) {
                 BeginPlaylistListEdit(index);
                 return 0;
             } else if (wparam == VK_DELETE) {
@@ -2825,6 +2755,9 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         ShowPlaylistContextMenu(point, client);
         return 0;
     }
+    case WM_MENUCHAR:
+        if (const auto result = PopupMenuChar(wparam, lparam)) return *result;
+        break;
     case WM_DRAWITEM:
         if (lparam && DrawPopupMenuItem(
                 *reinterpret_cast<const DRAWITEMSTRUCT*>(lparam))) return TRUE;

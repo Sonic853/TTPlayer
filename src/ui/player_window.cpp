@@ -1807,6 +1807,38 @@ const PlayerWindow::MenuVisualItem* PlayerWindow::FindPopupMenuItem(
     return found == popup_menu_items_.end() ? nullptr : &*found;
 }
 
+std::optional<LRESULT> PlayerWindow::PopupMenuChar(WPARAM key, LPARAM menu_value) const {
+    const auto menu = reinterpret_cast<HMENU>(menu_value);
+    if (!menu || HIWORD(key) != MF_POPUP) return std::nullopt;
+    int match = -1;
+    bool owned = false;
+    // 00466C65 -> 004699C5: use the saved owner-draw text, first '&',
+    // case-insensitive comparison, and SELECT for an ambiguous mnemonic.
+    // State/type are read live: dynamic submenus can change after styling.
+    const auto character = reinterpret_cast<ULONG_PTR>(
+        CharLowerW(reinterpret_cast<LPWSTR>(static_cast<ULONG_PTR>(LOWORD(key)))));
+    for (int position = 0; position < GetMenuItemCount(menu); ++position) {
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_FTYPE | MIIM_DATA;
+        if (!GetMenuItemInfoW(menu, position, TRUE, &item)) continue;
+        const auto* visual = FindPopupMenuItem(item.dwItemData);
+        if (!visual) continue;
+        owned = true;
+        if ((item.fType & MFT_SEPARATOR) != 0) continue;
+        const auto marker = visual->text.find(L'&');
+        if (marker == std::wstring::npos || marker + 1 == visual->text.size()) continue;
+        const auto mnemonic = reinterpret_cast<ULONG_PTR>(CharLowerW(
+            reinterpret_cast<LPWSTR>(static_cast<ULONG_PTR>(visual->text[marker + 1]))));
+        if (mnemonic != character) continue;
+        if (match >= 0) return MAKELRESULT(match, MNC_SELECT);
+        match = position;
+    }
+    if (!owned) return std::nullopt;
+    if (match >= 0) return MAKELRESULT(match, MNC_EXECUTE);
+    return LOWORD(key) == VK_RETURN ? MAKELRESULT(1, MNC_CLOSE)
+                                   : MAKELRESULT(0, MNC_IGNORE);
+}
+
 bool PlayerWindow::MeasurePopupMenuItem(MEASUREITEMSTRUCT& item) const {
     if (item.CtlType != ODT_MENU) return false;
     const MenuVisualItem* visual = FindPopupMenuItem(item.itemData);
@@ -2327,9 +2359,9 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
     equalizer_control_type.lpszClassName = kPlaylistTreeClass;
     if (!RegisterClassExW(&equalizer_control_type) &&
         GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
-    equalizer_control_type.lpszClassName = kPlaylistListClass;
-    if (!RegisterClassExW(&equalizer_control_type) &&
-        GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
+    // 00425DEC superclasses SysListView32. Keep its native window storage
+    // and default procedure; a plain painted HWND loses unhandled LVM_* APIs.
+    if (!RegisterPlaylistListClass(instance)) return false;
 
     const bool skinned = skin_ && skin_->Valid();
     mini_mode_ = skinned && settings_.player.mini_mode &&
@@ -2823,6 +2855,9 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         }
         break;
     }
+    case WM_MENUCHAR:
+        if (const auto result = PopupMenuChar(wparam, lparam)) return *result;
+        break;
     case WM_MENUSELECT: {
         const UINT flags = HIWORD(wparam);
         if (flags == 0xffffU && lparam == 0) {
