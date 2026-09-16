@@ -7,6 +7,12 @@ XP／Win7 版不编译此模块，也不链接新增的 WinRT 库。
 ## 已实现
 
 - 显示曲名、歌手、专辑。优先使用当前解码器返回的标签，其次使用播放条目的标签；没有标题时使用文件名。
+- 提供专辑歌手 `AlbumArtist` 和曲风列表 `Genres`，供 Wallpaper Engine 等媒体会话读取方使用。
+  专辑歌手优先使用真实标签，缺失时回退到歌曲歌手；曲风缺失时保持空列表。
+  支持 `Album Artist`、`ALBUM_ARTIST`、`WM/AlbumArtist`、`TPE2` 等别名，以及
+  `Genre`、`Genres`、`WM/Genre`、`TCON` 等曲风字段。多曲风按分号、逗号、NUL 或换行分隔，
+  去除首尾空白和重复值，保留 `Pop/Rock`、`R&B` 等名称。
+  解码器明确返回的空字段覆盖播放列表旧缓存；字段未提供时才使用当前条目的缓存。
 - 显示歌曲内嵌封面，复用任务栏预览已解码、限制尺寸后的位图，不再打开媒体文件读取封面。
   没有封面或封面编码失败时清除上一首的封面。
 - 同步播放、暂停、停止状态及上一首／下一首的可用状态。
@@ -37,7 +43,7 @@ SMTC 初始化失败不阻止播放。只有普通版链接 `runtimeobject`、`s
 
 ## 本地验证
 
-测试源码仅位于被 Git 忽略的 `tests/ui/system_media_controls_tests.cpp`。
+测试源码位于本地 `tests/ui/system_media_controls_tests.cpp`。
 `BUILD_TESTING=ON` 且为普通版时才创建该测试目标；Actions 继续使用 `BUILD_TESTING=OFF`。
 
 ```powershell
@@ -55,7 +61,15 @@ ctest --test-dir build -C Release -R "^system_media_controls_tests$" --output-on
 XP／Win7 版 Release 构建通过，18 个 DLL、641 个静态导入通过旧系统导出清单审计，
 没有新增 WinRT／SMTC 导入。本次运行验证在当前 Windows 宿主完成，未在 XP／Win7 实机运行。
 
+2026-09-17 验证：新增的可选标签测试通过，覆盖解码器／列表缓存优先级、专辑歌手回退、
+多曲风分隔和去重、空值覆盖缓存，以及从 Windows 全局会话实际读取 `AlbumArtist`／`Genres`
+和切歌清空；带真实专辑歌手、多曲风标签的 MP3 解码读取测试通过。
+Media Foundation 路径同时读取 Windows 的专辑歌手、曲风属性，继续复用解码器打开阶段，
+不增加 UI 线程上的媒体文件读取。
+
 ## 官方接口依据
 
 - [GetForWindow：为桌面顶层窗口获取 SMTC](https://learn.microsoft.com/en-us/windows/win32/api/systemmediatransportcontrolsinterop/nf-systemmediatransportcontrolsinterop-isystemmediatransportcontrolsinterop-getforwindow)
 - [手动控制 SMTC：事件线程、媒体信息与时间轴](https://learn.microsoft.com/en-us/windows/apps/develop/media-playback/system-media-transport-controls)
+- [AlbumArtist](https://learn.microsoft.com/en-us/uwp/api/windows.media.musicdisplayproperties.albumartist)
+- [Genres](https://learn.microsoft.com/en-us/uwp/api/windows.media.musicdisplayproperties.genres)

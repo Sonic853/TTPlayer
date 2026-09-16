@@ -1,16 +1,21 @@
 #include "ttplayer/ui/system_media_controls.h"
 #include "ttplayer/audio/audio_engine.h"
+#include "ttplayer/core/text.h"
+#include "ttplayer/playlist/playlist.h"
 #include "ttplayer/ui/taskbar_playback.h"
 
 #include <algorithm>
 #include <deque>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
+#include <string_view>
 #include <roapi.h>
 #include <shcore.h>
 #include <systemmediatransportcontrolsinterop.h>
 #include <wincodec.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Media.h>
 #include <winrt/Windows.Storage.Streams.h>
 
@@ -19,6 +24,55 @@ namespace {
 using namespace winrt::Windows::Media;
 using namespace winrt::Windows::Storage::Streams;
 using Command = SystemMediaControls::Command;
+
+std::wstring TagUtf8(std::string_view value) {
+    try { return core::Utf8ToWide(value); }
+    catch (const std::runtime_error&) { return {}; }
+}
+
+std::wstring TagText(std::wstring_view value) {
+    const auto first = value.find_first_not_of(L" \t\r\n");
+    if (first == std::wstring_view::npos) return {};
+    return std::wstring(value.substr(first, value.find_last_not_of(L" \t\r\n") - first + 1));
+}
+
+std::wstring TagKey(std::wstring_view value) {
+    std::wstring key;
+    for (wchar_t ch : value) {
+        if (ch >= L'A' && ch <= L'Z') ch += L'a' - L'A';
+        if ((ch >= L'a' && ch <= L'z') || (ch >= L'0' && ch <= L'9')) key += ch;
+    }
+    return key;
+}
+
+struct ExtraTags {
+    std::optional<std::wstring> album_artist;
+    bool has_genres{};
+    std::vector<std::wstring> genres;
+
+    void Read(std::wstring_view name, std::wstring_view value) {
+        const auto key = TagKey(name);
+        if (key == L"albumartist" || key == L"wmalbumartist" || key == L"tpe2" || key == L"tp2") {
+            if (!album_artist || album_artist->empty()) album_artist = TagText(value);
+        } else if (key == L"genre" || key == L"genres" || key == L"wmgenre" || key == L"tcon" || key == L"tco") {
+            has_genres = true;
+            size_t start{};
+            // Preserve names like Pop/Rock and R&B. Readers may return repeated
+            // fields, NUL-separated ID3v2.4 values, or a joined Shell string.
+            for (size_t end = 0; end <= value.size(); ++end) {
+                if (end != value.size() && value[end] != L';' && value[end] != L',' &&
+                    value[end] != L'\0' && value[end] != L'\r' && value[end] != L'\n') continue;
+                auto genre = TagText(value.substr(start, end - start));
+                start = end + 1;
+                if (genre.empty()) continue;
+                const bool duplicate = std::any_of(genres.begin(), genres.end(), [&](const auto& existing) {
+                    return CompareStringOrdinal(existing.c_str(), -1, genre.c_str(), -1, TRUE) == CSTR_EQUAL;
+                });
+                if (!duplicate) genres.push_back(std::move(genre));
+            }
+        }
+    }
+};
 
 RandomAccessStreamReference MakeThumbnail(HBITMAP cover) {
     if (!cover) return nullptr;
@@ -72,6 +126,27 @@ struct Receiver {
     }
 };
 } // namespace
+
+SystemMediaMetadata BuildSystemMediaMetadata(
+    const playlist::Track& track, const audio::AudioMetadata& metadata) {
+    SystemMediaMetadata result;
+    result.title = metadata.title.empty() ? (track.title.empty()
+        ? track.path.stem().wstring() : TagUtf8(track.title)) : metadata.title;
+    result.artist = metadata.artist.empty() ? TagUtf8(track.artist) : metadata.artist;
+    result.album = metadata.album.empty() ? TagUtf8(track.album) : metadata.album;
+    ExtraTags decoded, cached;
+    for (const auto& [name, value] : metadata.entries) decoded.Read(name, value);
+    if (!decoded.album_artist || !decoded.has_genres) {
+        for (const auto& [name, value] : track.metadata)
+            cached.Read(TagUtf8(name), TagUtf8(value));
+    }
+    // A present-but-empty reader field overrides old playlist tags, e.g. after
+    // deleting a tag. Only an absent field may fall back to the cached entry.
+    result.album_artist = decoded.album_artist.value_or(cached.album_artist.value_or(L""));
+    if (result.album_artist.empty()) result.album_artist = TagText(result.artist);
+    result.genres = decoded.has_genres ? std::move(decoded.genres) : std::move(cached.genres);
+    return result;
+}
 
 struct SystemMediaControls::Impl {
     bool apartment{};
@@ -143,8 +218,7 @@ UINT SystemMediaControls::RequestMessage() noexcept {
     return message;
 }
 
-void SystemMediaControls::SetSource(HWND window, std::wstring_view title,
-    std::wstring_view artist, std::wstring_view album, HBITMAP cover) noexcept {
+void SystemMediaControls::SetSource(HWND window, const SystemMediaMetadata& metadata, HBITMAP cover) noexcept {
     if (!window || !IsWindow(window) || !RequestMessage()) return;
     try {
         if (!attempted_) {
@@ -163,9 +237,13 @@ void SystemMediaControls::SetSource(HWND window, std::wstring_view title,
         updater.ClearAll();
         updater.Type(MediaPlaybackType::Music);
         const auto music = updater.MusicProperties();
-        music.Title(winrt::hstring(title));
-        music.Artist(winrt::hstring(artist));
-        music.AlbumTitle(winrt::hstring(album));
+        music.Title(winrt::hstring(metadata.title));
+        music.Artist(winrt::hstring(metadata.artist));
+        music.AlbumTitle(winrt::hstring(metadata.album));
+        music.AlbumArtist(winrt::hstring(metadata.album_artist));
+        const auto genres = music.Genres();
+        genres.Clear();
+        for (const auto& genre : metadata.genres) genres.Append(winrt::hstring(genre));
         // A corrupt artwork must not suppress title or transport controls.
         try { updater.Thumbnail(MakeThumbnail(cover)); } catch (...) { updater.Thumbnail(nullptr); }
         updater.Update();

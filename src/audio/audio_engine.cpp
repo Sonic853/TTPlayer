@@ -341,6 +341,9 @@ public:
                              metadata_.artist);
                 ReadProperty(properties.Get(), PKEY_Music_AlbumTitle, L"album",
                              metadata_.album);
+                std::wstring album_artist, genre;
+                ReadProperty(properties.Get(), PKEY_Music_AlbumArtist, L"AlbumArtist", album_artist);
+                ReadProperty(properties.Get(), PKEY_Music_Genre, L"Genre", genre);
             }
         }
         return true;

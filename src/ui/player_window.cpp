@@ -6149,12 +6149,8 @@ bool PlayerWindow::PlayCurrent() {
     const auto metadata = audio_.Metadata();
     taskbar_preview_.SetSource(window_, requested_track.path, metadata);
 #if !defined(TTPLAYER_LEGACY_WINDOWS)
-    system_media_controls_.SetSource(window_,
-        metadata.title.empty() ? (requested_track.title.empty()
-            ? requested_track.path.stem().wstring() : core::Utf8ToWide(requested_track.title)) : metadata.title,
-        metadata.artist.empty() ? core::Utf8ToWide(requested_track.artist) : metadata.artist,
-        metadata.album.empty() ? core::Utf8ToWide(requested_track.album) : metadata.album,
-        taskbar_preview_.CoverBitmap());
+    system_media_controls_.SetSource(window_, BuildSystemMediaMetadata(requested_track, metadata),
+                                    taskbar_preview_.CoverBitmap());
 #endif
     if (indexed_playback) try {
         bool metadata_changed = PlaybackPlaylist().SetMetadata(
