@@ -1,10 +1,17 @@
 #pragma once
 
 #include <windows.h>
+#include <filesystem>
 
 struct IPicture;
+namespace ttplayer::audio { struct AudioMetadata; }
 
 namespace ttplayer::ui::detail {
+
+// Same reader/embedded-picture policy as the visual cover. Caller owns the
+// bounded 32-bit bitmap. Invalid or absent artwork returns nullptr.
+HBITMAP LoadTaskbarCoverBitmap(const std::filesystem::path& path,
+                              const audio::AudioMetadata& metadata, SIZE* size);
 
 // Center crop in source coordinates. Unlike the embedded cover's contain
 // policy, the fullscreen background fills both axes and may enlarge images.

@@ -62,7 +62,7 @@ sidecar needs migration. TTPlayer6120 is not used as a reference here.
 The existing native skin-rebind regression failed before the fix with
 `skin switch lost the main window's configured topmost state`; its expanded
 four main/lyric pin combinations now pass. The new
-`src/ui/window_topmost_tests.cpp` covers the new contract independently of
+`tests/ui/window_topmost_tests.cpp` covers the new contract independently of
 the locally ignored `tests/` directory.
 
 The new regression launches a copy of itself in a unique temporary EXE-local

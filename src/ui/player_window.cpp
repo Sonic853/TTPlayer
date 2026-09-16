@@ -2522,10 +2522,16 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
     if (message == taskbar_button_created) {
         static_cast<void>(taskbar_playback_.OnButtonCreated(
             window_, TaskbarState(), TaskbarLabels()));
+        taskbar_preview_.Refresh(window_, true);
         return 0;
     }
+    if (taskbar_preview_.HandleMessage(message, lparam)) return 0;
     switch (message) {
+    case WM_DWMCOMPOSITIONCHANGED:
+        taskbar_preview_.Refresh(window_, true);
+        break;
     case WM_WINDOWPOSCHANGED:
+        taskbar_preview_.Refresh(window_);
         // Mini mode uses ShowWindow(SW_HIDE); fullscreen uses
         // SetWindowPos(SWP_HIDEWINDOW). Both remove the taskbar entry without
         // destroying our HWND. A later TaskbarButtonCreated must install a
@@ -2650,6 +2656,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         return 0;
     case WM_SIZE:
         LayoutControls(static_cast<int>(LOWORD(lparam)), static_cast<int>(HIWORD(lparam)));
+        taskbar_preview_.Refresh(window_);
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT paint{};
@@ -3156,6 +3163,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         CloseLyricServiceEditor();
         ClosePlaylistConverter(window_);
         taskbar_playback_.Reset();
+        taskbar_preview_.Reset();
         KillTimer(window_, kCloseAudioFadeTimer);
         close_waiting_for_audio_fade_ = false;
         close_skin_window_fade_finished_ = false;
@@ -6052,6 +6060,7 @@ bool PlayerWindow::PlayCurrent() {
         return true;
     }
     if (!audio_.Play(requested_track.path, requested_track.subtrack)) {
+        taskbar_preview_.Clear();
         playback_source_open_ = false;
         opened_track_.reset();
         if (indexed_playback && PlaybackPlaylist().SetDuration(*current_, -1) &&
@@ -6074,6 +6083,7 @@ bool PlayerWindow::PlayCurrent() {
     playback_source_open_ = true;
     opened_track_ = requested_track;
     const auto metadata = audio_.Metadata();
+    taskbar_preview_.SetSource(window_, requested_track.path, metadata);
     if (indexed_playback) try {
         bool metadata_changed = PlaybackPlaylist().SetMetadata(
                 *current_,

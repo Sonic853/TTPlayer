@@ -1,13 +1,15 @@
 cmake_minimum_required(VERSION 3.24)
 project(TTPlayerRebuild VERSION 0.1.0 LANGUAGES C CXX)
 
+option(BUILD_TESTING "Build local, unpublished tests" OFF)
 include(CTest)
 option(TTPLAYER_STAGE_RUNTIME "Rebuild/copy local original DLLs, skins and configuration beside the EXE" ON)
 option(TTPLAYER_LEGACY_WINDOWS "Build the separate Windows XP SP3 / Windows 7 edition" OFF)
-option(TTPLAYER_BUILD_LIBRARY_TESTS "Build media library regression tests without the private test suite" OFF)
-option(TTPLAYER_BUILD_NAVIGATION_TESTS "Build playback navigation regression tests without the private test suite" OFF)
-option(TTPLAYER_BUILD_INFO_TESTS "Build playlist information regression tests without the private test suite" OFF)
-option(TTPLAYER_BUILD_WHEEL_TESTS "Build playlist mouse wheel tests without the private test suite" OFF)
+option(TTPLAYER_BUILD_LIBRARY_TESTS "Build local media library regression tests" OFF)
+option(TTPLAYER_BUILD_NAVIGATION_TESTS "Build local playback navigation regression tests" OFF)
+option(TTPLAYER_BUILD_INFO_TESTS "Build local playlist information regression tests" OFF)
+option(TTPLAYER_BUILD_WHEEL_TESTS "Build local playlist mouse wheel tests" OFF)
+option(TTPLAYER_BUILD_PREVIEW_TESTS "Build local taskbar album preview tests" OFF)
 
 if(NOT WIN32)
   message(FATAL_ERROR "TTPlayerRebuild currently targets Windows")
@@ -87,6 +89,7 @@ add_library(ttplayer_core
   src/ui/player_window_skin_animation.cpp
   src/ui/player_window_taskbar.cpp
   src/ui/taskbar_playback.cpp
+  src/ui/taskbar_preview.cpp
   src/ui/player_window_equalizer.cpp
   src/ui/player_window_file_intake.cpp
   src/ui/output_devices.cpp
@@ -192,9 +195,19 @@ endif()
 # Standalone development/test front ends only. The shipped player embeds all
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
+if(BUILD_TESTING OR TTPLAYER_BUILD_PREVIEW_TESTS)
+enable_testing()
+add_executable(taskbar_preview_tests tests/ui/taskbar_preview_tests.cpp)
+target_compile_definitions(taskbar_preview_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(taskbar_preview_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(taskbar_preview_tests PRIVATE ttplayer_core)
+add_test(NAME taskbar_preview_tests COMMAND taskbar_preview_tests)
+set_tests_properties(taskbar_preview_tests PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
 if(BUILD_TESTING OR TTPLAYER_BUILD_WHEEL_TESTS)
 enable_testing()
-add_executable(playlist_wheel_tests src/ui/playlist_wheel_tests.cpp)
+add_executable(playlist_wheel_tests tests/ui/playlist_wheel_tests.cpp)
 target_compile_definitions(playlist_wheel_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(playlist_wheel_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(playlist_wheel_tests PRIVATE ttplayer_core)
@@ -204,7 +217,7 @@ endif()
 
 if(BUILD_TESTING OR TTPLAYER_BUILD_INFO_TESTS)
 enable_testing()
-add_executable(playlist_info_tests src/ui/playlist_info_tests.cpp)
+add_executable(playlist_info_tests tests/ui/playlist_info_tests.cpp)
 target_compile_definitions(playlist_info_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(playlist_info_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(playlist_info_tests PRIVATE ttplayer_core)
@@ -214,7 +227,7 @@ endif()
 
 if(BUILD_TESTING OR TTPLAYER_BUILD_NAVIGATION_TESTS)
 enable_testing()
-add_executable(playback_navigation_tests src/ui/playback_navigation_tests.cpp)
+add_executable(playback_navigation_tests tests/ui/playback_navigation_tests.cpp)
 target_compile_definitions(playback_navigation_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(playback_navigation_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(playback_navigation_tests PRIVATE ttplayer_core)
@@ -224,7 +237,7 @@ endif()
 
 if(BUILD_TESTING OR TTPLAYER_BUILD_LIBRARY_TESTS)
 enable_testing()
-add_executable(media_library_tests src/ui/media_library_tests.cpp
+add_executable(media_library_tests tests/ui/media_library_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(media_library_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(media_library_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -234,7 +247,7 @@ set_tests_properties(media_library_tests PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
 endif()
 
 if(BUILD_TESTING)
-add_executable(idle_error_tests src/ui/idle_error_tests.cpp
+add_executable(idle_error_tests tests/ui/idle_error_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(idle_error_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(idle_error_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -242,14 +255,14 @@ target_link_libraries(idle_error_tests PRIVATE ttplayer_core)
 add_test(NAME idle_error_tests COMMAND idle_error_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(idle_error_tests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
 
-add_executable(default_colors_tests src/skin/default_colors_tests.cpp)
+add_executable(default_colors_tests tests/skin/default_colors_tests.cpp)
 target_compile_definitions(default_colors_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(default_colors_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(default_colors_tests PRIVATE ttplayer_core)
 add_test(NAME default_colors_tests COMMAND default_colors_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(default_colors_tests PROPERTIES TIMEOUT 100 RUN_SERIAL TRUE)
 
-add_executable(legacy_windows_tests src/platform/legacy_windows_tests.cpp
+add_executable(legacy_windows_tests tests/platform/legacy_windows_tests.cpp
   src/platform/optional_windows_api.cpp)
 target_compile_definitions(legacy_windows_tests PRIVATE
   UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN TTPLAYER_TEST_NO_OPTIONAL_WINDOWS_API)
@@ -258,7 +271,7 @@ target_link_libraries(legacy_windows_tests PRIVATE ttplayer_core)
 add_test(NAME legacy_windows_tests COMMAND legacy_windows_tests)
 set_tests_properties(legacy_windows_tests PROPERTIES TIMEOUT 45)
 
-add_executable(runtime_paths_tests src/ui/runtime_paths_tests.cpp
+add_executable(runtime_paths_tests tests/ui/runtime_paths_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(runtime_paths_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(runtime_paths_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -269,9 +282,9 @@ add_test(NAME runtime_paths_tests COMMAND runtime_paths_tests "${CMAKE_CURRENT_S
 set_tests_properties(runtime_paths_tests PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
 add_test(NAME stage_settings_tests COMMAND "${CMAKE_COMMAND}"
   "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/Testing"
-  -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_stage_settings.cmake")
+  -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_stage_settings.cmake")
 
-add_executable(fullscreen_lyric_drag_tests src/ui/fullscreen_lyric_drag_tests.cpp
+add_executable(fullscreen_lyric_drag_tests tests/ui/fullscreen_lyric_drag_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(fullscreen_lyric_drag_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(fullscreen_lyric_drag_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -279,7 +292,7 @@ target_link_libraries(fullscreen_lyric_drag_tests PRIVATE ttplayer_core)
 add_test(NAME fullscreen_lyric_drag_tests COMMAND fullscreen_lyric_drag_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(fullscreen_lyric_drag_tests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
 
-add_executable(fullscreen_lyric_render_tests src/ui/fullscreen_lyric_render_tests.cpp
+add_executable(fullscreen_lyric_render_tests tests/ui/fullscreen_lyric_render_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(fullscreen_lyric_render_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(fullscreen_lyric_render_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -287,7 +300,7 @@ target_link_libraries(fullscreen_lyric_render_tests PRIVATE ttplayer_core)
 add_test(NAME fullscreen_lyric_render_tests COMMAND fullscreen_lyric_render_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(fullscreen_lyric_render_tests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
 
-add_executable(fullscreen_album_tests src/ui/fullscreen_album_tests.cpp
+add_executable(fullscreen_album_tests tests/ui/fullscreen_album_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(fullscreen_album_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(fullscreen_album_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -295,7 +308,7 @@ target_link_libraries(fullscreen_album_tests PRIVATE ttplayer_core)
 add_test(NAME fullscreen_album_tests COMMAND fullscreen_album_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(fullscreen_album_tests PROPERTIES TIMEOUT 45)
 
-add_executable(desktop_lyrics_menu_tests src/ui/desktop_lyrics_menu_tests.cpp
+add_executable(desktop_lyrics_menu_tests tests/ui/desktop_lyrics_menu_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(desktop_lyrics_menu_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(desktop_lyrics_menu_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -303,7 +316,7 @@ target_link_libraries(desktop_lyrics_menu_tests PRIVATE ttplayer_core)
 add_test(NAME desktop_lyrics_menu_tests COMMAND desktop_lyrics_menu_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(desktop_lyrics_menu_tests PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
 
-add_executable(options_drawing_tests src/ui/options_drawing_tests.cpp
+add_executable(options_drawing_tests tests/ui/options_drawing_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(options_drawing_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(options_drawing_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -311,21 +324,21 @@ target_link_libraries(options_drawing_tests PRIVATE ttplayer_core)
 add_test(NAME options_drawing_tests COMMAND options_drawing_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(options_drawing_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
-add_executable(lyric_search_tests src/ui/lyric_search_tests.cpp src/app/resources.rc src/app/ttplayer.manifest)
+add_executable(lyric_search_tests tests/ui/lyric_search_tests.cpp src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(lyric_search_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(lyric_search_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(lyric_search_tests PRIVATE ttplayer_core ws2_32)
 add_test(NAME lyric_search_tests COMMAND lyric_search_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(lyric_search_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
-add_executable(lyric_menu_tests src/ui/lyric_menu_tests.cpp src/app/resources.rc src/app/ttplayer.manifest)
+add_executable(lyric_menu_tests tests/ui/lyric_menu_tests.cpp src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(lyric_menu_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(lyric_menu_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(lyric_menu_tests PRIVATE ttplayer_core oleacc)
 add_test(NAME lyric_menu_tests COMMAND lyric_menu_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(lyric_menu_tests PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
 
-add_executable(lyric_association_tests src/ui/lyric_association_tests.cpp
+add_executable(lyric_association_tests tests/ui/lyric_association_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(lyric_association_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(lyric_association_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -333,14 +346,14 @@ target_link_libraries(lyric_association_tests PRIVATE ttplayer_core)
 add_test(NAME lyric_association_tests COMMAND lyric_association_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(lyric_association_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
-add_executable(lyric_service_catalog_tests src/lyrics/service_catalog_tests.cpp)
+add_executable(lyric_service_catalog_tests tests/lyrics/service_catalog_tests.cpp)
 target_compile_definitions(lyric_service_catalog_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(lyric_service_catalog_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(lyric_service_catalog_tests PRIVATE ttplayer_core)
 add_test(NAME lyric_service_catalog_tests COMMAND lyric_service_catalog_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(lyric_service_catalog_tests PROPERTIES TIMEOUT 60)
 
-add_executable(window_topmost_tests src/ui/window_topmost_tests.cpp
+add_executable(window_topmost_tests tests/ui/window_topmost_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(window_topmost_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(window_topmost_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -348,27 +361,27 @@ target_link_libraries(window_topmost_tests PRIVATE ttplayer_core)
 add_test(NAME window_topmost_tests COMMAND window_topmost_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(window_topmost_tests PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
 
-add_executable(skin_profile_tests src/skin/skin_profile_tests.cpp)
+add_executable(skin_profile_tests tests/skin/skin_profile_tests.cpp)
 target_compile_definitions(skin_profile_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(skin_profile_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(skin_profile_tests PRIVATE ttplayer_core)
 add_test(NAME skin_profile_tests COMMAND skin_profile_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(skin_profile_tests PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
 
-add_executable(skin_alignment_tests src/skin/skin_alignment_tests.cpp)
+add_executable(skin_alignment_tests tests/skin/skin_alignment_tests.cpp)
 target_compile_definitions(skin_alignment_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(skin_alignment_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(skin_alignment_tests PRIVATE ttplayer_core)
 add_test(NAME skin_alignment_tests COMMAND skin_alignment_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
-add_executable(project_links_tests src/ui/project_links_tests.cpp
+add_executable(project_links_tests tests/ui/project_links_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(project_links_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(project_links_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(project_links_tests PRIVATE ttplayer_core)
 add_test(NAME project_links_tests COMMAND project_links_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
-add_executable(skin_png_tests src/skin/skin_png_tests.cpp)
+add_executable(skin_png_tests tests/skin/skin_png_tests.cpp)
 target_compile_definitions(skin_png_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(skin_png_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(skin_png_tests PRIVATE ttplayer_core)
@@ -469,7 +482,7 @@ target_compile_options(ttplayer_tests PRIVATE
 target_link_libraries(ttplayer_tests PRIVATE ttplayer_core)
 
 add_executable(file_association_tests tests/file_association_tests.cpp)
-add_executable(default_programs_tests src/settings/default_programs_tests.cpp)
+add_executable(default_programs_tests tests/settings/default_programs_tests.cpp)
 target_compile_definitions(default_programs_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(default_programs_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(default_programs_tests PRIVATE ttplayer_core)
@@ -678,12 +691,12 @@ target_compile_definitions(taskbar_playback_tests PRIVATE UNICODE _UNICODE NOMIN
 target_compile_options(taskbar_playback_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(taskbar_playback_tests PRIVATE ttplayer_core)
 
-add_executable(skin_rebind_tests src/ui/skin_rebind_tests.cpp)
+add_executable(skin_rebind_tests tests/ui/skin_rebind_tests.cpp)
 target_compile_definitions(skin_rebind_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(skin_rebind_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(skin_rebind_tests PRIVATE ttplayer_core)
 
-add_executable(playlist_marquee_tests src/ui/playlist_marquee_tests.cpp
+add_executable(playlist_marquee_tests tests/ui/playlist_marquee_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(playlist_marquee_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(playlist_marquee_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -808,7 +821,7 @@ endif()
 if(BUILD_TESTING)
 add_test(NAME build_date_tests
   COMMAND "${TTPLAYER_POWERSHELL}" -NoProfile -NonInteractive -ExecutionPolicy Bypass
-          -File "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_build_date.ps1")
+          -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_build_date.ps1")
 add_library(mp3pro_input_mock SHARED tests/mock_winamp_input.cpp tests/mock_winamp_input.def)
 target_compile_definitions(mp3pro_input_mock PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(mp3pro_input_mock PRIVATE /W4 /EHsc /utf-8)

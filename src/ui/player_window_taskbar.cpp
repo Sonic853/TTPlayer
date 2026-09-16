@@ -27,6 +27,9 @@ TaskbarPlaybackLabels PlayerWindow::TaskbarLabels() const {
 
 void PlayerWindow::UpdateTaskbarPlayback() {
     static_cast<void>(taskbar_playback_.Update(TaskbarState(), TaskbarLabels()));
+    const auto state = audio_.State();
+    if (state != audio::PlaybackState::playing && state != audio::PlaybackState::paused)
+        taskbar_preview_.Clear();
 }
 
 void PlayerWindow::HandleTaskbarPlaybackClick(WPARAM wparam) {

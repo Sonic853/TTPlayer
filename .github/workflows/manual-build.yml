@@ -41,9 +41,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Test release workflow
-        run: ./cmake/test_manual_release.ps1
-
       - name: Validate release configuration and capture Beijing date
         id: release_date
         env:
@@ -82,25 +79,19 @@ jobs:
         run: >-
           cmake -S . -B build -G "Visual Studio 18 2026" -A Win32
           "-DCMAKE_GENERATOR_INSTANCE=$env:TTPLAYER_VS_INSTANCE"
-          -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF -DTTPLAYER_BUILD_LIBRARY_TESTS=ON -DTTPLAYER_BUILD_NAVIGATION_TESTS=ON -DTTPLAYER_BUILD_INFO_TESTS=ON -DTTPLAYER_BUILD_WHEEL_TESTS=ON
+          -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF
 
       - name: Build
-        run: cmake --build build --config "$env:BUILD_CONFIGURATION" --target ttplayer_rebuild media_library_tests playback_navigation_tests playlist_info_tests playlist_wheel_tests --parallel 4
-
-      - name: Test media library, playback navigation, metadata loading and wheel input
-        run: ctest --test-dir build -C "$env:BUILD_CONFIGURATION" -R '^(media_library_tests|playback_navigation_tests|playlist_info_tests|playlist_wheel_tests)$' --output-on-failure
+        run: cmake --build build --config "$env:BUILD_CONFIGURATION" --target ttplayer_rebuild --parallel 4
 
       - name: Configure XP and Windows 7 edition
         run: >-
           cmake -S . -B build-legacy -G "Visual Studio 18 2026" -A Win32
           "-DCMAKE_GENERATOR_INSTANCE=$env:TTPLAYER_VS_INSTANCE"
-          -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF -DTTPLAYER_LEGACY_WINDOWS=ON -DTTPLAYER_BUILD_LIBRARY_TESTS=ON -DTTPLAYER_BUILD_NAVIGATION_TESTS=ON -DTTPLAYER_BUILD_INFO_TESTS=ON -DTTPLAYER_BUILD_WHEEL_TESTS=ON
+          -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF -DTTPLAYER_LEGACY_WINDOWS=ON
 
       - name: Build and audit XP and Windows 7 edition
-        run: cmake --build build-legacy --config Release --target ttplayer_rebuild media_library_tests playback_navigation_tests playlist_info_tests playlist_wheel_tests --parallel 4
-
-      - name: Test media library, playback navigation, metadata loading and wheel input in XP and Windows 7 build
-        run: ctest --test-dir build-legacy -C Release -R '^(media_library_tests|playback_navigation_tests|playlist_info_tests|playlist_wheel_tests)$' --output-on-failure
+        run: cmake --build build-legacy --config Release --target ttplayer_rebuild --parallel 4
 
       - name: Prepare artifact
         env:

@@ -301,7 +301,7 @@ struct WicPicture {
     UINT height{};
 };
 
-WicPicture DecodePictureWithWic(const std::vector<unsigned char>& bytes) {
+WicPicture DecodePictureWithWic(const std::vector<unsigned char>& bytes, UINT maximum_edge = 0) {
     WicPicture result;
     if (bytes.empty() || bytes.size() > std::numeric_limits<UINT>::max())
         return result;
@@ -311,6 +311,7 @@ WicPicture DecodePictureWithWic(const std::vector<unsigned char>& bytes) {
     IWICImagingFactory* factory{};
     IWICBitmapDecoder* decoder{};
     IWICBitmapFrameDecode* frame{};
+    IWICBitmapScaler* scaler{};
     IWICFormatConverter* converter{};
     HRESULT status = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
         CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
@@ -330,9 +331,18 @@ WicPicture DecodePictureWithWic(const std::vector<unsigned char>& bytes) {
                          (result.width * 4U))) {
         status = E_INVALIDARG;
     }
+    IWICBitmapSource* source = frame;
+    if (SUCCEEDED(status) && maximum_edge && std::max(result.width, result.height) > maximum_edge) {
+        const UINT longest = std::max(result.width, result.height);
+        result.width = std::max<UINT>(1, static_cast<UINT>(static_cast<uint64_t>(result.width) * maximum_edge / longest));
+        result.height = std::max<UINT>(1, static_cast<UINT>(static_cast<uint64_t>(result.height) * maximum_edge / longest));
+        status = factory->CreateBitmapScaler(&scaler);
+        if (SUCCEEDED(status)) status = scaler->Initialize(frame, result.width, result.height, WICBitmapInterpolationModeFant);
+        source = scaler;
+    }
     if (SUCCEEDED(status)) status = factory->CreateFormatConverter(&converter);
     if (SUCCEEDED(status)) {
-        status = converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA,
+        status = converter->Initialize(source, GUID_WICPixelFormat32bppPBGRA,
             WICBitmapDitherTypeNone, nullptr, 0.0,
             WICBitmapPaletteTypeCustom);
     }
@@ -355,6 +365,7 @@ WicPicture DecodePictureWithWic(const std::vector<unsigned char>& bytes) {
             stride * result.height, static_cast<BYTE*>(pixels));
     }
     if (converter) converter->Release();
+    if (scaler) scaler->Release();
     if (frame) frame->Release();
     if (decoder) decoder->Release();
     if (factory) factory->Release();
@@ -508,6 +519,58 @@ void SafeSpectrumDestroy(void*) noexcept {}
 #endif
 
 } // namespace
+
+HBITMAP detail::LoadTaskbarCoverBitmap(const std::filesystem::path& path,
+                                     const audio::AudioMetadata& metadata, SIZE* size) {
+    *size = {};
+    try {
+        bool declared{};
+        // A reader with the thumbnail interface owns the decision, including
+        // an empty/corrupt first picture. Do not substitute Folder.jpg or the
+        // fullscreen fallback image for a song's actual cover.
+        const auto embedded = metadata.thumbnail_interface ? std::vector<unsigned char>{}
+                                                          : ReadEmbeddedPicture(path, &declared);
+        const auto& bytes = metadata.thumbnail_interface ? metadata.thumbnail : embedded;
+        if (bytes.empty() || bytes.size() > kMaximumPictureBytes) return nullptr;
+        constexpr UINT maximum_edge = 1024;
+        const auto wic = DecodePictureWithWic(bytes, maximum_edge);
+        if (wic.bitmap) {
+            *size = {static_cast<LONG>(wic.width), static_cast<LONG>(wic.height)};
+            return wic.bitmap;
+        }
+        IPicture* picture = DecodePictureWithOle(bytes);
+        if (!picture) return nullptr;
+        OLE_XSIZE_HIMETRIC width{}; OLE_YSIZE_HIMETRIC height{};
+        picture->get_Width(&width); picture->get_Height(&height);
+        HBITMAP bitmap{};
+        if (width > 0 && height > 0) {
+            const auto longest = std::max(width, height);
+            const LONG cx = std::max<LONG>(1, static_cast<LONG>(static_cast<int64_t>(width) * maximum_edge / longest));
+            const LONG cy = std::max<LONG>(1, static_cast<LONG>(static_cast<int64_t>(height) * maximum_edge / longest));
+            BITMAPINFO info{}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            info.bmiHeader.biWidth = cx; info.bmiHeader.biHeight = -cy;
+            info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
+            void* pixels{};
+            bitmap = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+            HDC dc = CreateCompatibleDC(nullptr);
+            HRESULT status = E_OUTOFMEMORY;
+            if (bitmap && pixels && dc) {
+                const auto old = SelectObject(dc, bitmap);
+                const size_t count = static_cast<size_t>(cx) * cy;
+                std::fill_n(static_cast<DWORD*>(pixels), count, 0xff000000U);
+                status = picture->Render(dc, 0, 0, cx, cy, 0, height, width, -height, nullptr);
+                GdiFlush();
+                for (size_t i = 0; i < count; ++i) static_cast<DWORD*>(pixels)[i] |= 0xff000000U;
+                SelectObject(dc, old);
+            }
+            if (dc) DeleteDC(dc);
+            if (FAILED(status)) { if (bitmap) DeleteObject(bitmap); bitmap = nullptr; }
+            else *size = {cx, cy};
+        }
+        picture->Release();
+        return bitmap;
+    } catch (const std::exception&) { return nullptr; }
+}
 
 // Runtime counterpart of the original CVisualCtrl object at CPlayerWnd+0x438.
 // It deliberately owns only renderer state; the child HWND and settings remain

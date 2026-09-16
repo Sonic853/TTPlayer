@@ -34,10 +34,10 @@ Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 若还没有符合规则的历史 tag，则链接到 `commits/本次版本`，不生成无效对比链接。
 正文安装说明明确区分现代版与旧系统版，不自动追加 GitHub 生成的说明。
 
-工作流会先运行 `cmake/test_manual_release.ps1`，离线检查北京时间边界、同日补丁号、
+本地可手动运行 `tests/cmake/test_manual_release.ps1`，离线检查北京时间边界、同日补丁号、
 动态对比链接、安装说明和模拟发布保护逻辑，包括两个附件的 SHA-256 和 Release 配置。
 同时用隔离目录实际打包、解压两个版本，检查 ZIP 内容、版本化文件名及内外校验文件。
-本地也可运行该脚本；测试不调用远程 API，不创建标签或 Release。
+该脚本仅保留在本地，Actions 不运行它；测试不调用远程 API，不创建标签或 Release。
 
 工作流必须先存在于默认分支，手动运行入口才会显示，见
 [GitHub 手动运行工作流说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。
@@ -106,14 +106,17 @@ VS 2022 配置，请改用新的空构建目录，不要复用旧的生成器缓
   `src/app/assets/TTPlayer.ico`。接口源码来自现有 `reverse` 中的恢复代码，
   导出序号、ABI、调用和原版图标内容保持不变，不需要反编译伪代码参与构建。
 
-本地完整恢复工作区的原有两个选项默认仍为 ON，保留测试和运行文件复制流程；
-它需要仓库旁的 `reverse/`、原版 DLL、皮肤等数据以及本地测试/工具源码。
-GitHub 工作流在现代版和旧系统版构建后运行媒体库和手动切歌核心回归；依赖私有原版资源
-的完整窗口测试只在本地资源可用时运行，不等同于 XP／Win7 实机验收。
+`BUILD_TESTING` 及各独立测试开关默认均为 OFF。测试源码、脚本和辅助文件仅保留在本地
+`tests/`，由 `.gitignore` 排除，不随仓库上传。GitHub Actions 不构建或运行测试，
+包括发布工作流测试；只构建程序、执行旧系统静态导入审计并打包。
+
+本地需要测试时，显式设置 `BUILD_TESTING=ON` 或下述独立开关，并保留本地 `tests/`。
+完整测试还需要 `tools/`、仓库旁的 `reverse/` 和原版运行资源。
+`TTPLAYER_STAGE_RUNTIME` 默认仍为 ON，用于本地复制运行文件；Actions 将其设为 OFF。
 
 ### 独立媒体库回归
 
-无需未提交的 `tests/`、`tools/` 即可构建：
+在保留本地 `tests/` 的工作区中可单独构建：
 
 ```powershell
 cmake -S . -B build-library-tests -G "Visual Studio 18 2026" -A Win32 -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF -DTTPLAYER_BUILD_LIBRARY_TESTS=ON
@@ -129,7 +132,7 @@ ctest --test-dir build-library-tests -C Release -R '^media_library_tests$' --out
 配置时设置 `-DTTPLAYER_BUILD_NAVIGATION_TESTS=ON`，构建目标
 `playback_navigation_tests`，再运行
 `ctest --test-dir <构建目录> -C Release -R '^playback_navigation_tests$' --output-on-failure`。
-测试无需原版 DLL、私有测试源码或音频设备，覆盖五种播放模式、随机序列前后回退、
+测试使用本地 `tests/` 源码，无需原版 DLL 或音频设备，覆盖五种播放模式、随机序列前后回退、
 首尾边界、播放跟随光标、自然结束和自动切换列表。媒体库测试另验证可见树节点切换。
 分析与验证记录见 [PLAYBACK_MODES_AUDIT_AND_FIXES.md](PLAYBACK_MODES_AUDIT_AND_FIXES.md)。
 随机播放另覆盖普通版 ≤5000 首三轮后台索引、>5000 首单份随机索引循环，
@@ -140,8 +143,8 @@ XP／Win7 版始终单份随机索引循环，以及跨轮回退、
 
 配置时设置 `-DTTPLAYER_BUILD_INFO_TESTS=ON`，构建目标 `playlist_info_tests`，再运行
 `ctest --test-dir <构建目录> -C Release -R '^playlist_info_tests$' --output-on-failure`。
-无需私有测试代码、原版 DLL 或音频设备，使用生成的 WAV/CUE 和隔离故障进程验证会话复用、
-缓存失效、取消恢复、读取队列及编辑竞争。Actions 在两个构建中均执行该测试。
+测试使用本地 `tests/` 源码，无需原版 DLL 或音频设备；使用生成的 WAV/CUE 和隔离故障进程验证会话复用、
+缓存失效、取消恢复、读取队列及编辑竞争。测试仅供本地手动运行。
 实现与测量见 [PLAYLIST_INFO_LOADING_OPTIMIZATION.md](PLAYLIST_INFO_LOADING_OPTIMIZATION.md)。
 
 ### 独立列表滚轮与底部边界回归
@@ -149,5 +152,12 @@ XP／Win7 版始终单份随机索引循环，以及跨轮回退、
 配置 `-DTTPLAYER_BUILD_WHEEL_TESTS=ON`，构建 `playlist_wheel_tests`，运行
 `ctest --test-dir <构建目录> -C Release -R '^playlist_wheel_tests$' --output-on-failure`。
 测试真实窗口失焦滚动、面板命中、焦点保持、原生树和经典列表，并对照原生 ListView 验证
-不同高度／曲目数量下的完整页数、末行位置、底部留白和滚动条拖动。已接入两种 Actions 构建。
+不同高度／曲目数量下的完整页数、末行位置、底部留白和滚动条拖动。测试仅供本地手动运行。
 原版分析与修复说明见 [PLAYLIST_MOUSE_WHEEL.md](PLAYLIST_MOUSE_WHEEL.md)。
+
+### 独立专辑封面预览回归
+
+配置 `-DTTPLAYER_BUILD_PREVIEW_TESTS=ON`，构建 `taskbar_preview_tests`，运行
+`ctest --test-dir <构建目录> -C Release -R '^taskbar_preview_tests$' --output-on-failure`。
+验证封面切换／无封面回退、图片比例与 alpha、缓存释放、播放状态，以及本机 DWM 普通和最小化预览。
+测试仅供本地手动运行。详见 [TASKBAR_ALBUM_PREVIEW.md](TASKBAR_ALBUM_PREVIEW.md)。

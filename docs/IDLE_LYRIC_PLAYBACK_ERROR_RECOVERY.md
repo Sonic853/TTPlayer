@@ -90,7 +90,7 @@ if (continuation_enabled && !StopWhenFail)
 
 ## 三、验证与分发
 
-新增 `src/ui/idle_error_tests.cpp`，使用独立临时运行目录和真正的 PlayerWindow，避免修改用户配置、皮肤配置和播放列表。验证内容：
+新增 `tests/ui/idle_error_tests.cpp`，使用独立临时运行目录和真正的 PlayerWindow，避免修改用户配置、皮肤配置和播放列表。验证内容：
 
 - 空列表初次创建、启动恢复、周期刷新、清空列表后的歌词文字。
 - 普通与迷你模式，横向/纵向、左中右/上中下对齐；逐像素比较普通颜色、矩形裁剪及无边缘渐隐的结果。

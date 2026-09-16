@@ -108,14 +108,14 @@ HTTPS 保留系统证书验证，允许 TLS 1.2/1.3、禁止 HTTPS 重定向降�
   后台结果/切歌不丢草稿、关闭恢复及强制销毁清理；主播放器保持可操作。
   在线搜索及其编辑器在置顶切换和普通/迷你切换中保留 HWND、所属关系和禁用状态。
 - 正向 HTTPS：测试客户端对 `https://example.com/` 的正常证书验证请求成功。
-- 反向 HTTPS：`src/lyrics/test_lyric_https.ps1` 创建临时自签名证书，启动本机 TLS 服务，
+- 反向 HTTPS：`tests/lyrics/test_lyric_https.ps1` 创建临时自签名证书，启动本机 TLS 服务，
   确认 WinHTTP 以 12175 拒绝。**未向用户/系统证书存储导入证书，未禁用证书验证**。
 
 ```powershell
 cmake --build out/png-6120 --config Release --target lyric_search_tests lyric_service_catalog_tests window_topmost_tests
 ctest --test-dir out/png-6120 -C Release -R '^(lyric_search|lyric_service_catalog|window_topmost)_tests$' --output-on-failure
 # 可选手动 TLS 测试，需要 Python 和 OpenSSL：
-./src/lyrics/test_lyric_https.ps1 -Program ./out/png-6120/Release/lyric_service_catalog_tests.exe -OpenSsl C:/path/to/openssl.exe
+./tests/lyrics/test_lyric_https.ps1 -Program ./out/png-6120/Release/lyric_service_catalog_tests.exe -OpenSsl C:/path/to/openssl.exe
 ```
 
 所有写入测试使用唯一临时目录和 DLL 副本；不修改播放器目录现有 DLL、INI 或用户主配置。

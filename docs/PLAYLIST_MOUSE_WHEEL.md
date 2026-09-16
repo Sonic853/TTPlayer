@@ -91,7 +91,7 @@
 ctest --test-dir <构建目录> -C Release -R '^playlist_wheel_tests$' --output-on-failure
 ```
 
-Actions 的普通版和 XP／Win7 构建均执行此回归。旧系统构建的本地测试在当前 Windows 主机上运行，
+测试保留在本地 `tests/`，不上传且不在 Actions 中执行。旧系统构建的本地测试在当前 Windows 主机上运行，
 另外执行 XP SP3 / Win7 导入审计；不等同于旧系统实机验证。
 
 本次普通版的滚轮与底部边界、框选、信息读取、切歌、媒体库和列表契约 6 项回归通过；

@@ -87,7 +87,7 @@ https://lyrics.example:8443/api/search/?key=1
 
 ## 宿主机测试
 
-新增 `src/ui/lyric_menu_tests.cpp`，不依赖被忽略的 tests 目录：
+`tests/ui/lyric_menu_tests.cpp` 仅保留在被 Git 忽略的本地 tests 目录：
 
 ```powershell
 cmake -S . -B build -DBUILD_TESTING=ON -DTTPLAYER_STAGE_RUNTIME=OFF

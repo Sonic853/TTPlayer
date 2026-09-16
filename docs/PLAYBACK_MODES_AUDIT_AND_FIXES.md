@@ -134,7 +134,7 @@
 
 ## 6. 回归验证
 
-[playback_navigation_tests.cpp](../src/ui/playback_navigation_tests.cpp) 覆盖：
+`tests/ui/playback_navigation_tests.cpp` 覆盖：
 
 - 五种模式的自然结束、按钮边界、无播放标记、空列表和单项列表。
 - 模式 0–3 的手动前后切换、首尾回绕以及播放／暂停／停止状态。
@@ -143,7 +143,7 @@
 - 各模式与跟随光标、自动换表的组合；单列表回绕、空目标和显示列表切换。
 - 列表已空但音频对象仍保有歌曲，以及歌曲间隔中的连续切歌。
 
-[media_library_tests.cpp](../src/ui/media_library_tests.cpp) 补充验证查询与快照行号不同时
+`tests/ui/media_library_tests.cpp` 补充验证查询与快照行号不同时
 的选曲、五种模式跟随光标、真实 TreeView 的可见子节点、展开、空分类与首节点回绕。
 
 切歌断言执行真实命令处理函数，使用延迟播放入口截获选曲，避免依赖音频设备。

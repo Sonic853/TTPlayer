@@ -34,7 +34,7 @@
 
 ## 回归
 
-将换肤测试纳入受 Git 跟踪的 `src/ui/skin_rebind_tests.cpp`，CMake 使用该文件：
+换肤测试位于本地、不上传的 `tests/ui/skin_rebind_tests.cpp`，显式开启本地测试时 CMake 使用该文件：
 
 - 以 HWND 属性标记验证窗口没有被销毁后复用句柄；保留原有 40 个窗口／控件。
 - 禁止在主窗口暂停重绘期间调整主窗口尺寸、Z 顺序或开始附属窗口的重绘事务。

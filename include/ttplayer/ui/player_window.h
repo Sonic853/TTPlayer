@@ -19,6 +19,7 @@
 #include "ttplayer/ui/playlist_selection_policy.h"
 #include "ttplayer/ui/shell_send_to.h"
 #include "ttplayer/ui/taskbar_playback.h"
+#include "ttplayer/ui/taskbar_preview.h"
 
 #include <array>
 #include <atomic>
@@ -785,6 +786,7 @@ private:
     HICON window_icon_big_{};
     bool tray_icon_added_{};
     TaskbarPlaybackControls taskbar_playback_;
+    TaskbarPreview taskbar_preview_;
     HWND playback_tip_window_{};
     std::wstring playback_tip_title_;
     std::wstring playback_tip_body_;

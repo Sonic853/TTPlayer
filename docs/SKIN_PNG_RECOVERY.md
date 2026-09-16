@@ -122,7 +122,7 @@ ctest --test-dir rebuild/out/png-6120 -C Release `
   -R '^(skin_png_tests|skin_rebind_tests)$' --output-on-failure
 ```
 
-`src/skin/skin_png_tests.cpp` 验证：
+`tests/skin/skin_png_tests.cpp` 验证：
 
 - 合成透明/半透明/不透明 PNG、PNG 内容使用 BMP 扩展名、坏图片和图片/流复制生命周期。
 - 真实默认皮肤的全部 **36 张 PNG**（整体透明度 255/128/0）与直接 GDI+ 参考绘制逐像素比较。

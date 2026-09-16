@@ -70,7 +70,7 @@
 
 ## 验证范围
 
-新增 `src/ui/desktop_lyrics_menu_tests.cpp`：使用宿主机 Win32 窗口和
+新增 `tests/ui/desktop_lyrics_menu_tests.cpp`：使用宿主机 Win32 窗口和
 5.7.9 资源，加载与正式程序相同的公共控件 manifest。测试包含：
 
 - 12 个回调提示注册、实际 `TTM_GETTEXTW` 请求、播放/暂停及双状态切换、

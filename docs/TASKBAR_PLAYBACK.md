@@ -6,6 +6,10 @@ player's playback commands, playlist navigation policy and `ttpres.dll` labels.
 
 ## Behavior
 
+Album artwork can now replace the native window image while these transport
+buttons remain available; missing artwork restores the main-window preview.
+See [album preview behavior and validation](TASKBAR_ALBUM_PREVIEW.md).
+
 - Hover the player's Windows taskbar button to show the native thumbnail toolbar:
   previous, play/pause, next. Playback switches the middle icon and tooltip.
 - Previous/next use the main skin controls' playlist-boundary and play-mode

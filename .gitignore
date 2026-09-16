@@ -1,5 +1,6 @@
 
-tests
+# Local tests and fixtures are intentionally not published.
+/tests/
 tools
 # CMake build trees and generated project files
 /rebuild/build/

@@ -97,13 +97,13 @@
   判断焦点是否已在播放，避免误用行号。选择另一首时从当前查询建立播放快照。
 - 保留实际播放来源、持久化模式和 `AdvanceAfterNaturalEnd()` 的自动播放规则。
 - 更新选中策略注释，明确手动下一首也会读取 PlayFollowCursor。
-- Actions 的现代版和兼容版均增加独立切歌回归，无需私有 `tests/` 目录。
+- 独立切歌回归已移至本地 `tests/`，不上传且不在 Actions 中执行。
 
 随机模式仍使用已有随机实现；本次没有重建原版完整随机历史队列。
 
 ## 验证
 
-新增 [playback_navigation_tests.cpp](../src/ui/playback_navigation_tests.cpp)：
+新增 `tests/ui/playback_navigation_tests.cpp`：
 
 - 修复前失败于“非随机模式手动切歌必须前进并回绕”，确认能检出本次故障。
 - 修复后覆盖普通列表／媒体库、模式 0–3、前后两个方向、按钮和菜单命令路径。
@@ -112,7 +112,7 @@
 - 验证单曲循环自然结束仍重复，顺序播放自然结束不回绕，单曲播放结束停止。
 - 验证焦点优先开关、未选中的光标、焦点已在当前歌曲，以及随机模式合法选曲。
 
-[media_library_tests.cpp](../src/ui/media_library_tests.cpp) 另外验证显示查询与播放快照
+`tests/ui/media_library_tests.cpp` 另外验证显示查询与播放快照
 顺序不一致时，下一首正确跟随歌曲身份，上一首不跟随光标。
 
 切歌测试运行实际命令处理和目标选择代码，使用已有的延迟播放入口截获目标，
