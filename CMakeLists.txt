@@ -136,6 +136,19 @@ target_link_libraries(ttplayer_core PUBLIC
   mfplat mfreadwrite mfuuid propsys winhttp
 )
 
+if(NOT TTPLAYER_LEGACY_WINDOWS)
+  target_sources(ttplayer_core PRIVATE src/ui/system_media_controls.cpp)
+  target_link_libraries(ttplayer_core PUBLIC runtimeobject shcore)
+  if(BUILD_TESTING)
+    add_executable(system_media_controls_tests tests/ui/system_media_controls_tests.cpp)
+    target_compile_definitions(system_media_controls_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(system_media_controls_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    target_link_libraries(system_media_controls_tests PRIVATE ttplayer_core)
+    add_test(NAME system_media_controls_tests COMMAND system_media_controls_tests)
+    set_tests_properties(system_media_controls_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+  endif()
+endif()
+
 add_library(ttpcomm_api STATIC src/app/ttpcomm_api.c)
 target_include_directories(ttpcomm_api PUBLIC include)
 target_compile_definitions(ttpcomm_api PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)

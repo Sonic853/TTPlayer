@@ -28,6 +28,8 @@ Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 同步更新校验文件和正文下载说明；原 Actions 构建产物仍保留构建日期名称。
 两种 ZIP 解压后的程序名均为 `TTPlayerRebuild.exe`。
 **XP / Win7 请使用名称中带 XP-Win7 的包**；详见 [兼容版说明](LEGACY_WINDOWS.md)。
+普通版在 Windows 10／11 上支持 [SMTC 系统媒体控件](SMTC.md)，可显示曲目信息和封面并控制播放。
+该功能使用 Windows SDK 自带的 C++/WinRT，不需要额外运行库包；XP／Win7 版不编入该模块。
 完整更新日志链接自动使用仓库中最近的版本 tag 与本次新 tag 对比，例如
 `compare/2026.09.05...2026.09.05p1`。历史版本 tag 必须符合 `yyyy.MM.dd` 或
 `yyyy.MM.ddpN`，按日期和数值补丁号排序（`p10` 晚于 `p2`），不依赖 API 返回顺序。

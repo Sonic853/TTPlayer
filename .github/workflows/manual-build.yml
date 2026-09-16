@@ -114,7 +114,7 @@ jobs:
           $legacyArchive = Join-Path artifact $legacyName
           $package = Join-Path build modern-package
           New-Item -ItemType Directory -Path $package | Out-Null
-          Copy-Item -LiteralPath $executable, LICENSE, docs/BUILDING.md -Destination $package
+          Copy-Item -LiteralPath $executable, LICENSE, docs/BUILDING.md, docs/SMTC.md -Destination $package
           New-Item -ItemType Directory -Path (Join-Path $package 'licenses') | Out-Null
           Copy-Item -LiteralPath docs/licenses/WTL-MS-PL.txt -Destination (Join-Path $package 'licenses')
           $executableHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()

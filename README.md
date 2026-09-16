@@ -21,6 +21,10 @@ and [PORTABLE_FILE_PROPERTIES.md](docs/PORTABLE_FILE_PROPERTIES.md).
 
 Current milestone (0.1):
 
+- [System Media Transport Controls](docs/SMTC.md) in the modern edition on Windows 10/11:
+  track metadata, embedded artwork, playback status and timeline, with play, pause,
+  stop, previous, next and seek commands routed to the existing player;
+
 - native Unicode `wWinMain` reconstructed at the original `004C0E8F` boundary:
   EXE-local `ttpcomm.dll` loading without version pinning, single-instance event/mapping and
   `WM_COPYDATA` forwarding, TLS/OLE/resource/sound/CoolSB lifecycle, followed

@@ -1,6 +1,8 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 
+#include <algorithm>
+
 namespace ttplayer::ui {
 using namespace detail;
 
@@ -26,7 +28,12 @@ TaskbarPlaybackLabels PlayerWindow::TaskbarLabels() const {
 }
 
 void PlayerWindow::UpdateTaskbarPlayback() {
-    static_cast<void>(taskbar_playback_.Update(TaskbarState(), TaskbarLabels()));
+    const auto buttons = TaskbarState();
+    static_cast<void>(taskbar_playback_.Update(buttons, TaskbarLabels()));
+#if !defined(TTPLAYER_LEGACY_WINDOWS)
+    if (!OpenedTrack()) system_media_controls_.Clear();
+    else system_media_controls_.Update(audio_.ClockSnapshot(), buttons, close_after_skin_window_fade_);
+#endif
     const auto state = audio_.State();
     if (state != audio::PlaybackState::playing && state != audio::PlaybackState::paused)
         taskbar_preview_.Clear();
@@ -45,4 +52,41 @@ void PlayerWindow::HandleTaskbarPlaybackClick(WPARAM wparam) {
     }
     RefreshPlaybackUi();
 }
+
+#if !defined(TTPLAYER_LEGACY_WINDOWS)
+void PlayerWindow::HandleSystemMediaCommand(SystemMediaControls::Command command, int64_t position_ms) {
+    // Recheck on the window thread: an input may have arrived during a decoder
+    // change, stop fade, or a nested save-lyrics dialog.
+    if (lyric_save_in_progress_ || close_after_skin_window_fade_ || audio_.StopFadePending()) return;
+    const auto state = audio_.State();
+    if (state == audio::PlaybackState::opening) return;
+    const auto buttons = TaskbarState();
+    using Command = SystemMediaControls::Command;
+    switch (command) {
+    case Command::play:
+        if (!buttons.play_pause_enabled) return;
+        if (state == audio::PlaybackState::paused) audio_.Resume();
+        else if (state != audio::PlaybackState::playing) static_cast<void>(PlayCurrent());
+        break;
+    case Command::pause:
+        if (state == audio::PlaybackState::playing) audio_.Pause();
+        break;
+    case Command::stop:
+        if (state == audio::PlaybackState::playing || state == audio::PlaybackState::paused) Stop();
+        break;
+    case Command::previous:
+        if (buttons.previous_enabled) SelectRelative(false);
+        break;
+    case Command::next:
+        if (buttons.next_enabled) SelectRelative(true);
+        break;
+    case Command::seek:
+        if ((state == audio::PlaybackState::playing || state == audio::PlaybackState::paused) &&
+            audio_.Duration().count() > 0)
+            audio_.Seek(std::chrono::milliseconds(std::clamp<int64_t>(position_ms, 0, audio_.Duration().count())));
+        break;
+    }
+    RefreshPlaybackUi();
+}
+#endif
 } // namespace ttplayer::ui

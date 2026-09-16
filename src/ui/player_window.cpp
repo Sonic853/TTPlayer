@@ -1364,6 +1364,9 @@ PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(se
 }
 
 PlayerWindow::~PlayerWindow() {
+#if !defined(TTPLAYER_LEGACY_WINDOWS)
+    system_media_controls_.Reset();
+#endif
     CancelLocalLyricSearch();
     static_cast<void>(lyric_associations_.Save());
     CloseOnlineLyricSearch();
@@ -2558,6 +2561,15 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         taskbar_preview_.Refresh(window_, true);
         return 0;
     }
+#if !defined(TTPLAYER_LEGACY_WINDOWS)
+    if (const UINT smtc_message = SystemMediaControls::RequestMessage();
+        smtc_message && message == smtc_message) {
+        system_media_controls_.DispatchPending([this](SystemMediaControls::Command command, int64_t position) {
+            HandleSystemMediaCommand(command, position);
+        });
+        return 0;
+    }
+#endif
     if (taskbar_preview_.HandleMessage(message, lparam)) return 0;
     switch (message) {
     case WM_DWMCOMPOSITIONCHANGED:
@@ -3208,6 +3220,9 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         ClosePlaylistConverter(window_);
         taskbar_playback_.Reset();
         taskbar_preview_.Reset();
+#if !defined(TTPLAYER_LEGACY_WINDOWS)
+        system_media_controls_.Reset();
+#endif
         KillTimer(window_, kCloseAudioFadeTimer);
         close_waiting_for_audio_fade_ = false;
         close_skin_window_fade_finished_ = false;
@@ -6107,6 +6122,9 @@ bool PlayerWindow::PlayCurrent() {
     }
     if (!audio_.Play(requested_track.path, requested_track.subtrack)) {
         taskbar_preview_.Clear();
+#if !defined(TTPLAYER_LEGACY_WINDOWS)
+        system_media_controls_.Clear();
+#endif
         playback_source_open_ = false;
         opened_track_.reset();
         if (indexed_playback && PlaybackPlaylist().SetDuration(*current_, -1) &&
@@ -6130,6 +6148,14 @@ bool PlayerWindow::PlayCurrent() {
     opened_track_ = requested_track;
     const auto metadata = audio_.Metadata();
     taskbar_preview_.SetSource(window_, requested_track.path, metadata);
+#if !defined(TTPLAYER_LEGACY_WINDOWS)
+    system_media_controls_.SetSource(window_,
+        metadata.title.empty() ? (requested_track.title.empty()
+            ? requested_track.path.stem().wstring() : core::Utf8ToWide(requested_track.title)) : metadata.title,
+        metadata.artist.empty() ? core::Utf8ToWide(requested_track.artist) : metadata.artist,
+        metadata.album.empty() ? core::Utf8ToWide(requested_track.album) : metadata.album,
+        taskbar_preview_.CoverBitmap());
+#endif
     if (indexed_playback) try {
         bool metadata_changed = PlaybackPlaylist().SetMetadata(
                 *current_,

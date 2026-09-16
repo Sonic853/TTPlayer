@@ -10,6 +10,8 @@ namespace ttplayer::ui {
 // UI-thread owned. All DWM entry points are optional so XP can load the EXE.
 class TaskbarPreview {
 public:
+    // Borrowed until SetSource/Clear/Reset; UI thread only.
+    [[nodiscard]] HBITMAP CoverBitmap() const noexcept { return cover_; }
     struct Api {
         HRESULT (WINAPI* composition)(BOOL*);
         HRESULT (WINAPI* attribute)(HWND, DWORD, LPCVOID, DWORD);
