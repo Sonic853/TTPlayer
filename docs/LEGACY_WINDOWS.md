@@ -19,6 +19,9 @@
   Windows Media Format（`wmvcore.dll`），其它格式仍优先使用原版 AddIn。
   精简系统需要保留 Windows Media 运行组件；后备解码器不提供新的编解码器。
 - XP 不提供任务栏缩略图按钮、DWM 合成等系统功能。Shell 元数据不可用时保留其它元数据读取路径。
+- XP / Win7 的“系统关联”按原版直接设置当前用户的文件关联，取消时恢复本程序
+  保存的旧关联，不再依赖 `SetAppAsDefault`。兼容 EXE 在 Win8 及以后运行时仍
+  使用系统默认程序确认流程。详见源码仓库 `docs/LEGACY_FILE_ASSOCIATION_FIX.md`。
 - 在线服务仍取决于系统 WinHTTP、证书和 TLS 能力。未给 XP 添加 TLS 1.2 实现，
   不通过降低 HTTPS 安全级别或忽略证书错误实现连接。HTTP 可用；不支持安全重定向策略的系统禁用自动跳转。
 

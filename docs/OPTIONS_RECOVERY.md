@@ -405,7 +405,8 @@ CD、文件夹、启动检查三个普通 checkbox 仍按原资源模板绘制�
 
 | 系统 | 设置关联/查看入口 |
 | --- | --- |
-| Vista / Win7 | 注册候选后调用 `IApplicationAssociationRegistration::SetAppAsDefault`；手动入口调用 `LaunchAdvancedAssociationUI` |
+| XP | 按原版直接设置每用户关联并处理 Explorer 旧覆盖项；手动入口打开文件夹选项 |
+| Vista / Win7 | 按原版直接设置关联并清理旧 `UserChoice` 子项，保存恢复信息；手动入口调用 `LaunchAdvancedAssociationUI` |
 | Win8 / 8.1 | 注册候选，调用 `LaunchAdvancedAssociationUI`，由用户确认默认程序 |
 | Win10 / 早期 Win11 | 注册候选，进入 `ms-settings:defaultapps` |
 | 更新后的 Win11 | 进入 `ms-settings:defaultapps?registeredAppUser=TTPlayerRebuild`；失败时降级为通用页面 |
@@ -414,7 +415,10 @@ Win11 定向入口的版本门槛为 22000.1817、22621.1555 或更新发布版�
 都有错误反馈和控制面板回退。`2282` 提示文本改为“前往查看系统关联”，
 右侧 `2281`“手动设置关联”按钮保留。最初实现在关闭/保存时提示系统确认；
 2026-09-15 按用户要求改为勾选后立即提交并提示，见下节。
-取消某种已关联格式同样需要用户在系统界面选择其它处理程序。
+Win8 及以后取消某种已关联格式同样需要用户在系统界面选择其它处理程序。
+XP / Win7 已在 2026-09-17 恢复直接设置与备份恢复路径，移除对
+`SetAppAsDefault` 的依赖；原版函数对照、权限处理及验证范围见
+[XP / Win7 系统关联修复](LEGACY_FILE_ASSOCIATION_FIX.md)。
 不会在自动启动检查中反复弹出系统设置，仅在用户新确认的操作后打开。
 
 依据：微软 [默认程序注册](https://learn.microsoft.com/en-us/windows/win32/shell/default-programs)、

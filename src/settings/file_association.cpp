@@ -259,9 +259,21 @@ struct ManagedChange {
     return Quote(executable.wstring()) + L",0";
 }
 
-[[nodiscard]] ManagedChange InstallManagedDefault(
-    std::wstring_view path, std::wstring_view value,
+struct ManagedValueNames {
+    std::wstring owner{kOwnerValue}, installed{kInstalledValue}, backup{kBackupValue};
+    std::wstring backup_present{kBackupPresentValue}, key_existed{kKeyExistedValue};
+    std::wstring installed_present{L"TTPlayer.Rebuild.InstalledPresent"};
+    explicit ManagedValueNames(const wchar_t* value_name) {
+        if (!value_name) return;
+        for (auto* name : {&owner, &installed, &backup, &backup_present, &key_existed, &installed_present})
+            *name += L"." + std::wstring(value_name);
+    }
+};
+
+[[nodiscard]] ManagedChange InstallManagedValue(
+    std::wstring_view path, const wchar_t* value_name, const std::optional<std::wstring>& value,
     std::wstring_view owner_identity) {
+    const ManagedValueNames names(value_name);
     UniqueRegKey key;
     bool key_existed = false;
     LONG status = CreateKey(path, key, key_existed);
@@ -272,7 +284,7 @@ struct ManagedChange {
     }
 
     std::optional<std::wstring> owner;
-    status = ReadStringValue(key.get(), kOwnerValue, owner);
+    status = ReadStringValue(key.get(), names.owner.c_str(), owner);
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
         return {Win32Failure(FileAssociationError::registry,
                              L"read association owner", status), false};
@@ -284,7 +296,7 @@ struct ManagedChange {
     }
 
     std::optional<std::wstring> previous;
-    status = ReadStringValue(key.get(), nullptr, previous);
+    status = ReadStringValue(key.get(), value_name, previous);
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
         return {Win32Failure(FileAssociationError::registry,
                              L"read registry default value", status), false};
@@ -292,44 +304,49 @@ struct ManagedChange {
 
     if (!owner) {
         if (previous) {
-            status = WriteStringValue(key.get(), kBackupValue, *previous);
+            status = WriteStringValue(key.get(), names.backup.c_str(), *previous);
             if (status != ERROR_SUCCESS)
                 return {Win32Failure(FileAssociationError::registry,
                                      L"save registry default backup", status),
                         false};
         } else {
-            status = DeleteValueIfPresent(key.get(), kBackupValue);
+            status = DeleteValueIfPresent(key.get(), names.backup.c_str());
             if (status != ERROR_SUCCESS)
                 return {Win32Failure(FileAssociationError::registry,
                                      L"clear stale registry backup", status),
                         false};
         }
-        status = WriteDwordValue(key.get(), kBackupPresentValue,
+        status = WriteDwordValue(key.get(), names.backup_present.c_str(),
                                  previous ? 1U : 0U);
         if (status == ERROR_SUCCESS)
-            status = WriteDwordValue(key.get(), kKeyExistedValue,
+            status = WriteDwordValue(key.get(), names.key_existed.c_str(),
                                      key_existed ? 1U : 0U);
         if (status == ERROR_SUCCESS)
-            status = WriteStringValue(key.get(), kOwnerValue, owner_identity);
+            status = WriteStringValue(key.get(), names.owner.c_str(), owner_identity);
         if (status != ERROR_SUCCESS)
             return {Win32Failure(FileAssociationError::registry,
                                  L"save association ownership metadata", status),
                     false};
     }
 
-    status = WriteStringValue(key.get(), kInstalledValue, value);
+    status = value ? WriteStringValue(key.get(), names.installed.c_str(), *value)
+                   : DeleteValueIfPresent(key.get(), names.installed.c_str());
     if (status == ERROR_SUCCESS)
-        status = WriteStringValue(key.get(), nullptr, value);
+        status = WriteDwordValue(key.get(), names.installed_present.c_str(), value ? 1U : 0U);
+    if (status == ERROR_SUCCESS)
+        status = value ? WriteStringValue(key.get(), value_name, *value)
+                       : DeleteValueIfPresent(key.get(), value_name);
     if (status != ERROR_SUCCESS) {
         return {Win32Failure(FileAssociationError::registry,
                              L"write registry default value", status), false};
     }
-    return {Success(!previous || *previous != value),
-            !previous || *previous != value};
+    return {Success(previous != value), previous != value};
 }
 
-[[nodiscard]] ManagedChange RestoreManagedDefault(
-    std::wstring_view path, std::wstring_view owner_identity) {
+[[nodiscard]] ManagedChange RestoreManagedValue(
+    std::wstring_view path, const wchar_t* value_name, std::wstring_view owner_identity,
+    bool restore_previous = true) {
+    const ManagedValueNames names(value_name);
     UniqueRegKey key;
     LONG status = OpenKey(path, KEY_QUERY_VALUE | KEY_SET_VALUE |
                                     KEY_ENUMERATE_SUB_KEYS,
@@ -342,7 +359,7 @@ struct ManagedChange {
     }
 
     std::optional<std::wstring> owner;
-    status = ReadStringValue(key.get(), kOwnerValue, owner);
+    status = ReadStringValue(key.get(), names.owner.c_str(), owner);
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
         return {Win32Failure(FileAssociationError::registry,
                              L"read association owner", status), false};
@@ -357,21 +374,25 @@ struct ManagedChange {
     std::optional<std::wstring> backup;
     std::optional<DWORD> backup_present;
     std::optional<DWORD> key_existed;
+    std::optional<DWORD> installed_present;
     const auto read_optional_string = [&](const wchar_t* name,
                                           std::optional<std::wstring>& target) {
         const LONG result = ReadStringValue(key.get(), name, target);
         return result == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : result;
     };
-    status = read_optional_string(nullptr, current);
+    status = read_optional_string(value_name, current);
     if (status == ERROR_SUCCESS)
-        status = read_optional_string(kInstalledValue, installed);
+        status = read_optional_string(names.installed.c_str(), installed);
     if (status == ERROR_SUCCESS)
-        status = read_optional_string(kBackupValue, backup);
-    LONG value_status = ReadDwordValue(key.get(), kBackupPresentValue,
+        status = read_optional_string(names.backup.c_str(), backup);
+    LONG value_status = ReadDwordValue(key.get(), names.backup_present.c_str(),
                                        backup_present);
     if (value_status != ERROR_SUCCESS && value_status != ERROR_FILE_NOT_FOUND)
         status = value_status;
-    value_status = ReadDwordValue(key.get(), kKeyExistedValue, key_existed);
+    value_status = ReadDwordValue(key.get(), names.key_existed.c_str(), key_existed);
+    if (value_status != ERROR_SUCCESS && value_status != ERROR_FILE_NOT_FOUND)
+        status = value_status;
+    value_status = ReadDwordValue(key.get(), names.installed_present.c_str(), installed_present);
     if (value_status != ERROR_SUCCESS && value_status != ERROR_FILE_NOT_FOUND)
         status = value_status;
     if (status != ERROR_SUCCESS) {
@@ -383,11 +404,15 @@ struct ManagedChange {
     bool changed = false;
     // Do not overwrite a default which the user or Windows changed after this
     // backend installed it (notably a protected UserChoice transition).
-    if (installed && current && *installed == *current) {
+    // Older builds did not write InstalledPresent. They always installed a
+    // string. New named-value transactions can also own a deliberate deletion.
+    if (restore_previous &&
+        installed_present.value_or(installed ? 1U : MAXDWORD) == (installed ? 1U : 0U) &&
+        current == installed) {
         if (backup_present.value_or(0U) != 0U && backup) {
-            status = WriteStringValue(key.get(), nullptr, *backup);
+            status = WriteStringValue(key.get(), value_name, *backup);
         } else {
-            status = RegDeleteValueW(key.get(), nullptr);
+            status = RegDeleteValueW(key.get(), value_name);
             if (status == ERROR_FILE_NOT_FOUND) status = ERROR_SUCCESS;
         }
         if (status != ERROR_SUCCESS) {
@@ -395,11 +420,11 @@ struct ManagedChange {
                                  L"restore registry default value", status),
                     false};
         }
-        changed = true;
+        changed = current != (backup_present.value_or(0U) != 0U ? backup : std::nullopt);
     }
 
-    for (const wchar_t* name : {kOwnerValue, kInstalledValue, kBackupValue,
-                                kBackupPresentValue, kKeyExistedValue}) {
+    for (const wchar_t* name : {names.owner.c_str(), names.installed.c_str(), names.backup.c_str(),
+                                names.backup_present.c_str(), names.key_existed.c_str(), names.installed_present.c_str()}) {
         status = DeleteValueIfPresent(key.get(), name);
         if (status != ERROR_SUCCESS) {
             auto failure = Win32Failure(FileAssociationError::registry,
@@ -426,6 +451,112 @@ struct ManagedChange {
                     changed};
         }
         changed = true;
+    }
+    return {Success(changed), changed};
+}
+
+[[nodiscard]] ManagedChange InstallManagedDefault(
+    std::wstring_view path, std::wstring_view value, std::wstring_view owner) {
+    return InstallManagedValue(path, nullptr, std::wstring(value), owner);
+}
+
+[[nodiscard]] ManagedChange RestoreManagedDefault(
+    std::wstring_view path, std::wstring_view owner) {
+    return RestoreManagedValue(path, nullptr, owner);
+}
+
+// FUN_0049bb64 deletes the Vista/Win7 UserChoice KEY. Deleting its Progid
+// value instead requires KEY_SET_VALUE, which the shell can deny. Keep our
+// backup outside UserChoice so neither registration nor removal needs that
+// permission on an existing choice. Never call this on Windows 8 or newer.
+[[nodiscard]] ManagedChange ManageLegacyUserChoice(
+    const std::wstring& path, const std::wstring& backup_path,
+    std::wstring_view owner_identity, bool enabled, bool restore_previous) {
+    const auto failure = [](std::wstring operation, LONG error, bool changed = false) {
+        auto result = Win32Failure(FileAssociationError::registry, std::move(operation), error);
+        result.changed = changed;
+        return ManagedChange{std::move(result), changed};
+    };
+    UniqueRegKey choice;
+    LONG status = OpenKey(path, KEY_QUERY_VALUE, choice);
+    const bool choice_exists = status == ERROR_SUCCESS;
+    if (!choice_exists && status != ERROR_FILE_NOT_FOUND)
+        return failure(L"read legacy UserChoice", status);
+    std::optional<std::wstring> current;
+    if (choice_exists) {
+        status = ReadStringValue(choice.get(), L"Progid", current);
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+            return failure(L"read legacy UserChoice Progid", status);
+    }
+    choice.reset();
+
+    UniqueRegKey backup;
+    status = OpenKey(backup_path, KEY_QUERY_VALUE | KEY_SET_VALUE, backup);
+    if (status == ERROR_FILE_NOT_FOUND) {
+        if (!enabled || !choice_exists) return {Success(), false};
+        bool existed{};
+        status = CreateKey(backup_path, backup, existed);
+    }
+    if (status != ERROR_SUCCESS) return failure(L"open legacy UserChoice backup", status);
+    std::optional<std::wstring> owner;
+    status = ReadStringValue(backup.get(), kOwnerValue, owner);
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+        return failure(L"read legacy UserChoice backup owner", status);
+    if (owner && !EqualInsensitive(*owner, owner_identity)) {
+        if (!enabled) return {Success(), false};
+        return failure(L"legacy UserChoice backup belongs to another installation", ERROR_SHARING_VIOLATION);
+    }
+    if (!owner) {
+        if (!enabled) return {Success(), false};
+        status = current ? WriteStringValue(backup.get(), kBackupValue, *current)
+                         : DeleteValueIfPresent(backup.get(), kBackupValue);
+        if (status == ERROR_SUCCESS)
+            status = WriteStringValue(backup.get(), kOwnerValue, owner_identity);
+        if (status != ERROR_SUCCESS) return failure(L"save legacy UserChoice backup", status);
+    }
+    if (enabled) {
+        if (!choice_exists) return {Success(), false};
+        status = RegDeleteKeyW(HKEY_CURRENT_USER, path.c_str());
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+            return failure(L"remove legacy UserChoice key", status);
+        return {Success(true), true};
+    }
+
+    bool changed = false;
+    // An existing key is a later selection made in Windows: leave it alone.
+    if (!choice_exists && restore_previous) {
+        std::optional<std::wstring> previous;
+        status = ReadStringValue(backup.get(), kBackupValue, previous);
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+            return failure(L"read legacy UserChoice backup", status);
+        if (previous) {
+            bool existed{};
+            status = CreateKey(path, choice, existed);
+            if (status == ERROR_SUCCESS && !existed) {
+                status = WriteStringValue(choice.get(), L"Progid", *previous);
+                changed = status == ERROR_SUCCESS;
+                if (status != ERROR_SUCCESS) {
+                    choice.reset();
+                    // Keep the backup retryable if creating the value failed.
+                    RegDeleteKeyW(HKEY_CURRENT_USER, path.c_str());
+                }
+            }
+            if (status != ERROR_SUCCESS) return failure(L"restore legacy UserChoice", status);
+        }
+    }
+    for (const auto* name : {kOwnerValue, kBackupValue}) {
+        status = DeleteValueIfPresent(backup.get(), name);
+        if (status != ERROR_SUCCESS) return failure(L"clear legacy UserChoice backup", status, changed);
+    }
+    DWORD subkeys{}, values{};
+    status = RegQueryInfoKeyW(backup.get(), nullptr, nullptr, nullptr, &subkeys,
+        nullptr, nullptr, &values, nullptr, nullptr, nullptr, nullptr);
+    const bool empty = status == ERROR_SUCCESS && subkeys == 0 && values == 0;
+    backup.reset();
+    if (empty) {
+        status = RegDeleteKeyW(HKEY_CURRENT_USER, backup_path.c_str());
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+            return failure(L"remove legacy UserChoice backup", status, changed);
     }
     return {Success(changed), changed};
 }
@@ -474,6 +605,20 @@ OSVERSIONINFOW AssociationWindowsVersion() {
         GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
     if (!get_version || get_version(&info) != 0) info.dwMajorVersion = 10;
     return info; // Failure must never enable the obsolete default-setting API.
+}
+
+FileAssociationMode AssociationMode(const FileAssociationBackendOptions& options) {
+    if (!IsRealClassesStore(options.current_user_classes_subkey)) return options.isolated_mode;
+    const auto version = AssociationWindowsVersion();
+    return SelectFileAssociationMode(version.dwMajorVersion, version.dwMinorVersion);
+}
+
+std::wstring ExplorerExtensionPath(const FileAssociationBackendOptions& options,
+                                   std::wstring_view extension) {
+    return JoinRegistryPath(IsRealClassesStore(options.current_user_classes_subkey)
+        ? L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts"
+        : JoinRegistryPath(options.current_user_classes_subkey, L"ExplorerFileExts"),
+        L"." + std::wstring(extension));
 }
 
 std::wstring CapabilitiesPath(const FileAssociationBackendOptions& options) {
@@ -767,7 +912,56 @@ FileAssociationResult FileAssociationBackend::SetLegacyExtensionAssociation(
                                    ? InstallManagedDefault(path, value, owner)
                                    : RestoreManagedDefault(path, owner);
         changed = changed || change.changed;
+        change.result.changed = changed;
         return change.result;
+    };
+
+    const auto mode = AssociationMode(options_);
+    bool restore_overrides = true;
+    if (!enabled && mode != FileAssociationMode::user_choice) {
+        std::wstring current_default;
+        bool present{};
+        const auto read = ReadDefaultAt(extension_key, current_default, present);
+        if (!read) return read;
+        // Restoring an old Explorer override would mask a later .ext choice.
+        restore_overrides = present && EqualInsensitive(current_default, prog_id);
+        if (mode == FileAssociationMode::vista_windows7) {
+            UniqueRegKey choice;
+            const auto status = OpenKey(ExplorerExtensionPath(options_, normalized) + L"\\UserChoice",
+                                         KEY_QUERY_VALUE, choice);
+            if (status == ERROR_SUCCESS) restore_overrides = false;
+            else if (status != ERROR_FILE_NOT_FOUND)
+                return Win32Failure(FileAssociationError::registry, L"read later legacy UserChoice", status);
+        }
+    }
+    const auto update_overrides = [&]() {
+        // /unreg also calls this routine on newer Windows to restore owned
+        // Classes values. That must never permit changes to modern UserChoice.
+        if (mode == FileAssociationMode::user_choice) return Success();
+        const auto explorer_key = ExplorerExtensionPath(options_, normalized);
+        // Restore in reverse installation order so a newly created empty
+        // FileExts key can be removed by its first value's ownership record.
+        if (!enabled && mode == FileAssociationMode::vista_windows7) {
+            auto update = ManageLegacyUserChoice(explorer_key + L"\\UserChoice",
+                class_key + L"\\LegacyUserChoiceBackup", owner, false, restore_overrides);
+            changed = changed || update.changed;
+            if (!update.result) { update.result.changed = changed; return update.result; }
+        }
+        for (const auto* name : {enabled ? L"Application" : L"Progid",
+                                 enabled ? L"Progid" : L"Application"}) {
+            auto update = enabled
+                ? InstallManagedValue(explorer_key, name, std::nullopt, owner)
+                : RestoreManagedValue(explorer_key, name, owner, restore_overrides);
+            changed = changed || update.changed;
+            if (!update.result) { update.result.changed = changed; return update.result; }
+        }
+        if (enabled && mode == FileAssociationMode::vista_windows7) {
+            auto update = ManageLegacyUserChoice(explorer_key + L"\\UserChoice",
+                class_key + L"\\LegacyUserChoiceBackup", owner, true, false);
+            changed = changed || update.changed;
+            if (!update.result) { update.result.changed = changed; return update.result; }
+        }
+        return Success(changed);
     };
 
     FileAssociationResult result;
@@ -780,7 +974,6 @@ FileAssociationResult FileAssociationBackend::SetLegacyExtensionAssociation(
                                             ? DefaultIcon(executable_)
                                             : std::wstring(icon);
         const std::array<std::pair<std::wstring, std::wstring>, 8> entries{{
-            {extension_key, prog_id},
             {class_key, type_description},
             {JoinRegistryPath(class_key, L"DefaultIcon"), icon_value},
             {shell_key, L"open"},
@@ -792,12 +985,18 @@ FileAssociationResult FileAssociationBackend::SetLegacyExtensionAssociation(
                                : labels.add_to_playlist},
             {JoinRegistryPath(playlist_key, L"command"),
              OpenCommand(executable_, true)},
+            // Publish the default only after its icon and commands exist.
+            {extension_key, prog_id},
         }};
         for (const auto& entry : entries) {
             result = apply(entry.first, entry.second);
             if (!result) return result;
         }
+        result = update_overrides();
+        if (!result) return result;
     } else {
+        result = update_overrides();
+        if (!result) return result;
         const std::array<std::wstring, 8> paths{
             JoinRegistryPath(playlist_key, L"command"), playlist_key,
             JoinRegistryPath(open_key, L"command"), open_key, shell_key,
@@ -840,8 +1039,15 @@ FileAssociationResult FileAssociationBackend::SetExtensionIcon(
     return change.result;
 }
 
+FileAssociationMode SelectFileAssociationMode(DWORD major, DWORD minor) noexcept {
+    if (major < 6) return FileAssociationMode::xp;
+    if (major == 6 && minor < 2) return FileAssociationMode::vista_windows7;
+    return FileAssociationMode::user_choice;
+}
+
 DefaultAppsTarget SelectDefaultAppsTarget(DWORD major, DWORD minor, DWORD build, DWORD revision) noexcept {
     (void)minor;
+    if (major < 6) return DefaultAppsTarget::folder_options;
     if (major < 10) return DefaultAppsTarget::control_panel;
     if (build >= 22631 || (build == 22621 && revision >= 1555) ||
         (build == 22000 && revision >= 1817)) return DefaultAppsTarget::application_settings;
@@ -887,7 +1093,7 @@ FileAssociationResult FileAssociationBackend::RegisterApplication(
         return result;
     };
     for (const auto& [name, value] : std::vector<std::pair<const wchar_t*,std::wstring>>{
-        {kOwnerValue, executable_.wstring()}, {L"ApplicationName", application_name_ + L" (TTPlayerRebuild)"},
+        {kOwnerValue, executable_.wstring()}, {L"ApplicationName", L"TTPlayerRebuild"},
         {L"ApplicationDescription", application_name_ + L" - audio and playlist player"},
         {L"ApplicationIcon", DefaultIcon(executable_)}}) {
         const auto result = write(capabilities, name, value);
@@ -934,7 +1140,7 @@ FileAssociationResult FileAssociationBackend::RegisterApplication(
 FileAssociationResult FileAssociationBackend::SetExtensionAssociation(
     std::wstring_view extension, bool enabled, std::wstring_view description,
     std::wstring_view icon, const ShellVerbLabels& labels) {
-    if (!IsRealClassesStore(options_.current_user_classes_subkey))
+    if (AssociationMode(options_) != FileAssociationMode::user_choice)
         return SetLegacyExtensionAssociation(extension, enabled, description, icon, labels);
     const auto normalized = NormalizeExtension(extension);
     if (normalized.empty()) return Invalid(L"set extension association", L"invalid extension");
@@ -954,18 +1160,6 @@ FileAssociationResult FileAssociationBackend::SetExtensionAssociation(
                 labels.add_to_playlist, executable_.wstring());
             if (!update.result) return update.result;
             result.changed = result.changed || update.changed;
-        }
-        const auto version = AssociationWindowsVersion();
-        if (version.dwMajorVersion == 6 && version.dwMinorVersion < 2) {
-            IApplicationAssociationRegistration* raw = nullptr;
-            HRESULT hr = CoCreateInstance(CLSID_ApplicationAssociationRegistration, nullptr,
-                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&raw));
-            UniqueComPtr<IApplicationAssociationRegistration> registration(raw);
-            if (SUCCEEDED(hr)) hr = registration->SetAppAsDefault(
-                L"TTPlayerRebuild", (L"." + normalized).c_str(), AT_FILEEXTENSION);
-            if (FAILED(hr)) return HResultFailure(FileAssociationError::com, L"SetAppAsDefault", hr);
-            result.changed = true;
-            if (options_.notify_shell) NotifyShellAssociationsChanged();
         }
     }
     const auto query = QueryExtension(normalized);
@@ -999,14 +1193,14 @@ FileAssociationResult FileAssociationBackend::OpenDefaultPrograms(HWND owner) co
         return ShellExecuteExW(&info) ? Success() : Win32Failure(
             FileAssociationError::shell, L"open system default programs", GetLastError());
     };
-    if (target != DefaultAppsTarget::control_panel) {
+    if (target == DefaultAppsTarget::settings || target == DefaultAppsTarget::application_settings) {
         auto result = launch(target == DefaultAppsTarget::application_settings
             ? L"ms-settings:defaultapps?registeredAppUser=TTPlayerRebuild"
             : L"ms-settings:defaultapps", nullptr);
         if (result) return result;
         result = launch(L"ms-settings:defaultapps", nullptr);
         if (result) return result;
-    } else {
+    } else if (target == DefaultAppsTarget::control_panel) {
         IApplicationAssociationRegistrationUI* raw_ui = nullptr;
         HRESULT hr = CoCreateInstance(CLSID_ApplicationAssociationRegistrationUI, nullptr,
             CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&raw_ui));
@@ -1018,7 +1212,8 @@ FileAssociationResult FileAssociationBackend::OpenDefaultPrograms(HWND owner) co
     if (!GetSystemDirectoryW(system, MAX_PATH))
         return Win32Failure(FileAssociationError::shell, L"GetSystemDirectoryW", GetLastError());
     const auto control = std::filesystem::path(system) / L"control.exe";
-    return launch(control.c_str(), L"/name Microsoft.DefaultPrograms /page pageDefaultProgram");
+    return launch(control.c_str(), target == DefaultAppsTarget::folder_options
+        ? L"folders" : L"/name Microsoft.DefaultPrograms /page pageDefaultProgram");
 }
 
 FileAssociationResult FileAssociationBackend::UnregisterApplication(

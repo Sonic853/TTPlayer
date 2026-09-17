@@ -112,6 +112,9 @@ struct ShortcutQuery {
     std::filesystem::path path;
 };
 
+enum class FileAssociationMode { xp, vista_windows7, user_choice };
+[[nodiscard]] FileAssociationMode SelectFileAssociationMode(DWORD major, DWORD minor) noexcept;
+
 struct FileAssociationBackendOptions {
     // Exposed primarily so isolated Windows-Sandbox tests can redirect all
     // registry traffic away from the live shell classes.  Production callers
@@ -120,9 +123,12 @@ struct FileAssociationBackendOptions {
     // Do not overwrite the original player's shared Audio.* ProgIDs.
     std::wstring prog_id_prefix{L"TTPlayerRebuild.Audio"};
     bool notify_shell{true};
+    // Only for isolated registry stores. The live store ALWAYS uses the real
+    // running OS, including when the XP/Win7 binary is started on Windows 10.
+    FileAssociationMode isolated_mode{FileAssociationMode::xp};
 };
 
-enum class DefaultAppsTarget { control_panel, settings, application_settings };
+enum class DefaultAppsTarget { control_panel, settings, application_settings, folder_options };
 [[nodiscard]] DefaultAppsTarget SelectDefaultAppsTarget(
     DWORD major, DWORD minor, DWORD build, DWORD revision = 0) noexcept;
 
@@ -138,7 +144,8 @@ public:
 
     // description is the reader-supplied type text shown in Explorer.
     // icon may be a complete DefaultIcon value.  An empty icon uses
-    // "<executable>,0". Win7 uses SetAppAsDefault after registration. Windows
+    // "<executable>,0". XP/Vista/Win7 use the original direct association
+    // path, with owned backups for Explorer's legacy overrides. Windows
     // 8+ requires user choice; success with requires_user_choice does NOT mean
     // the effective default changed. An unchecked effective default also needs
     // a replacement chosen in Windows. Isolated stores retain the legacy
