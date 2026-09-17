@@ -18,7 +18,8 @@ git submodule update --init --recursive -- tests
 
 本地 `rebuild` 是独立 Git 仓库；它在 GitHub 上就是仓库根目录。
 工作流位于 `.github/workflows/manual-build.yml`，不配置 push/PR 自动触发，
-默认只构建；可勾选 **Release a Version** 在构建成功后发布版本，不推送源码。
+默认只构建；可勾选 **Release a Version (GitHub)** 或 **Publish Release to Gitee**
+在构建成功后发布版本。两个选项相互独立，可同时勾选，不推送源码。
 
 1. 将工作流及配套构建文件提交到远程仓库的默认分支。
 2. 打开 **Actions → Manual Windows Build → Run workflow**。
@@ -28,12 +29,14 @@ git submodule update --init --recursive -- tests
    其中包含 `TTPlayerRebuild-yyyy.MM.dd.zip` 和
    `TTPlayerRebuild-XP-Win7-yyyy.MM.dd.zip`，日期取构建开始时的北京时间。
 
-如需发布，选择 `Release` 配置并勾选 **Release a Version**，不需要输入版本号。
+如需发布，选择 `Release` 配置并勾选对应平台，不需要输入版本号。
 在构建任务开始时记录北京时间（UTC+08:00）的日期，版本号和 Release 标题使用
 `yyyy.MM.dd`（例如 `2026.09.05`，不加 `v`）。同一天已有 tag 或 Release 时，按当天
 最大补丁号加一：`2026.09.05` → `2026.09.05p1` → `2026.09.05p2`，不复用中间空号。
 草稿 Release 也占用版本号。发布任务串行执行，在获得发布名额后重新分页读取全部
-tag/Release；新标签始终指向本次构建提交，不移动旧标签、不覆盖已有 Release。
+GitHub tag/Release；勾选 Gitee 时还会分页读取 Gitee tag/Release，把两边已有
+版本一起计入占用范围。两个平台同时发布时使用同一个新版本号和相同附件。
+新标签始终指向本次构建提交，不移动旧标签、不覆盖已有 Release。
 Debug / RelWithDebInfo 仍可只构建，不用于发布；每次工作流也会额外构建旧系统 Release 版。
 Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 `TTPlayerRebuild-XP-Win7-版本号.zip` 与包含两个 ZIP 校验值的 `SHA256SUMS.txt`。
@@ -48,12 +51,45 @@ Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 `compare/2026.09.05...2026.09.05p1`。历史版本 tag 必须符合 `yyyy.MM.dd` 或
 `yyyy.MM.ddpN`，按日期和数值补丁号排序（`p10` 晚于 `p2`），不依赖 API 返回顺序。
 若还没有符合规则的历史 tag，则链接到 `commits/本次版本`，不生成无效对比链接。
+只发布 Gitee 时，GitHub 更新日志链接的终点使用本次提交 SHA，因为该操作
+不会在 GitHub 上创建同名 tag。
 正文安装说明明确区分现代版与旧系统版，不自动追加 GitHub 生成的说明。
 
+### Gitee 发布
+
+在仓库 **Settings → Secrets and variables → Actions** 配置：
+
+- `GITEE_REPO`：目标仓库的 `owner/repo`；CLI 也接受完整 Gitee 仓库 URL。
+- `GITEE_TOKEN`：对目标仓库有 Release 创建和附件上传权限的 Gitee 令牌。
+
+已配置这两个 secrets 后，运行工作流时选择 `Release`，勾选
+**Publish Release to Gitee** 即可；无需同时勾选 GitHub 发布。
+勾选任一发布选项但选择 Debug / RelWithDebInfo 时，会在构建前报错。
+
+目标 Gitee 仓库必须已经包含本次 GitHub 构建的提交 SHA，例如通过已有镜像同步。
+发布命令显式传入该 SHA，避免 Release 标签与二进制所用源码不一致；工作流不
+推送源码，也不自动改用 Gitee 分支的最新提交。Gitee 缺少该提交时，需先完成同步。
+
+工作流使用 [gitee-release-cli-rust](https://github.com/Sonic853/gitee-release-cli-rust)，
+固定源码提交 `9993cd79d512e16c6586384cd83acbeaaf15a723`。仅勾选 Gitee 时检出并
+构建 CLI；此提交未包含 `Cargo.lock`，故先生成依赖锁文件，再以 `--locked`
+构建 `gitee-release-rs`，不运行 CLI 测试。令牌通过环境变量注入，不放在命令参数中。
+
+根据 CLI 的[创建与附件接口](https://github.com/Sonic853/gitee-release-cli-rust/blob/9993cd79d512e16c6586384cd83acbeaaf15a723/docs/rust-cli.md)，
+先创建 Release，校验返回的 ID 和 tag，再使用该 ID 上传普通版 ZIP、XP / Win7
+版 ZIP、`SHA256SUMS.txt`。创建或任一上传失败都会使任务失败，不会自动删除
+已经成功发布的版本或覆盖旧附件。日志会记录成功创建的 Release ID，便于补传
+缺失附件；重新运行整套发布流程会分配下一个可用版本号。
+
 本地可手动运行 `tests/cmake/test_manual_release.ps1`，离线检查北京时间边界、同日补丁号、
-动态对比链接、安装说明和模拟发布保护逻辑，包括两个附件的 SHA-256 和 Release 配置。
+动态对比链接、安装说明和模拟发布保护逻辑，包括两个附件的 SHA-256 和 Release 配置，
+以及 GitHub / Gitee 单独发布、同时发布、Gitee 版本占用、凭据缺失和上传失败。
 同时用隔离目录实际打包、解压两个版本，检查 ZIP 内容、版本化文件名及内外校验文件。
 该脚本位于测试子模块，Actions 不运行它；测试不调用远程 API，不创建标签或 Release。
+`tests/cmake/test_gitee_release_http.py --cli <gitee-release-rs.exe>` 还可在本地用实际
+CLI 连接回环 HTTP 服务，验证跨页版本号、中文正文、三个附件内容及上传失败中止。
+本次 Action 改动已通过 actionlint、12 项日期 / 配置用例、36 项模拟发布用例、
+2 项实际 ZIP 打包用例及上述 2 项 HTTP 集成用例；未执行线上发布。
 
 工作流必须先存在于默认分支，手动运行入口才会显示，见
 [GitHub 手动运行工作流说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。
@@ -61,7 +97,8 @@ Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 使用 `windows-2025-vs2026`、Visual Studio 2026、Win32/x86；不构建 x64，
 因为现有 DLL/AddIn ABI 为 32 位。构建任务只有 `contents: read` 权限，
 仅勾选发布时运行的独立发布任务使用 `contents: write`，通过内置 `GITHUB_TOKEN` 发布。
-官方 checkout/upload-artifact/download-artifact 动作固定到提交 SHA，不需要额外 secrets。
+官方 checkout/upload-artifact/download-artifact 动作固定到提交 SHA。GitHub 发布使用
+内置令牌；Gitee 发布读取上文的两个 secrets。
 
 `windows-2025` 已迁移到 VS 2026 镜像，因此不能再配合写死的
 `Visual Studio 17 2022` 生成器。工作流明确选择 VS 2026 镜像和
