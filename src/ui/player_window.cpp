@@ -2553,6 +2553,9 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         taskbar_playback_.Reset();
         tray_icon_added_ = false;
         UpdateTrayIcon();
+        // Explorer lost the fullscreen marks for the detached partial-screen
+        // surfaces along with its taskbar state. Republish without activation.
+        if (fullscreen_mode_ != 0) UpdateFullScreenLayout();
         return 0;
     }
     if (message == taskbar_button_created) {

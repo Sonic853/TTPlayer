@@ -21,6 +21,7 @@
 #include <vector>
 
 #include <olectl.h>
+#include <shobjidl.h>
 #include <shlwapi.h>
 #include <wincodec.h>
 #include <windowsx.h>
@@ -31,6 +32,23 @@ namespace {
 
 constexpr size_t kAnalysisSamples = 512;
 constexpr uint32_t kMaximumPictureBytes = 64U * 1024U * 1024U;
+
+void MarkShellFullscreen(HWND window, bool fullscreen) noexcept {
+    if (!window || !IsWindow(window)) return;
+    // A combined split has two partial-screen HWNDs. Explorer's geometric
+    // detection stops recognizing fullscreen when an overlay effect changes
+    // to spectrum, and raises the taskbar over the lyric portion. Notify the
+    // shell about each surface instead; it applies this only while active.
+    // ITaskbarList2 is available on XP as well as current Windows. Keeping
+    // the interface local also avoids retaining a stale Explorer connection.
+    ITaskbarList2* taskbar{};
+    if (SUCCEEDED(CoCreateInstance(CLSID_TaskbarList, nullptr,
+            CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&taskbar)))) {
+        if (SUCCEEDED(taskbar->HrInit()))
+            taskbar->MarkFullscreenWindow(window, fullscreen ? TRUE : FALSE);
+        taskbar->Release();
+    }
+}
 
 bool LayeredWindowsAvailable() noexcept {
     static const bool available = [] {
@@ -1776,10 +1794,12 @@ void PlayerWindow::DetachVisualWindow(const RECT& target) {
         window_target.right - window_target.left,
         window_target.bottom - window_target.top,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    MarkShellFullscreen(visual_window_, true);
 }
 
 void PlayerWindow::RestoreVisualWindow() {
     if (!fullscreen_visual_detached_ || !visual_window_) return;
+    MarkShellFullscreen(visual_window_, false);
     // FUN_0046786F first restores the saved desktop rectangle while the
     // control is still detached, then reparents it.  Its exact
     // hWndInsertAfter == NULL / flags == 0x50 call is retained; the TOPMOST
@@ -1843,6 +1863,9 @@ void PlayerWindow::DetachLyricControl(const RECT& target,
     style &= ~static_cast<LONG_PTR>(WS_CHILD);
     style |= WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS;
     SetWindowLongPtrW(lyric_control_, GWL_STYLE, style);
+    // Transparent lyrics-only mode deliberately lives on the desktop work
+    // area and must continue to coexist with the taskbar.
+    MarkShellFullscreen(lyric_control_, !fullscreen_lyric_desktop_mode_);
     RebuildLyricFont(false);
     ApplyFullScreenLyricTransparency();
     UpdateLyricScrollTimer();
@@ -1852,6 +1875,7 @@ void PlayerWindow::DetachLyricControl(const RECT& target,
 void PlayerWindow::RestoreLyricControl() {
     DestroyFullScreenLyricInput();
     if (!fullscreen_lyric_detached_ || !lyric_control_) return;
+    MarkShellFullscreen(lyric_control_, false);
     // FUN_0044ABFC reverses POPUP/CHILD before invoking the generic restore.
     LONG_PTR style = GetWindowLongPtrW(lyric_control_, GWL_STYLE);
     style &= ~static_cast<LONG_PTR>(WS_POPUP);

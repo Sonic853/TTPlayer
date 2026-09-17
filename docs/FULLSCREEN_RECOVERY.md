@@ -141,6 +141,54 @@ the probe does not alter system display configuration. Release builds and
 `taskbar_playback_tests` also passed; existing runtime XML/INI/TTBL files were
 restored and hash-verified after CMake's post-build staging.
 
+## Taskbar after switching to spectrum (2026-09-17)
+
+The combined-mode profiles can change the window geometry when selecting a
+different effect. With dream/oscilloscope/album configured as overlays and
+spectrum configured as a split, the transition shrinks the full-monitor visual
+HWND to the upper part of the monitor. The lyric HWND covers the remaining
+bottom part. Neither individual HWND then covers the whole monitor.
+
+The reproduced failure occurred after activating the lyric surface and
+switching from an overlay to spectrum: both controls still had
+`WS_EX_TOPMOST`, but Explorer raised the taskbar above the bottom lyric area.
+This is a missing shell fullscreen notification during the layout change;
+the spectrum renderer and the original split-boundary calculation were
+unchanged.
+
+`DetachVisualWindow` and `DetachLyricControl` now publish their fullscreen
+state through `ITaskbarList2::MarkFullscreenWindow`. Restore clears each mark
+before reparenting the control. Transparent lyrics-only mode uses the desktop
+work area, so its lyric HWND is explicitly unmarked. `TaskbarCreated` refreshes
+the active layout and republishes the marks without activating the player.
+The interface is acquired for each update, avoiding a cached connection to a
+previous Explorer instance.
+
+Microsoft documents that an explicitly marked window makes the shell treat it
+as fullscreen and lower the taskbar while that window is active. This interface
+is available starting with Windows XP:
+[ITaskbarList2::MarkFullscreenWindow](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-itaskbarlist2-markfullscreenwindow).
+
+Local regression: `tests/ui/fullscreen_taskbar_probe.py`, using an isolated
+temporary runtime, silent WAV, independent configuration and the real host
+taskbar. It checks repeated overlay/spectrum transitions, native visual-menu
+selection with a pointer click, a simulated `TaskbarCreated` notification,
+transparent desktop lyrics, visual-only mode, combined reentry and exit. It
+asserts which process owns the visible window at the taskbar position, as
+checking only the player windows' topmost styles missed the original failure.
+Tests remain local in `tests`; the release workflow does not run or package
+them. Simulating the shell notification does not restart Explorer, and running
+the legacy executable on the development host does not establish XP/Win7
+runtime behavior.
+
+Both Release variants passed all 15 shell integration checkpoints on the
+development host. `fullscreen_album_tests`, `fullscreen_lyric_drag_tests` and
+`window_topmost_tests` also passed for both builds. The legacy drag test needed
+an isolated rerun: diagnostic output from the failed run recorded the cursor
+moving from the requested `(72,72)` to `(987,624)` and the button being released
+during the gesture. The legacy PE audit still passes all 641 static imports
+from 18 DLLs against XP and Windows 7, with the subsystem version kept at 5.01.
+
 ## Verification
 
 Build and unit tests:
