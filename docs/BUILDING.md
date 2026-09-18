@@ -21,6 +21,21 @@ git submodule update --init --recursive -- tests
 默认只构建；可勾选 **Release a Version (GitHub)** 或 **Publish Release to Gitee**
 在构建成功后发布版本。两个选项相互独立，可同时勾选，不推送源码。
 
+Actions 流程图中的发布任务已分开：
+
+```mermaid
+flowchart LR
+  B[Build player] --> P[Prepare Release]
+  P --> G[GitHub Release]
+  P --> E[Gitee Release]
+```
+
+`Prepare Release` 统一分配版本号、校验和重命名附件、生成说明；勾选 Gitee 时
+在此构建一次 CLI。准备结果通过同一份 Artifact 交给两个发布任务。
+`GitHub Release`、`Gitee Release` 分别按对应勾选项运行，同时勾选时并行发布，
+各自显示成功或失败状态；其中一个发布失败不会阻止另一个发布任务。
+准备任务失败时，两边都不会开始发布。
+
 1. 将工作流及配套构建文件提交到远程仓库的默认分支。
 2. 打开 **Actions → Manual Windows Build → Run workflow**。
 3. 选择分支及配置：`Release`（默认）、`RelWithDebInfo` 或 `Debug`。
@@ -33,7 +48,9 @@ git submodule update --init --recursive -- tests
 在构建任务开始时记录北京时间（UTC+08:00）的日期，版本号和 Release 标题使用
 `yyyy.MM.dd`（例如 `2026.09.05`，不加 `v`）。同一天已有 tag 或 Release 时，按当天
 最大补丁号加一：`2026.09.05` → `2026.09.05p1` → `2026.09.05p2`，不复用中间空号。
-草稿 Release 也占用版本号。发布任务串行执行，在获得发布名额后重新分页读取全部
+草稿 Release 也占用版本号。勾选发布的工作流共用并发锁，锁覆盖构建、准备及两个
+发布任务，避免准备结束后另一次运行分配到相同版本号。只构建的运行保持独立。
+准备任务在锁内重新分页读取全部
 GitHub tag/Release；勾选 Gitee 时还会分页读取 Gitee tag/Release，把两边已有
 版本一起计入占用范围。两个平台同时发布时使用同一个新版本号和相同附件。
 新标签始终指向本次构建提交，不移动旧标签、不覆盖已有 Release。
@@ -80,6 +97,8 @@ Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 版 ZIP、`SHA256SUMS.txt`。创建或任一上传失败都会使任务失败，不会自动删除
 已经成功发布的版本或覆盖旧附件。日志会记录成功创建的 Release ID，便于补传
 缺失附件；重新运行整套发布流程会分配下一个可用版本号。
+仅重跑失败的发布任务则继续使用原准备任务输出的版本及 Artifact，不重新分配版本。
+若远程 Release 已创建但附件不完整，仍需按日志中的 ID 补传，不自动覆盖已有版本。
 
 本地可手动运行 `tests/cmake/test_manual_release.ps1`，离线检查北京时间边界、同日补丁号、
 动态对比链接、安装说明和模拟发布保护逻辑，包括两个附件的 SHA-256 和 Release 配置，
@@ -88,15 +107,17 @@ Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 该脚本位于测试子模块，Actions 不运行它；测试不调用远程 API，不创建标签或 Release。
 `tests/cmake/test_gitee_release_http.py --cli <gitee-release-rs.exe>` 还可在本地用实际
 CLI 连接回环 HTTP 服务，验证跨页版本号、中文正文、三个附件内容及上传失败中止。
-本次 Action 改动已通过 actionlint、12 项日期 / 配置用例、36 项模拟发布用例、
-2 项实际 ZIP 打包用例及上述 2 项 HTTP 集成用例；未执行线上发布。
+本次任务拆分已通过 actionlint、12 项日期 / 配置用例、36 项模拟发布用例、
+2 项实际 ZIP 打包用例及 3 项 HTTP 集成用例。集成验证在独立进程中消费准备结果，
+覆盖上传失败中止，以及 GitHub 发布失败后 Gitee 仍能成功发布；未执行线上发布。
 
 工作流必须先存在于默认分支，手动运行入口才会显示，见
 [GitHub 手动运行工作流说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。
 
 使用 `windows-2025-vs2026`、Visual Studio 2026、Win32/x86；不构建 x64，
 因为现有 DLL/AddIn ABI 为 32 位。构建任务只有 `contents: read` 权限，
-仅勾选发布时运行的独立发布任务使用 `contents: write`，通过内置 `GITHUB_TOKEN` 发布。
+只有 `GitHub Release` 任务使用 `contents: write`，通过内置 `GITHUB_TOKEN` 发布。
+`Prepare Release` 和 `Gitee Release` 保持 `contents: read`。
 官方 checkout/upload-artifact/download-artifact 动作固定到提交 SHA。GitHub 发布使用
 内置令牌；Gitee 发布读取上文的两个 secrets。
 
