@@ -823,7 +823,8 @@ bool ThumbnailSignatureMatches(const ThumbnailSnapshot& snapshot) noexcept {
                 data[size - 2] == 0xff && data[size - 1] == 0xd9) ||
                (size >= 2 && data[0] == 'B' && data[1] == 'M') ||
                (size >= 3 && data[0] == 'G' && data[1] == 'I' &&
-                data[2] == 'F');
+                data[2] == 'F') ||
+               (size >= 8 && std::memcmp(data, "\x89PNG\r\n\x1a\n", 8) == 0);
 #if defined(_MSC_VER)
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -853,10 +854,11 @@ bool CopyThumbnail(const LegacyThumbnailEntry* entry,
     ThumbnailSnapshot snapshot;
     if (!SnapshotThumbnail(entry, &snapshot)) return false;
     // FUN_004AD0AD performs a case-sensitive MIME gate.  Only an absent or
-    // wildcard image MIME asks it to sniff the four legacy byte signatures.
+    // wildcard image MIME asks it to sniff the legacy byte signatures. PNG
+    // is also accepted by the rebuild's cover editor and image decoder.
     const std::wstring_view type(snapshot.mime);
     bool accepted = type == L"image/jpeg" || type == L"image/jpg" ||
-                    type == L"image/bmp" || type == L"image/gif";
+                    type == L"image/bmp" || type == L"image/gif" || type == L"image/png";
     const bool sniff = type.empty() || type == L"image/" ||
                        type == L"image/*";
     // FUN_004AD83E copies the reader-reported DWORD byte count without adding
@@ -2117,6 +2119,29 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderForMetadata(
     auto session = OpenReaderWithFlags(path, stream, 0, result, diagnostic);
     stream->Release();
     return session;
+}
+
+std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderForInspection(
+    const std::filesystem::path& path, HRESULT* result,
+    std::wstring* diagnostic) const {
+    IStream* stream{};
+    const HRESULT opened = CreateNamedFileStream(
+        path, STGM_READ | STGM_SHARE_DENY_WRITE, &stream);
+    if (FAILED(opened) || !stream) {
+        if (result) *result = FAILED(opened) ? opened : E_NOINTERFACE;
+        if (diagnostic) *diagnostic = L"creating metadata input IStream";
+        if (stream) stream->Release();
+        return {};
+    }
+    auto session = OpenReaderForInspection(path, stream, result, diagnostic);
+    stream->Release();
+    return session;
+}
+
+std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderForInspection(
+    const std::filesystem::path& logical_path, IStream* stream,
+    HRESULT* result, std::wstring* diagnostic) const {
+    return OpenReaderWithFlags(logical_path, stream, 0, result, diagnostic);
 }
 
 std::unique_ptr<LegacyReaderSession> PluginManager::OpenReader(

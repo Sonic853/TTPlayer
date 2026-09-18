@@ -70,6 +70,8 @@ void PopulateReaderResult(
     bool include_cover) {
     result.status = S_OK;
     result.capabilities = reader.Capabilities();
+    result.cover_writable = reader.HasThumbnailInterface() &&
+                            (reader.Capabilities() & 4U) != 0;
     result.format = reader.Format();
     result.duration_ms = static_cast<DWORD>(std::clamp<std::int64_t>(
         reader.DurationMilliseconds(), 0,
@@ -121,6 +123,7 @@ void PopulateBuiltinResult(
     ttplayer::ui::detail::FileInfoProbeReadResult& result) {
     result.status = S_OK;
     result.capabilities = source.capabilities;
+    result.cover_writable = (source.capabilities & 4U) != 0;
     result.format = source.format;
     result.duration_ms = source.duration_ms;
     result.encoded_bits_per_second = source.encoded_bits_per_second;
@@ -157,7 +160,7 @@ std::unique_ptr<ttplayer::plugins::LegacyReaderSession> OpenReader(
     HRESULT* result) {
     ttplayer::audio::ArchiveMemberPath member;
     if (!ttplayer::audio::ParseArchiveMemberPath(logical_path.native(), member))
-        return manager.OpenReader(logical_path, result);
+        return manager.OpenReaderForInspection(logical_path, result);
 
     try {
         const auto bytes = ttplayer::audio::ReadArchiveMember(member, ttpcomm);
@@ -172,7 +175,7 @@ std::unique_ptr<ttplayer::plugins::LegacyReaderSession> OpenReader(
             if (result) *result = E_OUTOFMEMORY;
             return {};
         }
-        auto reader = manager.OpenReader(logical_path, stream, result);
+        auto reader = manager.OpenReaderForInspection(logical_path, stream, result);
         stream->Release();
         return reader;
     } catch (const std::exception&) {
@@ -405,7 +408,7 @@ int ServePlaylistInfo(wchar_t** args) {
 
 int WriteFileInfo(const std::filesystem::path& addin_directory,
                   const std::filesystem::path& logical_path,
-                  const std::filesystem::path& ttpcomm_path,
+                  const std::filesystem::path& /*ttpcomm_path*/,
                   const std::filesystem::path& request_path,
                   const std::filesystem::path& output) {
     ttplayer::ui::detail::FileInfoProbeWriteRequest request;
@@ -416,9 +419,12 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
     ttplayer::ui::detail::FileInfoProbeWriteResult result;
     HMODULE ttpcomm{};
     ttplayer::audio::ArchiveMemberPath archive;
-    if (ttplayer::audio::ParseArchiveMemberPath(logical_path.native(), archive))
-        ttpcomm = LoadLibraryExW(ttpcomm_path.c_str(), nullptr,
-                                LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (ttplayer::audio::ParseArchiveMemberPath(logical_path.native(), archive)) {
+        result.status = E_ACCESSDENIED;
+        if (request.cover_action != ttplayer::ui::detail::FileInfoProbeCoverAction::unchanged)
+            result.cover_status = E_ACCESSDENIED;
+        return ttplayer::ui::detail::WriteFileInfoProbeWriteResult(output, result) ? 0 : 4;
+    }
 
     ttplayer::plugins::PluginManager manager;
     bool completed{};
@@ -446,7 +452,7 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
     const HRESULT loaded = completed ? S_OK : manager.Load(addin_directory);
     if (!completed && SUCCEEDED(loaded)) {
         HRESULT opened{};
-        auto reader = OpenReader(manager, logical_path, ttpcomm, &opened);
+        auto reader = manager.OpenReaderForMetadata(logical_path, &opened);
         if (!reader) {
             result.status = FAILED(opened) ? opened : E_NOINTERFACE;
         } else {

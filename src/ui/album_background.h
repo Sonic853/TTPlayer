@@ -18,7 +18,7 @@ HBITMAP LoadTaskbarCoverBitmap(const std::filesystem::path& path,
 RECT AlbumCoverSourceRect(SIZE source, SIZE destination) noexcept;
 
 // Paint into the caller's back buffer (never directly into a visible HWND).
-// bitmap is WIC premultiplied BGRA; picture is used only when WIC failed.
+// bitmap is premultiplied BGRA from WIC or GDI+; picture is the OLE fallback.
 void PaintAlbumBackground(HDC dc, const RECT& bounds, COLORREF background,
                           int transparency_percent, HBITMAP bitmap,
                           SIZE bitmap_size, IPicture* picture);

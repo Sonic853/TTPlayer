@@ -3,6 +3,7 @@
 #include "ttplayer/platform/optional_windows_api.h"
 #include "player_window_internal.h"
 #include "album_background.h"
+#include "ttplayer/ui/cover_image.h"
 #include "ttplayer/app/worker_process.h"
 #include "../app/resource_ids.h"
 
@@ -23,7 +24,6 @@
 #include <olectl.h>
 #include <shobjidl.h>
 #include <shlwapi.h>
-#include <wincodec.h>
 #include <windowsx.h>
 
 namespace ttplayer::ui {
@@ -125,20 +125,21 @@ bool ReadExact(std::ifstream& input, void* destination, size_t size) {
     return input.good() || input.gcount() == static_cast<std::streamsize>(size);
 }
 
-bool LegacyPictureMimeMatches(std::string_view mime,
+bool CoverPictureMimeMatches(std::string_view mime,
                               std::span<const unsigned char> data) noexcept {
     // FUN_004AD0AD compares the MIME spelling case-sensitively.  A concrete
     // legacy MIME is trusted as-is; only the three wildcard forms take the
-    // JPEG/BMP/GIF signature path.  In particular, PNG and image/pjpeg are
-    // not accepted by TTPlayer 5.7.9.
+    // JPEG/BMP/GIF signature path. PNG is an intentional rebuild extension,
+    // matching the file-info cover editor and the reader thumbnail adapter.
     if (mime == "image/jpeg" || mime == "image/jpg" ||
-        mime == "image/bmp" || mime == "image/gif") return true;
+        mime == "image/bmp" || mime == "image/gif" || mime == "image/png") return true;
     if (!mime.empty() && mime != "image/" && mime != "image/*") return false;
     return (data.size() >= 4 && data[0] == 0xff && data[1] == 0xd8 &&
             data[data.size() - 2] == 0xff && data.back() == 0xd9) ||
            (data.size() >= 2 && data[0] == 'B' && data[1] == 'M') ||
            (data.size() >= 3 && data[0] == 'G' && data[1] == 'I' &&
-            data[2] == 'F');
+            data[2] == 'F') ||
+           (data.size() >= 8 && std::memcmp(data.data(), "\x89PNG\r\n\x1a\n", 8) == 0);
 }
 
 std::vector<unsigned char> ParseFlacPictureBlock(
@@ -174,7 +175,7 @@ std::vector<unsigned char> ParseFlacPictureBlock(
         data_length > block.size() - cursor) return {};
     const std::span<const unsigned char> data(block.data() + cursor,
                                                data_length);
-    if (!LegacyPictureMimeMatches(mime, data)) return {};
+    if (!CoverPictureMimeMatches(mime, data)) return {};
     if (picture_type) *picture_type = type;
     return {data.begin(), data.end()};
 }
@@ -236,6 +237,7 @@ std::vector<unsigned char> ParseId3Apic(
         const std::string_view format(
             reinterpret_cast<const char*>(frame.data() + cursor), 3);
         if (format == "JPG") mime = "image/jpeg";
+        else if (format == "PNG") mime = "image/png";
         else if (format == "BMP") mime = "image/bmp";
         else if (format == "GIF") mime = "image/gif";
         else mime.assign(format);
@@ -255,7 +257,7 @@ std::vector<unsigned char> ParseId3Apic(
         return {};
     const std::span<const unsigned char> data(frame.data() + cursor,
                                                frame.size() - cursor);
-    if (!LegacyPictureMimeMatches(mime, data)) return {};
+    if (!CoverPictureMimeMatches(mime, data)) return {};
     if (picture_type) *picture_type = type;
     return {data.begin(), data.end()};
 }
@@ -313,88 +315,6 @@ std::vector<unsigned char> ReadEmbeddedPicture(
     if (std::memcmp(header, "ID3", 3) == 0)
         return ReadId3Picture(input, header, picture_declared);
     return {};
-}
-
-struct WicPicture {
-    HBITMAP bitmap{};
-    UINT width{};
-    UINT height{};
-};
-
-WicPicture DecodePictureWithWic(const std::vector<unsigned char>& bytes, UINT maximum_edge = 0) {
-    WicPicture result;
-    if (bytes.empty() || bytes.size() > std::numeric_limits<UINT>::max())
-        return result;
-    IStream* stream = platform::SHCreateMemStream(bytes.data(),
-                                        static_cast<UINT>(bytes.size()));
-    if (!stream) return result;
-    IWICImagingFactory* factory{};
-    IWICBitmapDecoder* decoder{};
-    IWICBitmapFrameDecode* frame{};
-    IWICBitmapScaler* scaler{};
-    IWICFormatConverter* converter{};
-    HRESULT status = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
-        CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
-    if (SUCCEEDED(status)) {
-        status = factory->CreateDecoderFromStream(
-            stream, nullptr, WICDecodeMetadataCacheOnLoad, &decoder);
-    }
-    if (SUCCEEDED(status)) status = decoder->GetFrame(0, &frame);
-    if (SUCCEEDED(status)) status = frame->GetSize(&result.width,
-                                                   &result.height);
-    if (SUCCEEDED(status) &&
-        (result.width == 0 || result.height == 0 ||
-         result.width > static_cast<UINT>(std::numeric_limits<LONG>::max()) ||
-         result.height > static_cast<UINT>(std::numeric_limits<LONG>::max()) ||
-         result.width > std::numeric_limits<UINT>::max() / 4U ||
-         result.height > std::numeric_limits<UINT>::max() /
-                         (result.width * 4U))) {
-        status = E_INVALIDARG;
-    }
-    IWICBitmapSource* source = frame;
-    if (SUCCEEDED(status) && maximum_edge && std::max(result.width, result.height) > maximum_edge) {
-        const UINT longest = std::max(result.width, result.height);
-        result.width = std::max<UINT>(1, static_cast<UINT>(static_cast<uint64_t>(result.width) * maximum_edge / longest));
-        result.height = std::max<UINT>(1, static_cast<UINT>(static_cast<uint64_t>(result.height) * maximum_edge / longest));
-        status = factory->CreateBitmapScaler(&scaler);
-        if (SUCCEEDED(status)) status = scaler->Initialize(frame, result.width, result.height, WICBitmapInterpolationModeFant);
-        source = scaler;
-    }
-    if (SUCCEEDED(status)) status = factory->CreateFormatConverter(&converter);
-    if (SUCCEEDED(status)) {
-        status = converter->Initialize(source, GUID_WICPixelFormat32bppPBGRA,
-            WICBitmapDitherTypeNone, nullptr, 0.0,
-            WICBitmapPaletteTypeCustom);
-    }
-    void* pixels{};
-    if (SUCCEEDED(status)) {
-        BITMAPINFO information{};
-        information.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        information.bmiHeader.biWidth = static_cast<LONG>(result.width);
-        information.bmiHeader.biHeight = -static_cast<LONG>(result.height);
-        information.bmiHeader.biPlanes = 1;
-        information.bmiHeader.biBitCount = 32;
-        information.bmiHeader.biCompression = BI_RGB;
-        result.bitmap = CreateDIBSection(nullptr, &information,
-            DIB_RGB_COLORS, &pixels, nullptr, 0);
-        if (!result.bitmap || !pixels) status = E_OUTOFMEMORY;
-    }
-    if (SUCCEEDED(status)) {
-        const UINT stride = result.width * 4U;
-        status = converter->CopyPixels(nullptr, stride,
-            stride * result.height, static_cast<BYTE*>(pixels));
-    }
-    if (converter) converter->Release();
-    if (scaler) scaler->Release();
-    if (frame) frame->Release();
-    if (decoder) decoder->Release();
-    if (factory) factory->Release();
-    stream->Release();
-    if (FAILED(status)) {
-        if (result.bitmap) DeleteObject(result.bitmap);
-        result = {};
-    }
-    return result;
 }
 
 IPicture* DecodePictureWithOle(const std::vector<unsigned char>& bytes) {
@@ -553,10 +473,10 @@ HBITMAP detail::LoadTaskbarCoverBitmap(const std::filesystem::path& path,
         const auto& bytes = metadata.thumbnail_interface ? metadata.thumbnail : embedded;
         if (bytes.empty() || bytes.size() > kMaximumPictureBytes) return nullptr;
         constexpr UINT maximum_edge = 1024;
-        const auto wic = DecodePictureWithWic(bytes, maximum_edge);
-        if (wic.bitmap) {
-            *size = {static_cast<LONG>(wic.width), static_cast<LONG>(wic.height)};
-            return wic.bitmap;
+        const auto decoded = DecodeCoverImage(bytes, maximum_edge);
+        if (decoded.bitmap) {
+            *size = decoded.size;
+            return decoded.bitmap;
         }
         IPicture* picture = DecodePictureWithOle(bytes);
         if (!picture) return nullptr;
@@ -1242,11 +1162,11 @@ private:
         // FUN_00457B11 keeps update and paint inside CVisualCtrl's critical
         // section, and FUN_00457E2D presents one completed visual frame.  The
         // reconstruction previously copied the skin background to the window
-        // DC first and only then alpha-blended the WIC bitmap.  At the visual
+        // DC first and only then alpha-blended the cover bitmap. At the visual
         // worker cadence that exposed a real background-only intermediate
         // frame, especially while the layered parent was being refreshed.
         // Compose the complete Type 4 frame in the persistent DIB and publish
-        // it with one final blit.  WIC remains the primary decoder; IPicture is
+        // it with one final blit. WIC/GDI+ return premultiplied pixels; IPicture is
         // still the fallback, but neither path can now be observed half drawn.
         if (!RestoreBackground()) return;
         const RECT frame{0, 0, width_, height_};
@@ -1377,20 +1297,18 @@ private:
                 // it neither searches for picture type 3 nor falls through to
                 // another parser when the reader owns this capability.
                 cover_payload_present_ = !thumbnail_.empty();
-                const auto wic = DecodePictureWithWic(thumbnail_);
-                cover_bitmap_ = wic.bitmap;
-                cover_bitmap_size_ = {
-                    static_cast<LONG>(wic.width), static_cast<LONG>(wic.height)};
+                const auto decoded = DecodeCoverImage(thumbnail_);
+                cover_bitmap_ = decoded.bitmap;
+                cover_bitmap_size_ = decoded.size;
                 if (!cover_bitmap_)
                     cover_ = DecodePictureWithOle(thumbnail_);
             } else {
                 bool picture_declared{};
                 auto bytes = ReadEmbeddedPicture(source_, &picture_declared);
                 cover_payload_present_ = !bytes.empty();
-                const auto wic = DecodePictureWithWic(bytes);
-                cover_bitmap_ = wic.bitmap;
-                cover_bitmap_size_ = {
-                    static_cast<LONG>(wic.width), static_cast<LONG>(wic.height)};
+                const auto decoded = DecodeCoverImage(bytes);
+                cover_bitmap_ = decoded.bitmap;
+                cover_bitmap_size_ = decoded.size;
                 if (!cover_bitmap_) cover_ = DecodePictureWithOle(bytes);
             }
         } catch (const std::exception&) {
@@ -1413,9 +1331,9 @@ private:
             std::vector<unsigned char> bytes(static_cast<size_t>(length));
             input.seekg(0);
             if (!ReadExact(input, bytes.data(), bytes.size())) return;
-            const auto decoded = DecodePictureWithWic(bytes);
+            const auto decoded = DecodeCoverImage(bytes);
             cover_bitmap_ = decoded.bitmap;
-            cover_bitmap_size_ = {static_cast<LONG>(decoded.width), static_cast<LONG>(decoded.height)};
+            cover_bitmap_size_ = decoded.size;
             if (!cover_bitmap_) cover_ = DecodePictureWithOle(bytes);
         } catch (const std::exception&) {
             // Keep the opaque configured background when the path is missing

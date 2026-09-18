@@ -20,7 +20,7 @@ namespace ttplayer::ui::detail {
 // helper without ever terminating an in-process thread or trusting partial
 // output from a killed process.
 inline constexpr std::uint32_t kFileInfoProbeMagic = 0x50494654U; // TFIP
-inline constexpr std::uint32_t kFileInfoProbeVersion = 3;
+inline constexpr std::uint32_t kFileInfoProbeVersion = 4;
 inline constexpr std::uint32_t kFileInfoProbeReadPacket = 1;
 inline constexpr std::uint32_t kFileInfoProbeWriteRequestPacket = 2;
 inline constexpr std::uint32_t kFileInfoProbeWriteResultPacket = 3;
@@ -37,6 +37,7 @@ struct FileInfoProbeMetadata {
 struct FileInfoProbeReadResult {
     HRESULT status{E_FAIL};
     DWORD capabilities{};
+    DWORD cover_writable{};
     WAVEFORMATEX format{};
     DWORD duration_ms{};
     DWORD encoded_bits_per_second{};
@@ -241,6 +242,7 @@ inline bool WriteFileInfoProbeReadResult(
     bool okay = FileInfoProbeWriteHeader(file, kFileInfoProbeReadPacket) &&
         FileInfoProbeWriteScalar(file, result.status) &&
         FileInfoProbeWriteScalar(file, result.capabilities) &&
+        FileInfoProbeWriteScalar(file, result.cover_writable) &&
         FileInfoProbeWriteScalar(file, result.format) &&
         FileInfoProbeWriteScalar(file, result.duration_ms) &&
         FileInfoProbeWriteScalar(file, result.encoded_bits_per_second) &&
@@ -268,6 +270,7 @@ inline bool ReadFileInfoProbeReadResult(
     bool okay = FileInfoProbeReadHeader(file, kFileInfoProbeReadPacket) &&
         FileInfoProbeReadScalar(file, decoded.status) &&
         FileInfoProbeReadScalar(file, decoded.capabilities) &&
+        FileInfoProbeReadScalar(file, decoded.cover_writable) &&
         FileInfoProbeReadScalar(file, decoded.format) &&
         FileInfoProbeReadScalar(file, decoded.duration_ms) &&
         FileInfoProbeReadScalar(file, decoded.encoded_bits_per_second) &&

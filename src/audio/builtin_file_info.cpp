@@ -141,7 +141,31 @@ bool ReadAt(HANDLE file, std::uint64_t offset,
     return true;
 }
 
-bool ReadRange(HANDLE file, std::uint64_t offset, std::uint64_t size,
+bool ReadAt(IStream* stream, std::uint64_t offset,
+            std::span<unsigned char> output) noexcept {
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    if (FAILED(stream->Seek(position, STREAM_SEEK_SET, nullptr))) return false;
+    size_t done{};
+    while (done < output.size()) {
+        const ULONG requested = static_cast<ULONG>(std::min<size_t>(output.size()-done, MAXDWORD));
+        ULONG read{};
+        if (FAILED(stream->Read(output.data()+done, requested, &read)) || !read || read > requested)
+            return false;
+        done += read;
+    }
+    return true;
+}
+
+bool FileSize(IStream* stream, std::uint64_t& size) noexcept {
+    STATSTG stat{};
+    if (FAILED(stream->Stat(&stat, STATFLAG_NONAME))) return false;
+    size = stat.cbSize.QuadPart;
+    return size <= static_cast<ULONGLONG>(LLONG_MAX);
+}
+
+template<class File>
+bool ReadRange(File file, std::uint64_t offset, std::uint64_t size,
                Bytes& output) {
     if (size > kMaximumTagBytes ||
         size > static_cast<std::uint64_t>(
@@ -463,7 +487,8 @@ Bytes RemoveUnsynchronization(std::span<const unsigned char> value) {
     return output;
 }
 
-Id3Tag ReadId3v2(HANDLE file, std::uint64_t file_size) {
+template<class File>
+Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
     Id3Tag tag;
     if (file_size < 10) return tag;
     std::array<unsigned char, 10> header{};
@@ -564,7 +589,8 @@ struct ApeTag {
     std::vector<ApeItem> items;
 };
 
-std::optional<ApeTag> ReadApeAt(HANDLE file, std::uint64_t footer_end) {
+template<class File>
+std::optional<ApeTag> ReadApeAt(File file, std::uint64_t footer_end) {
     if (footer_end < 32) return std::nullopt;
     std::array<unsigned char, 32> footer{};
     if (!ReadAt(file, footer_end - 32, footer) ||
@@ -680,13 +706,15 @@ struct FileLayout {
     bool has_id3v1{};
 };
 
-bool HasId3v1At(HANDLE file, std::uint64_t offset,
+template<class File>
+bool HasId3v1At(File file, std::uint64_t offset,
                 std::array<unsigned char, 128>& bytes) {
     return ReadAt(file, offset, bytes) &&
            std::memcmp(bytes.data(), "TAG", 3) == 0;
 }
 
-bool ReadMp3Layout(HANDLE file, FileLayout& layout) {
+template<class File>
+bool ReadMp3Layout(File file, FileLayout& layout) {
     if (!FileSize(file, layout.file_size)) return false;
     layout.id3v2 = ReadId3v2(file, layout.file_size);
     layout.body_begin = layout.id3v2.present ? layout.id3v2.total_size : 0;
@@ -1465,7 +1493,281 @@ bool ExtensionIs(const std::filesystem::path& path,
     return WideAsciiEqual(actual, extension);
 }
 
+// CreateStdContent's two private COM vtables (0052416C / 00524144).
+// Keep method order and stdcall ABI; no C++ virtual destructor precedes them.
+struct StandardContentInterface : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE ContentCount(DWORD*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ContentAt(DWORD, wchar_t**, wchar_t**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ContentValue(const char*, wchar_t**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ContentSet(const char*, const wchar_t*) = 0;
+};
+struct StandardPicture {
+    DWORD size{sizeof(StandardPicture)};
+    const wchar_t* mime{};
+    const wchar_t* description{};
+    DWORD data_size{};
+    const unsigned char* data{};
+    DWORD picture_type{3};
+};
+struct StandardThumbnailInterface : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE PictureCount(DWORD*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE PictureMaximumBytes(DWORD*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE PictureMaximumItems(DWORD*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE PictureAt(DWORD, const StandardPicture**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE PictureSet(DWORD, const StandardPicture*, DWORD) = 0;
+    virtual HRESULT STDMETHODCALLTYPE PictureAdd(const StandardPicture*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE PictureRemove(DWORD) = 0;
+};
+constexpr GUID kContentIid{0x7ad84e00,0x5fef,0x4481,{0xb5,0x32,0xfb,0xbd,0x67,0x7e,0x67,0xc2}};
+constexpr GUID kThumbnailIid{0xb5e770af,0xdfb0,0x43e5,{0x9b,0x0c,0x3e,0xe9,0x8e,0x7b,0x62,0x48}};
+
+class StandardContent final : public StandardContentInterface,
+                              public StandardThumbnailInterface {
+public:
+    StandardContent(IStream* stream, DWORD write_type) : stream_(stream), write_type_(write_type) {
+        stream_->AddRef();
+    }
+    ~StandardContent() { stream_->Release(); }
+    HRESULT Initialize(ULONGLONG* audio_bytes) {
+        LARGE_INTEGER zero{};
+        ULARGE_INTEGER previous{};
+        if (FAILED(stream_->Seek(zero, STREAM_SEEK_CUR, &previous))) return STG_E_SEEKERROR;
+        const bool read = ReadMp3Layout(stream_, layout_);
+        LARGE_INTEGER start{};
+        start.QuadPart = read ? layout_.body_begin : previous.QuadPart;
+        stream_->Seek(start, STREAM_SEEK_SET, nullptr);
+        if (!read) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        fields_ = MergeMp3Tags(layout_, Mp3TagPolicy{}.read_priority);
+        STATSTG stat{};
+        writable_ = SUCCEEDED(stream_->Stat(&stat, STATFLAG_NONAME)) &&
+                    (stat.grfMode & 3U) == STGM_READWRITE;
+        if (audio_bytes) *audio_bytes = layout_.body_end - layout_.body_begin;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (InlineIsEqualGUID(iid, IID_IUnknown) || InlineIsEqualGUID(iid, kContentIid))
+            *output = static_cast<StandardContentInterface*>(this);
+        else if (InlineIsEqualGUID(iid, kThumbnailIid))
+            *output = static_cast<StandardThumbnailInterface*>(this);
+        else return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&references_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const LONG remaining = InterlockedDecrement(&references_);
+        if (!remaining) delete this;
+        return remaining;
+    }
+    HRESULT STDMETHODCALLTYPE ContentCount(DWORD* count) override {
+        if (!count) return E_POINTER;
+        *count = static_cast<DWORD>(fields_.fields.size());
+        return S_OK;
+    }
+    static HRESULT CopyText(std::wstring_view text, wchar_t** output) {
+        if (!output) return E_POINTER;
+        *output = static_cast<wchar_t*>(CoTaskMemAlloc((text.size()+1)*sizeof(wchar_t)));
+        if (!*output) return E_OUTOFMEMORY;
+        std::copy(text.begin(), text.end(), *output);
+        (*output)[text.size()] = 0;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE ContentAt(DWORD index, wchar_t** name, wchar_t** value) override {
+        if (!name || !value) return E_POINTER;
+        *name = *value = nullptr;
+        if (index >= fields_.fields.size()) return E_INVALIDARG;
+        HRESULT status = CopyText(fields_.fields[index].name, name);
+        if (SUCCEEDED(status)) status = CopyText(fields_.fields[index].value, value);
+        if (FAILED(status)) { CoTaskMemFree(*name); *name = nullptr; }
+        return status;
+    }
+    static std::wstring FieldName(const char* name) {
+        auto canonical = CanonicalField(name);
+        if (!canonical.empty()) return canonical;
+        return DecodeUtf8({reinterpret_cast<const unsigned char*>(name), std::strlen(name)});
+    }
+    HRESULT STDMETHODCALLTYPE ContentValue(const char* name, wchar_t** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!name || !*name) return E_INVALIDARG;
+        try {
+            const auto value = GetField(fields_, FieldName(name));
+            return value.empty() ? E_INVALIDARG : CopyText(value, output);
+        } catch (...) { return E_OUTOFMEMORY; }
+    }
+    HRESULT STDMETHODCALLTYPE ContentSet(const char* name, const wchar_t* value) override {
+        try {
+            auto changed = fields_;
+            if (!name) {
+                if (changed.fields.empty()) return S_OK;
+                changed.fields.clear();
+            }
+            else {
+                const auto key = FieldName(name);
+                if (key.empty()) return E_INVALIDARG;
+                if (GetField(changed, key) == (value ? value : L"")) return S_OK;
+                SetField(changed, key, value ? value : L"");
+            }
+            return Save(std::move(changed), BuiltinCoverAction::unchanged);
+        } catch (...) { return E_OUTOFMEMORY; }
+    }
+    HRESULT STDMETHODCALLTYPE PictureCount(DWORD* count) override {
+        if (!count) return E_POINTER;
+        *count = fields_.cover.empty() ? 0 : 1;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PictureMaximumBytes(DWORD* count) override {
+        if (!count) return E_POINTER;
+        *count = 60000; // 004D9EF7; reading has no such limit.
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PictureMaximumItems(DWORD* count) override {
+        if (!count) return E_POINTER;
+        *count = 1; // 004D9F11
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PictureAt(DWORD index, const StandardPicture** picture) override {
+        if (!picture) return E_POINTER;
+        *picture = nullptr;
+        if (index || fields_.cover.empty()) return E_FAIL;
+        picture_.mime = L"image/*";
+        picture_.description = L"";
+        picture_.data_size = static_cast<DWORD>(fields_.cover.size());
+        picture_.data = fields_.cover.data();
+        *picture = &picture_;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PictureSet(DWORD index, const StandardPicture* picture, DWORD mask) override {
+        if (index || fields_.cover.empty() || !picture) return E_FAIL;
+        // APE binary cover entries have no independent MIME/type attributes.
+        return (mask & 8U) ? StorePicture(picture) : S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PictureAdd(const StandardPicture* picture) override {
+        if (!fields_.cover.empty()) return E_FAIL;
+        return StorePicture(picture);
+    }
+    HRESULT STDMETHODCALLTYPE PictureRemove(DWORD index) override {
+        if (index || fields_.cover.empty()) return E_FAIL;
+        try {
+            auto changed = fields_;
+            changed.cover.clear();
+            return Save(std::move(changed), BuiltinCoverAction::remove);
+        } catch (...) { return E_OUTOFMEMORY; }
+    }
+private:
+    HRESULT StorePicture(const StandardPicture* picture) {
+        if (!picture || !picture->data || !picture->data_size || picture->data_size > 60000)
+            return E_INVALIDARG;
+        try {
+            auto changed = fields_;
+            changed.cover.assign(picture->data, picture->data + picture->data_size);
+            return Save(std::move(changed), BuiltinCoverAction::replace);
+        } catch (...) { return E_OUTOFMEMORY; }
+    }
+    HRESULT Save(TagData changed, BuiltinCoverAction action) {
+        if (!writable_) return STG_E_ACCESSDENIED;
+        // Shipped APE/TAK/MPC readers request APEv2 (4). Do not silently
+        // implement an unrequested ID3 rewriting policy for other callers.
+        if (write_type_ != 4 && write_type_ != 0) return E_NOTIMPL;
+        // Native readers may still use this stream after a tag method.
+        struct RestorePosition {
+            IStream* stream;
+            ULARGE_INTEGER value{};
+            bool valid{};
+            explicit RestorePosition(IStream* source) : stream(source) {
+                LARGE_INTEGER zero{};
+                valid = SUCCEEDED(stream->Seek(zero, STREAM_SEEK_CUR, &value));
+            }
+            ~RestorePosition() {
+                if (valid) {
+                    LARGE_INTEGER position{};
+                    position.QuadPart = value.QuadPart;
+                    stream->Seek(position, STREAM_SEEK_SET, nullptr);
+                }
+            }
+        } position(stream_);
+        ApeTag preserved = layout_.ape;
+        // Preserve unrelated binary entries. Rebuild text from the merged
+        // field set, including custom fields and ReplayGain, without duplicates.
+        std::erase_if(preserved.items, [](const ApeItem& item) {
+            return item.raw.size() >= 8 && ((ReadLe32(item.raw.data()+4) >> 1U) & 3U) == 0;
+        });
+        for (const auto& field : changed.fields) {
+            const auto encoded_name = EncodeUtf8(field.name);
+            const std::string key(encoded_name.begin(), encoded_name.end());
+            if (!CanonicalField(key).empty()) continue;
+            ApeItem item;
+            item.key = key;
+            AppendApeTextItem(item.raw, item.key, field.value);
+            preserved.items.push_back(std::move(item));
+        }
+        auto replacement = BuildApe(preserved, changed, action);
+        if (replacement.empty() || replacement.size() > kMaximumTagBytes) return E_OUTOFMEMORY;
+        if (replacement.size() == 64 && ReadLe32(replacement.data()+16) == 0)
+            replacement.clear();
+        // Only the trailing tags change. Audio frames and leading ID3 data
+        // stay byte-for-byte intact; retain the existing ID3v1 bytes as well.
+        if (layout_.has_id3v1) {
+            std::array<unsigned char,128> v1{};
+            if (!ReadAt(stream_, layout_.file_size-128, v1)) return STG_E_READFAULT;
+            replacement.insert(replacement.end(), v1.begin(), v1.end());
+        }
+        Bytes previous;
+        if (!ReadRange(stream_, layout_.body_end, layout_.file_size-layout_.body_end, previous))
+            return STG_E_READFAULT;
+        const auto write_tail = [&](std::span<const unsigned char> bytes) {
+            LARGE_INTEGER position{};
+            position.QuadPart = layout_.body_end;
+            HRESULT hr = stream_->Seek(position, STREAM_SEEK_SET, nullptr);
+            ULONG written{};
+            if (SUCCEEDED(hr)) hr = stream_->Write(bytes.data(), static_cast<ULONG>(bytes.size()), &written);
+            if (SUCCEEDED(hr) && written != bytes.size()) hr = STG_E_WRITEFAULT;
+            ULARGE_INTEGER size{};
+            size.QuadPart = layout_.body_end + bytes.size();
+            if (SUCCEEDED(hr)) hr = stream_->SetSize(size);
+            if (SUCCEEDED(hr)) hr = stream_->Commit(STGC_DEFAULT);
+            return hr;
+        };
+        const HRESULT written = write_tail(replacement);
+        if (FAILED(written)) { static_cast<void>(write_tail(previous)); return written; }
+        fields_ = std::move(changed);
+        layout_.file_size = layout_.body_end + replacement.size();
+        if (const auto ape = ReadApeAt(stream_, layout_.file_size - (layout_.has_id3v1 ? 128 : 0)))
+            layout_.ape = *ape;
+        else layout_.ape = {};
+        return S_OK;
+    }
+    LONG references_{1};
+    IStream* stream_{};
+    DWORD write_type_{};
+    bool writable_{};
+    FileLayout layout_;
+    TagData fields_;
+    StandardPicture picture_;
+};
+
 } // namespace
+
+HRESULT CreateStandardContent(IStream* stream, DWORD write_type,
+                              IUnknown** content, ULONGLONG* audio_bytes) noexcept {
+    if (!content) return E_POINTER;
+    *content = nullptr;
+    if (audio_bytes) *audio_bytes = 0;
+    if (!stream) return E_POINTER;
+    StandardContent* object{};
+    try {
+        object = new StandardContent(stream, write_type);
+        const HRESULT status = object->Initialize(audio_bytes);
+        if (FAILED(status)) { object->Release(); return status; }
+        *content = static_cast<StandardContentInterface*>(object);
+        return S_OK;
+    } catch (...) {
+        if (object) object->Release();
+        return E_OUTOFMEMORY;
+    }
+}
 
 HRESULT ReadBuiltinFileInfo(const std::filesystem::path& path,
                             const Mp3TagPolicy& policy,

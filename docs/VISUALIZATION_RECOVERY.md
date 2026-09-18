@@ -70,16 +70,18 @@ GetAt(0, const LegacyThumbnailEntry** entry);
 返回结构为 x86/pack(4) 的 24 字节记录，blob 由插件拥有，必须在释放接口前复制。
 MIME 判定按 `FUN_004AD0AD` 区分大小写：直接接受 `image/jpeg`、`image/jpg`、
 `image/bmp`、`image/gif`；空值、`image/`、`image/*` 才按 JPEG/BMP/GIF 魔数
-嗅探。AAC、APE、ASF、FLAC 和 RM reader 因而共享原版封面来源。
+嗅探。MP4、ASF、FLAC 和 RM reader 共享这一接口。裸 AAC 没有该接口；APE 还依赖
+主程序 `CreateStdContent`，不能仅凭插件中的接口标识认定可用。进一步分析和
+重建补充见 [多格式封面修复](ALBUM_COVER_FORMAT_RECOVERY.md)。
 
 接口存在但第 0 张为空/无效时不会跨过插件再私自扫描文件。不存在 reader 封面
 接口且文件也没有内嵌图时，封面模式按 `FUN_00457C33/00457D90` 显示
 `ttpres.dll` 字符串 `0x821B`。封面只会等比缩小并居中，不会放大。
 
-按项目当前兼容要求，接纳后的原始图像先交给 WIC 解码，WIC 失败才回退到原版的
-`OleLoadPicture`/`IPicture` 路径。这一优先级是明确的兼容扩展：参考 FLAC 的第 0
-张记录把 PNG payload 标成 `image/jpeg`，原版 OLE-only 路径显示空白，而重建版
-可由 WIC 正确显示该 PNG；reader ABI、第一张选择和 MIME 接纳规则仍保持原版。
+按项目当前兼容要求，接纳后的图像通过共用 WIC / GDI+ 解码器读取，失败时主窗口
+仍保留 `OleLoadPicture`/`IPicture` 后备。PNG 解码和 `image/png` 接纳是重建版的
+兼容扩展；reader ABI 和第一张选择规则保持原版。参考 FLAC 中标成 `image/jpeg`
+的 PNG 也可正确显示，详见 [XP / Win7 封面修复](LEGACY_ALBUM_COVER_FIX.md)。
 
 ## 鼠标与菜单
 

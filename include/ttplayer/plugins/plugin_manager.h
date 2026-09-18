@@ -282,6 +282,14 @@ public:
     [[nodiscard]] std::unique_ptr<LegacyReaderSession> OpenReaderForMetadata(
         const std::filesystem::path& path, HRESULT* result = nullptr,
         std::wstring* diagnostic = nullptr) const;
+    // Read tags/cover without starting a decoder. Also works for read-only
+    // files and archive streams; metadata writes use the method above.
+    [[nodiscard]] std::unique_ptr<LegacyReaderSession> OpenReaderForInspection(
+        const std::filesystem::path& path, HRESULT* result = nullptr,
+        std::wstring* diagnostic = nullptr) const;
+    [[nodiscard]] std::unique_ptr<LegacyReaderSession> OpenReaderForInspection(
+        const std::filesystem::path& logical_path, IStream* stream,
+        HRESULT* result = nullptr, std::wstring* diagnostic = nullptr) const;
     // Opens a reader selected by logical_path around an already-created
     // stream.  Archive members use this recovered FUN_004E323B boundary: the
     // member extension selects the creator, while reader slot 3 consumes the

@@ -1,4 +1,5 @@
 #include "ttplayer/plugins/plugin_manager.h"
+#include "ttplayer/audio/builtin_file_info.h"
 
 // TTPlayer.exe!004C51D3. ttp_clienc!6020619C resolves this by its undecorated
 // name at DLL initialization; 6020147F rejects %s presets when it is absent.
@@ -9,8 +10,16 @@ extern "C" HRESULT WINAPI TTPlayer_CreateStreamOnFile(
     return ttplayer::plugins::CreateLegacyFileStream(path, mode, output);
 }
 
+extern "C" HRESULT WINAPI TTPlayer_CreateStdContent(
+    IStream* stream, DWORD write_type, IUnknown** content,
+    ULONGLONG* audio_bytes) noexcept {
+    return ttplayer::audio::CreateStandardContent(stream, write_type, content, audio_bytes);
+}
+
 #if defined(_M_IX86)
+#pragma comment(linker, "/EXPORT:CreateStdContent=_TTPlayer_CreateStdContent@16,@2")
 #pragma comment(linker, "/EXPORT:CreateStreamOnFile=_TTPlayer_CreateStreamOnFile@12,@3")
 #else
+#pragma comment(linker, "/EXPORT:CreateStdContent=TTPlayer_CreateStdContent,@2")
 #pragma comment(linker, "/EXPORT:CreateStreamOnFile=TTPlayer_CreateStreamOnFile,@3")
 #endif

@@ -1,3 +1,4 @@
+#include "ttplayer/ui/cover_image.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "player_window_internal.h"
 #include "file_info_cover_policy.h"
@@ -30,7 +31,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-#include <wincodec.h>
 #include <shlwapi.h>
 
 namespace ttplayer::ui {
@@ -97,6 +97,7 @@ struct FileInfoRecord {
     int duration_ms{-2};
     bool reader_opened{};
     bool writable{};
+    bool cover_writable{};
 };
 
 struct FileInfoCombined {
@@ -114,6 +115,7 @@ struct FileInfoCombined {
     std::vector<std::pair<std::wstring, std::wstring>> metadata;
     size_t cover_count{};
     bool writable{};
+    bool cover_writable{};
 };
 
 struct FileInfoReadResult {
@@ -349,6 +351,7 @@ FileInfoRecord ReadFileInfoRecord(
     audio::ArchiveMemberPath archive_member;
     record.writable = (probe->capabilities & 4U) != 0 &&
         !audio::ParseArchiveMemberPath(record.path.native(), archive_member);
+    record.cover_writable = record.writable && probe->cover_writable != 0;
 
     static constexpr std::array<std::wstring_view, 7> names{
         L"Title", L"Artist", L"Album", L"Tracknumber", L"Genre", L"Date",
@@ -431,6 +434,7 @@ FileInfoCombined CombineRecords(const std::vector<FileInfoRecord>& records,
                      first);
         CombineValue(combined.gain, record.gain, strings.different, first);
         combined.writable = combined.writable || record.writable;
+        combined.cover_writable = combined.cover_writable || record.cover_writable;
         if (!record.cover.empty()) {
             ++combined.cover_count;
             if (combined.cover.empty()) combined.cover = record.cover;
@@ -470,101 +474,7 @@ FileInfoCombined CombineRecords(const std::vector<FileInfoRecord>& records,
 
 HBITMAP DecodeCoverBitmap(const std::vector<unsigned char>& bytes,
                           int target_width, int target_height) {
-    if (bytes.empty() || target_width <= 0 || target_height <= 0) return nullptr;
-    IWICImagingFactory* factory{};
-    IWICStream* stream{};
-    IWICBitmapDecoder* decoder{};
-    IWICBitmapFrameDecode* frame{};
-    IWICFormatConverter* converter{};
-    IWICBitmapScaler* scaler{};
-    HBITMAP bitmap{};
-    void* dib_bits{};
-
-    HRESULT result = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
-        CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
-    if (SUCCEEDED(result)) result = factory->CreateStream(&stream);
-    if (SUCCEEDED(result) &&
-        bytes.size() > static_cast<size_t>(std::numeric_limits<DWORD>::max()))
-        result = HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
-    if (SUCCEEDED(result)) result = stream->InitializeFromMemory(
-        const_cast<BYTE*>(bytes.data()), static_cast<DWORD>(bytes.size()));
-    if (SUCCEEDED(result)) result = factory->CreateDecoderFromStream(
-        stream, nullptr, WICDecodeMetadataCacheOnLoad, &decoder);
-    if (SUCCEEDED(result)) result = decoder->GetFrame(0, &frame);
-    if (SUCCEEDED(result)) result = factory->CreateFormatConverter(&converter);
-    if (SUCCEEDED(result)) result = converter->Initialize(
-        frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr,
-        0.0, WICBitmapPaletteTypeCustom);
-
-    UINT source_width{};
-    UINT source_height{};
-    if (SUCCEEDED(result)) result = converter->GetSize(&source_width,
-                                                       &source_height);
-    UINT width{};
-    UINT height{};
-    if (SUCCEEDED(result) && source_width != 0 && source_height != 0) {
-        const double scale = std::min(
-            static_cast<double>(target_width) / source_width,
-            static_cast<double>(target_height) / source_height);
-        width = std::max<UINT>(1, static_cast<UINT>(source_width * scale));
-        height = std::max<UINT>(1, static_cast<UINT>(source_height * scale));
-        result = factory->CreateBitmapScaler(&scaler);
-        if (SUCCEEDED(result))
-            result = scaler->Initialize(converter, width, height,
-                                         WICBitmapInterpolationModeFant);
-    }
-
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(info.bmiHeader);
-    info.bmiHeader.biWidth = target_width;
-    info.bmiHeader.biHeight = -target_height;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-    if (SUCCEEDED(result)) {
-        const HDC screen = GetDC(nullptr);
-        bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &dib_bits,
-                                  nullptr, 0);
-        ReleaseDC(nullptr, screen);
-        if (!bitmap || !dib_bits) result = E_OUTOFMEMORY;
-    }
-    if (SUCCEEDED(result)) {
-        const COLORREF background = GetSysColor(COLOR_WINDOW);
-        const std::uint32_t pixel = static_cast<std::uint32_t>(
-            GetBValue(background) | (GetGValue(background) << 8) |
-            (GetRValue(background) << 16) | 0xff000000U);
-        auto* destination = static_cast<std::uint32_t*>(dib_bits);
-        std::fill(destination,
-                  destination + static_cast<size_t>(target_width) * target_height,
-                  pixel);
-        std::vector<BYTE> pixels(static_cast<size_t>(width) * height * 4U);
-        result = scaler->CopyPixels(nullptr, width * 4U,
-                                    static_cast<UINT>(pixels.size()),
-                                    pixels.data());
-        if (SUCCEEDED(result)) {
-            const int left = (target_width - static_cast<int>(width)) / 2;
-            const int top = (target_height - static_cast<int>(height)) / 2;
-            for (UINT row = 0; row < height; ++row) {
-                std::memcpy(destination +
-                    static_cast<size_t>(top + static_cast<int>(row)) *
-                        target_width + left,
-                    pixels.data() + static_cast<size_t>(row) * width * 4U,
-                    static_cast<size_t>(width) * 4U);
-            }
-        }
-    }
-
-    if (scaler) scaler->Release();
-    if (converter) converter->Release();
-    if (frame) frame->Release();
-    if (decoder) decoder->Release();
-    if (stream) stream->Release();
-    if (factory) factory->Release();
-    if (FAILED(result) && bitmap) {
-        DeleteObject(bitmap);
-        bitmap = nullptr;
-    }
-    return bitmap;
+    return DecodeCoverPreview(bytes, {target_width, target_height}, GetSysColor(COLOR_WINDOW));
 }
 
 std::optional<std::vector<unsigned char>> ReadCoverBytes(
@@ -786,7 +696,7 @@ void PopulateCoverPage(FileInfoContext& context) {
         InvalidateRect(picture, nullptr, TRUE);
     }
     const bool ready = context.loaded && !context.loading && !context.saving &&
-                       context.combined.writable;
+                       context.combined.cover_writable;
     EnableWindow(GetDlgItem(page, 2220), ready);
     EnableWindow(GetDlgItem(page, 2221),
                  ready && !context.combined.cover.empty());
@@ -828,9 +738,9 @@ void UpdateSheetState(FileInfoContext& context) {
     }
     if (context.cover_page) {
         EnableWindow(GetDlgItem(context.cover_page, 2220),
-                     ready && context.combined.writable);
+                     ready && context.combined.cover_writable);
         EnableWindow(GetDlgItem(context.cover_page, 2221),
-                     ready && context.combined.writable &&
+                     ready && context.combined.cover_writable &&
                          !context.combined.cover.empty());
     }
     EnableWindow(GetDlgItem(context.sheet, kFileInfoSave),

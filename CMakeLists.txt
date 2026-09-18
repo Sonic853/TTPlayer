@@ -118,6 +118,7 @@ add_library(ttplayer_core
   src/ui/playlist_transforms.cpp
   src/ui/player_window_visual.cpp
   src/ui/album_background.cpp
+  src/ui/cover_image.cpp
   src/ui/player_window_visual_options.cpp
   src/ui/shell_send_to.cpp
   src/ui/window_drag.cpp
@@ -271,6 +272,31 @@ set_tests_properties(media_library_tests PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
 endif()
 
 if(BUILD_TESTING)
+add_executable(cover_format_tests tests/ui/cover_format_tests.cpp src/app/exports.cpp)
+target_compile_definitions(cover_format_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(cover_format_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(cover_format_tests PRIVATE ttplayer_core)
+add_test(NAME cover_format_tests COMMAND cover_format_tests
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/album_cover" "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(cover_format_tests PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+if(TTPLAYER_LEGACY_WINDOWS)
+  add_dependencies(cover_format_tests ttplayer_legacy_ttpcomm_import)
+  target_link_libraries(cover_format_tests PRIVATE "${ttpcomm_import_library}")
+  target_link_options(cover_format_tests PRIVATE /INCLUDE:__imp__srand48)
+endif()
+add_executable(cover_image_tests tests/ui/cover_image_tests.cpp)
+target_compile_definitions(cover_image_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(cover_image_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(cover_image_tests PRIVATE ttplayer_core)
+if(TTPLAYER_LEGACY_WINDOWS)
+  add_dependencies(cover_image_tests ttplayer_legacy_ttpcomm_import)
+  target_link_libraries(cover_image_tests PRIVATE "${ttpcomm_import_library}")
+  target_link_options(cover_image_tests PRIVATE /INCLUDE:__imp__srand48)
+endif()
+add_test(NAME cover_image_tests COMMAND cover_image_tests
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/album_cover" "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(cover_image_tests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+
 add_executable(idle_error_tests tests/ui/idle_error_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(idle_error_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

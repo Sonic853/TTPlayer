@@ -21,6 +21,13 @@
   Windows Media Format（`wmvcore.dll`），其它格式仍优先使用原版 AddIn。
   精简系统需要保留 Windows Media 运行组件；后备解码器不提供新的编解码器。
 - XP 不提供任务栏缩略图按钮、DWM 合成等系统功能。Shell 元数据不可用时保留其它元数据读取路径。
+- 专辑封面支持 PNG；WIC 不可用时使用系统 GDI+ 解码，文件属性预览也使用相同
+  后备路径。已在 XP SP3 / Win7 SP1 虚拟机验证常见格式、透明度及内嵌 PNG，
+  详见源码仓库 `docs/LEGACY_ALBUM_COVER_FIX.md`。
+- 多格式封面已补齐 APE 标签服务和属性保存路径；M4A / MP4、APE / MAC、WMA / ASF、
+  RM / RA 可通过对应插件读取和编辑 JPEG / PNG。裸 AAC、TTA 没有封面接口。
+  AAC / ASF / RM 等插件仍需其配套 x86 VC++ 2012 运行库，详见源码仓库
+  `docs/ALBUM_COVER_FORMAT_RECOVERY.md`。
 - XP / Win7 的“系统关联”按原版直接设置当前用户的文件关联，取消时恢复本程序
   保存的旧关联，不再依赖 `SetAppAsDefault`。兼容 EXE 在 Win8 及以后运行时仍
   使用系统默认程序确认流程。详见源码仓库 `docs/LEGACY_FILE_ASSOCIATION_FIX.md`。

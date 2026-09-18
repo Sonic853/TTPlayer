@@ -7,6 +7,7 @@
 #include <vector>
 #include <windows.h>
 #include <mmreg.h>
+#include <objidl.h>
 
 namespace ttplayer::audio {
 
@@ -48,6 +49,11 @@ enum class BuiltinCoverAction : std::uint32_t {
     replace = 1,
     remove = 2,
 };
+
+// Original host export 004DA091, used by APE and other AddIns for shared
+// tags. Returns ISoundContent; its QI also exposes ISoundThumbnail.
+HRESULT CreateStandardContent(IStream* stream, DWORD write_type,
+                              IUnknown** content, ULONGLONG* audio_bytes) noexcept;
 
 // The 5.7.9 executable contains an MP3 reader/tag writer in the main image
 // (004D9AC8/004D9B56), rather than in AddIn\ttp_mp3.dll.  These functions
