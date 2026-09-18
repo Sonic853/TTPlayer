@@ -25,7 +25,9 @@ std::wstring ResourceText(HMODULE module, UINT identifier) {
 
 int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     // Keep 004C0E8F's EXE-local dependency loading order, but deliberately
-    // omit its exact-version gate. ABI-compatible DLL revisions (including
+    // omit its exact-version gate. The XP edition also retains a startup
+    // import: XP cannot allocate ttpcomm's static TLS via LoadLibrary alone.
+    // ABI-compatible DLL revisions (including
     // those without a version export) are accepted; consumers check exports.
     ttplayer::app::TtpCommRuntime ttpcomm;
     if (!ttpcomm.Initialize()) {

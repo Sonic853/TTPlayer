@@ -85,13 +85,21 @@ def main():
     parser.add_argument('executable', type=Path)
     parser.add_argument('--exports', type=Path, action='append', required=True)
     parser.add_argument('--report', type=Path)
+    parser.add_argument('--require-ttpcomm-tls', action='store_true',
+                        help='Require the original ttpcomm ordinal 3 as an XP startup dependency')
     args = parser.parse_args()
     imports = inspect(args.executable)
     failures = []
+    if args.require_ttpcomm_tls and imports.get('ttpcomm.dll') != ['#3']:
+        failures.append('The XP player must import ttpcomm.dll ordinal 3 at startup for static TLS')
     for inventory in args.exports:
         available = exports(inventory)
         for dll, names in imports.items():
             for name in names:
+                # This is the sole application DLL exemption, not an OS API.
+                # Other ttpcomm imports and all other DLLs still need auditing.
+                if args.require_ttpcomm_tls and dll == 'ttpcomm.dll' and name == '#3':
+                    continue
                 if name not in available.get(dll, set()):
                     failures.append(f'{inventory.stem}: {dll}!{name}')
     if failures:

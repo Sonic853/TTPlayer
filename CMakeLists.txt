@@ -176,6 +176,7 @@ include(cmake/size_optimization.cmake)
 # enables DEP explicitly, with the system's legacy ATL compatibility.
 target_link_options(ttplayer_rebuild PRIVATE /NXCOMPAT:NO)
 if(TTPLAYER_LEGACY_WINDOWS)
+  include(cmake/legacy_ttpcomm.cmake)
   target_link_options(ttplayer_rebuild PRIVATE /SUBSYSTEM:WINDOWS,5.01 /OSVERSION:5.1)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_custom_command(TARGET ttplayer_rebuild POST_BUILD
@@ -183,6 +184,7 @@ if(TTPLAYER_LEGACY_WINDOWS)
       "$<TARGET_FILE:ttplayer_rebuild>"
       --exports "${ttplayer_yy_thunks_SOURCE_DIR}/Config/x86/5.1.2600.txt"
       --exports "${ttplayer_yy_thunks_SOURCE_DIR}/Config/x86/6.1.7600.txt"
+      --require-ttpcomm-tls
       --report "$<TARGET_FILE_DIR:ttplayer_rebuild>/legacy-imports.json"
     COMMENT "Checking every static import against XP and Windows 7"
     VERBATIM)

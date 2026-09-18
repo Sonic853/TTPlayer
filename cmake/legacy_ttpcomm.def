@@ -1,0 +1,3 @@
+LIBRARY ttpcomm.dll
+EXPORTS
+    srand48 @3 NONAME

@@ -4,6 +4,8 @@
 放入已安装的千千静听 5.7.9 目录，与 `TTPlayer.exe`、`ttpcomm.dll`、
 `ttpres.dll`、`AddIn`、`Skin` 放在一起。运行目录内的 `TTPlayerRebuild.exe`。
 压缩包不包含原版插件和个人配置；设置文件仍为 `TTPlayerRebuild.xml`。
+兼容版在进程启动时导入同目录 `ttpcomm.dll` 的序号 3，使 XP 为原版 DLL 正确分配
+线程局部存储（TLS）。该 DLL 必须随原版运行文件一起放置；缺失时由系统加载器报告错误。
 
 ## 版本选择
 
@@ -44,17 +46,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cmake/package_legacy.ps1 -Bu
 EXE 版本头的方法修复当前标准库已有的导入。兼容构建在链接时接入 XP thunk 对象、
 VC-LTL 的 XP CRT 适配库及 `/MT`，设置 PE 子系统版本 5.01。
 
-每次链接后，`cmake/check_legacy_imports.py` 会将全部静态 DLL/函数/序号导入与
+每次链接后，`cmake/check_legacy_imports.py` 会将系统 DLL/函数/序号导入与
 YY-Thunks 包中的 XP、Win7 系统导出清单核对，并拒绝过高的 PE 版本或未审核的延迟导入。
-检查失败则构建失败。`legacy-imports.json` 记录 EXE 的 SHA-256，打包前再次核对，
+另强制检查原版应用依赖 `ttpcomm.dll!#3` 存在，只有这一项可绕过系统 DLL 清单。
+检查失败则构建失败。`legacy-imports.json` 记录 EXE 的 SHA-256，打包前再次核对启动导入和哈希，
 防止检查后替换 EXE。此检查覆盖主 EXE；第三方插件需自行满足旧系统要求。
 
 ## 验证范围
 
 已在当前 Windows 主机检查 PE 导入并进行隔离启动；通过强制关闭 Media Foundation /
 属性系统的测试验证内置 WAV、Windows Media MP3/WMA 解码和定位、文件复制、内存流、
-播放工作线程的后备路径。**这些检查不是 XP / Win7 实机测试。**
-发布到实际旧系统前仍需验证：启动、添加文件/目录、MP3/WAV/WMA 和常用 AddIn 播放、
+播放工作线程的后备路径。
+
+2026-09-18 已在 VirtualBox 的 Windows XP Professional SP3（5.1.2600）中复现并修复
+启动崩溃：从共享 Z 盘复制修复版到 `C:\Documents and Settings\853\My Documents\TTPlayer`
+后，连续三次 `--smoke-test` 均返回 0，普通启动、打开选项和正常退出均通过。另用对照程序确认 DLL 与 EXE 的
+TLS 索引分离，三个并发线程的随机数状态和 C++ 局部静态初始化正常。
+详见源码仓库 `docs/XP_STARTUP_TLS_FIX.md`。
+
+Win7 本轮未进行来宾运行测试。完整功能仍需逐项验证：添加文件/目录、MP3/WAV/WMA 和常用 AddIn 播放、
 暂停/定位/切曲、歌词、转换、关闭与重启。XP SP3 及 Win7 的驱动和插件差异需在目标机器验证。
 
 ## 来源
