@@ -1,5 +1,12 @@
 # 音频引擎恢复记录
 
+## 2026-09-19：MIDI DirectShow 路径
+
+MIDI 已从 MCI 改为原版使用的 DirectShow Filter Graph，补齐时长查询、暂停定位、
+结束检测、IBasicAudio 音量和平衡，并明确拒绝 PCM 解码。控制回归在本机、XP、Win7
+通过；音量和平衡仍受系统 MIDI Renderer／设备能力限制。原版地址、实施和实测限制见
+[MIDI_PLAYBACK_ANALYSIS.md](MIDI_PLAYBACK_ANALYSIS.md)。
+
 ## 2026-09-11：可选 mp3PRO 输入解码
 
 按 `004E6CBD/004E6FB6/004E738F` 接入当前 EXE 同目录的 `mp3PRO.dll`，
@@ -20,7 +27,7 @@
 现在由音频引擎统一持有已接受的目标位置和递增请求序号：
 
 - 入队即通过 `Position()` 发布目标，UI 不等待解码线程或阻塞消息循环。
-- 工作线程取走请求后仍保持目标；waveOut/KS/ASIO、DirectSound 和 MCI
+- 工作线程取走请求后仍保持目标；waveOut/KS/ASIO、DirectSound 和 MIDI
   在新输出位置准备好后确认请求，先发布新时钟，再撤销目标覆盖。
 - 确认必须匹配最新序号，防止旧请求完成后覆盖连续拖动的新目标，亦
   覆盖连续两次拖到同一毫秒的情况。停止、失败或工作线程退出时清理

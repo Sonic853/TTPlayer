@@ -20,7 +20,7 @@
 struct IDirectSoundBuffer8;
 
 namespace ttplayer::plugins { class PluginManager; }
-namespace ttplayer::testing { struct ProgressSeekAccess; }
+namespace ttplayer::testing { struct ProgressSeekAccess; struct MidiPlaybackAccess; }
 
 namespace ttplayer::audio {
 class WinampDspChain;
@@ -261,7 +261,8 @@ public:
 
 private:
     friend struct ttplayer::testing::ProgressSeekAccess;
-    enum class Backend { none, wave_out, direct_sound, kernel_streaming, asio, mci };
+    friend struct ttplayer::testing::MidiPlaybackAccess;
+    enum class Backend { none, wave_out, direct_sound, kernel_streaming, asio, midi };
     enum class FadeCompletion { none, pause, seek, seek_resume, stop };
     struct SeekRequest {
         int64_t position_ms{-1};
@@ -280,7 +281,7 @@ private:
         ~LyricSourceRegistration();
     };
     void ProcessLyricWrite(DecodedAudioSource& source);
-    void MciWorker(const std::filesystem::path& path);
+    void MidiWorker(const std::filesystem::path& path);
     [[nodiscard]] bool PublishOpened(Backend backend, const AudioFormat& format,
                                      std::chrono::milliseconds duration);
     void SignalOpenComplete();
@@ -329,7 +330,6 @@ private:
     std::atomic<Backend> backend_{Backend::none};
     HWAVEOUT device_{};
     IDirectSoundBuffer8* direct_sound_buffer_{};
-    MCIDEVICEID mci_device_{};
     HANDLE completion_event_{};
     std::jthread worker_;
     std::jthread fade_worker_;

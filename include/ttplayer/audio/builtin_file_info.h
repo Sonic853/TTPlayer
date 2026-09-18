@@ -57,8 +57,9 @@ HRESULT CreateStandardContent(IStream* stream, DWORD write_type,
 
 // The 5.7.9 executable contains an MP3 reader/tag writer in the main image
 // (004D9AC8/004D9B56), rather than in AddIn\ttp_mp3.dll.  These functions
-// provide that built-in boundary to the isolated file-info helper.  WAV and
-// Shell metadata fallbacks are read-only and report no tag-write capability.
+// provide that built-in boundary to the isolated file-info helper. MIDI uses
+// the recovered DirectShow duration facade (caller initializes COM); WAV and
+// Shell metadata fallbacks are also read-only, without tag-write capability.
 [[nodiscard]] HRESULT ReadBuiltinFileInfo(
     const std::filesystem::path& path, const Mp3TagPolicy& policy,
     BuiltinFileInfo& result) noexcept;

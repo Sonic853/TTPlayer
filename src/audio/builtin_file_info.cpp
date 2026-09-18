@@ -1,5 +1,6 @@
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/builtin_file_info.h"
+#include "ttplayer/audio/midi_player.h"
 
 #include <algorithm>
 #include <array>
@@ -1774,6 +1775,20 @@ HRESULT ReadBuiltinFileInfo(const std::filesystem::path& path,
                             BuiltinFileInfo& result) noexcept {
     try {
         BuiltinFileInfo decoded;
+        if (IsMidiPath(path)) {
+            // 004E9BF5 opens a temporary graph solely for duration. It never
+            // runs the graph or advertises PCM reads / writable tags.
+            MidiPlayer player;
+            const HRESULT status = player.Open(path);
+            if (FAILED(status)) return status;
+            decoded.capabilities = 0x0a;
+            decoded.format = MidiReaderFormat();
+            decoded.duration_ms = static_cast<DWORD>(std::clamp<int64_t>(
+                player.Duration().count(), 0, MAXDWORD));
+            decoded.codec = L"MID|MIDI Music";
+            result = std::move(decoded);
+            return S_OK;
+        }
         HRESULT status = E_NOINTERFACE;
         if (ExtensionIs(path, L".mp3"))
             status = ReadMp3(path, policy, decoded);

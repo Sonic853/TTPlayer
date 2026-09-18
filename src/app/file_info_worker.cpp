@@ -6,6 +6,7 @@
 
 #include "ttplayer/audio/archive_member.h"
 #include "ttplayer/audio/builtin_file_info.h"
+#include "ttplayer/audio/midi_player.h"
 #include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/plugins/plugin_manager.h"
 
@@ -136,7 +137,8 @@ void PopulateBuiltinResult(
 }
 
 bool IsDirectBuiltinPath(const std::filesystem::path& path) {
-    return _wcsicmp(path.extension().c_str(), L".mp3") == 0 ||
+    return ttplayer::audio::IsMidiPath(path) ||
+           _wcsicmp(path.extension().c_str(), L".mp3") == 0 ||
            _wcsicmp(path.extension().c_str(), L".wav") == 0 ||
            _wcsicmp(path.extension().c_str(), L".wave") == 0;
 }

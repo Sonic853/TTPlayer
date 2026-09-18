@@ -61,6 +61,7 @@ add_library(ttplayer_core
   src/audio/file_encoder.cpp
   src/audio/kernel_streaming_sink.cpp
   src/audio/legacy_windows_source.cpp
+  src/audio/midi_player.cpp
   src/audio/mp3pro_source.cpp
   src/audio/native_output_contract.cpp
   src/audio/pcm_output_transform.cpp
@@ -132,7 +133,7 @@ target_compile_definitions(ttplayer_core PRIVATE UNICODE _UNICODE NOMINMAX WIN32
 target_compile_options(ttplayer_core PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_core PUBLIC
   ttplayer_wtl_headers
-  winmm ole32 oleaut32 comsuppw uuid msimg32 shell32 shlwapi comctl32 comdlg32
+  winmm ole32 oleaut32 comsuppw uuid strmiids msimg32 shell32 shlwapi comctl32 comdlg32
   windowscodecs gdiplus dsound setupapi dwmapi uxtheme
   mfplat mfreadwrite mfuuid propsys winhttp
 )
@@ -272,6 +273,12 @@ set_tests_properties(media_library_tests PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
 endif()
 
 if(BUILD_TESTING)
+add_executable(midi_playback_tests tests/audio/midi_playback_tests.cpp)
+target_compile_definitions(midi_playback_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(midi_playback_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(midi_playback_tests PRIVATE ttplayer_core)
+add_test(NAME midi_playback_tests COMMAND midi_playback_tests)
+set_tests_properties(midi_playback_tests PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
 add_executable(cover_format_tests tests/ui/cover_format_tests.cpp src/app/exports.cpp)
 target_compile_definitions(cover_format_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(cover_format_tests PRIVATE /W4 /permissive- /EHsc /utf-8)

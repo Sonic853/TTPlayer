@@ -1,5 +1,6 @@
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/audio_engine.h"
+#include "ttplayer/audio/midi_player.h"
 #include "ttplayer/audio/playback_clock.h"
 #include "ttplayer/audio/archive_member.h"
 #include "ttplayer/audio/cue_sheet.h"
@@ -115,11 +116,6 @@ std::wstring LowerExtension(const std::filesystem::path& path) {
     auto value = path.extension().wstring();
     std::transform(value.begin(), value.end(), value.begin(), towlower);
     return value;
-}
-
-bool IsMidiPath(const std::filesystem::path& path) {
-    const auto extension = LowerExtension(path);
-    return extension == L".mid" || extension == L".midi" || extension == L".rmi";
 }
 
 std::wstring HResultMessage(std::wstring_view operation, HRESULT result) {
@@ -1112,9 +1108,30 @@ private:
     std::wstring error_;
 };
 
+// 005230E8 reader slots +0x38/+0x3c return E_NOTIMPL. MIDI's fixed format
+// descriptor must never send conversion/ReplayGain down a fake PCM path.
+class MidiNonPcmSource final : public DecodedAudioSource {
+public:
+    bool Open(const std::filesystem::path&, const PlaybackOptions&) override { return false; }
+    bool Read(size_t, std::vector<std::byte>& output, bool& end) override {
+        output.clear(); end = true; return false;
+    }
+    bool Seek(std::chrono::milliseconds) override { return false; }
+    const WAVEFORMATEX& OutputFormat() const override { return format_; }
+    AudioFormat DisplayFormat() const override {
+        return {1, 2, 44100, 176400, 4, 16, L"MID|MIDI Music"};
+    }
+    std::chrono::milliseconds Duration() const override { return {}; }
+    std::wstring Error() const override { return L"MIDI Reader does not provide decoded PCM"; }
+    HRESULT ErrorResult() const override { return E_NOTIMPL; }
+private:
+    WAVEFORMATEX format_{MidiReaderFormat()};
+};
+
 std::unique_ptr<DecodedAudioSource> MakeBaseSource(
     const std::filesystem::path& path,
     const plugins::PluginManager* plugin_manager, HMODULE ttpcomm) {
+    if (IsMidiPath(path)) return std::make_unique<MidiNonPcmSource>();
     // CPlayList::OpenURL retains a URL as a network stream.  Extension-based
     // AddIn creators expect SHCreateStreamOnFileEx and must never intercept
     // values such as https://host/song.flac or http://host/song.ape.
@@ -1861,28 +1878,6 @@ void CALLBACK WaveOutCallback(HWAVEOUT, UINT message, DWORD_PTR instance,
         SetEvent(reinterpret_cast<HANDLE>(instance));
 }
 
-bool MciStatus(MCIDEVICEID device, DWORD item, DWORD& value) {
-    MCI_STATUS_PARMS status{};
-    status.dwItem = item;
-    const MCIERROR result = mciSendCommandW(
-        device, MCI_STATUS, MCI_STATUS_ITEM | MCI_WAIT,
-        reinterpret_cast<DWORD_PTR>(&status));
-    value = status.dwReturn;
-    return result == 0;
-}
-
-std::wstring MciErrorMessage(std::wstring_view operation, MCIERROR result) {
-    wchar_t detail[256]{};
-    mciGetErrorStringW(result, detail, static_cast<UINT>(std::size(detail)));
-    std::wstring message(operation);
-    message += L" failed";
-    if (*detail) {
-        message += L": ";
-        message += detail;
-    }
-    return message;
-}
-
 std::wstring WaveOutErrorMessage(std::wstring_view operation,
                                  MMRESULT result) {
     wchar_t detail[MAXERRORLENGTH]{};
@@ -2163,7 +2158,6 @@ bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
 void AudioEngine::RestoreAfterOutputRestart(
     std::chrono::milliseconds position, bool paused) {
     ClearVisualization();
-    HANDLE completion{};
     {
         std::scoped_lock lock(mutex_);
         const auto current = state_.load();
@@ -2185,15 +2179,12 @@ void AudioEngine::RestoreAfterOutputRestart(
             else if (backend_.load() == Backend::direct_sound &&
                      direct_sound_buffer_)
                 static_cast<void>(direct_sound_buffer_->Stop());
-            else if (backend_.load() == Backend::mci && mci_device_)
-                static_cast<void>(mciSendCommandW(mci_device_, MCI_PAUSE, 0, 0));
             state_ = PlaybackState::paused;
         } else {
             state_ = PlaybackState::playing;
         }
-        completion = completion_event_;
+        if (completion_event_) SetEvent(completion_event_);
     }
-    if (completion) SetEvent(completion);
 }
 
 void AudioEngine::PlaybackWorker(std::filesystem::path path, int subtrack) {
@@ -2207,7 +2198,8 @@ void AudioEngine::PlaybackWorker(std::filesystem::path path, int subtrack) {
         static_cast<int>(THREAD_PRIORITY_TIME_CRITICAL)));
     const HRESULT com_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (IsMidiPath(path)) {
-        MciWorker(path);
+        if (FAILED(com_result)) SetError(L"MIDI COM initialization failed", com_result);
+        else MidiWorker(path);
     } else {
         const HRESULT media_result = platform::MFStartup(MF_VERSION, MFSTARTUP_LITE);
         // Native readers and original AddIns do not require Media Foundation.
@@ -3114,113 +3106,123 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     if (state_.load() != PlaybackState::failed) state_ = PlaybackState::stopped;
 }
 
-void AudioEngine::MciWorker(const std::filesystem::path& path) {
-    MCI_OPEN_PARMSW open{};
-    open.lpstrElementName = path.c_str();
-    MCIERROR result = mciSendCommandW(0, MCI_OPEN, MCI_OPEN_ELEMENT | MCI_WAIT,
-                                      reinterpret_cast<DWORD_PTR>(&open));
-    if (result != 0) {
-        if (!stop_requested_) SetError(MciErrorMessage(L"MCI_OPEN", result));
-        return;
-    }
-    const MCIDEVICEID device = open.wDeviceID;
-    if (stop_requested_) {
-        mciSendCommandW(device, MCI_CLOSE, MCI_WAIT, 0);
-        return;
-    }
-    MCI_SET_PARMS set{};
-    set.dwTimeFormat = MCI_FORMAT_MILLISECONDS;
-    result = mciSendCommandW(device, MCI_SET, MCI_SET_TIME_FORMAT | MCI_WAIT,
-                             reinterpret_cast<DWORD_PTR>(&set));
-    if (result != 0) {
-        mciSendCommandW(device, MCI_CLOSE, MCI_WAIT, 0);
-        if (!stop_requested_)
-            SetError(MciErrorMessage(L"MCI_SET_TIME_FORMAT", result));
-        return;
-    }
-    DWORD duration{};
-    MciStatus(device, MCI_STATUS_LENGTH, duration);
+void AudioEngine::MidiWorker(const std::filesystem::path& path) {
+    // All DirectShow interfaces belong to this COM-initialized worker. UI
+    // commands update intent under mutex_ and wake it, never call raw COM
+    // pointers across apartments or race release during Stop/track changes.
+    MidiPlayer player;
+    const auto failed = [this](const wchar_t* operation, HRESULT result) {
+        if (!stop_requested_) {
+            std::wostringstream message;
+            message << L"MIDI " << operation << L" failed (0x" << std::hex
+                    << std::uppercase << static_cast<unsigned long>(result) << L")";
+            SetError(message.str(), result);
+        }
+    };
+    HRESULT result = player.Open(path);
+    if (FAILED(result)) { failed(L"RenderFile", result); return; }
+    if (stop_requested_) return;
+    const HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!wake) { failed(L"CreateEvent", HRESULT_FROM_WIN32(GetLastError())); return; }
     {
         std::scoped_lock lock(mutex_);
-        mci_device_ = device;
-        backend_ = Backend::mci;
-        ApplyVolumeLocked();
+        completion_event_ = wake;
     }
-    MCI_PLAY_PARMS play{};
-    result = mciSendCommandW(device, MCI_PLAY, 0,
-                             reinterpret_cast<DWORD_PTR>(&play));
-    if (result != 0) {
-        mciSendCommandW(device, MCI_CLOSE, MCI_WAIT, 0);
+    float applied_volume = -1.0F;
+    int applied_balance = 101;
+    bool volume_failure_reported{}, balance_failure_reported{};
+    const auto apply_audio = [&] {
+        float volume;
+        int balance;
         {
             std::scoped_lock lock(mutex_);
-            mci_device_ = 0;
-            backend_ = Backend::none;
+            // The MIDI object bypasses CSound's PCM fades and processing.
+            volume = volume_;
+            balance = balance_;
         }
-        if (!stop_requested_) SetError(MciErrorMessage(L"MCI_PLAY", result));
-        return;
-    }
-    AudioFormat format{};
-    format.format_tag = 0xffff;
-    format.codec_name = L"MIDI";
-    if (!PublishOpened(Backend::mci, format,
-                       std::chrono::milliseconds(duration))) {
-        mciSendCommandW(device, MCI_STOP, MCI_WAIT, 0);
-        mciSendCommandW(device, MCI_CLOSE, MCI_WAIT, 0);
-        {
-            std::scoped_lock lock(mutex_);
-            if (mci_device_ == device) mci_device_ = 0;
-            backend_ = Backend::none;
-        }
-        return;
-    }
-
-    while (!stop_requested_) {
-        const auto request = TakeSeekRequest();
-        const int64_t requested = request.position_ms;
-        if (requested >= 0) {
-            const auto previous_state = state_.load();
-            mciSendCommandW(device, MCI_STOP, MCI_WAIT, 0);
-            MCI_PLAY_PARMS from{};
-            from.dwFrom = static_cast<DWORD>(std::clamp<int64_t>(
-                requested, 0, duration_ms_.load()));
-            if (from.dwFrom >= static_cast<DWORD>(duration_ms_.load())) {
-                CompleteSeek(request, duration_ms_.load());
-                state_ = PlaybackState::stopped;
-                break;
+        const auto diagnose = [&](const wchar_t* name, HRESULT hr, bool& reported) {
+            if (FAILED(hr) && !reported) {
+                std::wostringstream message;
+                message << L"MIDI IBasicAudio::" << name << L" failed (0x"
+                        << std::hex << std::uppercase
+                        << static_cast<unsigned long>(hr) << L")";
+                RecordDiagnostic(message.str());
+                reported = true;
             }
-            result = mciSendCommandW(device, MCI_PLAY, MCI_FROM,
-                                     reinterpret_cast<DWORD_PTR>(&from));
-            if (result != 0) {
-                if (!stop_requested_)
-                    SetError(MciErrorMessage(L"MCI_PLAY(MCI_FROM)", result));
-                break;
+        };
+        if (volume != applied_volume) {
+            diagnose(L"put_Volume", player.SetVolume(volume), volume_failure_reported);
+            applied_volume = volume;
+        }
+        if (balance != applied_balance) {
+            diagnose(L"put_Balance", player.SetBalance(balance), balance_failure_reported);
+            applied_balance = balance;
+        }
+    };
+    apply_audio(); // Offer initial volume before Run; driver failures are diagnosed.
+    result = stop_requested_ ? E_ABORT : player.Run();
+    const auto wave = MidiReaderFormat();
+    AudioFormat format{wave.wFormatTag, wave.nChannels, wave.nSamplesPerSec,
+        wave.nAvgBytesPerSec, wave.nBlockAlign, wave.wBitsPerSample, L"MID|MIDI Music"};
+    if (FAILED(result)) failed(L"Run", result);
+    else if (PublishOpened(Backend::midi, format, player.Duration())) {
+        auto applied_state = PlaybackState::playing;
+        while (!stop_requested_) {
+            apply_audio();
+            const auto desired_state = state_.load();
+            if (desired_state != PlaybackState::playing &&
+                desired_state != PlaybackState::paused) break;
+            if (desired_state != applied_state) {
+                result = desired_state == PlaybackState::paused
+                    ? player.Pause() : player.Run();
+                if (FAILED(result)) { failed(L"play/pause", result); break; }
+                applied_state = desired_state;
             }
-            if (previous_state == PlaybackState::paused)
-                mciSendCommandW(device, MCI_PAUSE, 0, 0);
-            CompleteSeek(request, from.dwFrom);
+            const auto request = TakeSeekRequest();
+            if (request.position_ms >= 0) {
+                // Discard a completion belonging to the previous position.
+                bool old_complete{};
+                result = player.PollEvents(old_complete);
+                if (FAILED(result)) { failed(L"graph", result); break; }
+                result = player.Seek(std::chrono::milliseconds(request.position_ms));
+                if (FAILED(result)) { failed(L"SetPositions", result); break; }
+                CompleteSeek(request, request.position_ms);
+            }
+            std::chrono::milliseconds position;
+            const bool have_position = SUCCEEDED(player.Position(position));
+            if (have_position) {
+                std::scoped_lock lock(mutex_);
+                if (!stop_requested_) position_ms_ = std::max<int64_t>(0, position.count());
+            }
+            bool complete{};
+            result = player.PollEvents(complete);
+            if (FAILED(result)) { failed(L"graph", result); break; }
+            {
+                std::scoped_lock lock(mutex_);
+                // A newer UI seek must win over EOF from the old timeline.
+                // 004E2EA2 also checks the end while paused. Unknown duration
+                // must not be interpreted as an immediate zero-length EOF.
+                if (!stop_requested_ && pending_seek_position_ms_.load() < 0 &&
+                    ((have_position && duration_ms_.load() > 0 &&
+                      position.count() >= duration_ms_.load()) ||
+                     (complete && duration_ms_.load() <= 0))) {
+                    if (duration_ms_.load() > 0) position_ms_ = duration_ms_.load();
+                    state_ = PlaybackState::stopped;
+                    break;
+                }
+            }
+            WaitForSingleObject(wake, 50); // recovered 0x32 ms end timer
         }
-        DWORD position{};
-        if (MciStatus(device, MCI_STATUS_POSITION, position)) {
-            position_ms_ = position;
-            UpdateTrackFade(position_ms_.load());
-        }
-        DWORD mode{};
-        if (MciStatus(device, MCI_STATUS_MODE, mode) && mode == MCI_MODE_STOP) {
-            if (position_ms_.load() + 20 >= duration_ms_.load())
-                position_ms_ = duration_ms_.load();
-            state_ = PlaybackState::stopped;
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    mciSendCommandW(device, MCI_STOP, MCI_WAIT, 0);
-    mciSendCommandW(device, MCI_CLOSE, MCI_WAIT, 0);
+    static_cast<void>(player.Stop()); // Stop, seek to zero, then release on owner.
     {
         std::scoped_lock lock(mutex_);
-        if (mci_device_ == device) mci_device_ = 0;
+        completion_event_ = nullptr;
+        CloseHandle(wake);
         backend_ = Backend::none;
+        if (!stop_requested_ && state_.load() != PlaybackState::failed)
+            state_ = PlaybackState::stopped;
     }
-    if (state_.load() != PlaybackState::failed) state_ = PlaybackState::stopped;
 }
 
 bool AudioEngine::PublishOpened(Backend backend, const AudioFormat& format,
@@ -3236,7 +3238,8 @@ bool AudioEngine::PublishOpened(Backend backend, const AudioFormat& format,
             error_result_ = S_OK;
             state_ = PlaybackState::playing;
             track_gain_ = 1.0F;
-            if ((options_.sound_fade_mode & 0x01) != 0 &&
+            if (backend != Backend::midi &&
+                (options_.sound_fade_mode & 0x01) != 0 &&
                 options_.fade_duration[
                     RecoveredFadeInDurationIndex(false)] > 0) {
                 // local_38 == 5 in CSound::ReadThreadProc: ordinary open
@@ -3288,9 +3291,12 @@ void AudioEngine::Pause() {
     else if (backend_.load() == Backend::kernel_streaming ||
              backend_.load() == Backend::asio)
         success = true; // The owning worker performs the native pin transition.
-    else if (backend_.load() == Backend::mci && mci_device_)
-        success = mciSendCommandW(mci_device_, MCI_PAUSE, 0, 0) == 0;
-    if (success) state_ = PlaybackState::paused;
+    else if (backend_.load() == Backend::midi)
+        success = true; // The owner thread applies IMediaControl::Pause.
+    if (success) {
+        state_ = PlaybackState::paused;
+        if (completion_event_) SetEvent(completion_event_);
+    }
 }
 
 void AudioEngine::Resume() {
@@ -3304,17 +3310,8 @@ void AudioEngine::Resume() {
     else if (backend_.load() == Backend::kernel_streaming ||
              backend_.load() == Backend::asio)
         success = true;
-    else if (backend_.load() == Backend::mci && mci_device_) {
-        success = mciSendCommandW(mci_device_, MCI_RESUME, 0, 0) == 0;
-        if (!success) {
-            DWORD position{};
-            MciStatus(mci_device_, MCI_STATUS_POSITION, position);
-            MCI_PLAY_PARMS play{};
-            play.dwFrom = position;
-            success = mciSendCommandW(mci_device_, MCI_PLAY, MCI_FROM,
-                                      reinterpret_cast<DWORD_PTR>(&play)) == 0;
-        }
-    }
+    else if (backend_.load() == Backend::midi)
+        success = true; // The owner thread applies IMediaControl::Run.
     if (success) {
         state_ = PlaybackState::playing;
         if ((options_.sound_fade_mode & 0x01) != 0 &&
@@ -3391,7 +3388,6 @@ void AudioEngine::SeekImpl(std::chrono::milliseconds position,
     ClearVisualization();
     const int64_t target = std::clamp<int64_t>(
         position.count(), 0, duration_ms_.load());
-    HANDLE completion{};
     {
         std::scoped_lock lock(mutex_);
         if (state_.load() != PlaybackState::playing &&
@@ -3427,9 +3423,8 @@ void AudioEngine::SeekImpl(std::chrono::milliseconds position,
         QueueSeekLocked(target);
         track_gain_ = 1.0F;
         ApplyVolumeLocked();
-        completion = completion_event_;
+        if (completion_event_) SetEvent(completion_event_);
     }
-    if (completion) SetEvent(completion);
 }
 
 void AudioEngine::RequestStop() noexcept {
@@ -3444,7 +3439,6 @@ void AudioEngine::RequestStop() noexcept {
         // remain safely owned and are handled by the bounded reap below.
         static_cast<void>(CancelSynchronousIo(worker_.native_handle()));
     }
-    HANDLE completion{};
     {
         std::scoped_lock lock(mutex_);
         CancelSeekLocked();
@@ -3452,11 +3446,10 @@ void AudioEngine::RequestStop() noexcept {
         ++fade_generation_;
         transition_gain_ = 1.0F;
         track_gain_ = 1.0F;
-        completion = completion_event_;
+        // Driver teardown runs on the owner thread. Signal while holding its
+        // handle-registration lock so EOF cannot close/reuse the event first.
+        if (completion_event_) SetEvent(completion_event_);
     }
-    // waveOutReset and MCI_STOP can themselves block in a driver.  Wake the
-    // worker and let it perform those teardown calls off the UI thread.
-    if (completion) SetEvent(completion);
 }
 
 bool AudioEngine::ReapWorker(std::chrono::milliseconds timeout) noexcept {
@@ -3662,6 +3655,10 @@ void AudioEngine::UpdateTrackFade(int64_t position_ms) {
 }
 
 void AudioEngine::ApplyVolumeLocked() {
+    if (backend_.load() == Backend::midi) {
+        if (completion_event_) SetEvent(completion_event_);
+        return;
+    }
     const float effective = std::clamp(
         volume_ * transition_gain_ * track_gain_, 0.0F, 1.0F);
     const DWORD base = static_cast<DWORD>(std::lround(effective * 65535.0F));

@@ -98,7 +98,8 @@ revision，下一次输出重建会实际读取这些值。
 
 waveOut/DirectSound 执行完整过渡。ASIO 的 unity 行为由原 vtable 证明；KS
 因未恢复设备 topology volume 而不预填淡变 packet，避免在硬件队列前插入长
-静音。MIDI/MCI 不经过 PCM worker。
+静音。MIDI 的 DirectShow 播放对象不经过 PCM worker，恢复记录见
+[MIDI_PLAYBACK_ANALYSIS.md](MIDI_PLAYBACK_ANALYSIS.md)。
 
 ## 5. 媒体库
 
