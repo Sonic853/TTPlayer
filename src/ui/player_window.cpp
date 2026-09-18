@@ -2703,8 +2703,13 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         if (!skin_) reinterpret_cast<MINMAXINFO*>(lparam)->ptMinTrackSize = {760, 440};
         return 0;
     case WM_SIZE:
-        LayoutControls(static_cast<int>(LOWORD(lparam)), static_cast<int>(HIWORD(lparam)));
+        // Keep the normal child geometry for off-screen Peek rendering.
+        if (wparam != SIZE_MINIMIZED)
+            LayoutControls(static_cast<int>(LOWORD(lparam)), static_cast<int>(HIWORD(lparam)));
         taskbar_preview_.Refresh(window_);
+        return 0;
+    case WM_PRINTCLIENT:
+        if (wparam) Paint(reinterpret_cast<HDC>(wparam));
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT paint{};
@@ -3472,6 +3477,9 @@ void PlayerWindow::Paint(HDC dc) const {
     }
     RECT client{};
     GetClientRect(window_, &client);
+    // A minimized HWND may report an empty/icon-sized client rectangle.
+    // WM_PRINT uses a DIB with the last real client size for Aero Peek.
+    if (IsIconic(window_)) GetClipBox(dc, &client);
     const HBRUSH background = CreateSolidBrush(kBackground);
     FillRect(dc, &client, background);
     DeleteObject(background);

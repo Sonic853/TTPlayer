@@ -28,23 +28,74 @@ HBITMAP Render(HBITMAP cover, SIZE source, SIZE size) {
     if (bitmap && pixels && from && to) {
         const auto old_from = SelectObject(from, cover), old_to = SelectObject(to, bitmap);
         const size_t count = static_cast<size_t>(size.cx) * size.cy;
-        std::fill_n(static_cast<DWORD*>(pixels), count, 0xff000000U);
-        // Keep the submitted canvas at the requested size. Changing the DIB
-        // aspect ratio with the artwork makes Explorer resize its preview
-        // layout; a later request/cache entry can then use that smaller size.
-        const SIZE fitted = Fit(source, size);
-        const int x = (size.cx - fitted.cx) / 2, y = (size.cy - fitted.cy) / 2;
+        std::fill_n(static_cast<DWORD*>(pixels), count, 0U);
         const BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-        success = AlphaBlend(to, x, y, fitted.cx, fitted.cy, from, 0, 0, source.cx, source.cy, blend) != FALSE;
+        success = AlphaBlend(to, 0, 0, size.cx, size.cy, from, 0, 0, source.cx, source.cy, blend) != FALSE;
         GdiFlush();
-        // DWM requires 32-bit pixels. Keep transparent artwork readable over
-        // black and avoid GDI alpha differences between Windows versions.
-        for (size_t i = 0; i < count; ++i) static_cast<DWORD*>(pixels)[i] |= 0xff000000U;
         SelectObject(from, old_from); SelectObject(to, old_to);
     }
     if (from) DeleteDC(from);
     if (to) DeleteDC(to);
     if (!success && bitmap) { DeleteObject(bitmap); bitmap = nullptr; }
+    return bitmap;
+}
+
+HBITMAP RenderWindow(HWND window, SIZE size, POINT offset, HRGN window_region) {
+    // Peek replaces the window on the desktop, so it must show the window's
+    // own client content, not a thumbnail enlarged to the client dimensions.
+    // Paint into an off-screen DC; reading the screen would capture occluding
+    // windows or the preceding Peek image and fails when minimized.
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = size.cx; info.bmiHeader.biHeight = -size.cy;
+    info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
+    void* pixels{};
+    HBITMAP bitmap = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!bitmap || !pixels || !dc) {
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+        return nullptr;
+    }
+    const auto previous = SelectObject(dc, bitmap);
+    const size_t count = static_cast<size_t>(size.cx) * size.cy;
+    std::fill_n(static_cast<DWORD*>(pixels), count, 0U);
+    const int saved = SaveDC(dc);
+    // DefWindowProc(WM_PRINT) substitutes the application icon when iconic.
+    // Ask the client renderer directly, then compose visible direct children
+    // in Z order. Child WM_PRINT includes each child's non-client area and
+    // descendants; owned playlist/lyrics windows remain separate DWM windows.
+    SendMessageW(window, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT);
+    if (saved) RestoreDC(dc, saved);
+    for (HWND child = GetWindow(GetWindow(window, GW_CHILD), GW_HWNDLAST);
+         child; child = GetWindow(child, GW_HWNDPREV)) {
+        if (!(GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE)) continue;
+        RECT bounds{};
+        if (!GetWindowRect(child, &bounds)) continue;
+        MapWindowPoints(HWND_DESKTOP, window, reinterpret_cast<POINT*>(&bounds), 2);
+        const int child_saved = SaveDC(dc);
+        if (!child_saved) continue;
+        IntersectClipRect(dc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+        SetViewportOrgEx(dc, bounds.left, bounds.top, nullptr);
+        SendMessageW(child, WM_PRINT, reinterpret_cast<WPARAM>(dc),
+                     PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND | PRF_CHILDREN);
+        RestoreDC(dc, child_saved);
+    }
+    GdiFlush();
+    auto* data = static_cast<DWORD*>(pixels);
+    for (size_t i = 0; i < count; ++i) data[i] |= 0xff000000U;
+    // A skin can have a shaped window. Do not turn its cut-outs into black
+    // rectangles when DWM replaces the native surface with this bitmap.
+    HRGN region = CreateRectRgn(0, 0, 0, 0);
+    if (region && window_region && CombineRgn(region, window_region, nullptr, RGN_COPY) != ERROR) {
+        OffsetRgn(region, -offset.x, -offset.y);
+        ExtSelectClipRgn(dc, region, RGN_DIFF);
+        PatBlt(dc, 0, 0, size.cx, size.cy, BLACKNESS);
+        GdiFlush();
+    }
+    if (region) DeleteObject(region);
+    SelectObject(dc, previous);
+    DeleteDC(dc);
     return bitmap;
 }
 } // namespace
@@ -93,6 +144,8 @@ void TaskbarPreview::Clear() {
 
 void TaskbarPreview::Reset() {
     Clear(); window_ = nullptr;
+    if (window_region_) DeleteObject(window_region_);
+    window_region_ = nullptr;
     client_size_ = {}; client_offset_ = {}; monitor_ = nullptr; minimized_ = false;
 }
 
@@ -116,7 +169,18 @@ bool TaskbarPreview::UpdateGeometry() {
     const HMONITOR monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
     SIZE size = client_size_;
     POINT offset = client_offset_;
+    bool region_changed = false;
     if (!minimized) {
+        // Win7 replaces an iconic HWND's region with the small icon/caption
+        // rectangle. Keep the real skin shape along with the real geometry.
+        HRGN region = CreateRectRgn(0, 0, 0, 0);
+        if (region) {
+            if (GetWindowRgn(window_, region) == ERROR) { DeleteObject(region); region = nullptr; }
+            region_changed = (region == nullptr) != (window_region_ == nullptr) ||
+                (region && window_region_ && !EqualRgn(region, window_region_));
+            if (window_region_) DeleteObject(window_region_);
+            window_region_ = region;
+        }
         RECT client{}, frame{};
         POINT origin{};
         if (GetClientRect(window_, &client) && client.right > 0 && client.bottom > 0 &&
@@ -139,13 +203,17 @@ bool TaskbarPreview::UpdateGeometry() {
     }
     const bool changed = size.cx != client_size_.cx || size.cy != client_size_.cy ||
         offset.x != client_offset_.x || offset.y != client_offset_.y ||
-        minimized != minimized_ || monitor != monitor_;
+        minimized != minimized_ || monitor != monitor_ || region_changed;
     client_size_ = size; client_offset_ = offset; minimized_ = minimized; monitor_ = monitor;
     return changed;
 }
 
 void TaskbarPreview::Refresh(HWND window, bool force) {
-    if (window_ != window) { Disable(); window_ = window; client_size_ = {}; client_offset_ = {}; }
+    if (window_ != window) {
+        Disable(); window_ = window; client_size_ = {}; client_offset_ = {};
+        if (window_region_) DeleteObject(window_region_);
+        window_region_ = nullptr;
+    }
     if (!window_ || !Available()) return;
     const bool geometry_changed = UpdateGeometry();
     BOOL composed{};
@@ -181,10 +249,15 @@ bool TaskbarPreview::HandleMessage(UINT message, LPARAM lparam) {
     } else {
         limit = {HIWORD(lparam), LOWORD(lparam)};
     }
-    // Bound allocation even if a synthetic message specifies huge dimensions.
-    limit.cx = std::min<LONG>(4096, limit.cx); limit.cy = std::min<LONG>(4096, limit.cy);
     if (limit.cx <= 0 || limit.cy <= 0) return false;
-    HBITMAP bitmap = Render(cover_, cover_size_, limit);
+    // Never crop/resize a full-scale Peek bitmap. If the window exceeds our
+    // allocation bound, give the native representation back to DWM instead.
+    if (live && (limit.cx > 4096 || limit.cy > 4096)) { Disable(); return false; }
+    limit.cx = std::min<LONG>(4096, limit.cx); limit.cy = std::min<LONG>(4096, limit.cy);
+    // WM_DWMSENDICONICTHUMBNAIL supplies maximum bounds, not a required
+    // canvas. Submit only the fitted artwork; no opaque letterbox padding.
+    HBITMAP bitmap = live ? RenderWindow(window_, limit, offset, window_region_)
+                          : Render(cover_, cover_size_, Fit(cover_size_, limit));
     if (!bitmap) { Disable(); return false; }
     const HRESULT status = live ? api_.live_preview(window_, bitmap, &offset, 0)
                                 : api_.thumbnail(window_, bitmap, 0);

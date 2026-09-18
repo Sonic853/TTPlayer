@@ -44,6 +44,7 @@ private:
     SIZE cover_size_{};
     SIZE client_size_{};
     POINT client_offset_{};
+    HRGN window_region_{}; // Last non-minimized shape, in window coordinates.
     HMONITOR monitor_{};
     bool minimized_{};
     bool enabled_{};

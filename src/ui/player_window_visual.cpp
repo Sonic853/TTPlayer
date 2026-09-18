@@ -1411,6 +1411,9 @@ LRESULT PlayerWindow::HandleVisualMessage(
     switch (message) {
     case WM_ERASEBKGND:
         return 1;
+    case WM_PRINTCLIENT:
+        if (wparam) PaintVisualControl(reinterpret_cast<HDC>(wparam));
+        return 0;
     case WM_PAINT: {
         PAINTSTRUCT paint{};
         const HDC dc = BeginPaint(visual_window_, &paint);
