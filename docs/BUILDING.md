@@ -156,6 +156,19 @@ TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一�
 不会变化。本地和 GitHub Actions 共用同一生成步骤；跨日增量构建会更新日期，
 同日重复构建不重复写入生成头文件，也不需要手工改源码或重新配置 CMake。
 
+## 可选翻译 DLL
+
+`rebuild` 与 `gettext` 各自独立构建和发布。播放器构建只生成播放器，
+不会编译相邻的 `gettext` 源码或复制其翻译目录；播放器安装包也不打包构建目录中
+遗留的 `ttp_i18n.dll` 和 `i18n` 文件。
+
+需要国际化时，另行构建或下载 `gettext` 的翻译包，将 `ttp_i18n.dll` 和 `i18n`
+部署到 EXE 同目录。普通版和 XP／Win7 兼容版共用该 DLL；没有它时仍使用原始资源及自建文本。
+
+本地启用 `BUILD_TESTING=ON` 后，可通过 `TTPLAYER_I18N_TEST_DLL` 指定一份已经构建好的
+DLL 绝对路径，启用 `i18n_ui_tests` 以及普通版的 `i18n_startup_tests`。
+该选项仅用于集成测试，不会构建或分发 DLL。
+
 ## WTL 10.01 / ATL
 
 UI 基础代码使用 WTL 10.01 和 Visual Studio ATL。安装 C++ 桌面开发工具时，须同时安装当前工具集的 ATL（x86/x64）组件；Actions 会检查该组件。

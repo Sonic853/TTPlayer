@@ -171,55 +171,37 @@ target_compile_definitions(ttplayer_rebuild PRIVATE UNICODE _UNICODE NOMINMAX WI
 target_compile_options(ttplayer_rebuild PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_rebuild PRIVATE ttplayer_core ttpcomm_api comctl32 comdlg32 shell32)
 
-# This DLL is a runtime option, never an import-library dependency of the EXE.
-set(TTPLAYER_GETTEXT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../gettext" CACHE PATH
-    "Source directory of the optional ttp_i18n DLL")
-set(TTPLAYER_I18N_DEFAULT OFF)
-if(EXISTS "${TTPLAYER_GETTEXT_SOURCE_DIR}/CMakeLists.txt")
-  set(TTPLAYER_I18N_DEFAULT ON)
-endif()
-option(TTPLAYER_BUILD_I18N "Build the optional gettext translation DLL" ${TTPLAYER_I18N_DEFAULT})
-if(TTPLAYER_BUILD_I18N)
-  set(TTP_I18N_API_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
-  add_subdirectory("${TTPLAYER_GETTEXT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/gettext")
-  set_target_properties(ttp_i18n PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-  add_dependencies(ttplayer_rebuild ttp_i18n)
-  if(BUILD_TESTING)
-    add_executable(i18n_ui_tests tests/ui/i18n_tests.cpp tests/ui/i18n_test_resources.rc src/app/resources.rc)
-    target_compile_definitions(i18n_ui_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_compile_options(i18n_ui_tests PRIVATE /W4 /EHsc /utf-8)
-    target_link_libraries(i18n_ui_tests PRIVATE ttplayer_core)
-    add_dependencies(i18n_ui_tests ttp_i18n)
-    foreach(language IN ITEMS chs cht)
-      add_library(i18n_resource_mock_${language} SHARED tests/ui/i18n_mock_resources.rc)
-      set_target_properties(i18n_resource_mock_${language} PROPERTIES LINKER_LANGUAGE CXX)
-      target_link_options(i18n_resource_mock_${language} PRIVATE /NOENTRY)
-      if(language STREQUAL "cht")
-        target_compile_definitions(i18n_resource_mock_${language} PRIVATE I18N_TEST_TRADITIONAL)
-      endif()
-      add_dependencies(i18n_ui_tests i18n_resource_mock_${language})
-    endforeach()
-    add_test(NAME i18n_ui_tests COMMAND i18n_ui_tests "$<TARGET_FILE:ttp_i18n>"
-      "$<TARGET_FILE:i18n_resource_mock_chs>" "$<TARGET_FILE:i18n_resource_mock_cht>")
-    if(NOT TTPLAYER_LEGACY_WINDOWS)
-      find_package(Python3 REQUIRED COMPONENTS Interpreter)
-      add_dependencies(i18n_ui_tests ttplayer_rebuild ttpcomm_mock_no_version)
-      add_test(NAME i18n_startup_tests COMMAND "${Python3_EXECUTABLE}" -X utf8
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/ui/i18n_startup_tests.py"
-        "$<TARGET_FILE:ttplayer_rebuild>" "$<TARGET_FILE:ttp_i18n>"
-        "$<TARGET_FILE:ttpcomm_mock_no_version>")
-      set_tests_properties(i18n_startup_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
-    endif()
+# The player and translation provider are built and distributed independently.
+# An already-built DLL is only needed for optional integration tests.
+set(TTPLAYER_I18N_TEST_DLL "" CACHE FILEPATH "Prebuilt ttp_i18n.dll for local integration tests")
+if(BUILD_TESTING AND TTPLAYER_I18N_TEST_DLL)
+  if(NOT EXISTS "${TTPLAYER_I18N_TEST_DLL}" OR IS_DIRECTORY "${TTPLAYER_I18N_TEST_DLL}")
+    message(FATAL_ERROR "TTPLAYER_I18N_TEST_DLL must point to an independently built ttp_i18n.dll")
   endif()
-endif()
-if(EXISTS "${TTPLAYER_GETTEXT_SOURCE_DIR}/i18n")
-  add_custom_target(ttplayer_i18n_catalogs
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory
-      "${TTPLAYER_GETTEXT_SOURCE_DIR}/i18n" "$<TARGET_FILE_DIR:ttplayer_rebuild>/i18n"
-    COMMENT "Staging gettext catalogs"
-    VERBATIM)
-  add_dependencies(ttplayer_rebuild ttplayer_i18n_catalogs)
+  add_executable(i18n_ui_tests tests/ui/i18n_tests.cpp tests/ui/i18n_test_resources.rc src/app/resources.rc)
+  target_compile_definitions(i18n_ui_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(i18n_ui_tests PRIVATE /W4 /EHsc /utf-8)
+  target_link_libraries(i18n_ui_tests PRIVATE ttplayer_core)
+  foreach(language IN ITEMS chs cht)
+    add_library(i18n_resource_mock_${language} SHARED tests/ui/i18n_mock_resources.rc)
+    set_target_properties(i18n_resource_mock_${language} PROPERTIES LINKER_LANGUAGE CXX)
+    target_link_options(i18n_resource_mock_${language} PRIVATE /NOENTRY)
+    if(language STREQUAL "cht")
+      target_compile_definitions(i18n_resource_mock_${language} PRIVATE I18N_TEST_TRADITIONAL)
+    endif()
+    add_dependencies(i18n_ui_tests i18n_resource_mock_${language})
+  endforeach()
+  add_test(NAME i18n_ui_tests COMMAND i18n_ui_tests "${TTPLAYER_I18N_TEST_DLL}"
+    "$<TARGET_FILE:i18n_resource_mock_chs>" "$<TARGET_FILE:i18n_resource_mock_cht>")
+  if(NOT TTPLAYER_LEGACY_WINDOWS)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_dependencies(i18n_ui_tests ttplayer_rebuild ttpcomm_mock_no_version)
+    add_test(NAME i18n_startup_tests COMMAND "${Python3_EXECUTABLE}" -X utf8
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/ui/i18n_startup_tests.py"
+      "$<TARGET_FILE:ttplayer_rebuild>" "${TTPLAYER_I18N_TEST_DLL}"
+      "$<TARGET_FILE:ttpcomm_mock_no_version>")
+    set_tests_properties(i18n_startup_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+  endif()
 endif()
 
 include(cmake/size_optimization.cmake)
