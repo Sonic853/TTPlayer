@@ -488,6 +488,9 @@ private:
 
 class LegacyPluginSource final : public DecodedAudioSource {
 public:
+    bool CanOverlapPlayback() const override {
+        return reader_ && (reader_->Capabilities() & 9) == 0;
+    }
     HRESULT WriteLyrics(std::wstring_view text) override {
         if (!reader_) return E_NOINTERFACE;
         const HRESULT result = reader_->SetMetadataValueDirect("Lyrics", text);
@@ -953,6 +956,7 @@ private:
 
 class CdaSource final : public DecodedAudioSource {
 public:
+    bool CanOverlapPlayback() const override { return false; }
     ~CdaSource() override {
         if (drive_ != INVALID_HANDLE_VALUE) CloseHandle(drive_);
     }
@@ -1158,6 +1162,9 @@ std::unique_ptr<DecodedAudioSource> MakeBaseSource(
 
 class CueSegmentSource final : public DecodedAudioSource {
 public:
+    bool CanOverlapPlayback() const override {
+        return inner_ && inner_->CanOverlapPlayback();
+    }
     void SetPaused(bool paused) override { if (inner_) inner_->SetPaused(paused); }
     CueSegmentSource(const plugins::PluginManager* manager, HMODULE ttpcomm,
                      int subtrack)
@@ -1530,7 +1537,7 @@ public:
                winamp_dsp_.ActiveCount() != 0 || replay_gain_analyzer_;
     }
 
-    bool Process(std::vector<std::byte>& bytes) {
+    bool Process(std::vector<std::byte>& bytes, bool enable_dsp = true) {
         if (!Active() || bytes.empty()) return true;
         std::vector<double> samples;
         if (!Decode(bytes, samples)) return false;
@@ -1568,7 +1575,7 @@ public:
         if (surround_ && !SurroundProcess(
                 surround_, samples.data(), count)) return false;
 #endif
-        if (winamp_dsp_.ActiveCount() != 0) {
+        if (enable_dsp && winamp_dsp_.ActiveCount() != 0) {
             // FUN_004AC166 converts the processor stream to signed 16-bit
             // immediately before FUN_0042898D, then converts it back when the
             // output device uses another width. Keep ReplayGain/EQ/surround
@@ -1957,7 +1964,7 @@ std::unique_ptr<DecodedAudioSource> CreateDecodedAudioSource(
     return MakeBaseSource(path, plugin_manager, ttpcomm_module);
 }
 
-AudioEngine::AudioEngine() : dsp_chain_(std::make_unique<WinampDspChain>()) {
+AudioEngine::AudioEngine() : dsp_chain_(std::make_shared<WinampDspChain>()) {
     // CSound owns a separate CSoundFadeOut worker (004ACD95/004ACE17).
     // Keep one cancellable worker for the engine lifetime so UI fade commands
     // never sleep the window thread and never race a detached device pointer.
@@ -2093,6 +2100,36 @@ void AudioEngine::SetDspParentWindow(HWND window) {
     if (completion_event_) SetEvent(completion_event_);
 }
 
+std::shared_ptr<AudioEngine> AudioEngine::CreateSuccessor() const {
+    auto next = std::make_shared<AudioEngine>();
+    std::scoped_lock lock(mutex_, next->mutex_);
+    next->options_ = options_;
+    next->volume_ = volume_;
+    next->balance_ = balance_;
+    next->plugin_manager_ = plugin_manager_;
+    next->ttpcomm_module_ = ttpcomm_module_;
+    // DAT_00546C64 is shared for the application lifetime in the original.
+    // Keep one DSP Init/Quit lifetime and serialize callbacks across tails.
+    next->dsp_chain_ = dsp_chain_;
+    return next;
+}
+
+bool AudioEngine::CanRetainForTrackChange() const {
+    std::scoped_lock lock(mutex_);
+    // 0045BB73 requires CSound::OutputKind() == 1. WaveOut's 004E25B4
+    // returns 0; its volume is shared across handles and cannot crossfade.
+    const bool native = backend_.load() == Backend::direct_sound &&
+                        source_can_overlap_;
+    return ShouldBeginRecoveredStopFade(options_.sound_fade_mode,
+        options_.fade_duration[3], state_.load(), native);
+}
+
+bool AudioEngine::TryReapStopped() noexcept {
+    if (StopFadePending() || (State() != PlaybackState::stopped &&
+                              State() != PlaybackState::failed)) return false;
+    return ReapWorker(std::chrono::milliseconds::zero());
+}
+
 bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
     Stop();
     // The worker may have returned immediately after Stop exhausted its
@@ -2121,6 +2158,8 @@ bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
         format_ = {};
         metadata_ = {};
         open_complete_ = false;
+        source_can_overlap_ = false;
+        dsp_enabled_ = true;
         fade_pending_ = false;
         ++fade_generation_;
         transition_gain_ = (options_.sound_fade_mode & 0x01) != 0 &&
@@ -2246,6 +2285,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         std::scoped_lock lock(mutex_);
         lyric_source_path_ = path;
         lyric_source_subtrack_ = subtrack;
+        source_can_overlap_ = source->CanOverlapPlayback() &&
+                              !IsNetworkMediaLocation(path);
     }
     const WAVEFORMATEX& source_format = source->OutputFormat();
     if (source_format.nAvgBytesPerSec == 0 || source_format.nBlockAlign == 0) {
@@ -2457,7 +2498,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 processors.Update(current);
                 direct_processor_revision = latest_revision;
             }
-            if (!native.empty() && !processors.Process(native)) {
+            if (!native.empty() && !processors.Process(native, dsp_enabled_.load())) {
                 if (!stop_requested_)
                     SetError(L"The recovered audio processor chain failed");
                 return false;
@@ -2797,7 +2838,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                         RecordDiagnostic(std::move(diagnostic));
                     processor_revision = latest_revision;
                 }
-                if (!decoded.empty() && !processors.Process(decoded)) {
+                if (!decoded.empty() && !processors.Process(decoded, dsp_enabled_.load())) {
                     if (!stop_requested_)
                         SetError(L"The recovered audio processor chain failed");
                     return false;
@@ -3486,17 +3527,24 @@ void AudioEngine::StopWithFade() {
     Stop();
 }
 
-bool AudioEngine::BeginStopFade() {
+bool AudioEngine::BeginStopFade(bool detach_dsp) {
     std::unique_lock lock(mutex_);
     const bool supported = backend_.load() == Backend::wave_out ||
                            backend_.load() == Backend::direct_sound;
     if (ShouldBeginRecoveredStopFade(
             options_.sound_fade_mode, options_.fade_duration[3],
             state_.load(), supported)) {
-        // local_38 == 7 at 004AC8BD and CSoundFadeOut::Run both retain the
-        // output object until its 10 ms volume ramp reaches zero.
+        // 0045BB9D calls CSound +0x60(0) before retiring the old sound.
+        // 004AC166 then bypasses the global Winamp DSP chain on its tail;
+        // decoded PCM, ReplayGain/EQ and the output buffer remain alive.
+        if (detach_dsp) dsp_enabled_ = false;
+        // local_38 == 7 at 004AC8BD keeps the output alive for its 10 ms ramp.
         state_ = PlaybackState::stopped;
         stop_fade_pending_.store(true, std::memory_order_release);
+        // Preserve the audible level when a manual change interrupts the
+        // track-end ramp. UpdateTrackFade no longer owns a stopped tail.
+        transition_gain_ *= track_gain_;
+        track_gain_ = 1.0F;
         QueueFadeLocked(
             0.0F, std::chrono::milliseconds(options_.fade_duration[3]),
             FadeCompletion::stop);

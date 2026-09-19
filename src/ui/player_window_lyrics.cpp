@@ -409,7 +409,7 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
             // drag flag (+0xc0) is set.  The decoder clock is sampled directly;
             // it is deliberately not quantized through the 250 ms player timer.
             if (!lyric_line_dragging_ &&
-                audio_.State() == audio::PlaybackState::playing) {
+                audio_->State() == audio::PlaybackState::playing) {
                 InvalidateRect(control, nullptr, FALSE);
             }
             return 0;
@@ -510,7 +510,7 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
                 // over-applied the fade to every lyric release; preserve the
                 // observed original direct-seek behavior here.
                 if (target) {
-                    audio_.SeekWithoutFade(*target);
+                    audio_->SeekWithoutFade(*target);
                     UpdateDiscordPresence();
                 }
                 // ReleaseCapture synchronously sends WM_CAPTURECHANGED.
@@ -1089,7 +1089,7 @@ bool PlayerWindow::CreateDesktopLyrics() {
     desktop_lyrics_.SetSkin(skin_ ? &*skin_ : nullptr);
     desktop_lyrics_.SetLyrics(&lyrics_);
     desktop_lyrics_.UpdatePlayback(
-        audio_.Position(), audio_.State() == audio::PlaybackState::playing);
+        audio_->Position(), audio_->State() == audio::PlaybackState::playing);
     return true;
 }
 
@@ -1661,7 +1661,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
         // FUN_0043F766 samples the decoder callback once and derives the line,
         // start/end interval and pixel phase from that single value.  Sampling
         // Position() twice can cross a timestamp between the two reads.
-        const auto playback_position = audio_.Position();
+        const auto playback_position = audio_->Position();
         const auto playback_line = lyrics_.LineAt(playback_position);
         const auto position = LyricDragPosition(canvas, drag,
                                                 playback_position);
@@ -1946,7 +1946,7 @@ int PlayerWindow::LyricLineExtent(HDC dc, size_t index) const {
 }
 
 std::pair<size_t, int> PlayerWindow::LyricDragPosition(HDC dc, int delta) const {
-    return LyricDragPosition(dc, delta, audio_.Position());
+    return LyricDragPosition(dc, delta, audio_->Position());
 }
 
 std::pair<size_t, int> PlayerWindow::LyricDragPosition(
@@ -2834,7 +2834,7 @@ void PlayerWindow::EditLyricTimestamp(UINT command) {
         command == kCmdLyricEditorReplaceTag) {
         // 0044DAE2/0044DB11 sample 0045F0AD before the first RichEdit
         // message; even the centisecond shown in the tag uses this one value.
-        playback_position = audio_.Position();
+        playback_position = audio_->Position();
     } else if (command != kCmdLyricEditorDeleteTag) {
         return;
     }
@@ -3237,7 +3237,7 @@ bool PlayerWindow::WriteEmbeddedLyrics(std::wstring_view text,
     }
     std::unique_ptr<plugins::LegacyReaderSession> reader;
     const auto shared = SUCCEEDED(result)
-        ? audio_.WriteCurrentLyrics(path, track->subtrack, deleting ? std::wstring_view{} : text)
+        ? audio_->WriteCurrentLyrics(path, track->subtrack, deleting ? std::wstring_view{} : text)
         : std::optional<HRESULT>{result};
     if (shared) result = *shared;
     if (!shared && SUCCEEDED(result)) {
@@ -3471,7 +3471,7 @@ void PlayerWindow::PrepareLyricMenu(HMENU menu, bool fullscreen_popup) const {
         }
     }
     const bool may_enter =
-        audio_.State() == audio::PlaybackState::playing;
+        audio_->State() == audio::PlaybackState::playing;
     EnableCommand(menu, kCmdFullscreenLyrics, may_enter);
     EnableCommand(menu, kCmdFullscreenVisual, may_enter);
     EnableCommand(menu, kCmdFullscreenAll, may_enter);
@@ -3675,21 +3675,21 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
         WriteEmbeddedLyrics({}, true);
         return true;
     case 0x7d00:
-        if (audio_.State() == audio::PlaybackState::playing) audio_.Pause();
-        else if (audio_.State() == audio::PlaybackState::paused) audio_.Resume();
+        if (audio_->State() == audio::PlaybackState::playing) audio_->Pause();
+        else if (audio_->State() == audio::PlaybackState::paused) audio_->Resume();
         else PlayCurrent();
         RefreshPlaybackUi();
         return true;
     case 0x7d01:
-        audio_.Pause();
+        audio_->Pause();
         RefreshPlaybackUi();
         return true;
     case 0x7d03:
-        audio_.Seek(std::max(std::chrono::milliseconds(0),
-            audio_.Position() - std::chrono::seconds(5)));
+        audio_->Seek(std::max(std::chrono::milliseconds(0),
+            audio_->Position() - std::chrono::seconds(5)));
         return true;
     case 0x7d04:
-        audio_.Seek(audio_.Position() + std::chrono::seconds(5));
+        audio_->Seek(audio_->Position() + std::chrono::seconds(5));
         return true;
     case kCmdShowLyrics:
         ToggleLyricWindow();
@@ -3740,7 +3740,7 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
     case kCmdLyricAdjustFollowingLater:
     case kCmdLyricAdjustAllEarlier:
     case kCmdLyricAdjustAllLater: {
-        if (!lyric_editor_ && AdjustLyricDocument(lyrics_, command, audio_.Position()))
+        if (!lyric_editor_ && AdjustLyricDocument(lyrics_, command, audio_->Position()))
             LyricDocumentChanged();
         return true;
     }
@@ -4053,13 +4053,13 @@ void PlayerWindow::CopyLyricsToClipboard() const {
 
 void PlayerWindow::SeekLyricLine(std::ptrdiff_t delta) {
     if (lyrics_.lines.empty()) return;
-    const auto current = lyrics_.LineAt(audio_.Position()).value_or(0);
+    const auto current = lyrics_.LineAt(audio_->Position()).value_or(0);
     const auto next = std::clamp<std::ptrdiff_t>(
         static_cast<std::ptrdiff_t>(current) + delta, 0,
         static_cast<std::ptrdiff_t>(lyrics_.lines.size() - 1));
     // WM_KEYDOWN at 00442AC1 uses the same lyric position callback and hence
     // the same observed no-transition result as drag release.
-    audio_.SeekWithoutFade(
+    audio_->SeekWithoutFade(
         lyrics_.lines[static_cast<size_t>(next)].time + lyrics_.offset);
     UpdateDiscordPresence();
     if (lyric_control_) InvalidateRect(lyric_control_, nullptr, FALSE);

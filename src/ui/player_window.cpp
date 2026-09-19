@@ -1335,7 +1335,7 @@ PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(se
         settings_.equalizer.profile_last >= static_cast<int>(std::size(kEqualizerPresets)))
         settings_.equalizer.profile_last = -1;
     volume_before_mute_ = std::max(1, settings_.player.volume);
-    audio_.Configure({settings_.playback.file_buffer,
+    audio_->Configure({settings_.playback.file_buffer,
                       settings_.device.buffer_duration,
                       settings_.device.output_bits,
                       settings_.device.resample_rate,
@@ -1358,7 +1358,7 @@ PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(se
                       settings_.playback.sound_fade_mode,
                       settings_.playback.fade_duration,
                       settings_.playback.track_fade_duration});
-    audio_.SetVolume(settings_.player.mute ? 0.0F : static_cast<float>(settings_.player.volume) / 100.0F);
+    audio_->SetVolume(settings_.player.mute ? 0.0F : static_cast<float>(settings_.player.volume) / 100.0F);
     discord_presence_.Configure(settings_.general.send_title_to_msn,
                                 settings_.general.discord_application_id);
 }
@@ -1387,7 +1387,9 @@ PlayerWindow::~PlayerWindow() {
     RevokeFileDropTarget(playlist_window_);
     RevokeFileDropTarget(window_);
     StopVisualWorker();
-    audio_.Stop();
+    PollFadingAudio(true);
+    audio_->Stop();
+    fading_audio_.clear(); // lifetime barrier before borrowed AddIns are unloaded
     // The catalog worker only owns copied paths and borrowed module handles.
     // Stop at the next package boundary, then join it before the application
     // can release either module.
@@ -1485,9 +1487,9 @@ void PlayerWindow::ShowPlaybackOpenTip() {
     if (playback_tip_title_.empty()) playback_tip_title_ = L"TTPlayer";
     playback_tip_body_ = FormatPlaybackTipBody(
         ResourceText(0x81cb), title, artist, album,
-        FormatAudioDescription(audio_.Format()),
-        audio_.Duration().count() > 0
-            ? FormatInfoDuration(audio_.Duration()) : std::wstring{});
+        FormatAudioDescription(audio_->Format()),
+        audio_->Duration().count() > 0
+            ? FormatInfoDuration(audio_->Duration()) : std::wstring{});
     if (playback_tip_body_.empty()) playback_tip_body_ = std::move(title);
 
     WNDCLASSEXW type{sizeof(type)};
@@ -2591,7 +2593,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         // DefWindowProc must still generate WM_SIZE/WM_MOVE for skin layout.
         break;
     case WM_CREATE:
-        audio_.SetDspParentWindow(window_);
+        audio_->SetDspParentWindow(window_);
         CreateControls();
         visual_window_ = CreateWindowExW(0, kVisualWindowClass, nullptr,
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 0, 0, window_,
@@ -2806,7 +2808,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                 // even if it lies outside the control or no move preceded it.
                 SetSkinProgressFromPoint(point);
                 if (progress_tracking_position_) {
-                    audio_.SeekWithoutFade(*progress_tracking_position_);
+                    audio_->SeekWithoutFade(*progress_tracking_position_);
                     UpdateDiscordPresence();
                 }
             }
@@ -2869,17 +2871,16 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             PreparePlaylistModeMenu(popup);
             return 0;
         }
-        // CPlayerWnd_OnInitMenuPopup (00461BAE) recognizes the skin resource
-        // submenu by its first command (0x7919).  The rebuild starts its scan
-        // as soon as the root popup opens; this point waits for any unfinished
-        // asynchronous tail and publishes the complete result into the HMENU.
+        // The skin submenu now starts with Options (0x7918), ahead of the
+        // default skin. The root popup starts the scan; expansion publishes
+        // the latest complete asynchronous snapshot into this HMENU.
         if (popup && (GetMenuItemID(popup, 0) == kCmdFirstTrack ||
                       GetMenuItemID(popup, 0) == 0x7ef4)) {
             // 00461BAE -> 004813C1. DeskLrcBar forwards this notification
             // (0041907F), so both entry points populate the same track menu.
             PopulateTrackMenu(popup);
             ApplyPopupMenuStyle(popup);
-        } else if (popup && GetMenuItemID(popup, 0) == kCmdDefaultSkin) {
+        } else if (popup && GetMenuItemID(popup, 0) == kCmdSkinOptions) {
             PopulateSkinMenu(popup);
             ApplyPopupMenuStyle(popup);
         } else if (popup && GetMenuItemID(popup, 0) == kCmdVisualDream) {
@@ -2947,7 +2948,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
     case WM_HSCROLL:
         if (reinterpret_cast<HWND>(lparam) == volume_) {
             const int value = static_cast<int>(SendMessageW(volume_, TBM_GETPOS, 0, 0));
-            audio_.SetVolume(static_cast<float>(value) / 100.0F);
+            audio_->SetVolume(static_cast<float>(value) / 100.0F);
             settings_.player.volume = value;
         }
         return 0;
@@ -2969,8 +2970,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         case kOpen: ChooseFiles(); return 0;
         case kPrevious: SelectRelative(false); return 0;
         case kPlayPause:
-            if (audio_.State() == audio::PlaybackState::playing) audio_.Pause();
-            else if (audio_.State() == audio::PlaybackState::paused) audio_.Resume();
+            if (audio_->State() == audio::PlaybackState::playing) audio_->Pause();
+            else if (audio_->State() == audio::PlaybackState::paused) audio_->Resume();
             else PlayCurrent();
             RefreshPlaybackUi();
             return 0;
@@ -3111,6 +3112,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             wparam == kInfoScrollTimer) {
             AdvanceSkinInfoScroll(static_cast<UINT_PTR>(wparam));
         } else if (wparam == kUiTimer) {
+            PollFadingAudio();
             // A save-policy MessageBox pumps messages. Defer completions and
             // track navigation until it returns, so neither a downloaded lyric
             // nor natural EOF can replace the document being saved.
@@ -3141,7 +3143,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                 static_cast<void>(PlayCurrent());
                 return 0;
             }
-            const auto state = audio_.State();
+            const auto state = audio_->State();
             if (playback_was_active_ && state == audio::PlaybackState::stopped) {
                 playback_was_active_ = false;
                 playback_source_open_ = false;
@@ -3218,7 +3220,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                                   equalizer_window_}) {
             if (target && IsWindow(target)) EnableWindow(target, FALSE);
         }
-        close_waiting_for_audio_fade_ = audio_.BeginStopFade();
+        PollFadingAudio(true);
+        close_waiting_for_audio_fade_ = audio_->BeginStopFade();
         if (close_waiting_for_audio_fade_) {
             close_audio_fade_deadline_ = GetTickCount64() +
                 audio::RecoveredStopFadeCloseBudgetMs(
@@ -3278,7 +3281,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         PersistWindowState();
         // Keep the source/progress object alive through the 004616BD-style
         // state capture even when destruction did not originate at WM_CLOSE.
-        audio_.Stop();
+        audio_->Stop();
         tooltip_tools_.clear();
         tooltip_ = nullptr;
         PostQuitMessage(0);
@@ -3425,7 +3428,7 @@ void PlayerWindow::PersistWindowState() {
     // 004616BD samples the player/progress position unconditionally.  This is
     // also observable after natural completion, when no decoder is open but
     // the last-playing identity and terminal position are retained.
-    const auto position = audio_.Position().count();
+    const auto position = audio_->Position().count();
     settings_.player.playing_time = position < 0 ? 0 :
         (position > INT_MAX ? INT_MAX : static_cast<int>(position));
 
@@ -3511,7 +3514,7 @@ void PlayerWindow::PaintSkin(HDC dc) const {
     FillRect(canvas, &background_bounds, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
     ActiveSkinBackground().Draw(canvas, 0, 0, size.cx, size.cy, 0, 0, size.cx, size.cy);
 
-    const auto playback = audio_.State();
+    const auto playback = audio_->State();
     const bool active = playback == audio::PlaybackState::opening ||
                         playback == audio::PlaybackState::playing;
     for (const auto& element : ActiveSkinElements()) {
@@ -3547,9 +3550,9 @@ void PlayerWindow::PaintSkin(HDC dc) const {
     if (const auto* progress = FindActiveSkinElement(L"progress"); progress && progress->thumb_image) {
         const int control_width = progress->bounds.right - progress->bounds.left;
         const int control_height = progress->bounds.bottom - progress->bounds.top;
-        const auto duration = audio_.Duration().count();
+        const auto duration = audio_->Duration().count();
         const auto position = std::clamp<int64_t>(
-            progress_tracking_position_.value_or(audio_.Position()).count(), 0,
+            progress_tracking_position_.value_or(audio_->Position()).count(), 0,
             std::max<int64_t>(0, duration));
         const int safe_duration = static_cast<int>(
             std::clamp<int64_t>(duration, 1, INT_MAX));
@@ -3799,14 +3802,14 @@ const playlist::Track* PlayerWindow::PlaybackTrackForUi() const noexcept {
 
 bool PlayerWindow::IsSkinElementEnabled(std::wstring_view name) const {
     if (IsSuppressedSkinControl(name)) return false;
-    const auto state = audio_.State();
+    const auto state = audio_->State();
     const bool have_track = PlaybackTrackForUi() != nullptr;
     const bool active = state == audio::PlaybackState::opening ||
                         state == audio::PlaybackState::playing;
     if (name == L"play") return have_track && !active;
     if (name == L"pause") return state == audio::PlaybackState::playing;
     if (name == L"stop") return true;
-    if (name == L"progress") return audio_.Duration().count() > 0 &&
+    if (name == L"progress") return audio_->Duration().count() > 0 &&
                                       (state == audio::PlaybackState::playing ||
                                        state == audio::PlaybackState::paused);
     if (name == L"prev" || name == L"next") {
@@ -3831,7 +3834,7 @@ std::wstring PlayerWindow::PlaybackStatusText() const {
     if (!equalizer_tracking_status_.empty())
         return equalizer_tracking_status_;
     if (!playback_error_text_.empty()) return ResourceText(0x8285);
-    switch (audio_.State()) {
+    switch (audio_->State()) {
     case audio::PlaybackState::playing: return ResourceText(0x81b9);
     case audio::PlaybackState::paused: return ResourceText(0x81ba);
     case audio::PlaybackState::failed: return {};
@@ -3843,7 +3846,7 @@ std::wstring PlayerWindow::PlaybackStatusText() const {
 }
 
 std::wstring PlayerWindow::ChannelText() const {
-    const auto format = audio_.Format();
+    const auto format = audio_->Format();
     if (!PlaybackTrackForUi() || format.channels == 0)
         return ResourceText(0x81b7);
     if (settings_.player.mute) return ResourceText(0x81b8);
@@ -3891,14 +3894,14 @@ const skin::SkinElement* PlayerWindow::FindActiveSkinElement(std::wstring_view n
 }
 
 std::wstring PlayerWindow::CurrentLedText() const {
-    const auto position = progress_tracking_position_.value_or(audio_.Position());
+    const auto position = progress_tracking_position_.value_or(audio_->Position());
     return FormatLedTime(settings_.player.show_elapsed_time
-        ? position : position - audio_.Duration());
+        ? position : position - audio_->Duration());
 }
 
 std::wstring PlayerWindow::HitTestSkin(POINT point) const {
     if (!skin_) return {};
-    const auto playback = audio_.State();
+    const auto playback = audio_->State();
     const bool active = playback == audio::PlaybackState::opening ||
                         playback == audio::PlaybackState::playing;
     const auto& elements = ActiveSkinElements();
@@ -3946,7 +3949,7 @@ void PlayerWindow::InvokeSkinAction(std::wstring_view action) {
     else if (action == L"browser") HandleContextCommand(kCmdShowBrowser);
     else if (action == L"set") ShowOptions();
     else if (action == L"play") {
-        if (audio_.State() == audio::PlaybackState::paused) audio_.Resume();
+        if (audio_->State() == audio::PlaybackState::paused) audio_->Resume();
         else PlayCurrent();
     }
     else if (action.starts_with(L"mode_")) {
@@ -3955,8 +3958,8 @@ void PlayerWindow::InvokeSkinAction(std::wstring_view action) {
         UpdateMainToolRects();
     }
     else if (action == L"pause") {
-        if (audio_.State() == audio::PlaybackState::playing) audio_.Pause();
-        else if (audio_.State() == audio::PlaybackState::paused) audio_.Resume();
+        if (audio_->State() == audio::PlaybackState::playing) audio_->Pause();
+        else if (audio_->State() == audio::PlaybackState::paused) audio_->Resume();
     } else if (action == L"mute") {
         ToggleMute();
     } else if (action == L"playlist") {
@@ -4438,6 +4441,20 @@ HMENU PlayerWindow::BuildContextMenu() {
         if (resource_id == kMenuRelatedLinks) {
             for (const auto& link : kProjectLinks)
                 AppendMenuW(child, MF_STRING, link.command, link.label);
+        } else if (resource_id == kMenuSkin) {
+            // Move the resource's final Options/separator pair above the
+            // default skin, before owner-draw metadata is attached.
+            wchar_t label[256]{};
+            MENUITEMINFOW options{sizeof(options)};
+            options.fMask = MIIM_ID | MIIM_STRING | MIIM_FTYPE | MIIM_STATE;
+            options.dwTypeData = label;
+            options.cch = static_cast<UINT>(std::size(label));
+            if (GetMenuItemInfoW(child, kCmdSkinOptions, FALSE, &options) &&
+                InsertMenuItemW(child, 0, TRUE, &options)) {
+                DeleteMenu(child, GetMenuItemCount(child) - 1, MF_BYPOSITION);
+                DeleteMenu(child, GetMenuItemCount(child) - 1, MF_BYPOSITION);
+                InsertMenuW(child, 1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+            }
         } else if (resource_id == kMenuVisual) {
             // CPlayerWnd_ShowMainContextMenu (0045E126..0045E1E3) removes
             // the embedded/full-screen-only block by deleting position 6
@@ -4636,10 +4653,9 @@ void PlayerWindow::InvalidateSkinMenuCatalog() noexcept {
 void PlayerWindow::PopulateSkinMenu(HMENU menu) {
     if (!menu) return;
 
-    // CPlayerWnd_PopulateSkinMenu (0045E518) preserves resource positions
-    // 0/1 (default + separator) and the final separator/options pair, while
-    // replacing positions [2,count-3] left by the previous population.
-    for (int position = GetMenuItemCount(menu) - 3; position >= 2; --position)
+    // Keep Options/separator/default/separator at positions 0..3, replacing
+    // only the dynamically populated skin entries on every expansion.
+    for (int position = GetMenuItemCount(menu) - 1; position >= 4; --position)
         DeleteMenu(menu, position, MF_BYPOSITION);
     skin_commands_.clear();
 
@@ -4669,7 +4685,7 @@ void PlayerWindow::PopulateSkinMenu(HMENU menu) {
     }
 
     UINT command = kCmdFirstSkin;
-    int position = 2;
+    int position = 4;
     bool current_found{};
     for (auto& entry : installed) {
         entry.command = command++;
@@ -4870,7 +4886,7 @@ void PlayerWindow::HideSkinMenuToolTip() {
 }
 
 void PlayerWindow::PrepareContextMenu(HMENU menu) {
-    const auto state = audio_.State();
+    const auto state = audio_->State();
     const bool playing = state == audio::PlaybackState::playing || state == audio::PlaybackState::opening;
     const bool paused = state == audio::PlaybackState::paused;
     const bool have_track = PlaybackTrackForUi() != nullptr;
@@ -4885,7 +4901,7 @@ void PlayerWindow::PrepareContextMenu(HMENU menu) {
     EnableCommand(menu, kCmdCloseFile, have_track);
     EnableCommand(menu, kCmdFileProperties, have_track);
     const bool seekable = (playing || paused) &&
-        audio_.Duration() > std::chrono::milliseconds::zero();
+        audio_->Duration() > std::chrono::milliseconds::zero();
     EnableCommand(menu, kCmdSeekBack, seekable);
     EnableCommand(menu, kCmdSeekForward, seekable);
     EnableCommand(menu, kCmdPlayCd, CanPlayCompactDisc());
@@ -5072,24 +5088,24 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
     }
     switch (command) {
     case kCmdPlay:
-        if (audio_.State() == audio::PlaybackState::paused) audio_.Resume(); else PlayCurrent();
+        if (audio_->State() == audio::PlaybackState::paused) audio_->Resume(); else PlayCurrent();
         break;
-    case kCmdPause: audio_.Pause(); break;
+    case kCmdPause: audio_->Pause(); break;
     case kCmdStopPlayback: Stop(); break;
     case kCmdPrevious: SelectRelative(false); break;
     case kCmdNext: SelectRelative(true); break;
     case kCmdSeekBack: {
-        const auto position = audio_.Position();
+        const auto position = audio_->Position();
         // FUN_004651D7 deliberately does nothing in the first five seconds;
         // it does not clamp that case to zero.
         if (position > std::chrono::seconds(5))
-            audio_.Seek(position - std::chrono::seconds(5));
+            audio_->Seek(position - std::chrono::seconds(5));
         break;
     }
     case kCmdSeekForward:
         // FUN_0046520B forwards the unclamped position + 5000 ms to the
         // player's seek adapter; the decoder/output layer owns clamping.
-        audio_.Seek(audio_.Position() + std::chrono::seconds(5));
+        audio_->Seek(audio_->Position() + std::chrono::seconds(5));
         break;
     case kCmdPlayCd: ShowPlayCdDialog(); break;
     case kCmdPlayUrl: ShowPlayUrlDialog(); break;
@@ -5134,12 +5150,12 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
     case kCmdVolumeUp:
         settings_.player.volume = std::min(100, settings_.player.volume + 5);
         settings_.player.mute = false;
-        audio_.SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
+        audio_->SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
         break;
     case kCmdVolumeDown:
         settings_.player.volume = std::max(0, settings_.player.volume - 5);
         settings_.player.mute = false;
-        audio_.SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
+        audio_->SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
         break;
     case kCmdMute: ToggleMute(); break;
     case kCmdAlwaysOnTop: {
@@ -5622,7 +5638,7 @@ void PlayerWindow::PollCloseAudioFade() {
         return;
     }
 
-    const bool pending = audio_.StopFadePending();
+    const bool pending = audio_->StopFadePending();
     const bool expired = close_audio_fade_deadline_ != 0 &&
                          GetTickCount64() >= close_audio_fade_deadline_;
     if (pending && !expired) return;
@@ -5724,10 +5740,10 @@ void PlayerWindow::ToggleMute() {
     settings_.player.mute = !settings_.player.mute;
     if (settings_.player.mute) {
         if (settings_.player.volume > 0) volume_before_mute_ = settings_.player.volume;
-        audio_.SetVolume(0.0F);
+        audio_->SetVolume(0.0F);
     } else {
         if (settings_.player.volume == 0) settings_.player.volume = volume_before_mute_;
-        audio_.SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
+        audio_->SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
     }
 }
 
@@ -5750,7 +5766,7 @@ void PlayerWindow::SetSkinVolumeFromPoint(POINT point) {
         const int position = point.x - volume->bounds.left - 1 - thumb / 2;
         settings_.player.volume = std::clamp(MulDiv(position, 100, span), 0, 100);
     }
-    audio_.SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
+    audio_->SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
     settings_.player.mute = false;
     InvalidateRect(window_, &volume->bounds, FALSE);
 }
@@ -5758,7 +5774,7 @@ void PlayerWindow::SetSkinVolumeFromPoint(POINT point) {
 void PlayerWindow::SetSkinProgressFromPoint(POINT point) {
     if (!skin_) return;
     const auto* progress = FindActiveSkinElement(L"progress");
-    const auto duration = audio_.Duration();
+    const auto duration = audio_->Duration();
     if (!progress || duration.count() <= 0) return;
     int value{};
     constexpr int slider_inset = 1;
@@ -5842,8 +5858,8 @@ void PlayerWindow::RefreshPlaybackUi() {
     UpdateMainWindowCaption();
     const auto text = PlaybackStatusText();
     if (status_) SetWindowTextW(status_, text.c_str());
-    const auto duration = audio_.Duration().count();
-    const auto position = audio_.Position().count();
+    const auto duration = audio_->Duration().count();
+    const auto position = audio_->Position().count();
     if (progress_) {
         SendMessageW(progress_, PBM_SETMARQUEE, FALSE, 0);
         SendMessageW(progress_, PBM_SETRANGE32, 0, static_cast<LPARAM>(duration));
@@ -5851,7 +5867,7 @@ void PlayerWindow::RefreshPlaybackUi() {
     }
     std::wstring current_line;
     if (lyric_control_ || desktop_lyrics_.ControlHandle()) {
-        if (const auto line = lyrics_.LineAt(audio_.Position());
+        if (const auto line = lyrics_.LineAt(audio_->Position());
             line && *line < lyrics_.lines.size()) {
             try { current_line = core::Utf8ToWide(lyrics_.lines[*line].text); }
             catch (const std::exception&) {}
@@ -5860,18 +5876,18 @@ void PlayerWindow::RefreshPlaybackUi() {
         }
         if (lyric_control_) {
             SetWindowTextW(lyric_control_, current_line.c_str());
-            if (audio_.State() != audio::PlaybackState::playing)
+            if (audio_->State() != audio::PlaybackState::playing)
                 InvalidateRect(lyric_control_, nullptr, FALSE);
         }
     }
     desktop_lyrics_.SetFallbackText(lyrics_.lines.empty()
         ? LyricFallbackText(true) : current_line);
     desktop_lyrics_.UpdatePlayback(
-        audio_.Position(), audio_.State() == audio::PlaybackState::playing);
+        audio_->Position(), audio_->State() == audio::PlaybackState::playing);
     UpdateDiscordPresence();
     if (settings_.visual.type == 4 ||
-        audio_.State() == audio::PlaybackState::stopped ||
-        audio_.State() == audio::PlaybackState::failed)
+        audio_->State() == audio::PlaybackState::stopped ||
+        audio_->State() == audio::PlaybackState::failed)
         UpdateVisualFrame();
     if (skin_) InvalidateRect(window_, nullptr, FALSE);
 }
@@ -5881,7 +5897,7 @@ void PlayerWindow::UpdateDiscordPresence() {
         discord_presence_.Clear();
         return;
     }
-    const auto clock = audio_.ClockSnapshot();
+    const auto clock = audio_->ClockSnapshot();
     const auto state = clock.state;
     if (state != audio::PlaybackState::playing &&
         state != audio::PlaybackState::paused) {
@@ -5911,7 +5927,7 @@ void PlayerWindow::UpdateDiscordPresence() {
 void PlayerWindow::UpdateMainWindowCaption() {
     if (!window_) return;
     const bool scrolling = settings_.general.scroll_title &&
-        audio_.State() == audio::PlaybackState::playing;
+        audio_->State() == audio::PlaybackState::playing;
     std::wstring source = display_title_;
     if (scrolling) source += L"  ";
     if (source == window_caption_source_ &&
@@ -5959,9 +5975,9 @@ void PlayerWindow::RebuildSkinInfoItems(bool include_audio_details) {
     catch (const std::exception&) {}
     try { if (!track.album.empty()) album = core::Utf8ToWide(track.album); }
     catch (const std::exception&) {}
-    const auto format = FormatAudioDescription(audio_.Format());
-    const auto duration = audio_.Duration().count() > 0
-        ? FormatInfoDuration(audio_.Duration()) : std::wstring{};
+    const auto format = FormatAudioDescription(audio_->Format());
+    const auto duration = audio_->Duration().count() > 0
+        ? FormatInfoDuration(audio_->Duration()) : std::wstring{};
     auto resource_template = ResourceText(0x81ca);
     size_t begin = 0;
     while (begin <= resource_template.size()) {
@@ -6112,6 +6128,34 @@ void PlayerWindow::AdvanceSkinInfoScroll(UINT_PTR timer) {
     InvalidateRect(window_, &info->bounds, FALSE);
 }
 
+void PlayerWindow::PollFadingAudio(bool cancel) {
+    for (auto it = fading_audio_.begin(); it != fading_audio_.end();) {
+        if (cancel) (*it)->StopAsync();
+        if ((*it)->TryReapStopped()) it = fading_audio_.erase(it);
+        else ++it;
+    }
+}
+
+void PlayerWindow::PrepareTrackChange(bool same_item) {
+    // 0045B78E replaces +0x4348, retaining only the most recent outgoing
+    // sound. Older cancellation stays owned until its worker actually exits.
+    PollFadingAudio(true);
+    if (same_item || !audio_->CanRetainForTrackChange()) return;
+    // A driver/reader ignoring cancellation must not create an unbounded
+    // chain of workers on rapid Next presses. Reuse the foreground session
+    // through its existing bounded Stop/Play path if two tails still unwind.
+    if (fading_audio_.size() >= 2) return;
+    auto next = audio_->CreateSuccessor();
+    fading_audio_.reserve(fading_audio_.size() + 1);
+    if (!audio_->BeginStopFade(true)) return;
+    fading_audio_.push_back(audio_);
+    {
+        // The visualization worker takes a shared snapshot under this lock.
+        std::scoped_lock lock(visual_worker_mutex_);
+        audio_ = std::move(next);
+    }
+}
+
 bool PlayerWindow::PlayCurrent() {
     if (lyric_save_in_progress_) return false;
     if (!random_navigation_dispatch_) random_navigation_requests_.clear();
@@ -6135,6 +6179,13 @@ bool PlayerWindow::PlayCurrent() {
     // The decoder request may replace the object which backs opened_track_.
     // Keep a stable value while the engine and metadata paths run.
     const playlist::Track requested_track = *requested;
+    // 00461E35 clears stop-fade bit 3 when replaying the playing row. Retain
+    // row identity too: two separate rows may name the same file/subtrack.
+    const auto* opened = OpenedTrack();
+    const bool same_item = opened &&
+        _wcsicmp(opened->path.c_str(), requested_track.path.c_str()) == 0 &&
+        opened->subtrack == requested_track.subtrack &&
+        (!indexed_playback || PlaybackPlaylist().PlayingRow() == current_);
     FinishLyricDocument();
     // 0047FEA3 sends the play request and then 0047FB0C publishes +0x1c.
     // Publish the per-list marker at request time; the failed-open path below
@@ -6151,7 +6202,8 @@ bool PlayerWindow::PlayCurrent() {
             TrackIntervalMilliseconds(settings_.playback.track_interval);
         return true;
     }
-    if (!audio_.Play(requested_track.path, requested_track.subtrack)) {
+    PrepareTrackChange(same_item);
+    if (!audio_->Play(requested_track.path, requested_track.subtrack)) {
         taskbar_preview_.Clear();
 #if !defined(TTPLAYER_LEGACY_WINDOWS)
         system_media_controls_.Clear();
@@ -6177,7 +6229,7 @@ bool PlayerWindow::PlayCurrent() {
     settings_.player.playing_time = 0;
     playback_source_open_ = true;
     opened_track_ = requested_track;
-    const auto metadata = audio_.Metadata();
+    const auto metadata = audio_->Metadata();
     taskbar_preview_.SetSource(window_, requested_track.path, metadata);
 #if !defined(TTPLAYER_LEGACY_WINDOWS)
     system_media_controls_.SetSource(window_, BuildSystemMediaMetadata(requested_track, metadata),
@@ -6205,7 +6257,7 @@ bool PlayerWindow::PlayCurrent() {
             entries.emplace_back("Artist", core::WideToUtf8(metadata.artist));
         if (!metadata.album.empty())
             entries.emplace_back("Album", core::WideToUtf8(metadata.album));
-        const auto format = audio_.Format();
+        const auto format = audio_->Format();
         const std::uint64_t bitrate =
             static_cast<std::uint64_t>(format.bytes_per_second) * 8U;
         metadata_changed |= PlaybackPlaylist().SetExtendedMetadata(
@@ -6231,7 +6283,7 @@ bool PlayerWindow::PlayCurrent() {
     // The decoder-open completion in the original updates the playlist item
     // metadata before invalidating ListCtrl.  Persist the newly known WAV
     // duration so the right-aligned duration column appears immediately.
-    const auto duration = audio_.Duration().count();
+    const auto duration = audio_->Duration().count();
     if (indexed_playback && duration >= 0 && duration <= INT_MAX &&
         PlaybackPlaylist().SetDuration(*current_, static_cast<int>(duration))) {
         if (playback_playlist_index)
@@ -6311,7 +6363,7 @@ void PlayerWindow::RestoreStartupPlayback() {
     if (!restore_plan.should_play) return;
     if (!PlayCurrent()) return;
     if (restore_plan.resume_position_ms > 0) {
-        audio_.Seek(std::chrono::milliseconds(restore_plan.resume_position_ms));
+        audio_->Seek(std::chrono::milliseconds(restore_plan.resume_position_ms));
         // The resume offset is a one-shot startup input. The live position is
         // captured again during shutdown if this source remains open.
         settings_.player.playing_time = 0;
@@ -6586,7 +6638,8 @@ void PlayerWindow::Stop() {
     natural_completion_dispatch_ = false;
     pending_natural_play_ = false;
     ClearAudioError();
-    audio_.StopWithFade();
+    PollFadingAudio(true);
+    audio_->StopWithFade();
     UpdateVisualFrame();
     RefreshPlaybackUi();
 }
@@ -6629,7 +6682,7 @@ void PlayerWindow::ShowAudioError(const std::filesystem::path& path) {
     ClearAudioError();
     // FUN_0045AD86 writes the localized reason into CScrollingStatic and
     // stops all three animation timers; it does not open a message box.
-    playback_error_text_ = ResourceText(PlaybackErrorResource(audio_.LastErrorResult(),
+    playback_error_text_ = ResourceText(PlaybackErrorResource(audio_->LastErrorResult(),
         audio::AudioEngine::IsNetworkMediaLocation(path)));
     playback_error_started_tick_ = GetTickCount64();
     RebuildSkinInfoItems(false);

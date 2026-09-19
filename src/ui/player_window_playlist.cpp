@@ -3640,7 +3640,7 @@ std::wstring PlayerWindow::ToolTipText(HWND owner, UINT_PTR tool) const {
     if (const auto skin_text = SkinMenuToolTipText(static_cast<UINT>(tool));
         !skin_text.empty()) return skin_text;
     if (tool == kCmdPlay) {
-        const auto state = audio_.State();
+        const auto state = audio_->State();
         const bool playing = state == audio::PlaybackState::playing;
         if (!IsSkinElementEnabled(playing ? L"pause" : L"play")) return {};
         const UINT command = playing ? kCmdPause : kCmdPlay;

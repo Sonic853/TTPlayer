@@ -14,9 +14,10 @@ namespace ttplayer::audio {
 
 // In-process adapter for the Winamp DSP ABI recovered at
 // FUN_00427EDC/FUN_00428061/FUN_004280CD.  Instances are deliberately owned
-// by one playback worker: UI-side discovery/configuration remains isolated in
+// by the playback session family: UI-side discovery/configuration remains isolated in
 // a private worker mode of the player EXE, while ModifySamples runs in
-// the process which owns the PCM stream.
+// the process which owns the PCM stream. Callbacks are serialized when the
+// previous sound's fade overlaps the new sound; DLLs are not initialized twice.
 class WinampDspChain {
 public:
     WinampDspChain();

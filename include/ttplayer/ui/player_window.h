@@ -73,7 +73,7 @@ public:
         ShutdownPlaylistInfoLoading();
         reader_formats_ = manager ? manager->ReaderFormats()
                                   : std::vector<plugins::ReaderFormat>{};
-        audio_.SetPluginManager(manager);
+        audio_->SetPluginManager(manager);
     }
     void SetTtpCommModule(HMODULE module) noexcept;
     // Validate the saved package before restoring its profile; pre-Create only.
@@ -847,7 +847,12 @@ private:
     LONG_PTR fullscreen_lyric_saved_exstyle_{};
     bool fullscreen_lyric_was_empty_{};
     bool fullscreen_desktop_lyric_was_visible_{};
-    audio::AudioEngine audio_;
+    std::shared_ptr<audio::AudioEngine> audio_{std::make_shared<audio::AudioEngine>()};
+    // At most one audible outgoing sound, plus an older canceled worker still
+    // unwinding. Never destroy a session on the UI thread before it exits.
+    std::vector<std::shared_ptr<audio::AudioEngine>> fading_audio_;
+    void PollFadingAudio(bool cancel = false);
+    void PrepareTrackChange(bool same_item);
     playlist::PlaylistStore playlists_;
     std::vector<plugins::ReaderFormat> reader_formats_;
     const plugins::PluginManager* sound_library_{};

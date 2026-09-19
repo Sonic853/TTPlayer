@@ -1,5 +1,12 @@
 # 音频引擎恢复记录
 
+## 2026-09-19：上一首／下一首声音淡化
+
+按原版 `0045B78E` 恢复切歌时保留旧播放对象：符合条件的 DirectSound 旧曲使用停止淡出，
+新曲独立使用播放淡入；补齐输出／读取器限制、旧曲退出全局 DSP、快速切歌回收与可视化生命周期。
+原版虚表、选项对应关系和恢复边界见
+[TRACK_CHANGE_FADE_RECOVERY.md](TRACK_CHANGE_FADE_RECOVERY.md)。
+
 ## 2026-09-19：MIDI DirectShow 路径
 
 MIDI 已从 MCI 改为原版使用的 DirectShow Filter Graph，补齐时长查询、暂停定位、

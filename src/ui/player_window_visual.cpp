@@ -1392,7 +1392,7 @@ private:
 
 void PlayerWindow::SetTtpCommModule(HMODULE module) noexcept {
     ttpcomm_module_ = module;
-    audio_.SetTtpCommModule(module);
+    audio_->SetTtpCommModule(module);
     if (visual_runtime_) visual_runtime_->SetModule(module);
 }
 
@@ -1476,10 +1476,11 @@ void PlayerWindow::StartVisualWorker() {
             std::unique_lock lock(visual_worker_mutex_);
             visual_worker_condition_.wait_for(
                 lock, stop, interval, [] { return false; });
+            const auto audio = audio_;
             lock.unlock();
             if (stop.stop_requested()) return;
             if (visual_worker_enabled_.load(std::memory_order_acquire) &&
-                audio_.State() == audio::PlaybackState::playing) {
+                audio->State() == audio::PlaybackState::playing) {
                 // CPlayerWnd::Run invokes FUN_00457B11 on this worker.  It
                 // updates under the visual object's critical section, then
                 // obtains the child DC and paints immediately; no UI-thread
@@ -1488,7 +1489,7 @@ void PlayerWindow::StartVisualWorker() {
                 const auto runtime = visual_runtime_;
                 const HWND visual = visual_window_;
                 if (!runtime || !visual || !IsWindow(visual)) continue;
-                runtime->Update(audio_.Visualization());
+                runtime->Update(audio->Visualization());
                 const HDC dc = GetDC(visual);
                 if (dc) {
                     RECT client{};
@@ -1546,10 +1547,10 @@ void PlayerWindow::UpdateVisualWindowLayout() {
         if (fullscreen_mode_ == 3 && settings_.visual.type == 4) {
             std::filesystem::path source;
             audio::AudioMetadata metadata;
-            const auto state = audio_.State();
+            const auto state = audio_->State();
             if (state == audio::PlaybackState::playing || state == audio::PlaybackState::paused) {
                 if (const auto* track = PlaybackTrackForUi()) source = track->path;
-                metadata = audio_.Metadata();
+                metadata = audio_->Metadata();
             }
             visual_runtime_->ConfigureAlbum(settings_.visual, {width, height}, settings_.fullscreen,
                 settings_.lyric.fullscreen_background_color, source, metadata);
@@ -1592,14 +1593,14 @@ void PlayerWindow::UpdateVisualWindowLayout() {
 
 void PlayerWindow::UpdateVisualFrame() {
     if (!visual_runtime_ || !visual_window_) return;
-    const auto state = audio_.State();
+    const auto state = audio_->State();
     if (state == audio::PlaybackState::playing ||
         (state == audio::PlaybackState::paused && fullscreen_mode_ == 3 &&
          settings_.visual.type == 4)) {
         std::filesystem::path source;
         if (const auto* track = PlaybackTrackForUi()) source = track->path;
         visual_runtime_->SetSource(source, ResourceText(0x821b),
-                                   audio_.Metadata());
+                                   audio_->Metadata());
         // Dynamic modes are advanced exclusively by CPlayerWnd::Run's
         // worker cadence.  UI commands only publish cover/source state and
         // request a repaint; updating here would add an extra decay/blur
@@ -1969,7 +1970,7 @@ void PlayerWindow::SetFullScreenMode(int mode, HWND origin) {
     }
     const bool entering = fullscreen_mode_ == 0;
     if (entering &&
-        audio_.State() != audio::PlaybackState::playing) return;
+        audio_->State() != audio::PlaybackState::playing) return;
     if (entering) {
         // Capture before hiding/minimizing either host. A lyric menu uses its
         // own host, while the main/embedded-visual menu uses the main window.
@@ -2072,7 +2073,7 @@ void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
             DestroyMenu(fullscreen);
     }
     const bool may_enter =
-        audio_.State() == audio::PlaybackState::playing;
+        audio_->State() == audio::PlaybackState::playing;
     EnableCommand(popup, kCmdFullscreenLyrics, may_enter);
     EnableCommand(popup, kCmdFullscreenVisual, may_enter);
     EnableCommand(popup, kCmdFullscreenAll, may_enter);

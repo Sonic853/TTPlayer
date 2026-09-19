@@ -830,7 +830,7 @@ void PlayerWindow::SetEqualizerSliderValue(int slider, int value,
     if (slider == kEqSliderBalance) {
         value = std::clamp(value, -10, 10);
         settings_.player.balance = value * 10;
-        audio_.SetBalance(settings_.player.balance);
+        audio_->SetBalance(settings_.player.balance);
     } else if (slider == kEqSliderSurround) {
         settings_.equalizer.surround = std::clamp(value, 0, 16);
         ApplyEqualizer();
@@ -915,7 +915,7 @@ void PlayerWindow::SetEqualizerSliderFromPoint(int slider, POINT point,
 
 void PlayerWindow::ApplyEqualizer() {
     UpdateEqualizerControlState();
-    audio_.SetEqualizer(settings_.equalizer.profile,
+    audio_->SetEqualizer(settings_.equalizer.profile,
                         settings_.equalizer.surround,
                         settings_.equalizer.current);
 }
