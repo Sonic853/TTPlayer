@@ -171,6 +171,9 @@ public:
     [[nodiscard]] virtual std::wstring Error() const = 0;
     [[nodiscard]] virtual HRESULT ErrorResult() const { return E_FAIL; }
     [[nodiscard]] virtual AudioMetadata Metadata() const { return {}; }
+    // CPlayerWnd retains an outgoing reader only when (capabilities & 9) == 0.
+    // Native file readers can overlap; wrappers must forward the inner gate.
+    [[nodiscard]] virtual bool CanOverlapPlayback() const { return true; }
     // Called only by the source's owning playback thread, between reads.
     virtual HRESULT WriteLyrics(std::wstring_view) { return E_NOINTERFACE; }
 };
@@ -191,6 +194,12 @@ public:
     AudioEngine& operator=(const AudioEngine&) = delete;
 
     bool Play(const std::filesystem::path& path, int subtrack = 0);
+    // A stable second session lets the old sound finish its stop fade while
+    // the new sound opens/fades in (CPlayerWnd +0x4344 / +0x4348).
+    [[nodiscard]] std::shared_ptr<AudioEngine> CreateSuccessor() const;
+    [[nodiscard]] bool CanRetainForTrackChange() const;
+    void StopAsync() noexcept { RequestStop(); }
+    [[nodiscard]] bool TryReapStopped() noexcept;
     bool PlayWave(const std::filesystem::path& path) { return Play(path); }
     // Device-page changes reopen the current source with a new output object.
     // Restore the old clock/state without routing through the user-facing
@@ -212,7 +221,7 @@ public:
     // Close starts the same fade but must not synchronously stop when the
     // option/backend/state gate is false. The window message loop polls the
     // lock-free flag while continuing to dispatch paint/timer messages.
-    [[nodiscard]] bool BeginStopFade();
+    [[nodiscard]] bool BeginStopFade(bool detach_dsp = false);
     [[nodiscard]] bool StopFadePending() const noexcept {
         return stop_fade_pending_.load(std::memory_order_acquire);
     }
@@ -337,6 +346,8 @@ private:
     float transition_gain_{1.0F};
     float track_gain_{1.0F};
     bool fade_pending_{};
+    bool source_can_overlap_{};
+    std::atomic<bool> dsp_enabled_{true};
     std::atomic<bool> stop_fade_pending_{};
     bool fade_shutdown_{};
     uint64_t fade_generation_{};
@@ -351,6 +362,6 @@ private:
     HMODULE ttpcomm_module_{}; // borrowed from TtpCommRuntime
     // Kept for the full AudioEngine lifetime, as DAT_00546C64 is in the
     // original. DSP Init/Quit therefore does not repeat at every track.
-    std::unique_ptr<WinampDspChain> dsp_chain_;
+    std::shared_ptr<WinampDspChain> dsp_chain_;
 };
 }

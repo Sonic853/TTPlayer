@@ -463,6 +463,11 @@ public:
         return error_.empty() ? fallback_->Error() : error_;
     }
     AudioMetadata Metadata() const override { return fallback_->Metadata(); }
+    bool CanOverlapPlayback() const override {
+        // The Winamp input ABI has a single active decoder. Release it before
+        // opening the next source so mp3PRO does not silently lose enhancement.
+        return !bridge_ && fallback_ && fallback_->CanOverlapPlayback();
+    }
 
 private:
     bool PauseDecoder(bool paused) {

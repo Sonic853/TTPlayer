@@ -1,4 +1,5 @@
 #include "ttplayer/audio/winamp_dsp.h"
+#include <mutex>
 
 #include <algorithm>
 #include <cstring>
@@ -216,6 +217,7 @@ bool InvokeQuit(WinampDspModule* module) noexcept {
 
 class WinampDspChain::Impl {
 public:
+    mutable std::mutex mutex;
     struct LoadedModule {
         std::filesystem::path path;
         HMODULE library{};
@@ -397,19 +399,23 @@ WinampDspChain& WinampDspChain::operator=(WinampDspChain&&) noexcept = default;
 void WinampDspChain::Update(const std::filesystem::path& folder,
                             const std::vector<std::wstring>& modules,
                             HWND parent_window) {
+    std::scoped_lock lock(impl_->mutex);
     impl_->Update(folder, modules, parent_window);
 }
 
 void WinampDspChain::Process(std::span<std::int16_t> interleaved_samples,
                              int channels, int sample_rate) {
+    std::scoped_lock lock(impl_->mutex);
     impl_->Process(interleaved_samples, channels, sample_rate);
 }
 
 std::size_t WinampDspChain::ActiveCount() const noexcept {
+    std::scoped_lock lock(impl_->mutex);
     return impl_->modules_.size();
 }
 
 std::vector<std::wstring> WinampDspChain::TakeDiagnostics() {
+    std::scoped_lock lock(impl_->mutex);
     return impl_->TakeDiagnostics();
 }
 

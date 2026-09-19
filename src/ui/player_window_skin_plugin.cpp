@@ -86,11 +86,11 @@ BOOL WINAPI PlayerWindow::QuerySkinPluginState(void* context,TtpSkinState* state
     if(!context || !state || state->size<sizeof(*state)) return FALSE;
     try {
     const auto& self=*static_cast<PlayerWindow*>(context);
-    state->playback=static_cast<int>(self.audio_.State());
-    state->position_ms=self.audio_.Position().count();state->duration_ms=self.audio_.Duration().count();
+    state->playback=static_cast<int>(self.audio_->State());
+    state->position_ms=self.audio_->Position().count();state->duration_ms=self.audio_->Duration().count();
     state->volume=self.settings_.player.mute?0:self.settings_.player.volume;
     state->balance=self.settings_.player.balance;state->mode=self.settings_.player.play_mode;
-    const auto format=self.audio_.Format();
+    const auto format=self.audio_->Format();
     state->channels=static_cast<int>(format.channels);state->sample_rate=static_cast<int>(format.sample_rate);
     state->bitrate=0;
     if(const auto* track=self.PlaybackTrackForUi()) state->bitrate=static_cast<int>(track->bitrate_bps);
@@ -181,11 +181,11 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     case TTP_SKIN_OPTIONS: ShowOptions();break;
     case TTP_SKIN_VOLUME:
         settings_.player.volume=std::clamp(value,0,100);settings_.player.mute=false;
-        audio_.SetVolume(float(settings_.player.volume)/100.0F);break;
+        audio_->SetVolume(float(settings_.player.volume)/100.0F);break;
     case TTP_SKIN_BALANCE:
-        settings_.player.balance=std::clamp(value,-100,100);audio_.SetBalance(settings_.player.balance);break;
+        settings_.player.balance=std::clamp(value,-100,100);audio_->SetBalance(settings_.player.balance);break;
     case TTP_SKIN_SEEK:
-        if(audio_.Duration().count()>0) audio_.Seek(std::chrono::milliseconds(audio_.Duration().count()*std::clamp(value,0,10000)/10000));
+        if(audio_->Duration().count()>0) audio_->Seek(std::chrono::milliseconds(audio_->Duration().count()*std::clamp(value,0,10000)/10000));
         break;
     case TTP_SKIN_MODE: SetPlaybackMode(value);break;
     case TTP_SKIN_PLAY_ROW:

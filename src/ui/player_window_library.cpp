@@ -2232,7 +2232,7 @@ bool PlayerWindow::RestoreMediaLibraryPlayback() {
     media_library_startup_pending_ = false;
     SelectMediaLibraryPlaybackTrack(row,false);
     if (plan.should_play && PlayCurrent() && plan.resume_position_ms > 0) {
-        audio_.Seek(std::chrono::milliseconds(plan.resume_position_ms));
+        audio_->Seek(std::chrono::milliseconds(plan.resume_position_ms));
         settings_.player.playing_time = 0;
     }
     return true;

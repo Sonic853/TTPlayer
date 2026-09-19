@@ -7,10 +7,10 @@ namespace ttplayer::ui {
 using namespace detail;
 
 TaskbarPlaybackState PlayerWindow::TaskbarState() const {
-    const auto state = audio_.State();
+    const auto state = audio_->State();
     TaskbarPlaybackState result;
     result.playing = state == audio::PlaybackState::playing;
-    if (close_after_skin_window_fade_ || audio_.StopFadePending() ||
+    if (close_after_skin_window_fade_ || audio_->StopFadePending() ||
         state == audio::PlaybackState::opening || playlists_.Empty()) return result;
     result.previous_enabled = IsSkinElementEnabled(L"prev");
     result.next_enabled = IsSkinElementEnabled(L"next");
@@ -32,9 +32,9 @@ void PlayerWindow::UpdateTaskbarPlayback() {
     static_cast<void>(taskbar_playback_.Update(buttons, TaskbarLabels()));
 #if !defined(TTPLAYER_LEGACY_WINDOWS)
     if (!OpenedTrack()) system_media_controls_.Clear();
-    else system_media_controls_.Update(audio_.ClockSnapshot(), buttons, close_after_skin_window_fade_);
+    else system_media_controls_.Update(audio_->ClockSnapshot(), buttons, close_after_skin_window_fade_);
 #endif
-    const auto state = audio_.State();
+    const auto state = audio_->State();
     if (state != audio::PlaybackState::playing && state != audio::PlaybackState::paused)
         taskbar_preview_.Clear();
 }
@@ -44,8 +44,8 @@ void PlayerWindow::HandleTaskbarPlaybackClick(WPARAM wparam) {
     case TaskbarPlaybackAction::previous: SelectRelative(false); break;
     case TaskbarPlaybackAction::next: SelectRelative(true); break;
     case TaskbarPlaybackAction::play_pause:
-        if (audio_.State() == audio::PlaybackState::playing) audio_.Pause();
-        else if (audio_.State() == audio::PlaybackState::paused) audio_.Resume();
+        if (audio_->State() == audio::PlaybackState::playing) audio_->Pause();
+        else if (audio_->State() == audio::PlaybackState::paused) audio_->Resume();
         else static_cast<void>(PlayCurrent());
         break;
     default: return;
@@ -57,19 +57,19 @@ void PlayerWindow::HandleTaskbarPlaybackClick(WPARAM wparam) {
 void PlayerWindow::HandleSystemMediaCommand(SystemMediaControls::Command command, int64_t position_ms) {
     // Recheck on the window thread: an input may have arrived during a decoder
     // change, stop fade, or a nested save-lyrics dialog.
-    if (lyric_save_in_progress_ || close_after_skin_window_fade_ || audio_.StopFadePending()) return;
-    const auto state = audio_.State();
+    if (lyric_save_in_progress_ || close_after_skin_window_fade_ || audio_->StopFadePending()) return;
+    const auto state = audio_->State();
     if (state == audio::PlaybackState::opening) return;
     const auto buttons = TaskbarState();
     using Command = SystemMediaControls::Command;
     switch (command) {
     case Command::play:
         if (!buttons.play_pause_enabled) return;
-        if (state == audio::PlaybackState::paused) audio_.Resume();
+        if (state == audio::PlaybackState::paused) audio_->Resume();
         else if (state != audio::PlaybackState::playing) static_cast<void>(PlayCurrent());
         break;
     case Command::pause:
-        if (state == audio::PlaybackState::playing) audio_.Pause();
+        if (state == audio::PlaybackState::playing) audio_->Pause();
         break;
     case Command::stop:
         if (state == audio::PlaybackState::playing || state == audio::PlaybackState::paused) Stop();
@@ -82,8 +82,8 @@ void PlayerWindow::HandleSystemMediaCommand(SystemMediaControls::Command command
         break;
     case Command::seek:
         if ((state == audio::PlaybackState::playing || state == audio::PlaybackState::paused) &&
-            audio_.Duration().count() > 0)
-            audio_.Seek(std::chrono::milliseconds(std::clamp<int64_t>(position_ms, 0, audio_.Duration().count())));
+            audio_->Duration().count() > 0)
+            audio_->Seek(std::chrono::milliseconds(std::clamp<int64_t>(position_ms, 0, audio_->Duration().count())));
         break;
     }
     RefreshPlaybackUi();

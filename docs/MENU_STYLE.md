@@ -32,18 +32,28 @@ menu call returns.
 ## Skin-list population (`0045E518`)
 
 The native skin submenu is populated lazily from `WM_INITMENUPOPUP`, identified
-by its fixed first command `0x7919`. The rebuild keeps that HMENU publication
+by its fixed first command `0x7919`. At the user's request, the rebuild moves
+Options (`0x7918`) to the top, followed by the DLL-defined Plugin Skin submenus,
+a separator, Default Skin and the installed native skins. Popup recognition
+accepts both the resource's `0x7919` and the reordered `0x7918`. Population keeps
+the two fixed commands and their drawing records, and rebuilds the dynamic
+groups without relying on fixed positions. The rebuild keeps that HMENU publication
 point, but intentionally starts the package scan asynchronously when the root
 right-click menu opens. Consequently the root popup remains immediate and the
 time spent navigating to Skin overlaps the EXE-local `Skin` directory scan. If
-the submenu is expanded first, `WM_INITMENUPOPUP` waits for the unfinished tail
-and then publishes the complete snapshot; no worker thread inserts menu items
+the submenu is expanded first, `WM_INITMENUPOPUP` uses the latest complete
+snapshot while the scan continues; no worker thread inserts menu items
 or accesses a window handle.
 
-Each scan enumerates only `.skn`/`.zip` files below the executable-local `Skin`
-directory and reads that package's `Skin.xml`. Candidates for which ZIP
+The native scan enumerates `.skn`/`.zip` files below the executable-local `Skin`
+and `Skin/new` directories and reads that package's `Skin.xml`. Candidates for which ZIP
 loading, XML parsing, or root `version=2` validation fails are released without
 receiving a command.
+
+Plugin Skin packages are scanned only in each DLL's declared child directory,
+filtered by its suffixes and validated through its `probe` callback. The DLL
+also supplies the tab and submenu name. Without a usable provider, no plugin
+group is shown; an empty provider group is disabled.
 
 The menu title is the root `name` attribute, not the package stem. External
 objects are sorted by `FUN_004C54D1`, which dynamically resolves

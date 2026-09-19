@@ -5939,7 +5939,7 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
     }
     if (all || template_id == 251 || template_id == 259 ||
         template_id == 260) {
-        audio_.Configure({settings_.playback.file_buffer,
+        audio_->Configure({settings_.playback.file_buffer,
                           settings_.device.buffer_duration,
                           settings_.device.output_bits,
                           settings_.device.resample_rate,
@@ -5962,7 +5962,7 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
                           settings_.playback.sound_fade_mode,
                           settings_.playback.fade_duration,
                           settings_.playback.track_fade_duration});
-        audio_.SetVolume(settings_.player.mute ? 0.0F :
+        audio_->SetVolume(settings_.player.mute ? 0.0F :
             static_cast<float>(settings_.player.volume) / 100.0F);
     }
     if (all || template_id == 250) {
@@ -6022,12 +6022,12 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
     // (notably 0x100/-1 and 0xFFFF/-2) arrive here after the page callback has
     // unwound, matching the original ordering.
     const bool all = mask == 0xffff;
-    const auto playback_state = audio_.State();
+    const auto playback_state = audio_->State();
     const auto output_restart = PlanOutputRestart(
         mask, playback_source_open_,
         playback_state == audio::PlaybackState::playing,
         playback_state == audio::PlaybackState::paused);
-    const auto output_restart_position = audio_.Position();
+    const auto output_restart_position = audio_->Position();
     if (all || (mask & 0x800U) != 0) {
         const auto plugin_skin = settings_.plugin_skin_file;
         const bool use_default = settings_.skin_file.empty() ||
@@ -6076,7 +6076,7 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
         ApplyOptionsRuntime();
         if (output_restart != OutputRestartState::none &&
             PlayCurrent()) {
-            audio_.RestoreAfterOutputRestart(
+            audio_->RestoreAfterOutputRestart(
                 output_restart_position,
                 output_restart == OutputRestartState::paused);
             settings_.player.playing_time = static_cast<int>(std::clamp<int64_t>(
@@ -6099,7 +6099,7 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
     if ((mask & 0x4000U) != 0) ApplyOptionsRuntime(385);
     if (output_restart != OutputRestartState::none &&
         PlayCurrent()) {
-        audio_.RestoreAfterOutputRestart(
+        audio_->RestoreAfterOutputRestart(
             output_restart_position,
             output_restart == OutputRestartState::paused);
         settings_.player.playing_time = static_cast<int>(std::clamp<int64_t>(
