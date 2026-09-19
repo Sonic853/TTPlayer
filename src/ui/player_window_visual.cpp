@@ -730,10 +730,26 @@ public:
         }
     }
 
-    void Paint(HDC dc, const RECT& bounds) {
+    void Paint(HDC dc, const RECT& bounds, const TtpSkinVisualColors* colors = nullptr) {
         std::scoped_lock lock(mutex_);
         if (!dc || bounds.right <= bounds.left || bounds.bottom <= bounds.top)
             return;
+        // The native renderer and FFT remain authoritative. A provider may
+        // supply a temporary palette without changing persisted visual options.
+        const auto original = settings_;
+        struct Restore {
+            VisualRuntime& runtime;
+            const settings::VisualSettings& settings;
+            ~Restore() {runtime.settings_ = settings; runtime.paint_colors_ = nullptr;}
+        } restore{*this, original};
+        paint_colors_ = colors;
+        if (colors) {
+            settings_.spectrum_top_color = colors->top;
+            settings_.spectrum_middle_color = colors->middle;
+            settings_.spectrum_bottom_color = colors->bottom;
+            settings_.spectrum_peak_color = colors->peak;
+            settings_.blur_scope_color = colors->scope;
+        }
         switch (settings_.type) {
         case 1:
             PaintCachedBackground(dc, bounds);
@@ -828,11 +844,13 @@ private:
             surface_bits_, surface_bits_ + static_cast<size_t>(width_) * height_);
     }
 
+    const TtpSkinVisualColors* paint_colors_{}; // protected by mutex_, paint call only
+
     bool RestoreBackground() {
         const size_t pixels = static_cast<size_t>(width_) * height_;
         if (!surface_bits_ || background_pixels_.size() != pixels) return false;
-        std::copy(background_pixels_.begin(), background_pixels_.end(),
-                  surface_bits_);
+        if (paint_colors_) std::fill_n(surface_bits_,pixels,DibColor(paint_colors_->background));
+        else std::copy(background_pixels_.begin(), background_pixels_.end(),surface_bits_);
         return true;
     }
 
@@ -1625,6 +1643,17 @@ void PlayerWindow::UpdateVisualFrame() {
         }
     }
     InvalidateRect(visual_window_, nullptr, FALSE);
+}
+
+BOOL WINAPI PlayerWindow::PaintSkinPluginVisual(void* context,HDC dc,const RECT* bounds,
+                                                const TtpSkinVisualColors* colors) {
+    if(!context || !dc || !bounds) return FALSE;
+    try {
+        auto& self=*static_cast<PlayerWindow*>(context);
+        if(!self.visual_runtime_ || self.settings_.visual.type==0) return FALSE;
+        self.visual_runtime_->Paint(dc,*bounds,colors);
+        return TRUE;
+    } catch(...) {return FALSE;}
 }
 
 void PlayerWindow::PaintVisualControl(HDC dc) const {

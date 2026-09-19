@@ -405,7 +405,8 @@ struct Settings {
     ConvertSettings convert;
     DspPluginSettings plugin;
     HistorySettings history;
-    std::wstring skin_file;
+    std::wstring skin_file; // Native package, also supplies windows not owned by a provider.
+    std::wstring plugin_skin_file; // Empty when the user selects a native skin.
     std::filesystem::path source_path;
 };
 

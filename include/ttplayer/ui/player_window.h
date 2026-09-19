@@ -12,6 +12,7 @@
 #include "ttplayer/settings/settings.h"
 #include "ttplayer/skin/skin.h"
 #include "ttplayer/skin/skin_package.h"
+#include "ttplayer/skin/skin_plugin.h"
 #include "ttplayer/ui/desktop_lyrics.h"
 #include "ttplayer/ui/playlist_rating_input.h"
 #include "ttplayer/ui/playlist_marquee.h"
@@ -94,6 +95,21 @@ public:
     [[nodiscard]] HWND Handle() const noexcept { return window_; }
 
 private:
+    void DiscoverSkinPlugins();
+    bool IsPluginSkinPackage(const std::filesystem::path& path);
+    bool LoadPluginSkin(const std::filesystem::path& path, bool restore_profile = true);
+    [[nodiscard]] const std::wstring& ActiveSkinSelector() const;
+    bool InstallPluginSkin(const std::filesystem::path& path);
+    static BOOL WINAPI QuerySkinPluginState(void*, TtpSkinState*);
+    static BOOL WINAPI QuerySkinPluginTrack(void*, uint32_t, TtpSkinTrack*);
+    static uint32_t WINAPI QuerySkinPluginSelection(void*, uint32_t);
+    static BOOL WINAPI PaintSkinPluginVisual(void*, HDC, const RECT*, const TtpSkinVisualColors*);
+    static void WINAPI PostSkinPluginCommand(void*, uint32_t, int32_t);
+    static BOOL WINAPI HandleSkinPluginDrag(void*, const TtpSkinDrag*);
+    void HandleSkinPluginCommand(uint32_t command, int32_t value);
+    std::vector<std::shared_ptr<skin::SkinPluginModule>> skin_plugins_;
+    std::unique_ptr<skin::SkinPluginInstance> external_skin_;
+    bool skin_plugins_discovered_{};
     friend struct ttplayer::testing::ProgressSeekAccess;
     friend struct ttplayer::testing::SkinRebindAccess;
     enum class FileDropSurface { player, playlist, lyric };
@@ -125,6 +141,8 @@ private:
         std::wstring package_name;
         skin::SkinMetadata metadata;
         bool embedded_default{};
+        bool external{};
+        std::shared_ptr<skin::SkinPluginModule> provider;
     };
 
     struct AssociationOptionNode {
@@ -288,6 +306,7 @@ private:
     void RefreshOptionsAssociationIcon(HWND dialog);
     void SetOptionsAssociationIcon(HWND dialog, const std::wstring& icon);
     void PopulateOptionsSkinPage(HWND dialog);
+    void InitializeOptionsSkinTabs(HWND dialog);
     void UpdateOptionsSkinDetails(HWND dialog);
     void StartOptionsDspScan(HWND dialog,
                              const std::filesystem::path& folder);
@@ -313,7 +332,8 @@ private:
     void RestoreLyricControl();
     void LeaveFullScreen();
     void ToggleMiniMode();
-    void BeginSkinBackgroundDrag(HWND source, POINT point, unsigned int hit = 1);
+    void BeginSkinBackgroundDrag(HWND source, POINT point, unsigned int hit = 1,
+                                 SIZE minimum = {});
     void ContinueSkinBackgroundDrag(HWND source, POINT point);
     void EndSkinMouseCapture();
     [[nodiscard]] unsigned int PlaylistDragHitTest(POINT point) const;
@@ -324,7 +344,8 @@ private:
     static std::vector<SkinMenuEntry> LoadSkinMenuCatalog(
         const std::filesystem::path& skin_directory,
         HMODULE skin_resources, HMODULE ttpcomm_module,
-        const std::shared_ptr<std::atomic_bool>& cancel);
+        const std::shared_ptr<std::atomic_bool>& cancel,
+        const std::vector<std::shared_ptr<skin::SkinPluginModule>>& providers = {});
     void StartSkinMenuCatalogLoad();
     [[nodiscard]] bool PublishReadySkinMenuCatalog(DWORD wait_milliseconds = 0);
     void InvalidateSkinMenuCatalog() noexcept;
@@ -401,7 +422,7 @@ private:
     void ClearPlaylistDropCue() noexcept;
     void LoadDroppedLyrics(const std::filesystem::path& path);
     void RefreshPlaylist();
-    bool CreatePlaylistWindow();
+    bool CreatePlaylistWindow(bool for_provider = false);
     void TogglePlaylistWindow();
     void UpdatePlaylistWindowSkin(bool saved_bounds = false);
     void UpdatePlaylistWindowRegion();
@@ -578,7 +599,7 @@ private:
     void SeekLyricLine(std::ptrdiff_t delta);
     [[nodiscard]] bool HandleToolTipNotification(HWND owner, LPARAM notification);
     [[nodiscard]] std::wstring ToolTipText(HWND owner, UINT_PTR tool) const;
-    bool CreateEqualizerWindow();
+    bool CreateEqualizerWindow(bool for_provider = false);
     void CreateEqualizerControls();
     void DestroyEqualizerControls();
     void UpdateEqualizerControlState();
@@ -646,6 +667,7 @@ private:
     [[nodiscard]] int FindPlaylistControlPrefix(
         bool catalogue, int start, const LVFINDINFOW& find) const;
     void FinishPlaylistTrackDrag(POINT point);
+    void ReorderSelectedPlaylistRows(size_t insertion, bool copy);
     void FinishPlaylistListDrag();
     void BeginPlaylistOleDrag();
     void ChoosePlaylistFile(bool replace_active);
@@ -910,6 +932,7 @@ private:
     POINT skin_drag_anchor_{};
     POINT skin_drag_screen_anchor_{};
     RECT skin_drag_initial_rect_{};
+    SIZE skin_drag_minimum_{};
     unsigned int skin_drag_hit_{};
     std::vector<HWND> attached_drag_windows_;
     bool mini_mode_{};

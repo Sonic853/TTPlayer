@@ -1301,6 +1301,7 @@ void PlayerWindow::ShowPlayCdDialog() {
 
 bool PlayerWindow::OpenPath(const std::filesystem::path& path,
                             bool start_playback) {
+    if (IsPluginSkinPackage(path)) return InstallPluginSkin(path);
     // OpenPath is also the command-line/single-instance route.  It is not the
     // main window's 0xE101 Open command: starting a supplied media path must
     // not silently inherit that command's replace-list flag.  Preserve the
@@ -1316,6 +1317,10 @@ bool PlayerWindow::OpenPath(const std::filesystem::path& path,
 
 void PlayerWindow::OpenCommandLinePath(const std::filesystem::path& path,
                                        ULONG_PTR raw_mode) {
+    if (IsPluginSkinPackage(path)) {
+        static_cast<void>(InstallPluginSkin(path));
+        return;
+    }
     auto mode = static_cast<CommandLineFileMode>(raw_mode);
     if (mode != CommandLineFileMode::open_and_play &&
         mode != CommandLineFileMode::append &&
@@ -1449,7 +1454,12 @@ void PlayerWindow::HandleDroppedFiles(FileDropSurface surface, IDataObject* data
         return;
     }
     if (surface == FileDropSurface::player) {
-        if (LowerExtension(paths.front()) == L".skn") {
+        const auto extension = LowerExtension(paths.front());
+        if (IsPluginSkinPackage(paths.front())) {
+            if (InstallPluginSkin(paths.front()) && effect) *effect = incoming_effect;
+            return;
+        }
+        if (extension == L".skn") {
             const auto runtime = RuntimeDirectory();
             bool copied{};
             std::filesystem::path installed;

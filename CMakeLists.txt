@@ -88,10 +88,12 @@ add_library(ttplayer_core
   src/skin/skin.cpp
   src/skin/skin_image.cpp
   src/skin/skin_package.cpp
+  src/skin/skin_plugin.cpp
   src/ui/desktop_lyrics.cpp
   src/ui/directory_change_monitor.cpp
   src/ui/file_info_probe_client.cpp
   src/ui/player_window.cpp
+  src/ui/player_window_skin_plugin.cpp
   src/ui/player_window_skin_animation.cpp
   src/ui/player_window_taskbar.cpp
   src/ui/taskbar_playback.cpp
@@ -764,6 +766,12 @@ target_compile_options(taskbar_playback_tests PRIVATE /W4 /permissive- /EHsc /ut
 target_link_libraries(taskbar_playback_tests PRIVATE ttplayer_core)
 
 add_executable(skin_rebind_tests tests/ui/skin_rebind_tests.cpp)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/waskin/host_tests.cpp")
+  add_executable(waskin_host_tests tests/waskin/host_tests.cpp)
+  target_compile_definitions(waskin_host_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(waskin_host_tests PRIVATE /W4 /EHsc /utf-8)
+  target_link_libraries(waskin_host_tests PRIVATE ttplayer_core)
+endif()
 target_compile_definitions(skin_rebind_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(skin_rebind_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(skin_rebind_tests PRIVATE ttplayer_core)

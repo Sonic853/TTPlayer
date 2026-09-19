@@ -1,4 +1,5 @@
 #include "ttplayer/settings/settings.h"
+#include "ttplayer/skin/skin_paths.h"
 
 #include <algorithm>
 #include <cstring>
@@ -1302,6 +1303,11 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         auto v=Attribute(n,L"PackageName");
         if (v.vt==VT_EMPTY) v=Attribute(n,L"SkinFile");
         if (v.vt!=VT_EMPTY) s.skin_file=static_cast<const wchar_t*>(_bstr_t(v));
+        // Plugin selection is stored only in CustomPackageName. Retired
+        // attributes and PackageName must not restore a plugin selection.
+        s.plugin_skin_file=StringAttr(n,L"CustomPackageName");
+        if (!skin::IsNativeSkinPackage(s.skin_file)) s.skin_file=L"<Default_Skin>";
+        s.plugin_skin_file=skin::NormalizePluginSkinPackageName(s.plugin_skin_file).wstring();
     }
     return s;
 }
@@ -2053,6 +2059,10 @@ void SaveWindowState(const std::filesystem::path& path,
         const std::wstring package=settings.skin_file.empty()
             ? std::wstring(L"<Default_Skin>") : settings.skin_file;
         SetAttribute(element,L"PackageName",package);
+        // Always write the empty value too: SaveWindowState updates an
+        // existing document, which can still contain the previous plugin skin.
+        SetAttribute(element,L"CustomPackageName",settings.plugin_skin_file);
+        element->removeAttribute(_bstr_t(L"WinampPackageName"));
     }
     document->save(_variant_t(path.wstring().c_str()));
 }

@@ -1,5 +1,6 @@
 #include "ttplayer/plugins/plugin_manager.h"
 #include "ttplayer/core/text.h"
+#include "ttplayer/skin/skin_plugin_api.h"
 
 #include <algorithm>
 #include <array>
@@ -1904,6 +1905,26 @@ HRESULT PluginManager::Load(const std::filesystem::path& directory) {
             continue;
         }
 
+        // Skin providers share AddIn discovery but use a separate versioned ABI.
+        // Their module/instance lifetime is owned by the UI skin manager.
+        if (const auto skin_factory = reinterpret_cast<TtpGetSkinPlugin>(
+                GetProcAddress(module, TTP_SKIN_ENTRY))) {
+            info.skin_provider = true;
+            TtpSkinPlugin api{};
+            api.size = sizeof(api);
+            info.result = skin_factory(TTP_SKIN_ABI, &api);
+            info.registered = SUCCEEDED(info.result) && api.version == TTP_SKIN_ABI &&
+                api.size >= sizeof(api) && api.probe && api.create && api.attach &&
+                api.detach && api.destroy && api.preview && api.shade && api.paint && api.translate &&
+                api.skin_directory && api.extensions;
+            if (!info.registered) {
+                info.result = E_NOINTERFACE;
+                info.error = "unsupported skin provider ABI";
+            }
+            FreeLibrary(module);
+            plugins_.push_back(std::move(info));
+            continue;
+        }
         const FARPROC factory = GetProcAddress(module, "ttpGetSoundAddIn");
         info.has_legacy_entry = factory != nullptr;
         if (!factory) {

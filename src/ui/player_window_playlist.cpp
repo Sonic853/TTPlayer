@@ -2842,16 +2842,18 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
     return DefWindowProcW(playlist_window_, message, wparam, lparam);
 }
 
-bool PlayerWindow::CreatePlaylistWindow() {
+bool PlayerWindow::CreatePlaylistWindow(bool for_provider) {
     if (playlist_window_) return true;
-    if (!skin_ || !skin_->Playlist().valid) return false;
+    if (!skin_ || (!skin_->Playlist().valid && !for_provider && !external_skin_)) return false;
     const auto& layout = skin_->Playlist();
     RECT main_bounds{};
     GetWindowRect(window_, &main_bounds);
     int x = main_bounds.left + layout.position.left;
     int y = main_bounds.top + layout.position.top;
-    int width = layout.background.size.cx;
-    int height = layout.background.size.cy;
+    // A provider can own a surface absent from the selected native package.
+    // It supplies the actual geometry when attaching to this empty container.
+    int width = layout.valid ? layout.background.size.cx : 1;
+    int height = layout.valid ? layout.background.size.cy : 1;
     const RECT saved = settings_.player.playlist_window;
     if (saved.right > saved.left && saved.bottom > saved.top) {
         x = saved.left;
@@ -3196,6 +3198,7 @@ bool PlayerWindow::RoutePlaylistMouseWheel(const MSG& message) const {
 }
 
 bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
+    if (external_skin_ && external_skin_->Translate(message)) return true;
     if (RoutePlaylistMouseWheel(message)) return true;
     if (TranslateLyricUploadMessage(message)) return true;
     auto* queued = const_cast<MSG*>(&message);
@@ -5197,7 +5200,13 @@ void PlayerWindow::FinishPlaylistTrackDrag(POINT point) {
             0, metrics.visible_rows)),
             ActivePlaylist().Tracks().size());
     }
-    if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+    ReorderSelectedPlaylistRows(insertion,(GetKeyState(VK_CONTROL) & 0x8000)!=0);
+}
+
+void PlayerWindow::ReorderSelectedPlaylistRows(size_t insertion,bool copy) {
+    if(settings_.playlist.library_mode || playlist_selected_rows_.empty()) return;
+    insertion=std::min(insertion,ActivePlaylist().Tracks().size());
+    if(copy) {
         // Files' OLE drop target advertises COPY while Ctrl is held.  A copy
         // back into the same Files list clones the selected CPlayItem range
         // at the insertion mark; it must not route through Reorder(), which
