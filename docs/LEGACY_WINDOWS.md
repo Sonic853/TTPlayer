@@ -79,4 +79,4 @@ Win7 本轮未进行来宾运行测试。完整功能仍需逐项验证：添加
 - [CreateFile2 最低要求 Windows 8](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfile2)。
 - [YY-Thunks 1.2.2](https://github.com/Chuyu-Team/YY-Thunks/releases/tag/v1.2.2)：旧系统 API 后备实现。
 - [VC-LTL 5.3.1](https://github.com/Chuyu-Team/VC-LTL5/releases/tag/v5.3.1)：C/C++ 运行库适配。
-- 第三方许可在压缩包的 `licenses` 目录中；依赖未作修改。
+- 第三方许可保留在仓库及构建目录中；依赖未作修改。压缩包仅包含 `TTPlayerRebuild.exe` 和 `SHA256SUMS.txt`。

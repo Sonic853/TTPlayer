@@ -108,7 +108,7 @@ Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 `tests/cmake/test_gitee_release_http.py --cli <gitee-release-rs.exe>` 还可在本地用实际
 CLI 连接回环 HTTP 服务，验证跨页版本号、中文正文、三个附件内容及上传失败中止。
 本次任务拆分已通过 actionlint、12 项日期 / 配置用例、36 项模拟发布用例、
-2 项实际 ZIP 打包用例及 3 项 HTTP 集成用例。集成验证在独立进程中消费准备结果，
+3 项实际 ZIP 打包用例及 3 项 HTTP 集成用例。集成验证在独立进程中消费准备结果，
 覆盖上传失败中止，以及 GitHub 发布失败后 Gitee 仍能成功发布；未执行线上发布。
 
 工作流必须先存在于默认分支，手动运行入口才会显示，见
@@ -132,14 +132,14 @@ VS 2026 生成器要求 CMake 4.2 或更新版本，Runner 已提供相应工具
 
 旧系统版在 `build-legacy` 独立构建，固定使用 YY-Thunks 1.2.2 和 VC-LTL 5.3.1，
 首次配置自动下载并校验 SHA-256；Python 3 检查 XP / Win7 导入表后才允许打包。
-旧系统包附带依赖许可和导入报告。构建时不改动系统 DLL，也无需安装旧 Visual Studio。
+导入报告和依赖许可保留在构建目录。构建时不改动系统 DLL，也无需安装旧 Visual Studio。
 
 修改工作流后，请提交并在 **Run workflow** 中选择含修复的分支发起新运行；
 直接 **Re-run jobs** 重跑旧失败记录仍使用旧提交中的工作流。
 
-现代版 ZIP 包含 EXE、许可证、本说明和 EXE 的 SHA-256 校验值；兼容版 ZIP
-另附兼容说明、导入报告及依赖许可。Actions 产物还包含两个 ZIP 的校验文件、
-提交和构建信息，以及生成时的 PDB。
+普通版和兼容版 ZIP 均只包含 `TTPlayerRebuild.exe` 与 `SHA256SUMS.txt`，
+包内校验文件记录该 EXE 的 SHA-256。Actions 产物还包含两个 ZIP 的外层校验文件，
+以及供发布步骤核对的构建信息；PDB 保留在构建目录。
 **这不是包含原版运行依赖的安装包**：请把 `TTPlayerRebuild.exe` 放入已有
 TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一起使用。
 不会上传原版 DLL、编码器、歌曲、播放列表或 `TTPlayerRebuild.xml` 等个人配置。
@@ -179,7 +179,7 @@ DLL 绝对路径，启用 `i18n_ui_tests` 以及普通版的 `i18n_startup_tests
 
 UI 基础代码使用 WTL 10.01 和 Visual Studio ATL。安装 C++ 桌面开发工具时，须同时安装当前工具集的 ATL（x86/x64）组件；Actions 会检查该组件。
 
-CMake 从官方发布地址下载 WTL，并固定 SHA-256 校验值。库为头文件依赖，不需要分发 WTL DLL。普通版和兼容版压缩包均附带 `licenses/WTL-MS-PL.txt`。
+CMake 从官方发布地址下载 WTL，并固定 SHA-256 校验值。库为头文件依赖，不需要分发 WTL DLL。许可见仓库中的 `docs/licenses/WTL-MS-PL.txt`。
 
 ## Release 体积优化
 

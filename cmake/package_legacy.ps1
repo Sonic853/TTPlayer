@@ -3,7 +3,6 @@ param(
     [Parameter(Mandatory)][string]$Destination
 )
 $ErrorActionPreference = 'Stop'
-$source = Split-Path $PSScriptRoot -Parent
 $output = Join-Path $BuildDirectory 'Release'
 $executable = Join-Path $output 'TTPlayerRebuild.exe'
 $report = Join-Path $output 'legacy-imports.json'
@@ -22,17 +21,10 @@ $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerIn
 if ($hash -cne $audit.sha256) { throw 'The EXE changed after the import audit; rebuild it.' }
 $package = Join-Path $BuildDirectory ('legacy-package-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $package | Out-Null
-Copy-Item -LiteralPath $executable, $report -Destination $package
-Copy-Item -LiteralPath (Join-Path $source 'LICENSE') -Destination $package
-Copy-Item -LiteralPath (Join-Path $source 'docs/LEGACY_WINDOWS.md') -Destination $package
-$licenses = Join-Path $package 'licenses'
-New-Item -ItemType Directory -Path $licenses | Out-Null
-Copy-Item -LiteralPath (Join-Path $BuildDirectory 'legacy-licenses/YY-Thunks-LICENSE.txt') -Destination $licenses
-Copy-Item -LiteralPath (Join-Path $source 'docs/licenses/VC-LTL-LICENSE.txt') -Destination $licenses
-Copy-Item -LiteralPath (Join-Path $source 'docs/licenses/legacy-third-party.md') -Destination $licenses
-Copy-Item -LiteralPath (Join-Path $source 'docs/licenses/WTL-MS-PL.txt') -Destination $licenses
+Copy-Item -LiteralPath $executable -Destination $package
 "$hash  TTPlayerRebuild.exe" | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
 $parent = Split-Path ([IO.Path]::GetFullPath($Destination)) -Parent
 New-Item -ItemType Directory -Force -Path $parent | Out-Null
-Compress-Archive -Path (Join-Path $package '*') -DestinationPath $Destination -Force
+Compress-Archive -LiteralPath (Join-Path $package 'TTPlayerRebuild.exe'),
+    (Join-Path $package 'SHA256SUMS.txt') -DestinationPath $Destination -Force
 Write-Output "Legacy package: $Destination"
