@@ -185,7 +185,9 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     case TTP_SKIN_BALANCE:
         settings_.player.balance=std::clamp(value,-100,100);audio_->SetBalance(settings_.player.balance);break;
     case TTP_SKIN_SEEK:
-        if(audio_->Duration().count()>0) audio_->Seek(std::chrono::milliseconds(audio_->Duration().count()*std::clamp(value,0,10000)/10000));
+        // The DLL previews while dragging and commits only on release, just
+        // like the native progress control. Do not start a seek transition.
+        if(audio_->Duration().count()>0) audio_->SeekWithoutFade(std::chrono::milliseconds(audio_->Duration().count()*std::clamp(value,0,10000)/10000));
         break;
     case TTP_SKIN_MODE: SetPlaybackMode(value);break;
     case TTP_SKIN_PLAY_ROW:
