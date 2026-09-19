@@ -166,6 +166,11 @@ TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一�
 `AddIn`，将 `i18n` 放在 EXE 旁边。语言文件直接位于 `i18n/<语言>/ttplayer.po` 或 `.mo`，
 有效 MO 优先。普通版和 XP／Win7 兼容版共用该 DLL；没有它时仍使用原始资源及自建文本。
 
+“选项 → 常规”分为“选项”“命令行方式”“软件更新”三个子标签页。
+Discord 歌曲信息和歌词设置位于“选项”页的“自动关闭计算机”下方。
+安装翻译 DLL 后，Discord 设置下方提供“界面语言”下拉框；语言选择通过原有选项保存流程
+保存，重启播放器后生效。主窗口右键菜单不再提供语言选择。
+
 本地启用 `BUILD_TESTING=ON` 后，可通过 `TTPLAYER_I18N_TEST_DLL` 指定一份已经构建好的
 DLL 绝对路径，启用 `i18n_ui_tests` 以及普通版的 `i18n_startup_tests`。
 该选项仅用于集成测试，不会构建或分发 DLL。

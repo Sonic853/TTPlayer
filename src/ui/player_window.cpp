@@ -4482,28 +4482,6 @@ HMENU PlayerWindow::BuildContextMenu() {
         item.hSubMenu = child;
         if (!SetMenuItemInfoW(popup, resource_id, FALSE, &item)) DestroyMenu(child);
     }
-    language_menu_choices_.clear();
-    if (!FindRuntimePath(L"AddIn/ttp_i18n.dll").empty()) {
-        const HMENU languages = CreatePopupMenu();
-        if (languages) {
-            language_menu_choices_ = {L"auto", L"source"};
-            const auto available = i18n::Languages(PlayerRuntimeDirectory());
-            language_menu_choices_.insert(language_menu_choices_.end(), available.begin(), available.end());
-            if (language_menu_choices_.size() > kCmdLastLanguage - kCmdFirstLanguage + 1)
-                language_menu_choices_.resize(kCmdLastLanguage - kCmdFirstLanguage + 1);
-            for (size_t i = 0; i < language_menu_choices_.size(); ++i) {
-                const auto& locale = language_menu_choices_[i];
-                const auto label = i == 0 ? i18n::Text(L"自动（系统语言）") :
-                    i == 1 ? i18n::Text(L"原始文本") : locale;
-                AppendMenuW(languages, MF_STRING |
-                    (settings_.general.language == locale ? MF_CHECKED : 0),
-                    kCmdFirstLanguage + i, label.c_str());
-            }
-            AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
-            if (!AppendMenuW(popup, MF_POPUP, reinterpret_cast<UINT_PTR>(languages),
-                             i18n::Literal(L"界面语言"))) DestroyMenu(languages);
-        }
-    }
     PrepareContextMenu(popup);
 
     // FUN_00465CB8 adds a disabled zero-height owner-draw item before the
@@ -5062,24 +5040,6 @@ void PlayerWindow::ShowContextMenu(POINT screen_point, HWND origin) {
 }
 
 bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
-    if (command >= kCmdFirstLanguage && command <= kCmdLastLanguage) {
-        const size_t index = command - kCmdFirstLanguage;
-        if (index >= language_menu_choices_.size()) return false;
-        if (settings_.general.language == language_menu_choices_[index]) return true;
-        const auto previous = settings_.general.language;
-        settings_.general.language = language_menu_choices_[index];
-        try {
-            CaptureWindowState();
-            settings::SaveWindowState(settings_.source_path, settings_);
-            MessageBoxW(window_, i18n::Literal(L"界面语言将在下次启动播放器时生效。"),
-                        ResourceText(0x80).c_str(), MB_OK | MB_ICONINFORMATION);
-        } catch (...) {
-            settings_.general.language = previous;
-            MessageBoxW(window_, i18n::Literal(L"无法保存界面语言设置。"),
-                        ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
-        }
-        return true;
-    }
     if (OpenProjectLink(window_, command)) return true;
     if (HandleFullScreenCommand(command, fullscreen_origin ? fullscreen_origin :
             (context_menu_open_ && main_context_menu_origin_

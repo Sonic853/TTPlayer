@@ -6,6 +6,7 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "options_buttons.h"
+#include "options_general_tabs.h"
 #include "project_links.h"
 #include "output_devices.h"
 #include "modern_file_dialog.h"
@@ -75,6 +76,9 @@ constexpr int kOptionsNavigation = 0xe910;
 constexpr int kOptionsHeader = 0xe911;
 constexpr int kOptionsRelated = 0xe912;
 constexpr int kOptionsDiscordLyrics = 0xe913;
+constexpr int kOptionsLanguage = 0xe914;
+constexpr int kOptionsLanguageLabel = 0xe916;
+constexpr int kOptionsLanguageNotice = 0xe917;
 
 std::wstring AlbumOptionText(UINT id) {
     return i18n::ResourceText(GetModuleHandleW(nullptr), id);
@@ -4207,7 +4211,10 @@ void PlayerWindow::SelectOptionsPage(int page, UINT focus_control) {
             target = GetDlgItem(options_network_child_,
                                 static_cast<int>(focus_control));
     }
-    if (target && IsWindow(target)) SetFocus(target);
+    if (target && IsWindow(target)) {
+        if (current == options_pages_[kPageGeneral]) GeneralOptionsTabs::ShowControl(current, target);
+        SetFocus(target);
+    }
     options_focus_control_ = 0;
 }
 
@@ -4297,29 +4304,66 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
     }
     case 250: {
         const auto& value = settings_.general;
-        // Dialog 250 still comes from the original ttpres.dll.  Keep the
-        // recovered control ID/command path, but replace the retired service
-        // wording.  DiscordApplicationId is intentionally XML-only.
-        SetDlgItemTextW(dialog, 2188,
-                        i18n::Literal(L"向 Discord 发送播放的歌曲信息"));
-        // Community-only option: keep the original ttpres dialog usable.
-        // The free right-hand cell beside the shutdown time is inside its
-        // Options group. Dialog units/font follow the loaded template/DPI.
+        // Keep the resource controls alive across the three General tabs.
+        // All coordinates use the loaded resource's font and dialog units.
         if (!GetDlgItem(dialog, kOptionsDiscordLyrics)) {
-            RECT bounds{159, 109, 267, 119};
-            MapDialogRect(dialog, &bounds);
-            const HWND checkbox = CreateWindowExW(
-                0, WC_BUTTONW, i18n::Literal(L"向 Discord 发送歌词"),
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                bounds.left, bounds.top, bounds.right - bounds.left,
-                bounds.bottom - bounds.top, dialog,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOptionsDiscordLyrics)),
-                instance_, nullptr);
-            if (checkbox) {
-                SendMessageW(checkbox, WM_SETFONT,
-                    SendMessageW(dialog, WM_GETFONT, 0, 0), FALSE);
-                SetWindowPos(checkbox, GetDlgItem(dialog, 2183), 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            const bool language_available = !FindRuntimePath(L"AddIn/ttp_i18n.dll").empty();
+            const auto place = [dialog](HWND control, RECT rect, HWND after) {
+                MapDialogRect(dialog, &rect);
+                SetWindowPos(control, after, rect.left, rect.top,
+                             rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE);
+            };
+            const auto add = [&](LPCWSTR klass, LPCWSTR text, int id, DWORD style,
+                                 RECT rect, HWND after) {
+                const HWND control = CreateWindowExW(0, klass, text, WS_CHILD | WS_VISIBLE | style,
+                    0, 0, 0, 0, dialog, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                    instance_, nullptr);
+                SendMessageW(control, WM_SETFONT, SendMessageW(dialog, WM_GETFONT, 0, 0), FALSE);
+                place(control, rect, after);
+                return control;
+            };
+            const HWND discord = GetDlgItem(dialog, 2188);
+            SetWindowTextW(discord, i18n::Literal(L"向 Discord 发送播放的歌曲信息"));
+            // The date/time picker is last in the original template. Move it
+            // beside its checkbox in tab order before inserting the new rows.
+            const HWND shutdown_time = GetDlgItem(dialog, 2183);
+            SetWindowPos(shutdown_time, GetDlgItem(dialog, 2182), 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            place(discord, {13, 124, 267, 134}, shutdown_time);
+            const HWND lyrics = add(WC_BUTTONW, i18n::Literal(L"向 Discord 发送歌词"),
+                kOptionsDiscordLyrics, WS_TABSTOP | BS_AUTOCHECKBOX, {13, 139, 267, 149}, discord);
+            if (language_available) {
+                const HWND label = add(WC_STATICW, i18n::Literal(L"界面语言"), kOptionsLanguageLabel,
+                    0, {13, 160, 83, 172}, lyrics);
+                const HWND languages = add(WC_COMBOBOXW, L"", kOptionsLanguage,
+                    WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+                    {85, 156, 197, 276}, label);
+                std::vector<std::wstring> choices{L"auto", L"source"};
+                const auto available = i18n::Languages(PlayerRuntimeDirectory());
+                for (const auto& locale : available)
+                    if (locale != L"auto" && locale != L"source") choices.push_back(locale);
+                const auto selected = value.language.empty() ? L"auto" : value.language;
+                if (std::find(choices.begin(), choices.end(), selected) == choices.end())
+                    choices.push_back(selected); // Preserve unavailable or aliased configured locales.
+                for (size_t index = 0; index < choices.size(); ++index) {
+                    const auto& locale = choices[index];
+                    const auto text = index == 0 ? i18n::Text(L"自动（系统语言）") :
+                        index == 1 ? i18n::Text(L"原始文本") :
+                        locale == L"chs" ? i18n::Text(L"简体中文") :
+                        locale == L"cht" ? i18n::Text(L"繁体中文") :
+                        locale == L"en_US" ? i18n::Text(L"英文") : locale;
+                    const LRESULT item = SendMessageW(languages, CB_ADDSTRING, 0,
+                                                      reinterpret_cast<LPARAM>(text.c_str()));
+                    if (item == CB_ERR || item == CB_ERRSPACE) continue;
+                    // Store stable locale identifiers separately from translated
+                    // labels. These string literals live for the entire session.
+                    const wchar_t* code = locale == L"chs" ? L"chs" :
+                        locale == L"cht" ? L"cht" : locale == L"en_US" ? L"en_US" : nullptr;
+                    SendMessageW(languages, CB_SETITEMDATA, item, reinterpret_cast<LPARAM>(code));
+                    if (locale == selected) SendMessageW(languages, CB_SETCURSEL, item, 0);
+                }
+                add(WC_STATICW, i18n::Literal(L"界面语言将在下次启动播放器时生效。"),
+                    kOptionsLanguageNotice, 0, {13, 175, 267, 193}, languages);
             }
         }
         SetChecked(dialog, 2088, value.startup_minimize);
@@ -4364,6 +4408,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         EnableWindow(GetDlgItem(dialog, 1044), IsChecked(dialog, 1083));
         EnableWindow(GetDlgItem(dialog, 2138), IsChecked(dialog, 2137));
         EnableWindow(GetDlgItem(dialog, 2183), IsChecked(dialog, 2182));
+        GeneralOptionsTabs::Attach(dialog);
         break;
     }
     case 251: {
@@ -5153,6 +5198,8 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         value.send_title_to_msn = IsChecked(dialog, 2188);
         if (GetDlgItem(dialog, kOptionsDiscordLyrics))
             value.discord_sync_lyrics = IsChecked(dialog, kOptionsDiscordLyrics);
+        if (GetDlgItem(dialog, kOptionsLanguage))
+            CommitOptionsControl(dialog, template_id, kOptionsLanguage);
         value.fade_windows = IsChecked(dialog, 1075);
         value.snap_windows = (IsChecked(dialog, 1076) ? 0x10000 : 0) |
             GetInteger(dialog, 1077, value.snap_windows & 0xffff, 1, 100);
@@ -5450,6 +5497,15 @@ bool PlayerWindow::CommitOptionsControl(
         case kOptionsDiscordLyrics:
             value.discord_sync_lyrics = IsChecked(dialog, kOptionsDiscordLyrics);
             break;
+        case kOptionsLanguage: {
+            const LRESULT selected = SendDlgItemMessageW(dialog, kOptionsLanguage, CB_GETCURSEL, 0, 0);
+            if (selected != CB_ERR) {
+                const LRESULT code = SendDlgItemMessageW(dialog, kOptionsLanguage, CB_GETITEMDATA, selected, 0);
+                value.language = code && code != CB_ERR ? reinterpret_cast<const wchar_t*>(code) :
+                    selected == 0 ? L"auto" : selected == 1 ? L"source" : GetText(dialog, kOptionsLanguage);
+            }
+            break;
+        }
         case 1075: value.fade_windows = IsChecked(dialog, 1075); break;
         case 1076:
             value.snap_windows = (value.snap_windows & 0xffff) |

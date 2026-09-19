@@ -421,6 +421,8 @@ target_compile_options(options_drawing_tests PRIVATE /W4 /permissive- /EHsc /utf
 target_link_libraries(options_drawing_tests PRIVATE ttplayer_core)
 add_test(NAME options_drawing_tests COMMAND options_drawing_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(options_drawing_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+add_test(NAME options_general_tabs_tests COMMAND options_drawing_tests "${CMAKE_CURRENT_SOURCE_DIR}/.." --general-tabs)
+set_tests_properties(options_general_tabs_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
 add_executable(lyric_search_tests tests/ui/lyric_search_tests.cpp src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(lyric_search_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

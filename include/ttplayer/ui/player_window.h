@@ -800,7 +800,6 @@ private:
     std::vector<std::pair<UINT, int>> popup_menu_image_commands_;
     std::vector<std::array<unsigned char, 16 * 16>> popup_menu_image_masks_;
     std::list<MenuVisualItem> popup_menu_items_;
-    std::vector<std::wstring> language_menu_choices_;
     bool popup_menu_hide_keyboard_cues_{};
     HICON window_icon_small_{};
     HICON window_icon_big_{};
