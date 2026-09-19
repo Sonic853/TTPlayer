@@ -852,7 +852,9 @@ private:
     // unwinding. Never destroy a session on the UI thread before it exits.
     std::vector<std::shared_ptr<audio::AudioEngine>> fading_audio_;
     void PollFadingAudio(bool cancel = false);
-    void PrepareTrackChange(bool same_item);
+    [[nodiscard]] bool PrepareTrackChange(bool same_item);
+    void PollWaveTrackChange();
+    void CancelWaveTrackChange();
     playlist::PlaylistStore playlists_;
     std::vector<plugins::ReaderFormat> reader_formats_;
     const plugins::PluginManager* sound_library_{};
@@ -926,6 +928,8 @@ private:
     bool playback_source_open_{};
     bool natural_completion_dispatch_{};
     bool pending_natural_play_{};
+    std::optional<playlist::Track> pending_wave_track_change_;
+    ULONGLONG wave_track_change_deadline_{};
     bool pending_failed_advance_{};
     ULONGLONG pending_natural_play_tick_{};
     DWORD last_command_line_tick_{};

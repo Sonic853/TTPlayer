@@ -10,10 +10,12 @@ TaskbarPlaybackState PlayerWindow::TaskbarState() const {
     const auto state = audio_->State();
     TaskbarPlaybackState result;
     result.playing = state == audio::PlaybackState::playing;
-    if (close_after_skin_window_fade_ || audio_->StopFadePending() ||
+    if (close_after_skin_window_fade_ ||
+        (audio_->StopFadePending() && !pending_wave_track_change_) ||
         state == audio::PlaybackState::opening || playlists_.Empty()) return result;
     result.previous_enabled = IsSkinElementEnabled(L"prev");
     result.next_enabled = IsSkinElementEnabled(L"next");
+    if (pending_wave_track_change_) return result;
     result.play_pause_enabled = result.playing || state == audio::PlaybackState::paused ||
         PlaybackTrackForUi() || !PlaybackPlaylist().Tracks().empty();
     return result;
@@ -32,10 +34,15 @@ void PlayerWindow::UpdateTaskbarPlayback() {
     static_cast<void>(taskbar_playback_.Update(buttons, TaskbarLabels()));
 #if !defined(TTPLAYER_LEGACY_WINDOWS)
     if (!OpenedTrack()) system_media_controls_.Clear();
-    else system_media_controls_.Update(audio_->ClockSnapshot(), buttons, close_after_skin_window_fade_);
+    else {
+        auto clock = audio_->ClockSnapshot();
+        if (pending_wave_track_change_) clock.state = audio::PlaybackState::opening;
+        system_media_controls_.Update(clock, buttons, close_after_skin_window_fade_);
+    }
 #endif
     const auto state = audio_->State();
-    if (state != audio::PlaybackState::playing && state != audio::PlaybackState::paused)
+    if (!pending_wave_track_change_ && state != audio::PlaybackState::playing &&
+        state != audio::PlaybackState::paused)
         taskbar_preview_.Clear();
 }
 
@@ -57,7 +64,8 @@ void PlayerWindow::HandleTaskbarPlaybackClick(WPARAM wparam) {
 void PlayerWindow::HandleSystemMediaCommand(SystemMediaControls::Command command, int64_t position_ms) {
     // Recheck on the window thread: an input may have arrived during a decoder
     // change, stop fade, or a nested save-lyrics dialog.
-    if (lyric_save_in_progress_ || close_after_skin_window_fade_ || audio_->StopFadePending()) return;
+    if (lyric_save_in_progress_ || close_after_skin_window_fade_ ||
+        (audio_->StopFadePending() && !pending_wave_track_change_)) return;
     const auto state = audio_->State();
     if (state == audio::PlaybackState::opening) return;
     const auto buttons = TaskbarState();
@@ -72,7 +80,8 @@ void PlayerWindow::HandleSystemMediaCommand(SystemMediaControls::Command command
         if (state == audio::PlaybackState::playing) audio_->Pause();
         break;
     case Command::stop:
-        if (state == audio::PlaybackState::playing || state == audio::PlaybackState::paused) Stop();
+        if (pending_wave_track_change_ || state == audio::PlaybackState::playing ||
+            state == audio::PlaybackState::paused) Stop();
         break;
     case Command::previous:
         if (buttons.previous_enabled) SelectRelative(false);

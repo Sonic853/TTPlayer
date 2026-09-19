@@ -126,6 +126,8 @@ constexpr UINT kSkinWindowFadeIntervalMs = 5;
 // paint/input dispatch never enters Sleep or a nested message pump.
 constexpr UINT_PTR kCloseAudioFadeTimer = 0x218;
 constexpr UINT kCloseAudioFadeIntervalMs = 10;
+constexpr UINT_PTR kWaveTrackChangeTimer = 0x219;
+constexpr UINT kWaveTrackChangeIntervalMs = 10;
 constexpr UINT kInfoAnimationIntervalMs = 40;
 // CPlayerWnd overwrites CScrollingStatic's constructor default (3) with
 // DAT_005478AC.  The original 5.7.9 process initializes that WORD to 5.
