@@ -195,7 +195,7 @@ bool Initialize(const std::filesystem::path& runtime, std::wstring_view language
         const auto selected = language.empty() || language == L"auto" ? SystemLanguage() : std::wstring(language);
         if (selected.empty()) return false;
         auto loaded = std::make_shared<State>();
-        loaded->module = LoadLibraryW((runtime / L"ttp_i18n.dll").c_str());
+        loaded->module = LoadLibraryW((runtime / L"AddIn" / L"ttp_i18n.dll").c_str());
         if (!loaded->module) return false;
         const auto get = reinterpret_cast<TtpI18nGetApiFn>(GetProcAddress(loaded->module, "TtpI18n_GetApi"));
         if (!get) return false;
@@ -218,7 +218,7 @@ std::vector<std::wstring> Languages(const std::filesystem::path& runtime) {
     for (std::filesystem::directory_iterator it(runtime / L"i18n", error); !error && it != end; it.increment(error)) {
         const auto name = it->path().filename().wstring();
         if (name.empty() || name.size() > 64 || name.find_first_not_of(L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-@") != name.npos) continue;
-        const auto base = it->path() / L"LC_MESSAGES";
+        const auto& base = it->path();
         if (std::filesystem::is_regular_file(base / L"ttplayer.mo", error) ||
             std::filesystem::is_regular_file(base / L"ttplayer.po", error)) result.push_back(name);
         error.clear();

@@ -22,10 +22,9 @@ constexpr DWORD kSingleInstanceMappingSize = 4096;
 class OptionalI18nRuntime {
 public:
     OptionalI18nRuntime() {
-        const auto path = ttplayer::app::RuntimePath(L"ttp_i18n.dll");
-        if (!path.empty()) module_ = LoadLibraryW(path.c_str());
+        const auto runtime = ttplayer::app::RuntimePath({});
+        if (!runtime.empty()) module_ = LoadLibraryW((runtime / L"AddIn" / L"ttp_i18n.dll").c_str());
         if (module_) {
-            const auto runtime = path.parent_path();
             ttplayer::i18n::Initialize(runtime, ttplayer::settings::LoadRuntimeLanguage(runtime));
         }
     }

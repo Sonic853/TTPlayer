@@ -4483,7 +4483,7 @@ HMENU PlayerWindow::BuildContextMenu() {
         if (!SetMenuItemInfoW(popup, resource_id, FALSE, &item)) DestroyMenu(child);
     }
     language_menu_choices_.clear();
-    if (!FindRuntimePath(L"ttp_i18n.dll").empty()) {
+    if (!FindRuntimePath(L"AddIn/ttp_i18n.dll").empty()) {
         const HMENU languages = CreatePopupMenu();
         if (languages) {
             language_menu_choices_ = {L"auto", L"source"};
