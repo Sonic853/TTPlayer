@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "output_devices.h"
 #include "ttplayer/audio/asio_sink.h"
 #include "ttplayer/audio/native_output_contract.h"
@@ -756,7 +757,7 @@ bool PopulateLegacyOutputDeviceDetails(
         const MMRESULT result = waveOutGetDevCapsW(
             device.wave_device_id, &capabilities, sizeof(capabilities));
         if (result != MMSYSERR_NOERROR) {
-            if (diagnostic) *diagnostic = L"waveOutGetDevCapsW failed";
+            if (diagnostic) *diagnostic = i18n::Literal(L"waveOutGetDevCapsW failed");
             return false;
         }
         details[0] = capabilities.szPname;
@@ -773,7 +774,7 @@ bool PopulateLegacyOutputDeviceDetails(
         }
     } else if (device.backend == 1) {
         if (device.has_class_id && IsEqualGUID(device.class_id, GUID{})) {
-            if (diagnostic) *diagnostic = L"invalid DirectSound GUID";
+            if (diagnostic) *diagnostic = i18n::Literal(L"invalid DirectSound GUID");
             return false;
         }
         DSCAPS capabilities{};
@@ -790,7 +791,7 @@ bool PopulateLegacyOutputDeviceDetails(
         if (direct_sound) direct_sound->Release();
         if (FAILED(result)) {
             if (diagnostic)
-                *diagnostic = L"DirectSound capability query failed";
+                *diagnostic = i18n::Literal(L"DirectSound capability query failed");
             return false;
         }
         details[0] =
@@ -809,13 +810,13 @@ bool PopulateLegacyOutputDeviceDetails(
         if (device.module.empty() ||
             !QueryKsAudioCapabilities(device.module, details, 0)) {
             if (diagnostic)
-                *diagnostic = L"Kernel Streaming capability query failed";
+                *diagnostic = i18n::Literal(L"Kernel Streaming capability query failed");
             return false;
         }
     } else if (device.backend == 3) {
         if (!device.has_class_id || IsEqualGUID(device.class_id, GUID{}) ||
             device.name.empty() || device.module.empty()) {
-            if (diagnostic) *diagnostic = L"invalid ASIO descriptor";
+            if (diagnostic) *diagnostic = i18n::Literal(L"invalid ASIO descriptor");
             return false;
         }
         audio::AsioDriverCapabilities capabilities;
@@ -831,7 +832,7 @@ bool PopulateLegacyOutputDeviceDetails(
         }
         details = FormatAsioOutputDeviceDetails(capabilities);
     } else {
-        if (diagnostic) *diagnostic = L"unsupported output backend";
+        if (diagnostic) *diagnostic = i18n::Literal(L"unsupported output backend");
         return false;
     }
 
@@ -842,16 +843,16 @@ bool PopulateLegacyOutputDeviceDetails(
 std::array<std::wstring, 4> FormatAsioOutputDeviceDetails(
     const audio::AsioDriverCapabilities& capabilities) {
     std::array<std::wstring, 4> details;
-    details[0] = std::to_wstring(capabilities.output_channels) + L" Channels";
+    details[0] = std::to_wstring(capabilities.output_channels) + i18n::Literal(L" Channels");
     for (const long sample_rate : capabilities.supported_sample_rates) {
         details[1] += std::to_wstring(sample_rate);
         details[1] += L' ';
     }
     if (!details[1].empty()) details[1] += L"Hz";
     details[2] = std::to_wstring(capabilities.first_output_valid_bits) +
-                 L" Bits";
+                 i18n::Literal(L" Bits");
     details[3] = std::to_wstring(capabilities.preferred_buffer_frames) +
-                 L" Samples";
+                 i18n::Literal(L" Samples");
     return details;
 }
 

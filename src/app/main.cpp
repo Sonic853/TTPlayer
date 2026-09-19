@@ -3,6 +3,8 @@
 #include "ttplayer/app/runtime.h"
 #include "ttplayer/app/single_instance.h"
 #include "ttplayer/app/worker_process.h"
+#include "ttplayer/i18n/i18n.h"
+#include "ttplayer/settings/settings.h"
 #include "../ui/file_info_probe_client.h"
 
 #include <commctrl.h>
@@ -15,24 +17,42 @@ namespace {
 constexpr wchar_t kSingleInstanceName[] = L"TTPlayer";
 constexpr DWORD kSingleInstanceMappingSize = 4096;
 
-std::wstring ResourceText(HMODULE module, UINT identifier) {
-    const wchar_t* value{};
-    const int length = module ? LoadStringW(module, identifier,
-        reinterpret_cast<LPWSTR>(&value), 0) : 0;
-    return length > 0 && value ? std::wstring(value, static_cast<size_t>(length))
-                               : std::wstring{};
-}
+// Read only the language and initialize translations before any startup error
+// can open a message box. Full settings and skin loading still happen later.
+class OptionalI18nRuntime {
+public:
+    OptionalI18nRuntime() {
+        const auto path = ttplayer::app::RuntimePath(L"ttp_i18n.dll");
+        if (!path.empty()) module_ = LoadLibraryW(path.c_str());
+        if (module_) {
+            const auto runtime = path.parent_path();
+            ttplayer::i18n::Initialize(runtime, ttplayer::settings::LoadRuntimeLanguage(runtime));
+        }
+    }
+    ~OptionalI18nRuntime() {
+        ttplayer::i18n::Shutdown();
+        if (module_) FreeLibrary(module_);
+    }
+    OptionalI18nRuntime(const OptionalI18nRuntime&) = delete;
+    OptionalI18nRuntime& operator=(const OptionalI18nRuntime&) = delete;
+private:
+    HMODULE module_{};
+};
 
 int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
-    // Keep 004C0E8F's EXE-local dependency loading order, but deliberately
-    // omit its exact-version gate. The XP edition also retains a startup
-    // import: XP cannot allocate ttpcomm's static TLS via LoadLibrary alone.
-    // ABI-compatible DLL revisions (including
-    // those without a version export) are accepted; consumers check exports.
+    namespace i18n = ttplayer::i18n;
+    // Load the optional i18n provider before actively loading ttpcomm. Missing
+    // translations never prevent startup. The XP edition retains a mandatory
+    // ttpcomm startup import for static TLS, so Windows loads that dependency
+    // before this entry point; do not replace it with LoadLibrary-only loading.
+    const OptionalI18nRuntime i18n_runtime;
+
+    // Retain EXE-local dependency paths and omit the original exact-version
+    // gate. ABI-compatible revisions are accepted; consumers check exports.
     ttplayer::app::TtpCommRuntime ttpcomm;
     if (!ttpcomm.Initialize()) {
-        MessageBoxA(nullptr, "Error in ttpcomm.dll, please resetup this program!",
-                    "TTPlayer", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, i18n::Literal(L"Error in ttpcomm.dll, please resetup this program!"),
+                    i18n::Literal(L"TTPlayer"), MB_OK | MB_ICONERROR);
         return -1;
     }
 
@@ -71,8 +91,8 @@ int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     if (!resources.Initialize()) {
         if (SUCCEEDED(ole_result)) OleUninitialize();
         if (tls_index != TLS_OUT_OF_INDEXES) TlsFree(tls_index);
-        MessageBoxA(nullptr, "Load resource (ttpres.dll) failed, please resetup this program!",
-                    "TTPlayer", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, i18n::Literal(L"Load resource (ttpres.dll) failed, please resetup this program!"),
+                    i18n::Literal(L"TTPlayer"), MB_OK | MB_ICONERROR);
         return -1;
     }
 
@@ -84,11 +104,11 @@ int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
         // DAT_005474FC remains a live application-title string after
         // CPlayerApp_ShutdownResources in 004C0E8F.  Preserve its resource
         // value before unloading ttpres.dll.
-        const auto title = ResourceText(resources.Module(), 0x80);
+        const auto title = i18n::ResourceText(resources.Module(), 0x80);
         resources.Shutdown();
         if (SUCCEEDED(ole_result)) OleUninitialize();
         if (tls_index != TLS_OUT_OF_INDEXES) TlsFree(tls_index);
-        MessageBoxW(nullptr, L"Sound Library init failed, the player can not run!",
+        MessageBoxW(nullptr, i18n::Literal(L"Sound Library init failed, the player can not run!"),
                     title.c_str(), MB_OK | MB_ICONERROR);
         return static_cast<int>(sound_result);
     }

@@ -23,6 +23,26 @@ if ($hash -cne $audit.sha256) { throw 'The EXE changed after the import audit; r
 $package = Join-Path $BuildDirectory ('legacy-package-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $package | Out-Null
 Copy-Item -LiteralPath $executable, $report -Destination $package
+$translationDll = Join-Path $output 'ttp_i18n.dll'
+if (Test-Path -LiteralPath $translationDll) {
+    $translationReport = Join-Path $output 'i18n-legacy-imports.json'
+    if (-not (Test-Path -LiteralPath $translationReport)) {
+        throw 'Build and audit ttp_i18n.dll before including it in the legacy package.'
+    }
+    $translationAudit = Get-Content -LiteralPath $translationReport -Raw -Encoding UTF8 | ConvertFrom-Json
+    $translationHash = (Get-FileHash -LiteralPath $translationDll -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($translationAudit.sha256 -cne $translationHash -or
+        $translationAudit.architecture -ne 'x86' -or $translationAudit.minimum_subsystem -ne '5.01' -or
+        $translationAudit.inventories -notcontains '5.1.2600.txt' -or
+        $translationAudit.inventories -notcontains '6.1.7600.txt') {
+        throw 'The translation DLL does not have a matching XP / Win7 import audit.'
+    }
+    Copy-Item -LiteralPath $translationDll, $translationReport -Destination $package
+}
+$translations = Join-Path $output 'i18n'
+if (Test-Path -LiteralPath $translations) {
+    Copy-Item -LiteralPath $translations -Destination $package -Recurse
+}
 Copy-Item -LiteralPath (Join-Path $source 'LICENSE') -Destination $package
 Copy-Item -LiteralPath (Join-Path $source 'docs/LEGACY_WINDOWS.md') -Destination $package
 $licenses = Join-Path $package 'licenses'

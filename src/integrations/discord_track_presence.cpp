@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/integrations/discord_presence.h"
 
 #include "ttplayer/core/text.h"
@@ -87,12 +88,12 @@ DiscordTrackPresence BuildDiscordTrackPresence(
             result.album = std::move(album);
         if (IsLocation(result.title)) result.title.clear();
         if (result.title.empty()) result.title = result.station.empty()
-            ? L"网络音频" : result.station;
+            ? i18n::Literal(L"网络音频") : result.station;
     } else if (result.title.empty()) {
         try { result.title = track.path.stem().wstring(); }
         catch (const std::exception&) {}
     }
-    if (result.title.empty()) result.title = L"未知曲目";
+    if (result.title.empty()) result.title = i18n::Literal(L"未知曲目");
     return result;
 }
 

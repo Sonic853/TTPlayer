@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_window.h"
 #include "ttplayer/platform/optional_windows_api.h"
@@ -78,10 +79,7 @@ std::vector<MONITORINFOEXW> FullScreenMonitors() {
 }
 
 std::wstring FullScreenMenuText(UINT id) {
-    wchar_t text[128]{};
-    const int length = LoadStringW(GetModuleHandleW(nullptr), id, text,
-                                  static_cast<int>(std::size(text)));
-    return std::wstring(text, static_cast<size_t>(length));
+    return i18n::ResourceText(GetModuleHandleW(nullptr), id);
 }
 
 RECT WindowRectForClientTarget(HWND window, RECT target) noexcept {
@@ -2061,10 +2059,10 @@ void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
         !IsWindowEnabled(window_)) return;
     const HMODULE resources = ResourceModule();
     HMENU popup = DetachFirstPopup(
-        LoadMenuW(resources, MAKEINTRESOURCEW(kMenuVisual)));
+        i18n::LoadMenu(resources, MAKEINTRESOURCEW(kMenuVisual)));
     if (!popup) return;
     HMENU fullscreen = DetachFirstPopup(
-        LoadMenuW(resources, MAKEINTRESOURCEW(kMenuFullscreen)));
+        i18n::LoadMenu(resources, MAKEINTRESOURCEW(kMenuFullscreen)));
     if (fullscreen) {
         MENUITEMINFOW information{sizeof(information)};
         information.fMask = MIIM_SUBMENU;

@@ -1,3 +1,5 @@
+#include "ttplayer/i18n/i18n.h"
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "lyric_association_dialog.h"
 #include "modern_file_dialog.h"
 #include <commctrl.h>
@@ -11,9 +13,7 @@ constexpr int kAssociate = 2115, kRemove = 2116, kRename = 2117, kDelete = 2118;
 constexpr int kPartial = 2119, kBlock = 2120, kAll = 2087;
 constexpr UINT kSearchReady = WM_APP + 206;
 std::wstring Text(HMODULE module, UINT id) {
-    const wchar_t* data{};
-    const int length = LoadStringW(module, id, reinterpret_cast<LPWSTR>(&data), 0);
-    return length > 0 ? std::wstring(data, length) : std::wstring{};
+    return i18n::ResourceText(module, id);
 }
 std::wstring Field(HWND dialog, int id) {
     const HWND window = GetDlgItem(dialog, id);
@@ -280,7 +280,7 @@ INT_PTR CALLBACK AssociateProc(HWND window, UINT message, WPARAM wparam, LPARAM 
     if (command == IDCANCEL) { EndDialog(window, IDCANCEL); return TRUE; }
     if (command == kAll && !self->blocked) {
         self->CancelSearch(); KillTimer(window, 1);
-        DialogBoxParamW(self->resources, MAKEINTRESOURCEW(205), window, AllProc, reinterpret_cast<LPARAM>(self));
+        ShowWtlModalDialog(self->resources, MAKEINTRESOURCEW(205), window, AllProc, reinterpret_cast<LPARAM>(self));
         self->Initialize(window); return TRUE;
     }
     if (command == kBlock) { EndDialog(window, self->blocked ? 6 : 7); return TRUE; }
@@ -315,7 +315,7 @@ LyricAssociationChoice ChooseLyricAssociation(HMODULE resources, HWND owner,
     Dialog dialog;
     dialog.resources = resources; dialog.store = &store; dialog.song = song;
     dialog.request = std::move(request); dialog.changed = std::move(changed);
-    dialog.choice.action = DialogBoxParamW(resources, MAKEINTRESOURCEW(206), owner,
+    dialog.choice.action = ShowWtlModalDialog(resources, MAKEINTRESOURCEW(206), owner,
         AssociateProc, reinterpret_cast<LPARAM>(&dialog));
     return dialog.choice;
 }

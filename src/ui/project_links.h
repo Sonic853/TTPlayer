@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <array>
+#include "ttplayer/i18n/i18n.h"
 
 namespace ttplayer::ui::detail {
 
@@ -21,6 +22,12 @@ inline constexpr std::array<ProjectLink, 2> kProjectLinks{{
     {0xb650, L"Github仓库", L"https://github.com/Sonic853/TTPlayer", kMenuRelatedLinks},
     {0xb651, L"提交反馈", L"https://github.com/Sonic853/TTPlayer/issues", 0x802c},
 }};
+
+inline const wchar_t* ProjectLinkLabel(const ProjectLink& link) {
+    if (link.command == kProjectLinks[0].command) return i18n::Literal(L"Github仓库");
+    if (link.command == kProjectLinks[1].command) return i18n::Literal(L"提交反馈");
+    return link.label;
+}
 
 inline constexpr const ProjectLink* FindProjectLink(UINT command) noexcept {
     for (const auto& link : kProjectLinks)

@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "player_window_internal.h"
 #include "../app/resource_ids.h"
@@ -7,9 +8,7 @@ namespace ttplayer::ui {
 using namespace detail;
 namespace {
 std::wstring Text(UINT id) {
-    LPCWSTR value{};
-    const int size = LoadStringW(GetModuleHandleW(nullptr), id, reinterpret_cast<LPWSTR>(&value), 0);
-    return size > 0 ? std::wstring(value, size) : std::wstring{};
+    return i18n::ResourceText(GetModuleHandleW(nullptr), id);
 }
 std::wstring Field(HWND dialog, int id) {
     const HWND control = GetDlgItem(dialog, id);

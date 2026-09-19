@@ -1,3 +1,5 @@
+#include "ttplayer/i18n/i18n.h"
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/player_window.h"
 
 #include "file_info_probe_client.h"
@@ -401,11 +403,11 @@ struct SearchRootPresentation {
 
 std::wstring FallbackShellName(int csidl) {
     switch (csidl) {
-    case 17: return L"计算机";
+    case 17: return i18n::Literal(L"计算机");
     case 12: return L"CSIDL 12";
-    case 13: return L"我的音乐";
-    case 46: return L"公用文档";
-    case 53: return L"公用音乐";
+    case 13: return i18n::Literal(L"我的音乐");
+    case 46: return i18n::Literal(L"公用文档");
+    case 53: return i18n::Literal(L"公用音乐");
     default: return L"CSIDL " + std::to_wstring(csidl);
     }
 }
@@ -465,7 +467,7 @@ SearchRootPresentation PresentSearchRoot(
         return result;
     }
     return GenericFolderPresentation(custom_text.empty()
-        ? std::wstring(L"自定义...") : std::wstring(custom_text));
+        ? std::wstring(i18n::Literal(L"自定义...")) : std::wstring(custom_text));
 }
 
 void InsertComboItem(HWND combo, int index, std::wstring_view text,
@@ -593,7 +595,10 @@ void SetSearchStatus(const LocalSearchDialogState& state, HWND dialog,
                      const std::filesystem::path& current) {
     const size_t count = state.results.size();
     if (state.status_format.empty()) {
-        const auto text = std::to_wstring(count) + L" 个";
+        const auto format = i18n::Plural("app/search/count", L"%u 个", L"%u 个", count);
+        std::vector<wchar_t> buffer(format.size() + 32);
+        swprintf_s(buffer.data(), buffer.size(), format.c_str(), static_cast<unsigned>(count));
+        const std::wstring text(buffer.data());
         SetDlgItemTextW(dialog, kSearchStatus, text.c_str());
         return;
     }
@@ -814,8 +819,8 @@ INT_PTR CALLBACK LocalSearchDialogProc(HWND dialog, UINT message,
                           reinterpret_cast<LONG_PTR>(state));
         if (!state) return FALSE;
         auto labels = Split(WindowText(GetDlgItem(dialog, kSearchToggle)), L'|');
-        state->start_text = labels.empty() ? L"开始搜索" : labels.front();
-        state->stop_text = labels.size() < 2 ? L"停止搜索" : labels[1];
+        state->start_text = labels.empty() ? i18n::Literal(L"开始搜索") : labels.front();
+        state->stop_text = labels.size() < 2 ? i18n::Literal(L"停止搜索") : labels[1];
         state->status_format = WindowText(GetDlgItem(dialog, kSearchStatus));
         SetDlgItemTextW(dialog, kSearchStatus, L"");
         PopulateRootCombo(*state, dialog);
@@ -1051,7 +1056,7 @@ void PlayerWindow::ShowPlaylistLocalSearch() {
     // The final custom row still routes through the requested modern
     // IFileDialog folder picker.
     const HWND owner = playlist_window_ ? playlist_window_ : window_;
-    const INT_PTR result = DialogBoxParamW(
+    const INT_PTR result = ShowWtlModalDialog(
         ResourceModule(), MAKEINTRESOURCEW(228), owner,
         LocalSearchDialogProc, reinterpret_cast<LPARAM>(&state));
     StopSearch(state, nullptr);

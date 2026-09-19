@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/integrations/discord_presence.h"
 
 #include "ttplayer/core/text.h"
@@ -118,18 +119,18 @@ std::wstring ActivityStateText(const DiscordTrackPresence& presence) {
     const bool radio = presence.audio_kind == DiscordAudioKind::radio;
     std::wstring prefix;
     if (presence.playback == DiscordPlaybackState::paused) {
-        prefix = L"已暂停 · ";
-        if (radio && !known_duration) prefix += L"已收听 ";
+        prefix = i18n::Literal(L"已暂停 · ");
+        if (radio && !known_duration) prefix += i18n::Literal(L"已收听 ");
         prefix += ClockText(discord_presence_detail::ProjectPresencePosition(
             presence, std::chrono::milliseconds::zero()));
         if (known_duration) prefix += L" / " + ClockText(presence.duration);
-        else if (!radio) prefix += L" / 未知时长";
+        else if (!radio) prefix += i18n::Literal(L" / 未知时长");
     } else if (radio) {
-        prefix = known_duration ? L"电台" : L"电台直播";
+        prefix = known_duration ? i18n::Literal(L"电台") : i18n::Literal(L"电台直播");
     } else if (presence.audio_kind == DiscordAudioKind::network_audio) {
-        prefix = known_duration ? L"网络音频" : L"网络音频 · 时长未知";
+        prefix = known_duration ? i18n::Literal(L"网络音频") : i18n::Literal(L"网络音频 · 时长未知");
     } else if (!known_duration) {
-        prefix = L"时长未知";
+        prefix = i18n::Literal(L"时长未知");
     }
 
     std::vector<std::wstring> parts;
@@ -142,8 +143,8 @@ std::wstring ActivityStateText(const DiscordTrackPresence& presence) {
     if (auto artist = Trim(presence.artist); !artist.empty())
         parts.push_back(std::move(artist));
     if (auto album = Trim(presence.album); !album.empty())
-        parts.push_back(L"专辑：" + album);
-    if (parts.empty()) return prefix.empty() ? L"正在播放" : prefix;
+        parts.push_back(i18n::Literal(L"专辑：") + album);
+    if (parts.empty()) return prefix.empty() ? i18n::Literal(L"正在播放") : prefix;
 
     // Preserve the complete pause/time prefix and share the remaining 128
     // Unicode characters fairly. A long artist must not erase the album (or
@@ -381,7 +382,7 @@ std::string BuildSetActivityJson(const DiscordTrackPresence* presence,
     } else {
         auto title = Trim(presence->title);
         if (title.empty()) title = presence->station.empty()
-            ? L"未知曲目" : presence->station;
+            ? i18n::Literal(L"未知曲目") : presence->station;
         // Details (2) makes the member-list status show the song/program title
         // without changing the registered application name. This is local RPC;
         // its timestamps use Unix seconds, not Gateway's millisecond encoding.

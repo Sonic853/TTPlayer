@@ -1,3 +1,5 @@
+#include "ttplayer/i18n/i18n.h"
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_window.h"
 #include "ttplayer/ui/player_window.h"
@@ -167,12 +169,7 @@ HMENU ConvertMenuBarToPopup(HMENU menu) {
 }
 
 std::wstring LoadResourceText(HMODULE module, UINT identifier) {
-    if (!module) return {};
-    const wchar_t* value = nullptr;
-    const int length = LoadStringW(module, identifier,
-        reinterpret_cast<LPWSTR>(&value), 0);
-    return length > 0 && value ? std::wstring(value, static_cast<size_t>(length))
-                               : std::wstring{};
+    return i18n::ResourceText(module, identifier);
 }
 
 std::wstring ResourceCommandLabel(HMODULE module, UINT identifier) {
@@ -200,7 +197,7 @@ std::wstring ResourceListItem(HMODULE module, UINT identifier, size_t index) {
 
 std::wstring MenuPositionText(HMODULE module, UINT identifier, UINT position) {
     if (!module) return {};
-    const HMENU menu = LoadMenuW(module, MAKEINTRESOURCEW(identifier));
+    const HMENU menu = i18n::LoadMenu(module, MAKEINTRESOURCEW(identifier));
     if (!menu) return {};
     wchar_t text[256]{};
     const int length = GetMenuStringW(menu, position, text,
@@ -4428,7 +4425,7 @@ HMENU PlayerWindow::BuildContextMenu() {
     const HMODULE resources = ResourceModule();
     if (!resources) return nullptr;
 
-    HMENU popup = DetachFirstPopup(LoadMenuW(resources, MAKEINTRESOURCEW(kMenuMain)));
+    HMENU popup = DetachFirstPopup(i18n::LoadMenu(resources, MAKEINTRESOURCEW(kMenuMain)));
     if (!popup) return nullptr;
 
     // CPlayerWnd_ShowMainContextMenu deletes 0x94 in the ordinary player
@@ -4444,12 +4441,12 @@ HMENU PlayerWindow::BuildContextMenu() {
         // Supply community links even when the resource DLL has no link
         // submenu. Keep its parent caption/icon and the usual popup styling.
         HMENU child = resource_id == kMenuRelatedLinks ? CreatePopupMenu() :
-            DetachFirstPopup(LoadMenuW(resources, MAKEINTRESOURCEW(resource_id)));
+            DetachFirstPopup(i18n::LoadMenu(resources, MAKEINTRESOURCEW(resource_id)));
         if (!child) continue;
 
         if (resource_id == kMenuRelatedLinks) {
             for (const auto& link : kProjectLinks)
-                AppendMenuW(child, MF_STRING, link.command, link.label);
+                AppendMenuW(child, MF_STRING, link.command, ProjectLinkLabel(link));
         } else if (resource_id == kMenuSkin) {
             // Move the resource's final Options/separator pair above the
             // default skin, before owner-draw metadata is attached.
@@ -4484,6 +4481,28 @@ HMENU PlayerWindow::BuildContextMenu() {
         item.fMask = MIIM_SUBMENU;
         item.hSubMenu = child;
         if (!SetMenuItemInfoW(popup, resource_id, FALSE, &item)) DestroyMenu(child);
+    }
+    language_menu_choices_.clear();
+    if (!FindRuntimePath(L"ttp_i18n.dll").empty()) {
+        const HMENU languages = CreatePopupMenu();
+        if (languages) {
+            language_menu_choices_ = {L"auto", L"source"};
+            const auto available = i18n::Languages(PlayerRuntimeDirectory());
+            language_menu_choices_.insert(language_menu_choices_.end(), available.begin(), available.end());
+            if (language_menu_choices_.size() > kCmdLastLanguage - kCmdFirstLanguage + 1)
+                language_menu_choices_.resize(kCmdLastLanguage - kCmdFirstLanguage + 1);
+            for (size_t i = 0; i < language_menu_choices_.size(); ++i) {
+                const auto& locale = language_menu_choices_[i];
+                const auto label = i == 0 ? i18n::Text(L"自动（系统语言）") :
+                    i == 1 ? i18n::Text(L"原始文本") : locale;
+                AppendMenuW(languages, MF_STRING |
+                    (settings_.general.language == locale ? MF_CHECKED : 0),
+                    kCmdFirstLanguage + i, label.c_str());
+            }
+            AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
+            if (!AppendMenuW(popup, MF_POPUP, reinterpret_cast<UINT_PTR>(languages),
+                             i18n::Literal(L"界面语言"))) DestroyMenu(languages);
+        }
     }
     PrepareContextMenu(popup);
 
@@ -5043,6 +5062,24 @@ void PlayerWindow::ShowContextMenu(POINT screen_point, HWND origin) {
 }
 
 bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
+    if (command >= kCmdFirstLanguage && command <= kCmdLastLanguage) {
+        const size_t index = command - kCmdFirstLanguage;
+        if (index >= language_menu_choices_.size()) return false;
+        if (settings_.general.language == language_menu_choices_[index]) return true;
+        const auto previous = settings_.general.language;
+        settings_.general.language = language_menu_choices_[index];
+        try {
+            CaptureWindowState();
+            settings::SaveWindowState(settings_.source_path, settings_);
+            MessageBoxW(window_, i18n::Literal(L"界面语言将在下次启动播放器时生效。"),
+                        ResourceText(0x80).c_str(), MB_OK | MB_ICONINFORMATION);
+        } catch (...) {
+            settings_.general.language = previous;
+            MessageBoxW(window_, i18n::Literal(L"无法保存界面语言设置。"),
+                        ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
+        }
+        return true;
+    }
     if (OpenProjectLink(window_, command)) return true;
     if (HandleFullScreenCommand(command, fullscreen_origin ? fullscreen_origin :
             (context_menu_open_ && main_context_menu_origin_
@@ -5475,7 +5512,7 @@ void PlayerWindow::UpdateAutoShutdownTimer() {
 
 void PlayerWindow::ShowAutoShutdownDialog() {
     AutoShutdownDialogState state{ResourceModule(), 15};
-    const INT_PTR result = DialogBoxParamW(
+    const INT_PTR result = ShowWtlModalDialog(
         state.resources, MAKEINTRESOURCEW(0xe3), window_,
         AutoShutdownDialogProc, reinterpret_cast<LPARAM>(&state));
     if (result == IDOK) static_cast<void>(RequestSystemPowerOff());

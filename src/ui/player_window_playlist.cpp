@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_window.h"
 #include "ttplayer/ui/wtl_dialogs.h"
@@ -4564,7 +4565,7 @@ void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_poin
         if (!playlist_selected_rows_.contains(*track)) SelectPlaylistRow(*track);
         const UINT resource = playlist_selected_rows_.size() > 1
             ? kMenuPlaylistItems : kMenuPlaylistItem;
-        menu = DetachFirstPopup(LoadMenuW(ResourceModule(), MAKEINTRESOURCEW(resource)));
+        menu = DetachFirstPopup(i18n::LoadMenu(ResourceModule(), MAKEINTRESOURCEW(resource)));
         if (menu) {
             SetMenuDefaultItem(menu, kPlaylistPlay, FALSE);
             if (playlist_selected_rows_.size() == 1) {
@@ -4590,7 +4591,7 @@ void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_poin
     } else if (const auto list = PlaylistListAt(client_point)) {
         if (playlist_list_control_) SetFocus(playlist_list_control_);
         playlist_context_list_ = *list;
-        menu = DetachFirstPopup(LoadMenuW(ResourceModule(),
+        menu = DetachFirstPopup(i18n::LoadMenu(ResourceModule(),
             MAKEINTRESOURCEW(kMenuPlaylistLists)));
         if (menu) SetMenuDefaultItem(menu, kPlaylistActivateList, FALSE);
     } else {
@@ -4606,7 +4607,7 @@ void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_poin
             // 00489DFA still loads catalogue menu 0x9c, then disables the
             // item-dependent Save/Delete/Rename commands.
             if (playlist_list_control_) SetFocus(playlist_list_control_);
-            menu = DetachFirstPopup(LoadMenuW(ResourceModule(),
+            menu = DetachFirstPopup(i18n::LoadMenu(ResourceModule(),
                 MAKEINTRESOURCEW(kMenuPlaylistLists)));
             if (menu)
                 SetMenuDefaultItem(menu, kPlaylistActivateList, FALSE);
@@ -4615,7 +4616,7 @@ void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_poin
     if (!menu) {
         // FUN_00488FEF's iItem == -1 branch turns the seven top-level popups
         // from menu 0x8B into one context popup.
-        menu = ConvertMenuBarToPopup(LoadMenuW(ResourceModule(),
+        menu = ConvertMenuBarToPopup(i18n::LoadMenu(ResourceModule(),
             MAKEINTRESOURCEW(kMenuPlaylistToolbar)));
         converted_blank_menu = menu != nullptr;
     }
@@ -5282,7 +5283,7 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
     }
     if (command == kPlaylistAddUrl) {
         PlaylistTextDialogState state{kPlaylistUrlControl, L"http://"};
-        const INT_PTR result = DialogBoxParamW(ResourceModule(),
+        const INT_PTR result = ShowWtlModalDialog(ResourceModule(),
             MAKEINTRESOURCEW(204), playlist_window_, PlaylistTextDialogProc,
             reinterpret_cast<LPARAM>(&state));
         if (result == IDOK) {
@@ -5559,7 +5560,7 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
     if (command == kPlaylistMoveToList || command == kPlaylistCopyToList) {
         if (playlist_selected_rows_.empty()) return true;
         PlaylistTargetDialogState state{&playlists_};
-        if (DialogBoxParamW(ResourceModule(), MAKEINTRESOURCEW(223),
+        if (ShowWtlModalDialog(ResourceModule(), MAKEINTRESOURCEW(223),
                 playlist_window_, PlaylistTargetDialogProc,
                 reinterpret_cast<LPARAM>(&state)) != IDOK) return true;
         const size_t source_index = playlists_.ActiveIndex();
@@ -5835,7 +5836,7 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
         else {
             PlaylistTextDialogState state{kPlaylistRenamePatternControl,
                                           playlist_rename_pattern_};
-            if (DialogBoxParamW(ResourceModule(), MAKEINTRESOURCEW(224),
+            if (ShowWtlModalDialog(ResourceModule(), MAKEINTRESOURCEW(224),
                     playlist_window_, PlaylistTextDialogProc,
                     reinterpret_cast<LPARAM>(&state)) != IDOK) return true;
             playlist_rename_pattern_ = state.value;
@@ -6177,7 +6178,7 @@ bool PlayerWindow::HandlePlaylistSendToCommand(UINT command) {
 void PlayerWindow::InvokePlaylistToolbar(size_t button, POINT screen_point) {
     if (button >= 7) return;
     playlist_send_to_catalog_.Clear();
-    HMENU menu = DetachPopup(LoadMenuW(ResourceModule(),
+    HMENU menu = DetachPopup(i18n::LoadMenu(ResourceModule(),
         MAKEINTRESOURCEW(kMenuPlaylistToolbar)), static_cast<int>(button));
     if (!menu) return;
     PreparePlaylistMenu(menu);

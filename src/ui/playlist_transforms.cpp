@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "options_buttons.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/platform/optional_windows_api.h"
@@ -118,11 +119,7 @@ using ScanDialogLifetime = std::shared_ptr<ScanDialogState>;
 HWND g_scan_dialog{};
 
 std::wstring LoadText(HMODULE module, UINT identifier) {
-    if (!module) return {};
-    wchar_t* pointer{};
-    const int length = LoadStringW(module, identifier,
-        reinterpret_cast<wchar_t*>(&pointer), 0);
-    return length > 0 && pointer ? std::wstring(pointer, length) : std::wstring{};
+    return i18n::ResourceText(module, identifier);
 }
 
 std::wstring WindowCaption(HWND window) {
@@ -588,25 +585,25 @@ public:
 
 #if defined(_MSC_VER) && defined(_M_IX86)
         if (convert.equalizer && equalizer && equalizer->profile != -2) {
-            if (!ttpcomm_) return Fail(L"ttpcomm equalizer is unavailable");
+            if (!ttpcomm_) return Fail(i18n::Literal(L"ttpcomm equalizer is unavailable"));
             equalizer_ = Create(ttpcomm_, 103);
             if (!equalizer_ || !EqInitialize(
                     equalizer_, format_.nSamplesPerSec, format_.nChannels) ||
                 !EqSet(equalizer_, equalizer->current.data()))
-                return Fail(L"ttpcomm equalizer initialization failed");
+                return Fail(i18n::Literal(L"ttpcomm equalizer initialization failed"));
         }
         if (convert.surround && equalizer && equalizer->surround != 0) {
-            if (!ttpcomm_) return Fail(L"ttpcomm surround is unavailable");
+            if (!ttpcomm_) return Fail(i18n::Literal(L"ttpcomm surround is unavailable"));
             surround_ = Create(ttpcomm_, 104);
             if (!surround_ || !SurroundInitialize(
                     surround_, format_.nSamplesPerSec, format_.nChannels,
                     std::clamp(equalizer->surround, 0, 16)))
-                return Fail(L"ttpcomm surround initialization failed");
+                return Fail(i18n::Literal(L"ttpcomm surround initialization failed"));
         }
 #else
         if ((convert.equalizer && equalizer && equalizer->profile != -2) ||
             (convert.surround && equalizer && equalizer->surround != 0))
-            return Fail(L"legacy PCM processors require the x86 host");
+            return Fail(i18n::Literal(L"legacy PCM processors require the x86 host"));
 #endif
         return true;
     }
@@ -615,7 +612,7 @@ public:
         if (!Active() || bytes.empty()) return true;
         std::vector<double> samples;
         if (!Decode(bytes, samples))
-            return Fail(L"offline processor does not support the PCM format");
+            return Fail(i18n::Literal(L"offline processor does not support the PCM format"));
 
         if (replay_gain_ != 1.0) {
             for (auto& sample : samples) {
@@ -632,17 +629,17 @@ public:
             samples.size(), static_cast<size_t>(
                 std::numeric_limits<int>::max())));
         if (equalizer_ && !EqProcess(equalizer_, samples.data(), &count))
-            return Fail(L"ttpcomm equalizer processing failed");
+            return Fail(i18n::Literal(L"ttpcomm equalizer processing failed"));
         count = std::clamp(count, 0, static_cast<int>(samples.size()));
         if (format_.nChannels > 1)
             count -= count % format_.nChannels;
         samples.resize(static_cast<size_t>(count));
         if (surround_ && !SurroundProcess(
                 surround_, samples.data(), count))
-            return Fail(L"ttpcomm surround processing failed");
+            return Fail(i18n::Literal(L"ttpcomm surround processing failed"));
 #endif
         if (!Encode(samples, bytes))
-            return Fail(L"offline processor could not encode PCM");
+            return Fail(i18n::Literal(L"offline processor could not encode PCM"));
         return true;
     }
 
@@ -952,7 +949,7 @@ void PopulateConvertConfiguration(HWND dialog, ConvertConfigState& state) {
                      static_cast<LPARAM>(index+1));
     }
     state.lame = audio::LameEncoderAvailable();
-    if (state.lame) AddComboItem(combo, L"MP3 (LAME DLL)",
+    if (state.lame) AddComboItem(combo, i18n::Literal(L"MP3 (LAME DLL)"),
                                 static_cast<LPARAM>(factories.size()+1));
     SelectComboData(combo, state.settings->writer_index);
     UpdateEncoderConfigurationButton(dialog, state);
@@ -1122,7 +1119,7 @@ INT_PTR CALLBACK ConvertConfigProc(HWND dialog, UINT message,
             }
             else if (state->lame && selected ==
                      static_cast<LPARAM>(state->library->EncoderFactories().size()+1))
-                DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(4090),
+                ShowWtlModalDialog(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(4090),
                     dialog,LameConfigProc,reinterpret_cast<LPARAM>(state->settings));
             return TRUE;
         }
@@ -1197,7 +1194,7 @@ void RunConversion(ConvertLifetime lifetime) {
                 &state.equalizer,state.cancellation.get_token(),callbacks);
         } catch (...) {
             converted.result = E_FAIL;
-            converted.diagnostic = L"conversion worker exception";
+            converted.diagnostic = i18n::Literal(L"conversion worker exception");
         }
         { const std::scoped_lock lock(state.mutex); state.results[index] = std::move(converted); }
         PostConvert(state,kConvertRowComplete,static_cast<LPARAM>(index));
@@ -1559,12 +1556,12 @@ PlaylistConversionResult ConvertPlaylistTrack(
         return !stop.stop_requested() &&
             (!callbacks.checkpoint || callbacks.checkpoint());
     };
-    if (!checkpoint()) return fail(HRESULT_FROM_WIN32(ERROR_CANCELLED), L"conversion cancelled");
+    if (!checkpoint()) return fail(HRESULT_FROM_WIN32(ERROR_CANCELLED), i18n::Literal(L"conversion cancelled"));
     const bool wave = encoder_index == kWaveConversionEncoder;
     const bool lame = encoder_index == kLameConversionEncoder;
     if (!wave && !lame && encoder_index >= library.EncoderFactories().size())
-        return fail(E_INVALIDARG, L"encoder index is out of range");
-    if (destination.empty()) return fail(E_INVALIDARG, L"conversion destination is empty");
+        return fail(E_INVALIDARG, i18n::Literal(L"encoder index is out of range"));
+    if (destination.empty()) return fail(E_INVALIDARG, i18n::Literal(L"conversion destination is empty"));
 
     ConversionRuntime runtime;
     ConversionOutput transaction;
@@ -1579,7 +1576,7 @@ PlaylistConversionResult ConvertPlaylistTrack(
         if (extension.empty()) extension = PrimaryEncoderExtension(
             library.EncoderFactories()[encoder_index].extension);
         if (extension.empty() || extension.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos)
-            return fail(E_INVALIDARG, L"encoder has no valid configured file extension");
+            return fail(E_INVALIDARG, i18n::Literal(L"encoder has no valid configured file extension"));
         converted.destination.replace_extension(extension);
     } else {
         converted.destination.replace_extension(wave ? L".wav" : L".mp3");
@@ -1588,31 +1585,31 @@ PlaylistConversionResult ConvertPlaylistTrack(
     const auto& output = converted.destination;
     if (ConversionTargetsSource(output, track))
         return fail(HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION),
-                    L"conversion destination is a source file");
+                    i18n::Literal(L"conversion destination is a source file"));
     for (const auto& path : callbacks.protected_sources) {
         playlist::Track other;
         other.path = path;
         if (ConversionTargetsSource(output, other))
             return fail(HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION),
-                        L"conversion destination is another batch source");
+                        i18n::Literal(L"conversion destination is another batch source"));
     }
 
     const DWORD attributes = GetFileAttributesW(output.c_str());
     bool replace = settings.save_mode == 2;
     if (attributes != INVALID_FILE_ATTRIBUTES) {
         if (attributes & FILE_ATTRIBUTE_DIRECTORY)
-            return fail(HRESULT_FROM_WIN32(ERROR_DIRECTORY), L"destination is a directory");
-        if (settings.save_mode == 0) return fail(S_FALSE, L"destination skipped");
+            return fail(HRESULT_FROM_WIN32(ERROR_DIRECTORY), i18n::Literal(L"destination is a directory"));
+        if (settings.save_mode == 0) return fail(S_FALSE, i18n::Literal(L"destination skipped"));
         if (settings.save_mode != 2) {
             if (!callbacks.confirm_replace)
-                return fail(HRESULT_FROM_WIN32(ERROR_FILE_EXISTS), L"destination requires prompt");
-            if (!callbacks.confirm_replace(output)) return fail(S_FALSE, L"destination skipped");
+                return fail(HRESULT_FROM_WIN32(ERROR_FILE_EXISTS), i18n::Literal(L"destination requires prompt"));
+            if (!callbacks.confirm_replace(output)) return fail(S_FALSE, i18n::Literal(L"destination skipped"));
             replace = true;
         }
     }
-    if (!checkpoint()) return fail(HRESULT_FROM_WIN32(ERROR_CANCELLED), L"conversion cancelled");
+    if (!checkpoint()) return fail(HRESULT_FROM_WIN32(ERROR_CANCELLED), i18n::Literal(L"conversion cancelled"));
     auto source = audio::CreateDecodedAudioSource(track.path, track.subtrack, &library, ttpcomm);
-    if (!source) return fail(E_OUTOFMEMORY, L"unable to create decoded audio source");
+    if (!source) return fail(E_OUTOFMEMORY, i18n::Literal(L"unable to create decoded audio source"));
     audio::PlaybackOptions source_options;
     source_options.file_buffer_bytes = 64 * 1024;
     if (!source->Open(track.path, source_options))
@@ -1621,7 +1618,7 @@ PlaylistConversionResult ConvertPlaylistTrack(
     const WAVEFORMATEX& source_format = source->OutputFormat();
     if (!source_format.nChannels || !source_format.nSamplesPerSec ||
         !source_format.nAvgBytesPerSec || !source_format.nBlockAlign)
-        return fail(E_INVALIDARG, L"invalid decoded PCM format");
+        return fail(E_INVALIDARG, i18n::Literal(L"invalid decoded PCM format"));
 
     // 004B0D1A -> ReplayGain/EQ/surround -> 004AA360 (Wave only).
     // Quantizing before effects/resampling destroyed precision and gave native
@@ -1656,18 +1653,18 @@ PlaylistConversionResult ConvertPlaylistTrack(
     // An existing destination remains intact until the complete encoder and
     // metadata transaction succeeds. Temporary files are ours, never sources.
     result = transaction.Create(output);
-    if (FAILED(result)) return fail(result, L"unable to create output file");
+    if (FAILED(result)) return fail(result, i18n::Literal(L"unable to create output file"));
     result = encoder ? encoder->Open(transaction.temporary, output_format) :
         file_encoder->Open(transaction.temporary, output_format, lame,
             {settings.lame_mode, settings.lame_bitrate, settings.lame_quality});
-    if (FAILED(result)) return fail(result, L"encoder destination open failed");
+    if (FAILED(result)) return fail(result, i18n::Literal(L"encoder destination open failed"));
     const auto entries = ConversionMetadata(metadata, track);
     if (encoder) {
         // Missing tag interface and unsupported individual tags are nonfatal,
         // as in 004125C1/004121C4. Never propagate ReplayGain into new audio.
         static_cast<void>(encoder->SetMetadata(entries));
         result = encoder->Start();
-        if (FAILED(result)) return fail(result, L"ISoundEncoder slot 4 start failed");
+        if (FAILED(result)) return fail(result, i18n::Literal(L"ISoundEncoder slot 4 start failed"));
     }
 
     std::vector<std::byte> pcm, transformed, quantized;
@@ -1676,7 +1673,7 @@ PlaylistConversionResult ConvertPlaylistTrack(
     for (;;) {
         if (!checkpoint()) {
             result = HRESULT_FROM_WIN32(ERROR_CANCELLED);
-            converted.diagnostic = L"conversion cancelled";
+            converted.diagnostic = i18n::Literal(L"conversion cancelled");
             break;
         }
         bool end{};
@@ -1684,7 +1681,7 @@ PlaylistConversionResult ConvertPlaylistTrack(
             result = E_FAIL; converted.diagnostic = source->Error(); break;
         }
         if (pcm.size() % source_format.nBlockAlign) {
-            result = E_UNEXPECTED; converted.diagnostic = L"partial decoded PCM frame"; break;
+            result = E_UNEXPECTED; converted.diagnostic = i18n::Literal(L"partial decoded PCM frame"); break;
         }
         converted.pcm_bytes += pcm.size();
         if (!decoded_transform.Process(pcm, transformed, end) || !processors.Process(transformed)) {
@@ -1699,7 +1696,7 @@ PlaylistConversionResult ConvertPlaylistTrack(
             }
             if (!quantized.empty()) result = file_encoder->Write(quantized);
         } else if (!transformed.empty()) result = encoder->WritePcm(transformed);
-        if (FAILED(result)) { converted.diagnostic = L"encoder PCM write failed"; break; }
+        if (FAILED(result)) { converted.diagnostic = i18n::Literal(L"encoder PCM write failed"); break; }
         if (callbacks.progress) {
             const unsigned percent = duration > 0
                 ? static_cast<unsigned>(std::clamp<long double>(
@@ -1709,12 +1706,12 @@ PlaylistConversionResult ConvertPlaylistTrack(
         }
         if (end) break;
         if (pcm.empty()) {
-            result = E_UNEXPECTED; converted.diagnostic = L"empty non-final PCM block"; break;
+            result = E_UNEXPECTED; converted.diagnostic = i18n::Literal(L"empty non-final PCM block"); break;
         }
     }
     const HRESULT finalized = encoder ? encoder->Finalize() : file_encoder->Finalize();
     if (SUCCEEDED(result) && FAILED(finalized)) {
-        result = finalized; converted.diagnostic = L"encoder finalize failed";
+        result = finalized; converted.diagnostic = i18n::Literal(L"encoder finalize failed");
     }
     encoder.reset();
     file_encoder.reset();
@@ -1726,13 +1723,13 @@ PlaylistConversionResult ConvertPlaylistTrack(
                 tags.push_back({core::WideToUtf8(entry.name), entry.value});
         const auto written = audio::WriteBuiltinFileInfo(transaction.temporary, {}, tags);
         if (FAILED(written.status)) {
-            result = written.status; converted.diagnostic = L"MP3 metadata write failed";
+            result = written.status; converted.diagnostic = i18n::Literal(L"MP3 metadata write failed");
         }
     }
     if (SUCCEEDED(result) && !checkpoint()) result = HRESULT_FROM_WIN32(ERROR_CANCELLED);
     if (SUCCEEDED(result)) {
         result = transaction.Commit(output, replace);
-        if (FAILED(result)) converted.diagnostic = L"unable to commit converted file";
+        if (FAILED(result)) converted.diagnostic = i18n::Literal(L"unable to commit converted file");
     }
     if (SUCCEEDED(result)) {
         converted.diagnostic.clear();
@@ -1756,7 +1753,7 @@ bool ShowPlaylistConverter(
     }
     if (!owner || !resources || !library || tracks.empty()) return false;
     ConvertConfigState configuration{resources,library,&settings};
-    if (DialogBoxParamW(resources,MAKEINTRESOURCEW(kConvertConfigDialog),owner,
+    if (ShowWtlModalDialog(resources,MAKEINTRESOURCEW(kConvertConfigDialog),owner,
         ConvertConfigProc,reinterpret_cast<LPARAM>(&configuration)) != IDOK) return false;
     const size_t count=library->EncoderFactories().size();
     size_t encoder=kWaveConversionEncoder;

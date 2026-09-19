@@ -1,5 +1,6 @@
 #include "ttplayer/ui/wtl_runtime.h"
 #include "ttplayer/ui/wtl_dialogs.h"
+#include "ttplayer/i18n/i18n.h"
 #include <atldlgs.h>
 #include <memory>
 #include <vector>
@@ -39,7 +40,11 @@ public:
         ATL::_AtlWinModule.AddCreateWndData(&m_thunk.cd,
             static_cast<ATL::CDialogImplBase*>(this));
         // Unlike CDialogImpl::Create, preserve the caller's resource module.
-        const HWND window = ::CreateDialogParamW(resources, name, parent, StartDialogProc, data);
+        const auto translated = i18n::DialogTemplate(resources, name);
+        const HWND window = translated.empty()
+            ? ::CreateDialogParamW(resources, name, parent, StartDialogProc, data)
+            : ::CreateDialogIndirectParamW(resources,
+                reinterpret_cast<LPCDLGTEMPLATEW>(translated.data()), parent, StartDialogProc, data);
         if (!started) ATL::_AtlWinModule.ExtractCreateWndData();
         return window;
     }
@@ -47,7 +52,11 @@ public:
         if (!m_thunk.Init(nullptr, nullptr)) return -1;
         ATL::_AtlWinModule.AddCreateWndData(&m_thunk.cd,
             static_cast<ATL::CDialogImplBase*>(this));
-        const INT_PTR result = ::DialogBoxParamW(resources, name, parent, StartDialogProc, data);
+        const auto translated = i18n::DialogTemplate(resources, name);
+        const INT_PTR result = translated.empty()
+            ? ::DialogBoxParamW(resources, name, parent, StartDialogProc, data)
+            : ::DialogBoxIndirectParamW(resources,
+                reinterpret_cast<LPCDLGTEMPLATEW>(translated.data()), parent, StartDialogProc, data);
         if (!started) ATL::_AtlWinModule.ExtractCreateWndData();
         return result;
     }
@@ -58,6 +67,7 @@ class ResourcePage final : public WTL::CPropertyPageImpl<ResourcePage> {
 public:
     enum { IDD = 0 };
     PROPSHEETPAGEW original;
+    std::vector<std::byte> translated;
     explicit ResourcePage(const PROPSHEETPAGEW& page) : original(page) {
         const auto callback = m_psp.pfnCallback;
         const auto procedure = m_psp.pfnDlgProc;
@@ -66,6 +76,13 @@ public:
         m_psp.pfnCallback = callback;
         m_psp.pfnDlgProc = procedure;
         m_psp.lParam = reinterpret_cast<LPARAM>(this);
+        if (!(page.dwFlags & PSP_DLGINDIRECT)) {
+            translated = i18n::DialogTemplate(page.hInstance, page.pszTemplate);
+            if (!translated.empty()) {
+                m_psp.dwFlags |= PSP_DLGINDIRECT;
+                m_psp.pResource = reinterpret_cast<LPCDLGTEMPLATE>(translated.data());
+            }
+        }
     }
     BOOL ProcessWindowMessage(HWND window, UINT message, WPARAM wp, LPARAM lp,
                               LRESULT& result, DWORD = 0) override {

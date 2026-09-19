@@ -1,3 +1,5 @@
+#include "ttplayer/i18n/i18n.h"
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
@@ -1263,7 +1265,7 @@ bool PlayerWindow::CanPlayCompactDisc() const noexcept {
 
 void PlayerWindow::ShowPlayUrlDialog() {
     PlayUrlDialogState state;
-    const INT_PTR result = DialogBoxParamW(
+    const INT_PTR result = ShowWtlModalDialog(
         ResourceModule(), MAKEINTRESOURCEW(204), window_, PlayUrlDialogProc,
         reinterpret_cast<LPARAM>(&state));
     if (result == kPlayUrlBrowse) {
@@ -1288,7 +1290,7 @@ void PlayerWindow::ShowPlayCdDialog() {
             paths, playlists_.ActiveIndex(), std::nullopt, false,
             ImportPlayback::none));
     };
-    const INT_PTR result = DialogBoxParamW(
+    const INT_PTR result = ShowWtlModalDialog(
         ResourceModule(), MAKEINTRESOURCEW(229), window_, PlayCdDialogProc,
         reinterpret_cast<LPARAM>(&state));
     if (result != IDOK || state.selected.empty()) return;
@@ -1335,7 +1337,7 @@ void PlayerWindow::OpenCommandLinePath(const std::filesystem::path& path,
             // The original opens ttpres.dll dialog 223 and permits choosing
             // an existing destination or its 0x7F01 "new list" row.
             ControlPacketPlaylistDialogState state{&playlists_};
-            if (DialogBoxParamW(ResourceModule(), MAKEINTRESOURCEW(223),
+            if (ShowWtlModalDialog(ResourceModule(), MAKEINTRESOURCEW(223),
                     window_, ControlPacketPlaylistDialogProc,
                     reinterpret_cast<LPARAM>(&state)) != IDOK) {
                 return;

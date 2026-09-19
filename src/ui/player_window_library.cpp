@@ -1,3 +1,5 @@
+#include "ttplayer/i18n/i18n.h"
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_runtime.h"
 #include "ttplayer/platform/optional_windows_api.h"
@@ -974,9 +976,10 @@ struct PlayerWindow::MediaLibraryState {
 namespace {
 std::vector<std::wstring> LibraryLabels(std::wstring resource) {
     auto labels = Split(resource, L'|');
-    static constexpr std::wstring_view fallback[] = {
-        L"Music", L"Artist", L"Album", L"Genre", L"Date", L"Rating",
-        L"%d stars"};
+    const std::wstring fallback[] = {
+        i18n::Text(L"Music"), i18n::Text(L"Artist"), i18n::Text(L"Album"),
+        i18n::Text(L"Genre"), i18n::Text(L"Date"), i18n::Text(L"Rating"),
+        i18n::Text(L"%d stars")};
     if (labels.size() < std::size(fallback)) {
         labels.assign(std::begin(fallback), std::end(fallback));
     }
@@ -2343,7 +2346,7 @@ bool PlayerWindow::ShowMediaLibraryTreeContextMenu(POINT screen_point) {
     tree_item.hItem = item;
     WTL::CTreeViewCtrl(playlist_tree_control_).GetItem(&tree_item);
     auto* node = reinterpret_cast<MediaLibraryState::Node*>(tree_item.lParam);
-    HMENU owner = LoadMenuW(ResourceModule(), MAKEINTRESOURCEW(kMenuLibrary));
+    HMENU owner = i18n::LoadMenu(ResourceModule(), MAKEINTRESOURCEW(kMenuLibrary));
     if (!owner) return true;
     HMENU menu = GetSubMenu(owner, 0);
     if (menu) RemoveMenu(owner, 0, MF_BYPOSITION);
@@ -2477,7 +2480,7 @@ bool PlayerWindow::HandleMediaLibraryCommand(UINT command) {
         auto tracks = selected_tracks();
         if (tracks.empty()) return true;
         LibraryTargetDialogState dialog{&playlists_};
-        if (DialogBoxParamW(ResourceModule(), MAKEINTRESOURCEW(223),
+        if (ShowWtlModalDialog(ResourceModule(), MAKEINTRESOURCEW(223),
                 playlist_window_, LibraryTargetDialogProc,
                 reinterpret_cast<LPARAM>(&dialog)) != IDOK)
             return true;

@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/lyrics/service_catalog.h"
 #include "service_xml.h"
 
@@ -137,7 +138,7 @@ ServiceCatalog ReadServiceCatalog(const std::vector<plugins::LyricSearchProvider
             }
         } catch (...) {
             file.valid = false;
-            Error(catalog, file.ini, L"无法读取有效的服务器 XML，保留原文件，不允许覆盖。");
+            Error(catalog, file.ini, i18n::Literal(L"无法读取有效的服务器 XML，保留原文件，不允许覆盖。"));
         }
         catalog.files.push_back(file);
         // Load only resource data; never unload/reload a live sound AddIn.
@@ -235,8 +236,8 @@ ServiceCatalog SaveServiceCatalog(const ServiceCatalog& baseline, const std::vec
         result.entries = edited;
         for (auto& entry : result.entries) entry.key = ServiceKey(entry);
     } catch (const std::exception& error) {
-        result.error = L"保存未完成（已成功保存的文件已保留）：" + core::Utf8ToWide(error.what());
-    } catch (...) { result.error = L"保存失败，未完成的文件保持原样。"; }
+        result.error = i18n::Literal(L"保存未完成（已成功保存的文件已保留）：") + core::Utf8ToWide(error.what());
+    } catch (...) { result.error = i18n::Literal(L"保存失败，未完成的文件保持原样。"); }
     BuiltinsFirst(result.entries);
     return result;
 }
@@ -244,7 +245,7 @@ std::shared_ptr<CatalogJob> ReadServiceCatalogAsync(std::vector<plugins::LyricSe
     auto job = std::make_shared<CatalogJob>();
     std::thread([job, providers = std::move(providers)] {
         ServiceCatalog result;
-        try { result = ReadServiceCatalog(providers); } catch (...) { result.error = L"读取歌词服务器列表失败。"; }
+        try { result = ReadServiceCatalog(providers); } catch (...) { result.error = i18n::Literal(L"读取歌词服务器列表失败。"); }
         std::lock_guard lock(job->mutex); job->result = std::move(result);
     }).detach();
     return job;

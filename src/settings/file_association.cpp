@@ -1,4 +1,5 @@
 #include "ttplayer/settings/file_association.h"
+#include "ttplayer/i18n/i18n.h"
 
 #include <algorithm>
 #include <array>
@@ -60,7 +61,7 @@ struct ManagedChange {
         FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
             FORMAT_MESSAGE_IGNORE_INSERTS,
         nullptr, error, 0, reinterpret_cast<wchar_t*>(&allocated), 0, nullptr);
-    if (!length || !allocated) return L"Windows error " + std::to_wstring(error);
+    if (!length || !allocated) return i18n::Text(L"Windows error ") + std::to_wstring(error);
     std::wstring message(allocated, length);
     LocalFree(allocated);
     while (!message.empty() &&
@@ -287,11 +288,11 @@ struct ManagedValueNames {
     status = ReadStringValue(key.get(), names.owner.c_str(), owner);
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
         return {Win32Failure(FileAssociationError::registry,
-                             L"read association owner", status), false};
+                             i18n::Literal(L"read association owner"), status), false};
     }
     if (owner && !EqualInsensitive(*owner, owner_identity)) {
         return {Win32Failure(FileAssociationError::registry,
-                             L"association key is managed by another executable",
+                             i18n::Literal(L"association key is managed by another executable"),
                              ERROR_SHARING_VIOLATION), false};
     }
 
@@ -299,7 +300,7 @@ struct ManagedValueNames {
     status = ReadStringValue(key.get(), value_name, previous);
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
         return {Win32Failure(FileAssociationError::registry,
-                             L"read registry default value", status), false};
+                             i18n::Literal(L"read registry default value"), status), false};
     }
 
     if (!owner) {
@@ -307,13 +308,13 @@ struct ManagedValueNames {
             status = WriteStringValue(key.get(), names.backup.c_str(), *previous);
             if (status != ERROR_SUCCESS)
                 return {Win32Failure(FileAssociationError::registry,
-                                     L"save registry default backup", status),
+                                     i18n::Literal(L"save registry default backup"), status),
                         false};
         } else {
             status = DeleteValueIfPresent(key.get(), names.backup.c_str());
             if (status != ERROR_SUCCESS)
                 return {Win32Failure(FileAssociationError::registry,
-                                     L"clear stale registry backup", status),
+                                     i18n::Literal(L"clear stale registry backup"), status),
                         false};
         }
         status = WriteDwordValue(key.get(), names.backup_present.c_str(),
@@ -325,7 +326,7 @@ struct ManagedValueNames {
             status = WriteStringValue(key.get(), names.owner.c_str(), owner_identity);
         if (status != ERROR_SUCCESS)
             return {Win32Failure(FileAssociationError::registry,
-                                 L"save association ownership metadata", status),
+                                 i18n::Literal(L"save association ownership metadata"), status),
                     false};
     }
 
@@ -338,7 +339,7 @@ struct ManagedValueNames {
                        : DeleteValueIfPresent(key.get(), value_name);
     if (status != ERROR_SUCCESS) {
         return {Win32Failure(FileAssociationError::registry,
-                             L"write registry default value", status), false};
+                             i18n::Literal(L"write registry default value"), status), false};
     }
     return {Success(previous != value), previous != value};
 }
@@ -362,7 +363,7 @@ struct ManagedValueNames {
     status = ReadStringValue(key.get(), names.owner.c_str(), owner);
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
         return {Win32Failure(FileAssociationError::registry,
-                             L"read association owner", status), false};
+                             i18n::Literal(L"read association owner"), status), false};
     }
     if (status == ERROR_FILE_NOT_FOUND || !owner ||
         !EqualInsensitive(*owner, owner_identity)) {
@@ -397,7 +398,7 @@ struct ManagedValueNames {
         status = value_status;
     if (status != ERROR_SUCCESS) {
         return {Win32Failure(FileAssociationError::registry,
-                             L"read association backup metadata", status),
+                             i18n::Literal(L"read association backup metadata"), status),
                 false};
     }
 
@@ -417,7 +418,7 @@ struct ManagedValueNames {
         }
         if (status != ERROR_SUCCESS) {
             return {Win32Failure(FileAssociationError::registry,
-                                 L"restore registry default value", status),
+                                 i18n::Literal(L"restore registry default value"), status),
                     false};
         }
         changed = current != (backup_present.value_or(0U) != 0U ? backup : std::nullopt);
@@ -428,7 +429,7 @@ struct ManagedValueNames {
         status = DeleteValueIfPresent(key.get(), name);
         if (status != ERROR_SUCCESS) {
             auto failure = Win32Failure(FileAssociationError::registry,
-                                        L"remove association metadata",
+                                        i18n::Literal(L"remove association metadata"),
                                         status);
             failure.changed = changed;
             return {std::move(failure), changed};
@@ -447,7 +448,7 @@ struct ManagedValueNames {
         status = RegDeleteKeyW(HKEY_CURRENT_USER, std::wstring(path).c_str());
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
             return {Win32Failure(FileAssociationError::registry,
-                                 L"remove empty association key", status),
+                                 i18n::Literal(L"remove empty association key"), status),
                     changed};
         }
         changed = true;
@@ -481,12 +482,12 @@ struct ManagedValueNames {
     LONG status = OpenKey(path, KEY_QUERY_VALUE, choice);
     const bool choice_exists = status == ERROR_SUCCESS;
     if (!choice_exists && status != ERROR_FILE_NOT_FOUND)
-        return failure(L"read legacy UserChoice", status);
+        return failure(i18n::Literal(L"read legacy UserChoice"), status);
     std::optional<std::wstring> current;
     if (choice_exists) {
         status = ReadStringValue(choice.get(), L"Progid", current);
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-            return failure(L"read legacy UserChoice Progid", status);
+            return failure(i18n::Literal(L"read legacy UserChoice Progid"), status);
     }
     choice.reset();
 
@@ -497,14 +498,14 @@ struct ManagedValueNames {
         bool existed{};
         status = CreateKey(backup_path, backup, existed);
     }
-    if (status != ERROR_SUCCESS) return failure(L"open legacy UserChoice backup", status);
+    if (status != ERROR_SUCCESS) return failure(i18n::Literal(L"open legacy UserChoice backup"), status);
     std::optional<std::wstring> owner;
     status = ReadStringValue(backup.get(), kOwnerValue, owner);
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-        return failure(L"read legacy UserChoice backup owner", status);
+        return failure(i18n::Literal(L"read legacy UserChoice backup owner"), status);
     if (owner && !EqualInsensitive(*owner, owner_identity)) {
         if (!enabled) return {Success(), false};
-        return failure(L"legacy UserChoice backup belongs to another installation", ERROR_SHARING_VIOLATION);
+        return failure(i18n::Literal(L"legacy UserChoice backup belongs to another installation"), ERROR_SHARING_VIOLATION);
     }
     if (!owner) {
         if (!enabled) return {Success(), false};
@@ -512,13 +513,13 @@ struct ManagedValueNames {
                          : DeleteValueIfPresent(backup.get(), kBackupValue);
         if (status == ERROR_SUCCESS)
             status = WriteStringValue(backup.get(), kOwnerValue, owner_identity);
-        if (status != ERROR_SUCCESS) return failure(L"save legacy UserChoice backup", status);
+        if (status != ERROR_SUCCESS) return failure(i18n::Literal(L"save legacy UserChoice backup"), status);
     }
     if (enabled) {
         if (!choice_exists) return {Success(), false};
         status = RegDeleteKeyW(HKEY_CURRENT_USER, path.c_str());
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-            return failure(L"remove legacy UserChoice key", status);
+            return failure(i18n::Literal(L"remove legacy UserChoice key"), status);
         return {Success(true), true};
     }
 
@@ -528,7 +529,7 @@ struct ManagedValueNames {
         std::optional<std::wstring> previous;
         status = ReadStringValue(backup.get(), kBackupValue, previous);
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-            return failure(L"read legacy UserChoice backup", status);
+            return failure(i18n::Literal(L"read legacy UserChoice backup"), status);
         if (previous) {
             bool existed{};
             status = CreateKey(path, choice, existed);
@@ -541,12 +542,12 @@ struct ManagedValueNames {
                     RegDeleteKeyW(HKEY_CURRENT_USER, path.c_str());
                 }
             }
-            if (status != ERROR_SUCCESS) return failure(L"restore legacy UserChoice", status);
+            if (status != ERROR_SUCCESS) return failure(i18n::Literal(L"restore legacy UserChoice"), status);
         }
     }
     for (const auto* name : {kOwnerValue, kBackupValue}) {
         status = DeleteValueIfPresent(backup.get(), name);
-        if (status != ERROR_SUCCESS) return failure(L"clear legacy UserChoice backup", status, changed);
+        if (status != ERROR_SUCCESS) return failure(i18n::Literal(L"clear legacy UserChoice backup"), status, changed);
     }
     DWORD subkeys{}, values{};
     status = RegQueryInfoKeyW(backup.get(), nullptr, nullptr, nullptr, &subkeys,
@@ -556,7 +557,7 @@ struct ManagedValueNames {
     if (empty) {
         status = RegDeleteKeyW(HKEY_CURRENT_USER, backup_path.c_str());
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-            return failure(L"remove legacy UserChoice backup", status, changed);
+            return failure(i18n::Literal(L"remove legacy UserChoice backup"), status, changed);
     }
     return {Success(changed), changed};
 }
@@ -578,7 +579,7 @@ struct ManagedValueNames {
     if (status == ERROR_FILE_NOT_FOUND) return Success();
     if (status != ERROR_SUCCESS)
         return Win32Failure(FileAssociationError::registry,
-                            L"read registry default value", status);
+                            i18n::Literal(L"read registry default value"), status);
     value = read.value_or(std::wstring{});
     present = true;
     return Success();
@@ -639,15 +640,15 @@ FileAssociationResult SetRegistrationString(std::wstring_view path,
     bool existed{};
     LONG status = CreateKey(path, key, existed);
     if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry,
-        L"create default-program registration", status);
+        i18n::Literal(L"create default-program registration"), status);
     std::optional<std::wstring> previous;
     status = ReadStringValue(key.get(), name, previous);
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-        return Win32Failure(FileAssociationError::registry, L"read default-program registration", status);
+        return Win32Failure(FileAssociationError::registry, i18n::Literal(L"read default-program registration"), status);
     if (previous && *previous == value) return Success();
     status = WriteStringValue(key.get(), name, value);
     return status == ERROR_SUCCESS ? Success(true) : Win32Failure(
-        FileAssociationError::registry, L"write default-program registration", status);
+        FileAssociationError::registry, i18n::Literal(L"write default-program registration"), status);
 }
 
 FileAssociationResult SetOpenWith(const FileAssociationBackendOptions& options,
@@ -658,17 +659,17 @@ FileAssociationResult SetOpenWith(const FileAssociationBackendOptions& options,
     bool existed{};
     LONG status = add ? CreateKey(path, key, existed) : OpenKey(path, KEY_QUERY_VALUE | KEY_SET_VALUE, key);
     if (!add && status == ERROR_FILE_NOT_FOUND) return Success();
-    if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, L"open OpenWithProgids", status);
+    if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, i18n::Literal(L"open OpenWithProgids"), status);
     DWORD type{}, bytes{};
     status = RegQueryValueExW(key.get(), prog_id.c_str(), nullptr, &type, nullptr, &bytes);
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-        return Win32Failure(FileAssociationError::registry, L"query OpenWithProgids", status);
+        return Win32Failure(FileAssociationError::registry, i18n::Literal(L"query OpenWithProgids"), status);
     if ((add && status == ERROR_SUCCESS) || (!add && status == ERROR_FILE_NOT_FOUND)) return Success();
     status = add ? RegSetValueExW(key.get(), prog_id.c_str(), 0, REG_NONE, nullptr, 0)
                  : RegDeleteValueW(key.get(), prog_id.c_str());
     // Never delete the extension key or other applications' named entries.
     return status == ERROR_SUCCESS ? Success(true) : Win32Failure(
-        FileAssociationError::registry, L"update OpenWithProgids", status);
+        FileAssociationError::registry, i18n::Literal(L"update OpenWithProgids"), status);
 }
 
 [[nodiscard]] std::filesystem::path CanonicalForCompare(
@@ -711,13 +712,13 @@ FileAssociationResult SetOpenWith(const FileAssociationBackendOptions& options,
         const auto& subdirectory = options.programs_subdirectory;
         if (subdirectory.is_absolute() || subdirectory.has_root_name() ||
             subdirectory.has_root_directory()) {
-            return Invalid(L"resolve Programs shortcut",
-                           L"programs_subdirectory must be relative");
+            return Invalid(i18n::Literal(L"resolve Programs shortcut"),
+                           i18n::Literal(L"programs_subdirectory must be relative"));
         }
         for (const auto& component : subdirectory) {
             if (component == L"..")
-                return Invalid(L"resolve Programs shortcut",
-                               L"programs_subdirectory may not contain '..'");
+                return Invalid(i18n::Literal(L"resolve Programs shortcut"),
+                               i18n::Literal(L"programs_subdirectory may not contain '..'"));
         }
         directory /= subdirectory;
     }
@@ -727,7 +728,7 @@ FileAssociationResult SetOpenWith(const FileAssociationBackendOptions& options,
                             : options.display_name;
     if (name.empty() || name == L"." || name == L".." ||
         name.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) {
-        return Invalid(L"resolve shortcut path", L"invalid shortcut name");
+        return Invalid(i18n::Literal(L"resolve shortcut path"), i18n::Literal(L"invalid shortcut name"));
     }
     if (name.size() < 4 ||
         !EqualInsensitive(std::wstring_view(name).substr(name.size() - 4),
@@ -811,7 +812,7 @@ AssociationQuery FileAssociationBackend::QueryExtension(
     AssociationQuery query;
     query.extension = NormalizeExtension(extension);
     if (query.extension.empty()) {
-        query.result = Invalid(L"query extension", L"invalid extension");
+        query.result = Invalid(i18n::Literal(L"query extension"), i18n::Literal(L"invalid extension"));
         return query;
     }
     query.managed_prog_id = ManagedProgId(options_, query.extension);
@@ -844,12 +845,12 @@ AssociationQuery FileAssociationBackend::QueryExtension(
         if (status == ERROR_SUCCESS && backup) query.backup_prog_id = *backup;
         else if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
             query.result = Win32Failure(FileAssociationError::registry,
-                                        L"read extension backup", status);
+                                        i18n::Literal(L"read extension backup"), status);
             return query;
         }
     } else if (status != ERROR_FILE_NOT_FOUND) {
         query.result = Win32Failure(FileAssociationError::registry,
-                                    L"open extension key", status);
+                                    i18n::Literal(L"open extension key"), status);
         return query;
     }
 
@@ -892,9 +893,9 @@ FileAssociationResult FileAssociationBackend::SetLegacyExtensionAssociation(
     std::wstring_view icon, const ShellVerbLabels& labels) {
     const std::wstring normalized = NormalizeExtension(extension);
     if (normalized.empty())
-        return Invalid(L"set extension association", L"invalid extension");
+        return Invalid(i18n::Literal(L"set extension association"), i18n::Literal(L"invalid extension"));
     if (executable_.empty())
-        return Invalid(L"set extension association", L"executable is empty");
+        return Invalid(i18n::Literal(L"set extension association"), i18n::Literal(L"executable is empty"));
 
     const std::wstring owner = executable_.wstring();
     const std::wstring prog_id = ManagedProgId(options_, normalized);
@@ -931,7 +932,7 @@ FileAssociationResult FileAssociationBackend::SetLegacyExtensionAssociation(
                                          KEY_QUERY_VALUE, choice);
             if (status == ERROR_SUCCESS) restore_overrides = false;
             else if (status != ERROR_FILE_NOT_FOUND)
-                return Win32Failure(FileAssociationError::registry, L"read later legacy UserChoice", status);
+                return Win32Failure(FileAssociationError::registry, i18n::Literal(L"read later legacy UserChoice"), status);
         }
     }
     const auto update_overrides = [&]() {
@@ -1024,7 +1025,7 @@ FileAssociationResult FileAssociationBackend::SetExtensionIcon(
     if (!read_command) return read_command;
     if (!present || !EqualInsensitive(command, OpenCommand(executable_, false)))
         return Win32Failure(FileAssociationError::registry,
-                            L"set icon for an unmanaged association",
+                            i18n::Literal(L"set icon for an unmanaged association"),
                             ERROR_NOT_FOUND);
     const std::wstring icon_value = icon.empty() ? DefaultIcon(executable_)
                                                  : std::wstring(icon);
@@ -1056,11 +1057,11 @@ DefaultAppsTarget SelectDefaultAppsTarget(DWORD major, DWORD minor, DWORD build,
 
 FileAssociationResult FileAssociationBackend::RegisterApplication(
     const std::vector<AssociableExtension>& formats) {
-    if (executable_.empty()) return Invalid(L"register default program", L"executable is empty");
+    if (executable_.empty()) return Invalid(i18n::Literal(L"register default program"), i18n::Literal(L"executable is empty"));
     // Validate the complete input before changing any keys.
     for (const auto& format : formats)
         if (NormalizeExtension(format.extension).empty())
-            return Invalid(L"register default program", L"invalid extension");
+            return Invalid(i18n::Literal(L"register default program"), i18n::Literal(L"invalid extension"));
     const auto capabilities = CapabilitiesPath(options_);
     UniqueRegKey key;
     LONG status = OpenKey(capabilities, KEY_QUERY_VALUE, key);
@@ -1068,11 +1069,11 @@ FileAssociationResult FileAssociationBackend::RegisterApplication(
         std::optional<std::wstring> owner;
         status = ReadStringValue(key.get(), kOwnerValue, owner);
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-            return Win32Failure(FileAssociationError::registry, L"read capabilities owner", status);
+            return Win32Failure(FileAssociationError::registry, i18n::Literal(L"read capabilities owner"), status);
         if (owner && !EqualInsensitive(*owner, executable_.wstring()))
-            return Win32Failure(FileAssociationError::registry, L"default program belongs to another installation", ERROR_SHARING_VIOLATION);
+            return Win32Failure(FileAssociationError::registry, i18n::Literal(L"default program belongs to another installation"), ERROR_SHARING_VIOLATION);
     } else if (status != ERROR_FILE_NOT_FOUND) {
-        return Win32Failure(FileAssociationError::registry, L"open capabilities", status);
+        return Win32Failure(FileAssociationError::registry, i18n::Literal(L"open capabilities"), status);
     }
     key.reset();
     status = OpenKey(RegisteredApplicationsPath(options_), KEY_QUERY_VALUE, key);
@@ -1080,11 +1081,11 @@ FileAssociationResult FileAssociationBackend::RegisterApplication(
         std::optional<std::wstring> registered;
         status = ReadStringValue(key.get(), L"TTPlayerRebuild", registered);
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-            return Win32Failure(FileAssociationError::registry, L"read RegisteredApplications", status);
+            return Win32Failure(FileAssociationError::registry, i18n::Literal(L"read RegisteredApplications"), status);
         if (registered && !EqualInsensitive(*registered, capabilities))
-            return Win32Failure(FileAssociationError::registry, L"registered application name already in use", ERROR_SHARING_VIOLATION);
+            return Win32Failure(FileAssociationError::registry, i18n::Literal(L"registered application name already in use"), ERROR_SHARING_VIOLATION);
     } else if (status != ERROR_FILE_NOT_FOUND) {
-        return Win32Failure(FileAssociationError::registry, L"open RegisteredApplications", status);
+        return Win32Failure(FileAssociationError::registry, i18n::Literal(L"open RegisteredApplications"), status);
     }
     bool changed = false;
     const auto write = [&](std::wstring_view path, const wchar_t* name, std::wstring_view value) {
@@ -1143,7 +1144,7 @@ FileAssociationResult FileAssociationBackend::SetExtensionAssociation(
     if (AssociationMode(options_) != FileAssociationMode::user_choice)
         return SetLegacyExtensionAssociation(extension, enabled, description, icon, labels);
     const auto normalized = NormalizeExtension(extension);
-    if (normalized.empty()) return Invalid(L"set extension association", L"invalid extension");
+    if (normalized.empty()) return Invalid(i18n::Literal(L"set extension association"), i18n::Literal(L"invalid extension"));
     FileAssociationResult result;
     if (enabled) {
         result = RegisterApplication({{normalized, std::wstring(description), {}}});
@@ -1172,7 +1173,7 @@ FileAssociationResult FileAssociationBackend::SetExtensionAssociation(
 
 FileAssociationResult FileAssociationBackend::OpenDefaultPrograms(HWND owner) const {
     if (!IsRealClassesStore(options_.current_user_classes_subkey))
-        return Invalid(L"open default programs", L"isolated registration cannot launch the live shell");
+        return Invalid(i18n::Literal(L"open default programs"), i18n::Literal(L"isolated registration cannot launch the live shell"));
     const auto version = AssociationWindowsVersion();
     DWORD revision{};
     UniqueRegKey key;
@@ -1191,7 +1192,7 @@ FileAssociationResult FileAssociationBackend::OpenDefaultPrograms(HWND owner) co
         info.hwnd = owner; info.lpVerb = L"open"; info.lpFile = file;
         info.lpParameters = arguments; info.nShow = SW_SHOWNORMAL;
         return ShellExecuteExW(&info) ? Success() : Win32Failure(
-            FileAssociationError::shell, L"open system default programs", GetLastError());
+            FileAssociationError::shell, i18n::Literal(L"open system default programs"), GetLastError());
     };
     if (target == DefaultAppsTarget::settings || target == DefaultAppsTarget::application_settings) {
         auto result = launch(target == DefaultAppsTarget::application_settings
@@ -1221,7 +1222,7 @@ FileAssociationResult FileAssociationBackend::UnregisterApplication(
     std::unordered_set<std::wstring> extensions;
     for (const auto& format : legacy_formats) {
         const auto extension = NormalizeExtension(format.extension);
-        if (extension.empty()) return Invalid(L"unregister default program", L"invalid extension");
+        if (extension.empty()) return Invalid(i18n::Literal(L"unregister default program"), i18n::Literal(L"invalid extension"));
         extensions.insert(extension);
     }
     const auto capabilities = CapabilitiesPath(options_);
@@ -1229,23 +1230,23 @@ FileAssociationResult FileAssociationBackend::UnregisterApplication(
     LONG status = OpenKey(capabilities, KEY_QUERY_VALUE, key);
     const bool has_capabilities = status == ERROR_SUCCESS;
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-        return Win32Failure(FileAssociationError::registry, L"open capabilities", status);
+        return Win32Failure(FileAssociationError::registry, i18n::Literal(L"open capabilities"), status);
     if (has_capabilities) {
         std::optional<std::wstring> owner;
         status = ReadStringValue(key.get(), kOwnerValue, owner);
         if (status != ERROR_SUCCESS || !owner || !EqualInsensitive(*owner, executable_.wstring()))
-            return Win32Failure(FileAssociationError::registry, L"capabilities belong to another installation", ERROR_ACCESS_DENIED);
+            return Win32Failure(FileAssociationError::registry, i18n::Literal(L"capabilities belong to another installation"), ERROR_ACCESS_DENIED);
     }
     key.reset();
     status = OpenKey(capabilities + L"\\FileAssociations", KEY_QUERY_VALUE, key);
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-        return Win32Failure(FileAssociationError::registry, L"read registered formats", status);
+        return Win32Failure(FileAssociationError::registry, i18n::Literal(L"read registered formats"), status);
     if (key) {
         for (DWORD index = 0;; ++index) {
             wchar_t name[256]{}; DWORD size = 256;
             status = RegEnumValueW(key.get(), index, name, &size, nullptr, nullptr, nullptr, nullptr);
             if (status == ERROR_NO_MORE_ITEMS) break;
-            if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, L"enumerate registered formats", status);
+            if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, i18n::Literal(L"enumerate registered formats"), status);
             const auto extension = NormalizeExtension(name);
             std::optional<std::wstring> prog_id;
             if (!extension.empty() && ReadStringValue(key.get(), name, prog_id) == ERROR_SUCCESS &&
@@ -1283,11 +1284,11 @@ FileAssociationResult FileAssociationBackend::UnregisterApplication(
             status = RegDeleteValueW(key.get(), L"TTPlayerRebuild");
     }
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-        return Win32Failure(FileAssociationError::registry, L"remove RegisteredApplications entry", status);
+        return Win32Failure(FileAssociationError::registry, i18n::Literal(L"remove RegisteredApplications entry"), status);
     // Exact private key, checked against the stored executable owner above.
     status = RegDeleteTreeW(HKEY_CURRENT_USER, capabilities.c_str());
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
-        return Win32Failure(FileAssociationError::registry, L"remove capabilities", status);
+        return Win32Failure(FileAssociationError::registry, i18n::Literal(L"remove capabilities"), status);
     if (options_.notify_shell) NotifyShellAssociationsChanged();
     return Success(true);
 }
@@ -1313,7 +1314,7 @@ FileAssociationResult FileAssociationBackend::SetShellIntegration(
     ShellIntegrationTarget target, bool enabled,
     const ShellVerbLabels& labels) {
     if (executable_.empty())
-        return Invalid(L"set shell integration", L"executable is empty");
+        return Invalid(i18n::Literal(L"set shell integration"), i18n::Literal(L"executable is empty"));
     const std::wstring owner = executable_.wstring();
     const std::wstring target_key = JoinRegistryPath(
         options_.current_user_classes_subkey,
@@ -1393,7 +1394,7 @@ ShortcutQuery FileAssociationBackend::QueryShortcut(
 FileAssociationResult FileAssociationBackend::CreateShortcut(
     ShortcutLocation location, const ShortcutOptions& options) const {
     if (executable_.empty())
-        return Invalid(L"create shortcut", L"executable is empty");
+        return Invalid(i18n::Literal(L"create shortcut"), i18n::Literal(L"executable is empty"));
     std::filesystem::path shortcut;
     FileAssociationResult result = ResolveShortcutPath(
         location, options, application_name_, shortcut);
@@ -1404,7 +1405,7 @@ FileAssociationResult FileAssociationBackend::CreateShortcut(
                                         filesystem_error);
     if (filesystem_error) {
         return Win32Failure(FileAssociationError::filesystem,
-                            L"create shortcut directory",
+                            i18n::Literal(L"create shortcut directory"),
                             static_cast<DWORD>(filesystem_error.value()));
     }
 
@@ -1441,7 +1442,7 @@ FileAssociationResult FileAssociationBackend::CreateShortcut(
         status = link->SetIconLocation(icon_path.c_str(), options.icon_index);
     if (FAILED(status))
         return HResultFailure(FileAssociationError::com,
-                              L"configure IShellLinkW", status);
+                              i18n::Literal(L"configure IShellLinkW"), status);
 
     IPersistFile* raw_persist = nullptr;
     status = link->QueryInterface(IID_IPersistFile,

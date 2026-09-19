@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/wtl_runtime.h"
@@ -76,10 +77,7 @@ constexpr int kOptionsRelated = 0xe912;
 constexpr int kOptionsDiscordLyrics = 0xe913;
 
 std::wstring AlbumOptionText(UINT id) {
-    wchar_t text[256]{};
-    const int length = LoadStringW(GetModuleHandleW(nullptr), id, text,
-                                   static_cast<int>(std::size(text)));
-    return {text, static_cast<size_t>(length)};
+    return i18n::ResourceText(GetModuleHandleW(nullptr), id);
 }
 
 void PopulateAlbumBackgroundOptions(HWND dialog, HINSTANCE instance,
@@ -271,26 +269,7 @@ const WORD* SkipDialogString(const WORD* cursor) {
 }
 
 std::wstring DialogCaption(HMODULE module, UINT identifier) {
-    const HRSRC resource = module
-        ? FindResourceW(module, MAKEINTRESOURCEW(identifier), RT_DIALOG)
-        : nullptr;
-    const HGLOBAL loaded = resource ? LoadResource(module, resource) : nullptr;
-    const auto* words = loaded
-        ? static_cast<const WORD*>(LockResource(loaded)) : nullptr;
-    if (!words) return {};
-
-    const WORD* cursor = words;
-    if (cursor[0] == 1 && cursor[1] == 0xffff) {
-        // DLGTEMPLATEEX: dlgVer/signature, three DWORDs, cDlgItems and rect.
-        cursor += 2 + 6 + 1 + 4;
-    } else {
-        // DLGTEMPLATE: style/exStyle, cdit and rect.
-        cursor += 4 + 1 + 4;
-    }
-    cursor = SkipDialogString(cursor); // menu
-    cursor = SkipDialogString(cursor); // class
-    if (*cursor == 0 || *cursor == 0xffff) return {};
-    return std::wstring(reinterpret_cast<const wchar_t*>(cursor));
+    return i18n::DialogCaption(module, identifier);
 }
 
 void SetChecked(HWND dialog, int control, bool checked) {
@@ -2020,7 +1999,7 @@ bool EditGradientProfile(HWND owner, HMODULE resources, int& count,
                          std::array<COLORREF, 3>& colors) {
     GradientProfileDialogContext value{resources, std::clamp(count, 1, 3),
                                        colors};
-    if (DialogBoxParamW(resources, MAKEINTRESOURCEW(386), owner,
+    if (ShowWtlModalDialog(resources, MAKEINTRESOURCEW(386), owner,
                         GradientProfileDialogProc,
                         reinterpret_cast<LPARAM>(&value)) != 1) return false;
     count = value.count;
@@ -2148,7 +2127,7 @@ bool EditDesktopProfile(HWND owner, HMODULE resources,
                         settings::DesktopLyricColorProfile& profile,
                         const settings::DesktopLyricColorProfile& defaults) {
     DesktopProfileDialogContext value{resources, profile, defaults};
-    if (DialogBoxParamW(resources, MAKEINTRESOURCEW(387), owner,
+    if (ShowWtlModalDialog(resources, MAKEINTRESOURCEW(387), owner,
                         DesktopProfileDialogProc,
                         reinterpret_cast<LPARAM>(&value)) != 1) return false;
     profile = std::move(value.working);
@@ -2236,7 +2215,7 @@ std::optional<std::filesystem::path> ChooseOptionsProfileFile(
 }
 
 UINT TrackProfileTransferMenu(HWND dialog, HMODULE resources, int control) {
-    HMENU menu = LoadMenuW(resources, MAKEINTRESOURCEW(158));
+    HMENU menu = i18n::LoadMenu(resources, MAKEINTRESOURCEW(158));
     const HMENU popup = menu ? GetSubMenu(menu, 0) : nullptr;
     UINT command{};
     if (popup) {
@@ -2265,7 +2244,7 @@ UINT TrackDesktopProfileMenu(
     HWND dialog, HMODULE resources, int control,
     const std::array<settings::DesktopLyricColorProfile, 3>& profiles,
     int selected) {
-    HMENU menu = LoadMenuW(resources, MAKEINTRESOURCEW(388));
+    HMENU menu = i18n::LoadMenu(resources, MAKEINTRESOURCEW(388));
     const HMENU popup = menu ? GetSubMenu(menu, 0) : nullptr;
     if (!popup) {
         if (menu) DestroyMenu(menu);
@@ -3267,7 +3246,7 @@ void PlayerWindow::CheckStartupAssociations() {
     const bool user_confirmed = !settings_.player.auto_associate;
     if (!settings_.player.auto_associate) {
         AssociationPromptState prompt{&settings_.player.auto_associate};
-        const INT_PTR answer = DialogBoxParamW(
+        const INT_PTR answer = ShowWtlModalDialog(
             ResourceModule(), MAKEINTRESOURCEW(0x17a), window_,
             YesNoDialogProc, reinterpret_cast<LPARAM>(&prompt));
         if (answer == -1) return;
@@ -4095,10 +4074,10 @@ void PlayerWindow::InitializeOptionsShell() {
         reinterpret_cast<WPARAM>(font), TRUE);
     int link_x = 8 + related_width + 4;
     for (size_t index = 0; index < kProjectLinks.size(); ++index) {
-        const std::wstring_view label{kProjectLinks[index].label};
+        const std::wstring_view label{ProjectLinkLabel(kProjectLinks[index])};
         const int width = text_width(label);
         const HWND link = CreateWindowExW(
-            0, WC_STATICW, kProjectLinks[index].label,
+            0, WC_STATICW, label.data(),
             WS_CHILD | WS_VISIBLE | SS_NOTIFY,
             link_x, close_bounds.top + 6, width, button_height - 6, options_window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLinkFirst + index)),
@@ -4290,7 +4269,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         auto version = ResourceText(0x8299);
         version += L" (Unicode)";
         SetDlgItemTextW(dialog, 1011, version.c_str());
-        SetDlgItemTextW(dialog, 1005, L"nanling与社区");
+        SetDlgItemTextW(dialog, 1005, i18n::Literal(L"nanling与社区"));
         SetDlgItemTextW(dialog, 1040, build::kCompletionDate);
         // RT_DIALOG 200 uses the shared IDC_STATIC (-1) for its captions.
         // Replace only the date caption, not the other anonymous labels.
@@ -4298,12 +4277,15 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             wchar_t caption[32]{}, klass[16]{};
             GetClassNameW(control, klass, static_cast<int>(std::size(klass)));
             GetWindowTextW(control, caption, static_cast<int>(std::size(caption)));
-            if (_wcsicmp(klass, L"Static") == 0 && std::wstring_view(caption) == L"完成日期:")
-                SetWindowTextW(control, L"构建日期:");
+            if (_wcsicmp(klass, L"Static") == 0 &&
+                (std::wstring_view(caption) == L"完成日期:" ||
+                 std::wstring_view(caption) == i18n::Text(L"完成日期:",
+                    "ttpres/dialog/200/control/4294967295/3")))
+                SetWindowTextW(control, i18n::Literal(L"构建日期:"));
             return TRUE;
         }, 0);
         SetDlgItemTextW(dialog, 1009, ResourceText(0x80).c_str());
-        SetDlgItemTextW(dialog, 1020, L"社区版");
+        SetDlgItemTextW(dialog, 1020, i18n::Literal(L"社区版"));
         // The resource placeholders are intentionally hidden.  AboutPage's
         // window paint hook uses their rectangles just like FUN_0049227D,
         // so the logo/icon are part of the page rather than child controls.
@@ -4319,7 +4301,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         // recovered control ID/command path, but replace the retired service
         // wording.  DiscordApplicationId is intentionally XML-only.
         SetDlgItemTextW(dialog, 2188,
-                        L"向 Discord 发送播放的歌曲信息");
+                        i18n::Literal(L"向 Discord 发送播放的歌曲信息"));
         // Community-only option: keep the original ttpres dialog usable.
         // The free right-hand cell beside the shutdown time is inside its
         // Options group. Dialog units/font follow the loaded template/DPI.
@@ -4327,7 +4309,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             RECT bounds{159, 109, 267, 119};
             MapDialogRect(dialog, &bounds);
             const HWND checkbox = CreateWindowExW(
-                0, WC_BUTTONW, L"向 Discord 发送歌词",
+                0, WC_BUTTONW, i18n::Literal(L"向 Discord 发送歌词"),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 bounds.left, bounds.top, bounds.right - bounds.left,
                 bounds.bottom - bounds.top, dialog,
@@ -4756,7 +4738,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             fallback.backend = DeviceBackendFromKey(
                 fallback.key, fallback.wave_device_id);
             fallback.name = fallback.key;
-            if (fallback.name.empty()) fallback.name = L"Unavailable device";
+            if (fallback.name.empty()) fallback.name = i18n::Literal(L"Unavailable device");
             fallback.details_resolved = true;
             options_device_entries_.push_back(std::move(fallback));
         }
@@ -6594,8 +6576,8 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 const auto selected = ChooseOptionsProfileFile(
                     dialog, true, playlist ? L"ttpl_cfg" : L"ttlr_cfg",
                     history, playlist
-                        ? L"Playlist Profile (*.ttpl_cfg)"
-                        : L"Lyrics Profile (*.ttlr_cfg)");
+                        ? i18n::Literal(L"Playlist Profile (*.ttpl_cfg)")
+                        : i18n::Literal(L"Lyrics Profile (*.ttlr_cfg)"));
                 if (selected) {
                     // FUN_0042918D passes the history string as lpstrFile, so
                     // a chosen path is retained even when profile parsing
@@ -6630,8 +6612,8 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 const auto selected = ChooseOptionsProfileFile(
                     dialog, false, playlist ? L"ttpl_cfg" : L"ttlr_cfg",
                     history, playlist
-                        ? L"Playlist Profile (*.ttpl_cfg)"
-                        : L"Lyrics Profile (*.ttlr_cfg)");
+                        ? i18n::Literal(L"Playlist Profile (*.ttpl_cfg)")
+                        : i18n::Literal(L"Lyrics Profile (*.ttlr_cfg)"));
                 if (selected) {
                     history = *selected;
                     if (playlist)
@@ -6955,7 +6937,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 return TRUE;
             }
             if (control == 2106 && notification == BN_CLICKED) {
-                HMENU menu = LoadMenuW(ResourceModule(), MAKEINTRESOURCEW(154));
+                HMENU menu = i18n::LoadMenu(ResourceModule(), MAKEINTRESOURCEW(154));
                 const HMENU popup = menu ? GetSubMenu(menu, 0) : nullptr;
                 UINT command{};
                 if (popup) {

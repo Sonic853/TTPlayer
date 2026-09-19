@@ -1,4 +1,5 @@
 #include "ttplayer/plugins/plugin_manager.h"
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/core/text.h"
 
 #include <algorithm>
@@ -1129,13 +1130,13 @@ HRESULT PluginManager::PrepareEncoderDependencies(
                 path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
             if (!module) {
                 const DWORD error = GetLastError();
-                if (diagnostic) *diagnostic = L"Unable to load Nero component: " + path.wstring();
+                if (diagnostic) *diagnostic = i18n::Text(L"Unable to load Nero component: ") + path.wstring();
                 return HRESULT_FROM_WIN32(error ? error : ERROR_MOD_NOT_FOUND);
             }
             state->modules.push_back(module);
         }
         if (!GetProcAddress(state->modules.back(), "NERO_PLUGIN_GetPrimaryAudioObject")) {
-            if (diagnostic) *diagnostic = L"Aac.dll has no NERO_PLUGIN_GetPrimaryAudioObject export";
+            if (diagnostic) *diagnostic = i18n::Literal(L"Aac.dll has no NERO_PLUGIN_GetPrimaryAudioObject export");
             return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
         }
         return S_OK;

@@ -805,6 +805,36 @@ LyricSettings::LyricSettings() {
     fullscreen_font_valid = true;
 }
 
+std::wstring LoadRuntimeLanguage(const std::filesystem::path& runtime_directory) noexcept {
+    try {
+        if (runtime_directory.empty()) return L"auto";
+        auto source = runtime_directory / kSettingsFileName;
+        std::error_code error;
+        if (!std::filesystem::exists(source, error)) {
+            if (error) return L"auto";
+            source = runtime_directory / L"TTPlayer.xml";
+        }
+        // An existing but malformed new file must not revive the old language.
+        ComInit com;
+        if (FAILED(com.hr) && com.hr != RPC_E_CHANGED_MODE) return L"auto";
+        ComPtr<IXMLDOMDocument> document;
+        if (FAILED(CoCreateInstance(__uuidof(DOMDocument60), nullptr,
+                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(document.GetAddressOf())))) return L"auto";
+        document->put_async(VARIANT_FALSE);
+        document->put_resolveExternals(VARIANT_FALSE);
+        document->put_validateOnParse(VARIANT_FALSE);
+        VARIANT_BOOL loaded{};
+        if (FAILED(document->load(_variant_t(source.c_str()), &loaded)) ||
+            loaded != VARIANT_TRUE) return L"auto";
+        const auto general = SelectOwned(document.Get(), L"/ttplayer/General");
+        auto language = StringAttr(general.Get(), L"Language");
+        if (!language.empty()) return language;
+    } catch (...) {
+        // Translation must never prevent the original startup error message.
+    }
+    return L"auto";
+}
+
 Settings LoadLegacyXml(const std::filesystem::path& path) {
     ComInit com; if (FAILED(com.hr) && com.hr != RPC_E_CHANGED_MODE) throw std::runtime_error("COM init failed");
     ComPtr<IXMLDOMDocument> document;
@@ -878,6 +908,8 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
             n,L"MenuBarPlayList",s.general.menu_bar_playlist ? 1 : 0)!=0;
         s.general.scroll_title=IntAttr(
             n,L"ScrollTitle",s.general.scroll_title ? 1 : 0)!=0;
+        if (auto language=StringAttr(n,L"Language"); !language.empty())
+            s.general.language=std::move(language);
         const auto discord_switch=Attribute(n,L"SendTitleToDiscord");
         s.general.discord_sync_lyrics=IntAttr(
             n,L"DiscordSyncLyrics",s.general.discord_sync_lyrics ? 1 : 0)!=0;
@@ -1650,6 +1682,7 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"MenuBarPlayList",
                      settings.general.menu_bar_playlist ? 1 : 0);
         SetAttribute(element,L"ScrollTitle",settings.general.scroll_title ? 1 : 0);
+        SetAttribute(element,L"Language",settings.general.language);
         SetAttribute(element,L"SendTitleToDiscord",
                      settings.general.send_title_to_msn ? 1 : 0);
         SetAttribute(element,L"DiscordSyncLyrics",

@@ -12,6 +12,8 @@
 namespace ttplayer::settings {
 inline constexpr wchar_t kSettingsFileName[] = L"TTPlayerRebuild.xml";
 struct GeneralSettings {
+    // auto: Windows UI language; source: unchanged resource/code text.
+    std::wstring language{L"auto"};
     bool startup_minimize{};
     bool tray_icon{true};
     bool fade_windows{true};
@@ -422,6 +424,9 @@ Settings LoadLegacyXml(const std::filesystem::path& path);
 // Import EXE-local TTPlayer.xml only when the new file is absent; never save
 // back to the old file. An existing rebuild config always takes precedence.
 Settings LoadRuntimeSettings(const std::filesystem::path& runtime_directory);
+// Read only General/@Language before dependency initialization. Do not create
+// Settings (its default skin colors load DLLs) or migrate/write configuration.
+std::wstring LoadRuntimeLanguage(const std::filesystem::path& runtime_directory) noexcept;
 bool LoadPlaylistProfile(const std::filesystem::path& path,
                          PlaylistSettings& playlist);
 bool LoadPlaylistOptionsProfile(const std::filesystem::path& path,

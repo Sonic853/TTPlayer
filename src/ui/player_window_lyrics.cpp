@@ -1,3 +1,5 @@
+#include "ttplayer/i18n/i18n.h"
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_window.h"
 #include "ttplayer/ui/player_window.h"
@@ -193,7 +195,7 @@ std::optional<int> PromptLyricAdjustment(HMODULE resources, HWND owner,
     INITCOMMONCONTROLSEX common{sizeof(common), ICC_UPDOWN_CLASS};
     InitCommonControlsEx(&common);
     LyricAdjustmentDialogState state{previous};
-    const INT_PTR result = DialogBoxParamW(
+    const INT_PTR result = ShowWtlModalDialog(
         resources, MAKEINTRESOURCEW(kLyricAdjustmentDialog), owner,
         LyricAdjustmentDialogProc, reinterpret_cast<LPARAM>(&state));
     return result == IDOK ? std::optional<int>(state.value) : std::nullopt;
@@ -2705,7 +2707,7 @@ bool PlayerWindow::SaveLyricEditor(bool save_as, bool automatic) {
         // FUN_0044D6F1 uses 0x8181 for Save As; the ordinary 0x8022 path in
         // FUN_0044D824 uses the adjacent 0x8182 failure text.
         std::wstring message = ResourceText(save_as ? 0x8181 : 0x8182);
-        if (message.empty()) message = L"Failed to save lyric file %s.";
+        if (message.empty()) message = i18n::Literal(L"Failed to save lyric file %s.");
         if (const size_t marker = message.find(L"%s");
             marker != std::wstring::npos)
             message.replace(marker, 2, target.wstring());
@@ -2737,7 +2739,7 @@ bool PlayerWindow::SaveModifiedLyrics() {
     struct Reset { bool& value; ~Reset() { value = false; } } reset{lyric_save_in_progress_};
     if (settings_.lyric.lyric_save_mode == 1) {
         auto question = ResourceText(lyrics_embedded_ ? 0x817c : 0x817d);
-        if (question.empty()) question = L"The lyric file was modified. Save it?";
+        if (question.empty()) question = i18n::Literal(L"The lyric file was modified. Save it?");
         if (MessageBoxW(lyric_window_ ? lyric_window_ : window_, question.c_str(),
             ResourceText(0x80).c_str(), MB_ICONQUESTION | MB_YESNO) != IDYES) return false;
     }
@@ -3339,7 +3341,7 @@ void PlayerWindow::ShowLyricContextMenu(POINT screen_point) {
         return;
     }
     HMENU menu = DetachFirstPopup(
-        LoadMenuW(ResourceModule(), MAKEINTRESOURCEW(
+        i18n::LoadMenu(ResourceModule(), MAKEINTRESOURCEW(
             lyric_editor_ ? kMenuLyricEditor : kMenuLyricDisplay)));
     if (!menu) return;
     if (lyric_editor_) PrepareLyricEditorMenu(menu);
@@ -3362,7 +3364,7 @@ void PlayerWindow::ShowLyricContextMenu(POINT screen_point) {
 void PlayerWindow::ShowFullScreenLyricContextMenu(POINT screen_point) {
     if (!lyric_control_ || context_menu_open_ || !IsWindowEnabled(window_))
         return;
-    HMENU menu = DetachFirstPopup(LoadMenuW(
+    HMENU menu = DetachFirstPopup(i18n::LoadMenu(
         ResourceModule(), MAKEINTRESOURCEW(kMenuLyricDisplay)));
     if (!menu) return;
     PrepareFullScreenLyricMenu(menu);
@@ -3458,7 +3460,7 @@ void PlayerWindow::PrepareLyricMenu(HMENU menu, bool fullscreen_popup) const {
         existing.fMask = MIIM_SUBMENU;
         GetMenuItemInfoW(parent, kMenuFullscreen, FALSE, &existing);
         if (!existing.hSubMenu) {
-            HMENU fullscreen = DetachFirstPopup(LoadMenuW(
+            HMENU fullscreen = DetachFirstPopup(i18n::LoadMenu(
                 ResourceModule(), MAKEINTRESOURCEW(kMenuFullscreen)));
             if (fullscreen) {
                 MENUITEMINFOW information{sizeof(information)};

@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_window.h"
 #include "ttplayer/ui/player_window.h"
@@ -926,7 +927,7 @@ void PlayerWindow::ShowEqualizerProfileMenu(POINT screen_point) {
     // contains Recommended, Custom, the category submenu, Enable EQ and
     // Dolby Surround. Only the preset placeholder is replaced at runtime.
     HMENU menu = DetachFirstPopup(
-        LoadMenuW(ResourceModule(), MAKEINTRESOURCEW(kMenuEqualizer)));
+        i18n::LoadMenu(ResourceModule(), MAKEINTRESOURCEW(kMenuEqualizer)));
     if (!menu) return;
     if (HMENU profiles = GetSubMenu(menu, 2)) {
         DeleteMenu(profiles, 0, MF_BYPOSITION); // resource "<>" placeholder
@@ -995,10 +996,9 @@ bool PlayerWindow::HandleEqualizerCommand(UINT command) {
             settings_.equalizer.surround != 0 ? 0 : 8;
         ApplyEqualizer();
     } else if (command == kEqCommandLoad || command == kEqCommandSave) {
-        const wchar_t filter[] =
-            // Literal at VA 0053B49C; the misspelling is present in 5.7.9.
-            L"Equlizer Profile (*.tteq_cfg)\0*.tteq_cfg\0\0";
-        const auto filters = ParseLegacyDialogFilter(filter);
+        // Keep the original spelling as fallback; only translate the label.
+        const std::vector<ModernDialogFilter> filters{{
+            i18n::Text(L"Equlizer Profile (*.tteq_cfg)"), L"*.tteq_cfg"}};
         std::optional<std::filesystem::path> file;
         if (command == kEqCommandLoad) {
             ModernOpenFileOptions dialog;

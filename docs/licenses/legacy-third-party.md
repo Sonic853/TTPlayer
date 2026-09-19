@@ -1,6 +1,7 @@
 # Legacy Windows build dependencies
 
-The legacy executable includes unmodified portions of:
+The legacy executable and the optional ttp_i18n.dll shared by both player
+editions include unmodified portions of:
 
 - YY-Thunks 1.2.2, MIT. Copyright (c) 2018 Chuyu-Team.
   Source: https://github.com/Chuyu-Team/YY-Thunks/tree/v1.2.2

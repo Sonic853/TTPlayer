@@ -1,3 +1,5 @@
+#include "ttplayer/i18n/i18n.h"
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/player_window.h"
 
 #include "player_window_internal.h"
@@ -31,7 +33,7 @@ INT_PTR CALLBACK ReportDialogProc(HWND dialog, UINT message,
         CheckRadioButton(dialog, kReportUnavailable, kReportWrongSong, kReportUnavailable);
         // The resource's 0x84D0 acknowledgement is only valid AFTER an
         // actual submission. The optional reporting backend is absent.
-        SetDlgItemTextW(dialog, kReportStatus, L"报告服务不可用，尚未提交。");
+        SetDlgItemTextW(dialog, kReportStatus, i18n::Literal(L"报告服务不可用，尚未提交。"));
         for (int control : {IDOK, kReportUnavailable, kReportWrongSong})
             EnableWindow(GetDlgItem(dialog, control), FALSE);
         SendMessageW(dialog, DM_SETDEFID, IDCANCEL, 0);
@@ -90,7 +92,7 @@ bool PlayerWindow::HandleLegacyPlaylistNetworkCommand(UINT command) {
         ReportDialogState state;
         state.track = BuildLegacyReportTrackText(
             *track, ResourceText(0x84d1));
-        const INT_PTR result = DialogBoxParamW(
+        const INT_PTR result = ShowWtlModalDialog(
             ResourceModule(), MAKEINTRESOURCEW(kReportDialog),
             playlist_window_ ? playlist_window_ : window_, ReportDialogProc,
             reinterpret_cast<LPARAM>(&state));

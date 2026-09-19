@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_runtime.h"
 #include <atlhost.h>
 #include "lyric_upload_window.h"
@@ -22,9 +23,7 @@ struct Bstr {
     ~Bstr() { SysFreeString(value); }
 };
 std::wstring Text(UINT id) {
-    wchar_t text[512]{};
-    LoadStringW(GetModuleHandleW(nullptr), id, text, static_cast<int>(std::size(text)));
-    return text;
+    return i18n::ResourceText(GetModuleHandleW(nullptr), id);
 }
 
 // ATL owns the WebBrowser's OLE container. This object retains only the

@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/desktop_lyrics.h"
 #include "ttplayer/ui/desktop_lyric_layout.h"
@@ -82,12 +83,7 @@ struct ScopedDc final {
 };
 
 std::wstring ResourceText(HMODULE module, UINT identifier) {
-    if (!module) return {};
-    const wchar_t* value{};
-    const int length = LoadStringW(module, identifier,
-        reinterpret_cast<LPWSTR>(&value), 0);
-    return length > 0 && value
-        ? std::wstring(value, static_cast<size_t>(length)) : std::wstring{};
+    return i18n::ResourceText(module, identifier);
 }
 
 std::wstring ResourceCommandText(HMODULE module, UINT identifier) {
@@ -1366,7 +1362,7 @@ private:
             point = POINT{(bounds.left + bounds.right) / 2,
                           (bounds.top + bounds.bottom) / 2};
         }
-        const HMENU root = LoadMenuW(resource_module_,
+        const HMENU root = i18n::LoadMenu(resource_module_,
             MAKEINTRESOURCEW(kMenuDesktopLyric));
         if (!root) return;
         const HMENU popup = GetSubMenu(root, 0);
@@ -1394,7 +1390,7 @@ private:
 
     void ShowProfileMenu() {
         if (!resource_module_ || !settings_) return;
-        const HMENU root = LoadMenuW(resource_module_,
+        const HMENU root = i18n::LoadMenu(resource_module_,
             MAKEINTRESOURCEW(kMenuProfiles));
         if (!root) return;
         const HMENU popup = GetSubMenu(root, 0);
@@ -1426,7 +1422,7 @@ private:
 
     void ShowPlaylistMenu() {
         if (!resource_module_) return;
-        const HMENU root = LoadMenuW(resource_module_,
+        const HMENU root = i18n::LoadMenu(resource_module_,
             MAKEINTRESOURCEW(kMenuPlaylist));
         if (!root) return;
         const HMENU popup = GetSubMenu(root, 0);

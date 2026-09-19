@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
@@ -335,9 +336,8 @@ bool SelectVisualProfileFile(HWND owner, HMODULE resources, bool save,
     static std::filesystem::path last_path;
     // FUN_00493BAF supplies this literal filter to the stock file dialog;
     // the menu captions themselves still come from ttpres MENU 0x9e.
-    constexpr wchar_t filter[] =
-        L"Vis Profile (*.ttvi_cfg)\0*.ttvi_cfg\0\0";
-    const auto filters = ParseLegacyDialogFilter(filter);
+    const std::vector<ModernDialogFilter> filters{{
+        i18n::Text(L"Vis Profile (*.ttvi_cfg)"), L"*.ttvi_cfg"}};
     std::optional<std::filesystem::path> selected;
     if (save) {
         ModernSaveFileOptions options;
@@ -567,7 +567,7 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
             const HWND button = GetDlgItem(dialog, kVisualProfile);
             RECT bounds{};
             GetWindowRect(button, &bounds);
-            const HMENU menu = LoadMenuW(
+            const HMENU menu = i18n::LoadMenu(
                 resources, MAKEINTRESOURCEW(kVisualProfileMenu));
             const HMENU popup = menu ? GetSubMenu(menu, 0) : nullptr;
             const UINT selected = popup ? TrackPlayerPopupMenu(
