@@ -1388,6 +1388,7 @@ PlayerWindow::~PlayerWindow() {
     RevokeFileDropTarget(playlist_window_);
     RevokeFileDropTarget(window_);
     StopVisualWorker();
+    CancelWaveTrackChange();
     PollFadingAudio(true);
     audio_->Stop();
     fading_audio_.clear(); // lifetime barrier before borrowed AddIns are unloaded
@@ -3119,6 +3120,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             AdvanceSkinWindowFade();
         } else if (wparam == kCloseAudioFadeTimer) {
             PollCloseAudioFade();
+        } else if (wparam == kWaveTrackChangeTimer) {
+            PollWaveTrackChange();
         } else if (wparam == kSkinMenuToolTipTimer) {
             ShowQueuedSkinMenuToolTip();
         } else if (wparam == kPlaybackErrorTimer) {
@@ -3172,6 +3175,10 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             PollOnlineLyricSearch();
             PollLyricServices();
             playlists_.FlushDirty(false);
+            if (pending_wave_track_change_) {
+                PollWaveTrackChange(); // fallback if the 10 ms timer is unavailable
+                return 0;
+            }
             if (pending_natural_play_ &&
                 GetTickCount64() >= pending_natural_play_tick_) {
                 pending_natural_play_ = false;
@@ -3217,6 +3224,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
     case WM_CLOSE:
         if (close_after_skin_window_fade_) return 0;
         if (lyric_save_in_progress_) return 0;
+        CancelWaveTrackChange();
         FinishLyricDocument();
         ClearAudioError();
         CompleteSkinWindowFadeForReplacement();
@@ -3256,7 +3264,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             if (target && IsWindow(target)) EnableWindow(target, FALSE);
         }
         PollFadingAudio(true);
-        close_waiting_for_audio_fade_ = audio_->BeginStopFade();
+        close_waiting_for_audio_fade_ = audio_->StopFadePending() || audio_->BeginStopFade();
         if (close_waiting_for_audio_fade_) {
             close_audio_fade_deadline_ = GetTickCount64() +
                 audio::RecoveredStopFadeCloseBudgetMs(
@@ -3279,6 +3287,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         }
         return 0;
     case WM_DESTROY:
+        CancelWaveTrackChange();
         if (playlist_find_dialog_ && IsWindow(playlist_find_dialog_))
             EndDialog(playlist_find_dialog_, IDCANCEL);
         CloseOnlineLyricSearch();
@@ -6248,24 +6257,58 @@ void PlayerWindow::PollFadingAudio(bool cancel) {
     }
 }
 
-void PlayerWindow::PrepareTrackChange(bool same_item) {
+void PlayerWindow::CancelWaveTrackChange() {
+    pending_wave_track_change_.reset();
+    wave_track_change_deadline_ = 0;
+    if (window_) KillTimer(window_, kWaveTrackChangeTimer);
+}
+
+void PlayerWindow::PollWaveTrackChange() {
+    if (!pending_wave_track_change_ || lyric_save_in_progress_ ||
+        close_after_skin_window_fade_ || !random_navigation_requests_.empty()) return;
+    if (!audio_->TryReapStopped() && GetTickCount64() < wave_track_change_deadline_) return;
+    // Removing/replacing the requested row during the fade must not open a
+    // different song accidentally. New explicit requests replace this value.
+    const auto* requested = HasPlaybackTrack()
+        ? &PlaybackPlaylist().Tracks()[*current_] : OpenedTrack();
+    const bool still_requested = requested &&
+        _wcsicmp(requested->path.c_str(), pending_wave_track_change_->path.c_str()) == 0 &&
+        requested->subtrack == pending_wave_track_change_->subtrack;
+    CancelWaveTrackChange();
+    if (still_requested) static_cast<void>(PlayCurrent());
+}
+
+bool PlayerWindow::PrepareTrackChange(bool same_item) {
     // 0045B78E replaces +0x4348, retaining only the most recent outgoing
     // sound. Older cancellation stays owned until its worker actually exits.
     PollFadingAudio(true);
-    if (same_item || !audio_->CanRetainForTrackChange()) return;
+    // Additional clicks replace the destination, not the old curve's start
+    // time. No second WaveOut handle exists during this wait.
+    if (pending_wave_track_change_) return false;
+    if (same_item) return true;
+    if (audio_->BeginWaveOutTrackChange()) {
+        playback_was_active_ = false; // the stop is not natural EOF
+        wave_track_change_deadline_ = GetTickCount64() +
+            audio::RecoveredStopFadeCloseBudgetMs(settings_.playback.fade_duration[3]);
+        if (window_) SetTimer(window_, kWaveTrackChangeTimer,
+                              kWaveTrackChangeIntervalMs, nullptr);
+        return false;
+    }
+    if (!audio_->CanRetainForTrackChange()) return true;
     // A driver/reader ignoring cancellation must not create an unbounded
     // chain of workers on rapid Next presses. Reuse the foreground session
     // through its existing bounded Stop/Play path if two tails still unwind.
-    if (fading_audio_.size() >= 2) return;
+    if (fading_audio_.size() >= 2) return true;
     auto next = audio_->CreateSuccessor();
     fading_audio_.reserve(fading_audio_.size() + 1);
-    if (!audio_->BeginStopFade(true)) return;
+    if (!audio_->BeginStopFade(true)) return true;
     fading_audio_.push_back(audio_);
     {
         // The visualization worker takes a shared snapshot under this lock.
         std::scoped_lock lock(visual_worker_mutex_);
         audio_ = std::move(next);
     }
+    return true;
 }
 
 bool PlayerWindow::PlayCurrent() {
@@ -6287,7 +6330,10 @@ bool PlayerWindow::PlayCurrent() {
     const bool indexed_playback = HasPlaybackTrack();
     const auto* requested = indexed_playback
         ? &PlaybackPlaylist().Tracks()[*current_] : OpenedTrack();
-    if (!requested) return false;
+    if (!requested) {
+        CancelWaveTrackChange();
+        return false;
+    }
     // The decoder request may replace the object which backs opened_track_.
     // Keep a stable value while the engine and metadata paths run.
     const playlist::Track requested_track = *requested;
@@ -6314,7 +6360,11 @@ bool PlayerWindow::PlayCurrent() {
             TrackIntervalMilliseconds(settings_.playback.track_interval);
         return true;
     }
-    PrepareTrackChange(same_item);
+    if (!PrepareTrackChange(same_item)) {
+        pending_wave_track_change_ = requested_track;
+        RefreshPlaybackUi();
+        return true;
+    }
     if (!audio_->Play(requested_track.path, requested_track.subtrack)) {
         taskbar_preview_.Clear();
 #if !defined(TTPLAYER_LEGACY_WINDOWS)
@@ -6736,6 +6786,7 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
 
 void PlayerWindow::Stop() {
     if (lyric_save_in_progress_) return;
+    CancelWaveTrackChange();
     FinishLyricDocument(false);
     random_navigation_requests_.clear();
     media_library_startup_pending_ = false;

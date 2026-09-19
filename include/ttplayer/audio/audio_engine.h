@@ -198,6 +198,9 @@ public:
     // the new sound opens/fades in (CPlayerWnd +0x4344 / +0x4348).
     [[nodiscard]] std::shared_ptr<AudioEngine> CreateSuccessor() const;
     [[nodiscard]] bool CanRetainForTrackChange() const;
+    // WaveOut volume can be shared across handles. Fade on the current
+    // handle, then let the UI open the successor after TryReapStopped().
+    [[nodiscard]] bool BeginWaveOutTrackChange();
     void StopAsync() noexcept { RequestStop(); }
     [[nodiscard]] bool TryReapStopped() noexcept;
     bool PlayWave(const std::filesystem::path& path) { return Play(path); }

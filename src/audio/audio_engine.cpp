@@ -2130,6 +2130,11 @@ bool AudioEngine::TryReapStopped() noexcept {
     return ReapWorker(std::chrono::milliseconds::zero());
 }
 
+bool AudioEngine::BeginWaveOutTrackChange() {
+    if (backend_.load() != Backend::wave_out) return false;
+    return BeginStopFade();
+}
+
 bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
     Stop();
     // The worker may have returned immediately after Stop exhausted its
@@ -3133,14 +3138,16 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         if (!ks_sink && !asio_sink && (buffer.header.dwFlags & WHDR_PREPARED))
             waveOutUnprepareHeader(opened_device, &buffer.header, sizeof(buffer.header));
     }
-    if (!ks_sink && !asio_sink) waveOutClose(opened_device);
-    CloseHandle(completion);
     {
         std::scoped_lock lock(mutex_);
         if (device_ == opened_device) device_ = nullptr;
         if (completion_event_ == completion) completion_event_ = nullptr;
         backend_ = Backend::none;
     }
+    // Revoke shared handles before closing them. Fade/volume/cancellation
+    // commands also hold mutex_ and must never call a just-closed handle.
+    if (!ks_sink && !asio_sink) waveOutClose(opened_device);
+    CloseHandle(completion);
     ClearVisualization();
     if (natural_replay_gain_end)
         replay_gain_commit.Complete(processors.FinishReplayGain());
@@ -3469,7 +3476,6 @@ void AudioEngine::SeekImpl(std::chrono::milliseconds position,
 }
 
 void AudioEngine::RequestStop() noexcept {
-    stop_fade_pending_.store(false, std::memory_order_release);
     stop_requested_ = true;
     state_ = PlaybackState::stopped;
     ClearVisualization();
@@ -3491,6 +3497,9 @@ void AudioEngine::RequestStop() noexcept {
         // handle-registration lock so EOF cannot close/reuse the event first.
         if (completion_event_) SetEvent(completion_event_);
     }
+    // Serial WaveOut navigation may reuse this engine as soon as this flag
+    // clears. Publish completion only after cancellation has finished.
+    stop_fade_pending_.store(false, std::memory_order_release);
 }
 
 bool AudioEngine::ReapWorker(std::chrono::milliseconds timeout) noexcept {
