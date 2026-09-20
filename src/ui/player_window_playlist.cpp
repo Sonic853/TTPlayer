@@ -3248,6 +3248,10 @@ bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
             return true;
         }
     }
+    // Provider-owned windows use their own geometry and tooltip lifecycle.
+    // Never relay their mouse events into the backing native skin's tools.
+    if(external_skin_ && (message.hwnd==window_ || message.hwnd==playlist_window_ ||
+        message.hwnd==equalizer_window_)) return false;
     for (const HWND target : {tooltip_, playlist_item_tooltip_}) {
         if (!target || !IsWindow(target)) continue;
         // Preserve hwnd/time/screen coordinates from the original queued MSG;
@@ -3312,7 +3316,7 @@ void PlayerWindow::AddPlaylistToolTipControl(HWND control,
 void PlayerWindow::UpdateMainToolRects() {
     if (!window_ || !CreateToolTipWindow()) return;
     RemoveToolTipTools(window_);
-    if (!skin_) return;
+    if (external_skin_ || !skin_) return;
 
     std::set<UINT_PTR> registered;
     for (const auto& element : ActiveSkinElements()) {
@@ -3371,7 +3375,7 @@ void PlayerWindow::UpdatePlaylistToolRects() {
                              SWP_NOZORDER | SWP_NOACTIVATE);
         }
     };
-    if (!skin_ || !skin_->Playlist().valid) { park_unused(); return; }
+    if (external_skin_ || !skin_ || !skin_->Playlist().valid) { park_unused(); return; }
     RECT client{};
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
@@ -3493,7 +3497,7 @@ void PlayerWindow::UpdatePlaylistItemTipRects() {
             item = tooltip_tools_.erase(item);
         }
     }
-    if (!skin_ || !skin_->Playlist().valid) return;
+    if (external_skin_ || !skin_ || !skin_->Playlist().valid) return;
 
     RECT client{};
     GetClientRect(playlist_window_, &client);

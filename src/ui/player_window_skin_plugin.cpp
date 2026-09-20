@@ -1,5 +1,7 @@
 #include "ttplayer/ui/player_window.h"
 #include "ttplayer/ui/wtl_menu.h"
+#include "ttplayer/ui/window_drag.h"
+#include "ttplayer/ui/player_runtime_policy.h"
 #include "player_window_internal.h"
 #include "ttplayer/skin/skin_paths.h"
 #include <algorithm>
@@ -26,7 +28,7 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
         if(!module->OwnsInstalledPackage(PlayerRuntimeDirectory()/L"Skin",path) || !module->Probe(path,info)) continue;
         const TtpSkinHost host{sizeof(TtpSkinHost),TTP_SKIN_ABI,this,
             QuerySkinPluginState,QuerySkinPluginTrack,PostSkinPluginCommand,HandleSkinPluginDrag,
-            QuerySkinPluginSelection,PaintSkinPluginVisual};
+            QuerySkinPluginSelection,PaintSkinPluginVisual,QuerySkinPluginTip,ResizeSkinPluginWindow,QuerySkinPluginSpectrum};
         auto next=skin::SkinPluginInstance::Create(module,path,&host);
         if(!next) return false;
         // The native fallback supplies lyrics and application dialogs. Format
@@ -42,22 +44,60 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
             CompleteSkinWindowFadeForReplacement();
             if(close_after_skin_window_fade_) return false;
             if (restore_profile) SaveCurrentSkinProfile();
+            if(IsIconic(window_)) ShowWindow(window_,SW_RESTORE);
             if(mini_mode_) {ToggleMiniMode();CompleteSkinWindowFadeForReplacement();}
+        }
+        const auto previous_player=settings_.player;
+        const auto previous_playlist=settings_.playlist;
+        const auto previous_lyric=settings_.lyric;
+        const auto previous_visual=settings_.visual;
+        auto profile=path;profile+=L".xml";
+        std::wstring state;
+        // Missing geometry in a partial target profile is a default layout,
+        // not permission to inherit the outgoing provider's folded rectangles.
+        auto target_player=settings_.player;
+        SetRectEmpty(&target_player.player_window);
+        SetRectEmpty(&target_player.playlist_window);
+        SetRectEmpty(&target_player.equalizer_window);
+        const bool profile_loaded=restore_profile && settings::LoadSkinVisualProfile(profile,
+            target_player,settings_.playlist,settings_.lyric,settings_.visual,&state);
+        if(profile_loaded) settings_.player=std::move(target_player);
+        TtpSkinLayout layout{};layout.size=sizeof(layout);
+        if(profile_loaded) {
+            layout.windows[0]=settings_.player.player_window;
+            layout.windows[1]=settings_.player.playlist_window;
+            layout.windows[2]=settings_.player.equalizer_window;
+            if(state.size()<std::size(layout.state)) wcscpy_s(layout.state,state.c_str());
+        }
+        if(!next->Layout(layout,true) && layout.state[0]) {
+            // A future/corrupt provider payload must not discard usable saved
+            // rectangles or prevent loading the skin itself.
+            layout.state[0]=0;static_cast<void>(next->Layout(layout,true));
         }
         auto previous=std::move(external_skin_);
         if(previous) previous->Detach();
         if (window_) {
             static_cast<void>(CreatePlaylistWindow(true));
             static_cast<void>(CreateEqualizerWindow(true));
+            if(profile_loaded) ApplySkinProfileWindowState();
         }
         if(window_ && !next->Attach(window_,playlist_window_,equalizer_window_)) {
+            settings_.player=previous_player;settings_.playlist=previous_playlist;
+            settings_.lyric=previous_lyric;settings_.visual=previous_visual;
+            ApplySkinProfileWindowState();
             if(previous) previous->Attach(window_,playlist_window_,equalizer_window_);
-            external_skin_=std::move(previous);return false;
+            external_skin_=std::move(previous);RemovePluginSkinNativeTips();return false;
         }
         external_skin_=std::move(next);
+        UpdateVisualWindowLayout();UpdateVisualFrame();
+        RemovePluginSkinNativeTips();
         settings_.plugin_skin_file=skin::SkinPackageSelector(PlayerRuntimeDirectory()/L"Skin",path);
         settings_.player.mini_mode=false;
-        if(window_) {RefreshPlaybackUi();InvalidateRect(window_,nullptr,FALSE);}
+        if(window_) {
+            ShowWindow(playlist_window_,settings_.player.playlist_visible?SW_SHOWNOACTIVATE:SW_HIDE);
+            ShowWindow(equalizer_window_,settings_.player.equalizer_visible?SW_SHOWNOACTIVATE:SW_HIDE);
+            RefreshPlaybackUi();InvalidateRect(window_,nullptr,FALSE);
+        }
         return true;
     }
     return false;
@@ -81,6 +121,49 @@ bool PlayerWindow::InstallPluginSkin(const std::filesystem::path& path) {
     InvalidateSkinMenuCatalog();
     StartSkinMenuCatalogLoad();
     return loaded;
+}
+void PlayerWindow::RemovePluginSkinNativeTips() {
+    if(!external_skin_) return;
+    for(HWND tip:{tooltip_,playlist_tooltip_,playlist_item_tooltip_})
+        if(IsWindow(tip)) SendMessageW(tip,TTM_POP,0,0);
+    for(HWND owner:{window_,playlist_window_,equalizer_window_,playlist_track_control_})
+        if(owner) RemoveToolTipTools(owner);
+}
+BOOL WINAPI PlayerWindow::QuerySkinPluginTip(void* context,uint32_t action,int32_t value,wchar_t* text,uint32_t count) {
+    if(!context || !text || !count) return FALSE;
+    text[0]=0;
+    try {
+        const auto& self=*static_cast<PlayerWindow*>(context);
+        UINT command{};std::wstring label;
+        switch(action) {
+        case TTP_SKIN_PLAY: command=kCmdPlay;break;
+        case TTP_SKIN_PAUSE: command=kCmdPause;break;
+        case TTP_SKIN_STOP: command=kCmdStopPlayback;break;
+        case TTP_SKIN_PREVIOUS: command=kCmdPrevious;break;
+        case TTP_SKIN_NEXT: command=kCmdNext;break;
+        case TTP_SKIN_OPEN: command=kCmdOpenFile;break;
+        case TTP_SKIN_CLOSE: label=self.ResourceText(8);break;
+        case TTP_SKIN_MINIMIZE: command=0x7dd3;break;
+        case TTP_SKIN_PLAYLIST: command=kCmdShowPlaylist;break;
+        case TTP_SKIN_EQUALIZER: command=kCmdShowEqualizer;break;
+        case TTP_SKIN_OPTIONS: command=kCmdOptions;break;
+        case TTP_SKIN_LYRICS: command=kCmdShowLyrics;break;
+        case TTP_SKIN_PROPERTIES: command=kCmdFileProperties;break;
+        case TTP_SKIN_ALWAYS_ON_TOP: command=kCmdAlwaysOnTop;break;
+        case TTP_SKIN_EQ_ENABLE: command=kEqCommandEnable;break;
+        case TTP_SKIN_EQ_PRESETS: label=self.EqualizerToolText(kEqControlProfile);break;
+        case TTP_SKIN_EQ_VALUE:
+            if(value>=0 && value<=10) label=self.EqualizerToolText(value?kEqSliderFirstBand+value-1:kEqSliderPreamp);
+            break;
+        case TTP_SKIN_LIST_TOOLBAR:
+            if(value>=0 && value<7) label=self.ToolTipText(self.playlist_window_,kPlaylistToolFirst+value);
+            break;
+        default: return FALSE;
+        }
+        if(command) label=self.ToolTipWithHotKey(command,ResourceCommandLabel(self.ResourceModule(),command));
+        if(label.empty()) return FALSE;
+        wcsncpy_s(text,count,label.c_str(),_TRUNCATE);return TRUE;
+    } catch(...) {return FALSE;}
 }
 BOOL WINAPI PlayerWindow::QuerySkinPluginState(void* context,TtpSkinState* state) {
     if(!context || !state || state->size<sizeof(*state)) return FALSE;
@@ -162,6 +245,60 @@ BOOL WINAPI PlayerWindow::HandleSkinPluginDrag(void* context,const TtpSkinDrag* 
         if (self.skin_drag_window_ == source) self.EndSkinMouseCapture();
     }
     return FALSE;
+}
+BOOL WINAPI PlayerWindow::ResizeSkinPluginWindow(void* context,HWND source,SIZE size) {
+    if(!context || !IsWindow(source) || IsIconic(source) ||
+       size.cx<=0 || size.cy<=0 || size.cx>32767 || size.cy>32767) return FALSE;
+    auto& self=*static_cast<PlayerWindow*>(context);
+    if(!self.external_skin_ || (source!=self.window_ && source!=self.playlist_window_ &&
+       source!=self.equalizer_window_) || GetWindowThreadProcessId(source,nullptr)!=GetCurrentThreadId()) return FALSE;
+    try {
+        RECT before{},client{};
+        if(!GetWindowRect(source,&before) || !GetClientRect(source,&client)) return FALSE;
+        const int width=size.cx+(before.right-before.left)-(client.right-client.left);
+        const int height=size.cy+(before.bottom-before.top)-(client.bottom-client.top);
+        const int dy=height-(before.bottom-before.top);
+        struct WindowBounds {HWND window;RECT bounds;};
+        std::vector<WindowBounds> candidates,moving;
+        if(dy && DecodePackedRuntimeOption(self.settings_.general.snap_windows,1,100).enabled) {
+            for(const HWND window:self.RegisteredDragWindows()) {
+                RECT bounds{};
+                if(window!=source && !IsIconic(window) && GetWindowRect(window,&bounds) &&
+                   bounds.top>=before.bottom && bounds.bottom>bounds.top && bounds.right>bounds.left)
+                    candidates.push_back({window,bounds});
+            }
+            // Seed only actual contacts with the moving bottom edge. A nearby
+            // window inside the magnetic distance has not yet been attached.
+            // Then carry the connected group below that edge, including side
+            // branches and hidden windows that will later be shown again.
+            bool added=true;
+            while(added) {
+                added=false;
+                for(auto it=candidates.begin();it!=candidates.end();) {
+                    const auto& r=it->bounds;
+                    bool connected=r.top==before.bottom && r.left<before.right && before.left<r.right;
+                    for(const auto& member:moving)
+                        if(AreDragWindowsAttached(member.bounds,r)) {connected=true;break;}
+                    if(connected) {moving.push_back(*it);it=candidates.erase(it);added=true;}
+                    else ++it;
+                }
+            }
+        }
+        constexpr UINT flags=SWP_NOZORDER|SWP_NOACTIVATE;
+        HDWP batch=BeginDeferWindowPos(static_cast<int>(moving.size()+1));
+        if(batch) batch=DeferWindowPos(batch,source,nullptr,before.left,before.top,width,height,flags);
+        if(batch) for(const auto& member:moving) {
+            batch=DeferWindowPos(batch,member.window,nullptr,member.bounds.left,member.bounds.top+dy,0,0,flags|SWP_NOSIZE);
+            if(!batch) break;
+        }
+        if(batch && EndDeferWindowPos(batch)) return TRUE;
+        // Use the original snapshot even if a deferred update partially ran;
+        // applying a second relative translation would move followers twice.
+        if(!SetWindowPos(source,nullptr,before.left,before.top,width,height,flags)) return FALSE;
+        for(const auto& member:moving)
+            SetWindowPos(member.window,nullptr,member.bounds.left,member.bounds.top+dy,0,0,flags|SWP_NOSIZE);
+        return TRUE;
+    } catch(...) {return FALSE;}
 }
 void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     if(!external_skin_ || close_after_skin_window_fade_) return;

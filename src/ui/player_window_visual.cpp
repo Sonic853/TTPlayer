@@ -597,6 +597,7 @@ public:
         previous_peaks_.assign(static_cast<size_t>(width_), int16_t{});
         scope_.assign(static_cast<size_t>(width_ + 2) * (height_ + 2), 0);
         have_dynamic_frame_ = false;
+        ++spectrum_generation_;
         dream_bits_ = nullptr;
         if (geometry_changed || !surface_dc_ || !surface_bits_)
             RecreateSurface();
@@ -772,6 +773,14 @@ public:
         }
     }
 
+    void SpectrumFrame(TtpSkinSpectrumFrame& frame) const {
+        std::scoped_lock lock(mutex_);
+        frame.type=static_cast<uint32_t>(settings_.type);
+        frame.generation=spectrum_generation_;frame.revision=spectrum_revision_;
+        frame.count=settings_.type==2 && have_dynamic_frame_?256:0;
+        if(frame.count) std::copy_n(analysis_work_.begin()+kAnalysisSamples*2,frame.count,frame.magnitudes);
+    }
+
     void PaintBackgroundOnly(HDC dc, const RECT& bounds) {
         std::scoped_lock lock(mutex_);
         if (!dc || bounds.right <= bounds.left || bounds.bottom <= bounds.top)
@@ -927,6 +936,7 @@ private:
     }
 
     void UpdateSpectrum(const audio::VisualizationSamples&) {
+        ++spectrum_revision_;
         if (spectrum_.size() != static_cast<size_t>(width_))
             spectrum_.assign(static_cast<size_t>(width_), int16_t{});
         if (peaks_.size() != spectrum_.size()) peaks_ = spectrum_;
@@ -1397,6 +1407,7 @@ private:
     std::vector<int16_t> previous_peaks_;
     std::vector<unsigned char> scope_;
     bool have_dynamic_frame_{};
+    uint64_t spectrum_generation_{},spectrum_revision_{};
     std::filesystem::path source_;
     std::wstring fallback_;
     bool thumbnail_interface_{};
@@ -1508,6 +1519,13 @@ void PlayerWindow::StartVisualWorker() {
                 const HWND visual = visual_window_;
                 if (!runtime || !visual || !IsWindow(visual)) continue;
                 runtime->Update(audio->Visualization());
+                if(visual_plugin_embedded_.load(std::memory_order_acquire)) {
+                    // A provider paints into its own bounded surfaces. Never
+                    // obtain the fallback skin child's DC in this mode.
+                    InvalidateRect(window_,nullptr,FALSE);
+                    if(playlist_window_) InvalidateRect(playlist_window_,nullptr,FALSE);
+                    continue;
+                }
                 const HDC dc = GetDC(visual);
                 if (dc) {
                     RECT client{};
@@ -1553,6 +1571,9 @@ void PlayerWindow::ApplySkinVisualSettings() {
 
 void PlayerWindow::UpdateVisualWindowLayout() {
     if (!window_) return;
+    const bool plugin_embedded=external_skin_ && !fullscreen_visual_detached_;
+    visual_plugin_embedded_.store(plugin_embedded,std::memory_order_release);
+    if(plugin_embedded && visual_window_) ShowWindow(visual_window_,SW_HIDE);
     if (!visual_runtime_) {
         visual_runtime_ = std::make_shared<VisualRuntime>();
         visual_runtime_->SetModule(ttpcomm_module_);
@@ -1585,21 +1606,21 @@ void PlayerWindow::UpdateVisualWindowLayout() {
         return;
     }
     const auto* element = FindActiveSkinElement(L"visual");
-    if (!visual_window_ || !element ||
-        element->bounds.right <= element->bounds.left ||
-        element->bounds.bottom <= element->bounds.top) {
+    RECT analysis_bounds=element?element->bounds:RECT{};
+    if(plugin_embedded && IsRectEmpty(&analysis_bounds)) GetClientRect(window_,&analysis_bounds);
+    if (!visual_window_ || IsRectEmpty(&analysis_bounds)) {
         if (visual_window_) ShowWindow(visual_window_, SW_HIDE);
         visual_worker_enabled_.store(false, std::memory_order_release);
         return;
     }
-    const int width = element->bounds.right - element->bounds.left;
-    const int height = element->bounds.bottom - element->bounds.top;
-    SetWindowPos(visual_window_, nullptr, element->bounds.left,
-                 element->bounds.top, width, height,
-                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
+    const int width = analysis_bounds.right - analysis_bounds.left;
+    const int height = analysis_bounds.bottom - analysis_bounds.top;
+    SetWindowPos(visual_window_, nullptr, analysis_bounds.left,
+                 analysis_bounds.top, width, height,
+                 SWP_NOACTIVATE | SWP_NOZORDER | (plugin_embedded?SWP_HIDEWINDOW:SWP_SHOWWINDOW));
     const auto background = ActiveSkinBackground();
     visual_runtime_->Configure(settings_.visual, {width, height}, false,
-                               background, &element->bounds);
+                               plugin_embedded?skin::SkinImage{}:background, &analysis_bounds);
     const UINT interval = settings_.visual.frames_per_second > 0
         ? std::max(1, 1000 / settings_.visual.frames_per_second) : 50;
     visual_interval_ms_.store(interval, std::memory_order_relaxed);
@@ -1607,6 +1628,10 @@ void PlayerWindow::UpdateVisualWindowLayout() {
                                  std::memory_order_release);
     visual_worker_condition_.notify_all();
     InvalidateRect(visual_window_, nullptr, FALSE);
+    if(plugin_embedded) {
+        InvalidateRect(window_,nullptr,FALSE);
+        if(playlist_window_) InvalidateRect(playlist_window_,nullptr,FALSE);
+    }
 }
 
 void PlayerWindow::UpdateVisualFrame() {
@@ -1633,7 +1658,7 @@ void PlayerWindow::UpdateVisualFrame() {
         // FUN_00457BCF calls FUN_00457600 before invalidating: clear the
         // visible child synchronously instead of waiting for a later UI
         // WM_PAINT (the render worker has already stopped at this point).
-        const HDC dc = GetDC(visual_window_);
+        const HDC dc = external_skin_ && !fullscreen_visual_detached_?nullptr:GetDC(visual_window_);
         if (dc) {
             RECT client{};
             GetClientRect(visual_window_, &client);
@@ -1644,6 +1669,23 @@ void PlayerWindow::UpdateVisualFrame() {
         }
     }
     InvalidateRect(visual_window_, nullptr, FALSE);
+    if(external_skin_ && !fullscreen_visual_detached_) {
+        InvalidateRect(window_,nullptr,FALSE);
+        if(playlist_window_) InvalidateRect(playlist_window_,nullptr,FALSE);
+    }
+}
+
+BOOL WINAPI PlayerWindow::QuerySkinPluginSpectrum(void* context,TtpSkinSpectrumFrame* frame) {
+    if(!context || !frame || frame->size<sizeof(*frame)) return FALSE;
+    try {
+        auto& self=*static_cast<PlayerWindow*>(context);
+        if(!self.visual_runtime_) return FALSE;
+        *frame={};frame->size=sizeof(*frame);
+        self.visual_runtime_->SpectrumFrame(*frame);
+        frame->playback=static_cast<uint32_t>(self.audio_->State());
+        if(frame->playback!=2 && frame->playback!=3) frame->count=0;
+        return TRUE;
+    } catch(...) {return FALSE;}
 }
 
 BOOL WINAPI PlayerWindow::PaintSkinPluginVisual(void* context,HDC dc,const RECT* bounds,
@@ -1652,6 +1694,9 @@ BOOL WINAPI PlayerWindow::PaintSkinPluginVisual(void* context,HDC dc,const RECT*
     try {
         auto& self=*static_cast<PlayerWindow*>(context);
         if(!self.visual_runtime_ || self.settings_.visual.type==0) return FALSE;
+        const int saved=SaveDC(dc);
+        struct RestoreClip {HDC dc;int saved;~RestoreClip(){if(saved) RestoreDC(dc,saved);}} restore{dc,saved};
+        IntersectClipRect(dc,bounds->left,bounds->top,bounds->right,bounds->bottom);
         self.visual_runtime_->Paint(dc,*bounds,colors);
         return TRUE;
     } catch(...) {return FALSE;}
@@ -1659,6 +1704,7 @@ BOOL WINAPI PlayerWindow::PaintSkinPluginVisual(void* context,HDC dc,const RECT*
 
 void PlayerWindow::PaintVisualControl(HDC dc) const {
     if (!dc || !visual_window_) return;
+    if(external_skin_ && !fullscreen_visual_detached_) return;
     RECT client{};
     GetClientRect(visual_window_, &client);
     if (fullscreen_visual_detached_) {

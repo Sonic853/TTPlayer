@@ -2121,8 +2121,6 @@ bool PlayerWindow::LoadStartupSkin(HMODULE module) {
     settings_.plugin_skin_file = requested_plugin;
     if (!requested_plugin.empty() && LoadPluginSkin(skin::ResolveSkinPackagePath(
             PlayerRuntimeDirectory() / L"Skin", requested_plugin))) {
-        static_cast<void>(settings::LoadSkinVisualProfile(CurrentSkinProfilePath(),
-            settings_.player, settings_.playlist, settings_.lyric, settings_.visual));
         settings_.player.mini_mode = false;
     }
     return true;
@@ -2260,6 +2258,7 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
         external_skin_ = std::move(previous_external);
         if (external_skin_)
             external_skin_->Attach(window_, playlist_window_, equalizer_window_);
+        RemovePluginSkinNativeTips();
         return false;
     }
     if (window_ && (profile_loaded || !restore_profile)) ApplySkinProfileWindowState();
@@ -2473,7 +2472,9 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
     }
     if (external_skin_ && !external_skin_->Attach(window_, playlist_window_, equalizer_window_)) {
         external_skin_.reset();
+        UpdateMainToolRects();UpdatePlaylistToolRects();UpdateEqualizerToolRects();
     }
+    RemovePluginSkinNativeTips();
     ApplyWindowShadow();
     if (skinned) {
         // CPlayerApp_CreateMainWindow (004C01CD) passes the sentinel 100 to
@@ -3451,11 +3452,20 @@ void PlayerWindow::SaveCurrentSkinProfile() {
     CaptureWindowState();
     const auto profile = CurrentSkinProfilePath();
     if (profile.empty()) return;
+    std::wstring plugin_state;
+    TtpSkinLayout layout{};layout.size=sizeof(layout);
+    const bool have_layout=external_skin_ && external_skin_->Layout(layout,false);
+    if(have_layout) {
+        settings_.player.player_window=layout.windows[0];
+        settings_.player.playlist_window=layout.windows[1];
+        settings_.player.equalizer_window=layout.windows[2];
+        plugin_state.assign(layout.state,wcsnlen_s(layout.state,std::size(layout.state)));
+    }
     // FUN_0045D5FA captures the outgoing package's windows and invokes the
     // common serializer with DAT_00547744 set before loading the replacement.
     static_cast<void>(settings::SaveSkinVisualProfile(
         profile, settings_.player, settings_.playlist, settings_.lyric,
-        settings_.visual, settings_.source_path));
+        settings_.visual, settings_.source_path,have_layout?&plugin_state:nullptr));
 }
 
 void PlayerWindow::PersistWindowState() {
@@ -3483,14 +3493,7 @@ void PlayerWindow::PersistWindowState() {
     // flags on the next launch.  FUN_0045D5FA uses this same per-skin branch
     // when leaving a package; commit the active package snapshot at shutdown
     // as well, before the root state that owns mini visibility/top-most data.
-    if (skin_ && skin_->Valid()) {
-        const auto profile = CurrentSkinProfilePath();
-        if (!profile.empty()) {
-            static_cast<void>(settings::SaveSkinVisualProfile(
-                profile, settings_.player, settings_.playlist,
-                settings_.lyric, settings_.visual, settings_.source_path));
-        }
-    }
+    SaveCurrentSkinProfile();
     settings::SaveWindowState(settings_.source_path, settings_);
     if (!lyric_associations_.Save())
         OutputDebugStringW(L"TTPlayerRebuild: cannot save lyric associations; previous .rll retained.\n");

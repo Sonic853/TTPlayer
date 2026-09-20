@@ -51,10 +51,11 @@ std::vector<std::shared_ptr<SkinPluginModule>> SkinPluginModule::Discover(const 
         if(!module) continue;
         const auto getter=reinterpret_cast<TtpGetSkinPlugin>(GetProcAddress(module,TTP_SKIN_ENTRY));
         TtpSkinPlugin api{};api.size=sizeof(api);
-        if(!getter || FAILED(getter(TTP_SKIN_ABI,&api)) || api.version!=TTP_SKIN_ABI || api.size<sizeof(api) ||
+        if(!getter || FAILED(getter(TTP_SKIN_ABI,&api)) || api.version!=TTP_SKIN_ABI || api.size<TTP_SKIN_PLUGIN_DECLARATION_SIZE ||
            !api.probe || !api.create || !api.attach || !api.detach || !api.destroy || !api.preview || !api.shade || !api.paint || !api.translate) {
             FreeLibrary(module);continue;
         }
+        if(api.size<sizeof(api)) api.layout=nullptr;
         std::unique_ptr<SkinPluginModule> provider;
         try {provider.reset(new SkinPluginModule(module,api));}
         catch(const std::invalid_argument&) {FreeLibrary(module);continue;}

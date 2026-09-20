@@ -104,8 +104,12 @@ private:
     static BOOL WINAPI QuerySkinPluginTrack(void*, uint32_t, TtpSkinTrack*);
     static uint32_t WINAPI QuerySkinPluginSelection(void*, uint32_t);
     static BOOL WINAPI PaintSkinPluginVisual(void*, HDC, const RECT*, const TtpSkinVisualColors*);
+    static BOOL WINAPI QuerySkinPluginTip(void*, uint32_t, int32_t, wchar_t*, uint32_t);
+    void RemovePluginSkinNativeTips();
     static void WINAPI PostSkinPluginCommand(void*, uint32_t, int32_t);
     static BOOL WINAPI HandleSkinPluginDrag(void*, const TtpSkinDrag*);
+    static BOOL WINAPI ResizeSkinPluginWindow(void*, HWND, SIZE);
+    static BOOL WINAPI QuerySkinPluginSpectrum(void*, TtpSkinSpectrumFrame*);
     void HandleSkinPluginCommand(uint32_t command, int32_t value);
     std::vector<std::shared_ptr<skin::SkinPluginModule>> skin_plugins_;
     std::unique_ptr<skin::SkinPluginInstance> external_skin_;
@@ -845,6 +849,7 @@ private:
     std::mutex visual_worker_mutex_;
     std::atomic_uint visual_interval_ms_{50};
     std::atomic_bool visual_worker_enabled_{};
+    std::atomic_bool visual_plugin_embedded_{};
     int fullscreen_mode_{}; // 0 normal, 1 lyric, 2 visual, 3 lyric+visual
     std::wstring fullscreen_monitor_device_; // active display, survives mode changes
     RECT fullscreen_monitor_rect_{}; // nearest-display fallback after unplugging

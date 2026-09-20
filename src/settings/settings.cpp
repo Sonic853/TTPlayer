@@ -1436,7 +1436,8 @@ bool LoadSkinVisualProfile(const std::filesystem::path& path,
                            PlayerSettings& player,
                            PlaylistSettings& playlist,
                            LyricSettings& lyric,
-                           VisualSettings& visual) {
+                           VisualSettings& visual,std::wstring* plugin_state) {
+    if(plugin_state) plugin_state->clear();
     try {
         ComInit com;
         if(FAILED(com.hr) && com.hr!=RPC_E_CHANGED_MODE) return false;
@@ -1502,6 +1503,10 @@ bool LoadSkinVisualProfile(const std::filesystem::path& path,
         playlist=std::move(next_playlist);
         lyric=std::move(next_lyric);
         visual=std::move(next_visual);
+        if(plugin_state) {
+            if(auto node=SelectOwned(document.Get(),L"/ttplayer/PluginSkin"))
+                *plugin_state=StringAttr(node.Get(),L"State");
+        }
         return true;
     } catch (const _com_error&) {
         return false;
@@ -1515,7 +1520,8 @@ bool SaveSkinVisualProfile(const std::filesystem::path& path,
                            const PlaylistSettings& playlist,
                            const LyricSettings& lyric,
                            const VisualSettings& visual,
-                           const std::filesystem::path& global_settings_path) {
+                           const std::filesystem::path& global_settings_path,
+                           const std::wstring* plugin_state) {
     if(path.empty()) return false;
     ComInit com;
     if(FAILED(com.hr) && com.hr!=RPC_E_CHANGED_MODE) return false;
@@ -1524,6 +1530,12 @@ bool SaveSkinVisualProfile(const std::filesystem::path& path,
     auto document_owner=AdoptCom(document);
 
     static_cast<void>(global_settings_path);
+    if(plugin_state) {
+        if(auto* element=EnsureElement(document,L"PluginSkin")) {
+            auto owner=AdoptCom(element);
+            SetAttribute(element,L"State",*plugin_state);
+        }
+    }
 
     // The profile serializer writes this complete subset even though it
     // intentionally leaves the global Type/FramesPerSec untouched.

@@ -552,7 +552,7 @@ void PlayerWindow::UpdateEqualizerWindowRegion() {
 void PlayerWindow::UpdateEqualizerToolRects() {
     if (!equalizer_window_ || !CreateToolTipWindow()) return;
     RemoveToolTipTools(equalizer_window_);
-    if (!skin_ || !skin_->Equalizer().valid) return;
+    if (external_skin_ || !skin_ || !skin_->Equalizer().valid) return;
     for (const auto& [hit, control] : equalizer_controls_) {
         UINT_PTR identifier{};
         if (hit == kEqHitEnabled) identifier = kEqCommandEnable;

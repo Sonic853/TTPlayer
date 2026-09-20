@@ -37,6 +37,9 @@ public:
     void Shade() { module_->Api().shade(instance_); }
     void Paint(HWND window,HDC dc) const { module_->Api().paint(instance_,window,dc); }
     bool Translate(const MSG& message) const { return module_->Api().translate(instance_,&message)!=FALSE; }
+    bool Layout(TtpSkinLayout& state,bool restore) const {
+        return module_->Api().layout && SUCCEEDED(module_->Api().layout(instance_,&state,restore));
+    }
 private:
     SkinPluginInstance(std::shared_ptr<SkinPluginModule> module,void* instance):module_(std::move(module)),instance_(instance) {}
     std::shared_ptr<SkinPluginModule> module_;

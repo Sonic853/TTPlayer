@@ -1914,7 +1914,7 @@ HRESULT PluginManager::Load(const std::filesystem::path& directory) {
             api.size = sizeof(api);
             info.result = skin_factory(TTP_SKIN_ABI, &api);
             info.registered = SUCCEEDED(info.result) && api.version == TTP_SKIN_ABI &&
-                api.size >= sizeof(api) && api.probe && api.create && api.attach &&
+                api.size >= TTP_SKIN_PLUGIN_DECLARATION_SIZE && api.probe && api.create && api.attach &&
                 api.detach && api.destroy && api.preview && api.shade && api.paint && api.translate &&
                 api.skin_directory && api.extensions;
             if (!info.registered) {

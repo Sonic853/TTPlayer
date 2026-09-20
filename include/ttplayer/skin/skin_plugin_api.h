@@ -64,6 +64,14 @@ typedef struct TtpSkinVisualColors {
     COLORREF background, top, middle, bottom, peak, scope;
 } TtpSkinVisualColors;
 
+// Read-only native analysis snapshot for provider-owned spectrum styles.
+// Magnitudes are the first 256 bins of the host's existing 512-sample FFT.
+typedef struct TtpSkinSpectrumFrame {
+    uint32_t size, type, playback, count;
+    uint64_t generation, revision;
+    int16_t magnitudes[256];
+} TtpSkinSpectrumFrame;
+
 typedef struct TtpSkinHost {
     uint32_t size, version;
     void* context;
@@ -81,6 +89,14 @@ typedef struct TtpSkinHost {
     // Render the native visualization into the supplied rectangle. The optional
     // colors apply to this paint only, without modifying user preferences.
     BOOL (WINAPI *visual)(void*, HDC, const RECT*, const TtpSkinVisualColors*);
+    // Optional UI-thread command label, including the host's configured hotkey.
+    // FALSE means the provider should use its own description. Caller owns text.
+    BOOL (WINAPI *tip)(void*, uint32_t, int32_t, wchar_t*, uint32_t);
+    // Optional synchronous geometry change (e.g. shade/unshade). Keep the
+    // source's top-left fixed and carry windows docked below its old bottom.
+    // Client size is in physical pixels. FALSE requests a single-window fallback.
+    BOOL (WINAPI *resize)(void*, HWND, SIZE);
+    BOOL (WINAPI *spectrum)(void*, TtpSkinSpectrumFrame*);
 } TtpSkinHost;
 #define TTP_SKIN_HOST_V1_SIZE offsetof(TtpSkinHost, drag)
 
@@ -93,6 +109,12 @@ typedef struct TtpSkinInfo {
     uint32_t size;
     wchar_t name[128], author[128];
 } TtpSkinInfo;
+
+typedef struct TtpSkinLayout {
+    uint32_t size;
+    RECT windows[3]; // Screen rectangles: player, playlist, equalizer. Empty = default.
+    wchar_t state[256]; // Provider-owned versioned text; host stores it without parsing.
+} TtpSkinLayout;
 
 typedef struct TtpSkinPlugin {
     uint32_t size, version;
@@ -115,8 +137,11 @@ typedef struct TtpSkinPlugin {
     // the generic host; legacy v1 callers may request only the prefix below.
     const wchar_t* skin_directory;
     const wchar_t* extensions; // e.g. L".wsz;.wal"; no wildcard/native suffixes
-
+    // Optional UI-thread snapshot. restore=TRUE stages state before attach;
+    // FALSE captures live or last non-minimized state. No filesystem access.
+    HRESULT (WINAPI *layout)(void*, TtpSkinLayout*, BOOL restore);
 } TtpSkinPlugin;
 #define TTP_SKIN_PLUGIN_V1_SIZE offsetof(TtpSkinPlugin, skin_directory)
+#define TTP_SKIN_PLUGIN_DECLARATION_SIZE offsetof(TtpSkinPlugin, layout)
 
 typedef HRESULT (WINAPI *TtpGetSkinPlugin)(uint32_t, TtpSkinPlugin*);
