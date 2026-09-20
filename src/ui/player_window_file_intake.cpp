@@ -661,6 +661,9 @@ public:
             if (point_accepted_) {
                 selected = surface_ == FileDropSurface::playlist
                     ? incoming : DROPEFFECT_LINK;
+                if (surface_ == FileDropSurface::playlist && owner_.external_skin_ &&
+                    owner_.external_skin_->Provider()->Api().playlist_drop)
+                    selected = owner_.FileDropEffect(surface_, point, incoming);
             }
         } catch (...) {
             accepted_ = false;
@@ -809,6 +812,17 @@ DWORD PlayerWindow::FileDropEffect(FileDropSurface surface, POINTL point,
     // the region/hit-test path below and ORs LINK into the incoming mask.
     if (surface == FileDropSurface::player) return source_effect;
     if (surface == FileDropSurface::lyric) return DROPEFFECT_LINK;
+    if (external_skin_ && playlist_window_) {
+        TtpSkinPlaylistDrop drop{sizeof(drop),playlist_window_,{point.x,point.y},TTP_SKIN_DROP_PREVIEW,-1};
+        ScreenToClient(playlist_window_,&drop.point);
+        if (external_skin_->PlaylistDrop(drop)) {
+            playlist_list_hover_.reset();
+            playlist_external_dragging_=drop.insertion>=0;
+            playlist_track_drop_row_=drop.insertion>=0
+                ? std::optional<size_t>{static_cast<size_t>(drop.insertion)}:std::nullopt;
+            return drop.insertion>=0?source_effect|DROPEFFECT_LINK:DROPEFFECT_NONE;
+        }
+    }
     if (!playlist_window_ || !playlist_list_control_ ||
         !playlist_track_control_ || !skin_ || !skin_->Playlist().valid)
         return DROPEFFECT_NONE;
@@ -854,6 +868,10 @@ DWORD PlayerWindow::FileDropEffect(FileDropSurface surface, POINTL point,
 }
 
 void PlayerWindow::ClearPlaylistDropCue() noexcept {
+    if (external_skin_ && playlist_window_) {
+        TtpSkinPlaylistDrop drop{sizeof(drop),playlist_window_,{},TTP_SKIN_DROP_LEAVE,-1};
+        external_skin_->PlaylistDrop(drop);
+    }
     const bool changed = playlist_track_drop_row_.has_value() ||
                          playlist_list_hover_.has_value() ||
                          playlist_external_dragging_;
@@ -1516,6 +1534,10 @@ void PlayerWindow::HandleDroppedFiles(FileDropSurface surface, IDataObject* data
 
     if (!playlist_window_ || !skin_ || !skin_->Playlist().valid) return;
     const POINT screen{point.x, point.y};
+    TtpSkinPlaylistDrop drop{sizeof(drop),playlist_window_,screen,TTP_SKIN_DROP_QUERY,-1};
+    ScreenToClient(playlist_window_,&drop.point);
+    const bool provider_drop=external_skin_ && external_skin_->PlaylistDrop(drop);
+    if (provider_drop && drop.insertion<0) return;
     RECT list_bounds{};
     GetWindowRect(playlist_list_control_, &list_bounds);
 
@@ -1523,14 +1545,14 @@ void PlayerWindow::HandleDroppedFiles(FileDropSurface surface, IDataObject* data
     // PlayLists rectangle is not inflated here; a point in the two-pixel
     // transition band therefore follows the Files branch selected by
     // 0048218C.
-    const bool over_catalogue = !settings_.playlist.library_mode &&
+    const bool over_catalogue = !provider_drop && !settings_.playlist.library_mode &&
                                 settings_.playlist.split_on_lists > 0 &&
                                 PtInRect(&list_bounds, screen);
     if (!over_catalogue) {
         POINT track_point = screen;
         ScreenToClient(playlist_track_control_, &track_point);
-        const LRESULT hit_row = OriginalListDropHit(playlist_track_control_,
-                                                    track_point);
+        const LRESULT hit_row = provider_drop?drop.insertion:
+            OriginalListDropHit(playlist_track_control_,track_point);
         const size_t insertion = hit_row >= 0
             ? static_cast<size_t>(hit_row) : ActivePlaylist().Tracks().size();
         auto classified = ClassifyExternalDropPaths(paths);
@@ -1540,7 +1562,8 @@ void PlayerWindow::HandleDroppedFiles(FileDropSurface surface, IDataObject* data
                                           insertion, false,
                                           ImportPlayback::none);
         if (imported || consumed_playlist) {
-            if (playlist_track_control_) SetFocus(playlist_track_control_);
+            const HWND focus=provider_drop?playlist_window_:playlist_track_control_;
+            if (focus) SetFocus(focus);
             if (effect) *effect = DROPEFFECT_LINK;
         }
         return;

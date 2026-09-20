@@ -92,6 +92,15 @@ typedef struct TtpSkinLyricColors {
 // Host-created content widgets remain visible inside a provider-owned frame.
 #define TTP_SKIN_CONTENT_CHILD L"TTPlayer.SkinPlugin.ContentChild.v1"
 
+enum TtpSkinDropPhase { TTP_SKIN_DROP_QUERY, TTP_SKIN_DROP_PREVIEW, TTP_SKIN_DROP_LEAVE };
+typedef struct TtpSkinPlaylistDrop {
+    uint32_t size;
+    HWND window;
+    POINT point; // Playlist-window client coordinates, in physical pixels.
+    uint32_t phase;
+    int32_t insertion; // Output: position in [0, track_count], -1 rejects the point.
+} TtpSkinPlaylistDrop;
+
 typedef struct TtpSkinHost {
     uint32_t size, version;
     void* context;
@@ -184,6 +193,10 @@ typedef struct TtpSkinPlugin {
     // pixels, zero = host default). Query before attach, then overlay the
     // user's saved lyric font; never override it during painting.
     int32_t (WINAPI *lyric_font_height)(void*);
+    // Optional UI-thread external drop geometry/cue. TRUE means the provider
+    // handled the query, including a rejected point. QUERY must not scroll;
+    // PREVIEW updates its insertion cue, LEAVE clears it. Host imports files.
+    BOOL (WINAPI *playlist_drop)(void*, TtpSkinPlaylistDrop*);
 } TtpSkinPlugin;
 #define TTP_SKIN_PLUGIN_V1_SIZE offsetof(TtpSkinPlugin, skin_directory)
 #define TTP_SKIN_PLUGIN_DECLARATION_SIZE offsetof(TtpSkinPlugin, layout)
