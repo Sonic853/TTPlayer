@@ -368,7 +368,7 @@ struct LyricSettings {
     bool auto_save_lyric_tag{};
     bool dont_load_lyric_tag{};
     bool auto_visible{};
-    bool auto_width{true};
+    bool auto_width{};
     bool auto_width_only_vertical{true};
     bool drag_lyric{true};
     bool mouse_wheel_adjust{};

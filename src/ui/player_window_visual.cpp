@@ -2013,8 +2013,8 @@ void PlayerWindow::RestoreLyricControl() {
     fullscreen_lyric_detached_ = false;
     fullscreen_lyric_was_empty_ = false;
     fullscreen_lyric_parent_ = nullptr;
-    RebuildLyricFont(false);
     LayoutLyricControls();
+    RebuildLyricFont(false);
     UpdateLyricScrollTimer();
 }
 

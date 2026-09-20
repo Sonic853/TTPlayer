@@ -1168,9 +1168,9 @@ void PlayerWindow::CreateLyricControls() {
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(0x82dc)),
             instance_, this);
 
+    LayoutLyricControls();
     RebuildLyricFont(false);
     UpdateLyricEditorStyle();
-    LayoutLyricControls();
     UpdateLyricToolRects();
 }
 
@@ -1266,8 +1266,60 @@ void PlayerWindow::RebuildLyricFont(bool repaint) {
         SendMessageW(lyric_control_, WM_SETFONT,
                      reinterpret_cast<WPARAM>(lyric_font_), FALSE);
     if (previous) DeleteObject(previous);
+    ApplyAutoLyricWidth();
     if (repaint && lyric_control_)
         InvalidateRect(lyric_control_, nullptr, FALSE);
+}
+
+void PlayerWindow::ApplyAutoLyricWidth() {
+    // 00449A8F: normal/mini lyric popup only. Fullscreen has AutoFontFS;
+    // external skin providers own their window geometry and resize limits.
+    if (!settings_.lyric.auto_width || fullscreen_lyric_detached_ ||
+        !lyric_window_ || !lyric_control_ || !lyric_font_ ||
+        !skin_ || !skin_->Lyric().valid ||
+        (external_skin_ && external_skin_->Handles(lyric_window_)) ||
+        (settings_.lyric.auto_width_only_vertical && ActiveLyricScrollMode() != 0))
+        return;
+    const auto& layout = skin_->Lyric();
+    if (IsRectEmpty(&layout.resize_rect)) return;
+
+    RECT work{}, player{}, bounds{}, content{};
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0) ||
+        !GetWindowRect(window_, &player) ||
+        !GetWindowRect(lyric_window_, &bounds) ||
+        !GetClientRect(lyric_control_, &content)) return;
+    const HDC dc = GetDC(lyric_control_);
+    if (!dc) return;
+    const HGDIOBJ previous = SelectObject(dc, lyric_font_);
+    LONG widest{};
+    // 0043F0C1 -> 0043E961 uses raw, unwrapped DrawText extents (0xC20).
+    // Measure the entire document once per content/font/options change,
+    // never the current row on the animation timer.
+    for (size_t index = 0; index < lyrics_.lines.size(); ++index) {
+        const auto text = LyricLineText(index);
+        RECT extent{};
+        DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &extent,
+                  DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
+        widest = std::max(widest, extent.right - extent.left);
+    }
+    SelectObject(dc, previous);
+    ReleaseDC(lyric_control_, dc);
+    widest = std::min(widest, work.right - work.left);
+    // Retain the actual skin/mini/transparent margins. Empty lyrics reduce
+    // to the skin's minimum width; fallback prompts do not size the popup.
+    const LONG width = std::max(layout.background.size.cx,
+        bounds.right - bounds.left - (content.right - content.left) + widest);
+    if (width == bounds.right - bounds.left) return;
+    // Preserve the edge beside the player (or the work area's right edge),
+    // rather than recentering the window as the desktop lyric subsystem does.
+    const bool keep_left = player.left < bounds.right && bounds.right != work.right &&
+        (bounds.right != player.right || player.left <= bounds.left);
+    const LONG left = keep_left ? bounds.left : bounds.right - width;
+    if (SetWindowPos(lyric_window_, nullptr, left, bounds.top,
+                     width, bounds.bottom - bounds.top,
+                     SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED)) {
+        GetWindowRect(lyric_window_, &ActiveLyricWindowBounds());
+    }
 }
 
 void PlayerWindow::ApplyFullScreenLyricTransparency() {
@@ -2916,6 +2968,7 @@ void PlayerWindow::LeaveLyricEditor(bool prompt_to_save) {
             lyrics_ = lyrics::ParseLrc(core::WideToUtf8(editor_text));
             ApplyLyricTrimSpaces(lyrics_, settings_.lyric.trim_spaces);
             desktop_lyrics_.SetLyrics(&lyrics_);
+            ApplyAutoLyricWidth();
         }
         catch (const std::exception&) {}
         lyric_document_modified_ = modified && !saved;
@@ -3393,6 +3446,7 @@ void PlayerWindow::LyricDocumentChanged() {
     // Desktop lyrics cache their glyph masks even though the model address
     // stays the same; an InvalidateRect on the normal window is not enough.
     desktop_lyrics_.SetLyrics(&lyrics_);
+    ApplyAutoLyricWidth();
     if (lyric_control_) InvalidateRect(lyric_control_, nullptr, FALSE);
 }
 
@@ -3769,6 +3823,7 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
             lyric_document_modified_ = false;
             ApplyLyricTrimSpaces(lyrics_, settings_.lyric.trim_spaces);
             desktop_lyrics_.SetLyrics(&lyrics_);
+            ApplyAutoLyricWidth();
             lyric_path_.clear();
             associated_lyric_path_.clear();
             lyrics_embedded_ = true;
@@ -3833,8 +3888,8 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
     case kCmdLyricTransparent:
         if (fullscreen_lyric_detached_) return true;
         settings_.lyric.transparent = !settings_.lyric.transparent;
-        RebuildLyricFont(false);
         LayoutLyricControls();
+        RebuildLyricFont(false);
         ApplySkinWindowAlpha(EffectiveSkinWindowAlpha(window_));
         if (lyric_window_) {
             RedrawWindow(lyric_window_, nullptr, nullptr,
@@ -3922,6 +3977,7 @@ void PlayerWindow::ClearLyrics() {
     lyric_document_modified_ = false;
     lyric_document_track_.reset();
     desktop_lyrics_.SetLyrics(&lyrics_);
+    ApplyAutoLyricWidth();
     lyric_path_.clear();
     lyrics_embedded_ = false;
     if (lyric_control_) {
@@ -3970,6 +4026,7 @@ void PlayerWindow::LoadLyricsFrom(const std::filesystem::path& path,
         lyric_path_.clear();
         associated_lyric_path_.clear();
     }
+    ApplyAutoLyricWidth();
     if (lyric_control_) {
         if (fullscreen_lyric_detached_)
             RebuildLyricFont(false);
@@ -4033,6 +4090,7 @@ void PlayerWindow::LoadCurrentLyrics(bool force) {
             lyrics_ = std::move(loaded); lyrics_embedded_ = true;
             ApplyLyricTrimSpaces(lyrics_, settings_.lyric.trim_spaces);
             desktop_lyrics_.SetLyrics(&lyrics_);
+            ApplyAutoLyricWidth();
             if (lyric_control_) InvalidateRect(lyric_control_, nullptr, FALSE);
             ApplyAutoLyricVisibility(); return;
         }
@@ -4090,6 +4148,7 @@ void PlayerWindow::PollLocalLyricSearch() {
         lyrics_ = std::move(result->lyric); lyrics_embedded_ = false;
         ApplyLyricTrimSpaces(lyrics_, settings_.lyric.trim_spaces);
         desktop_lyrics_.SetLyrics(&lyrics_);
+        ApplyAutoLyricWidth();
         AutoEmbedLoadedLyrics();
         if (lyric_control_) {
             if (fullscreen_lyric_detached_) RebuildLyricFont(false);

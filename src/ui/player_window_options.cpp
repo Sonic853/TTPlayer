@@ -5094,6 +5094,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetChecked(dialog, 2152, settings_.lyric.transparent_skin);
         SetChecked(dialog, 2022, settings_.lyric.auto_width);
         SetChecked(dialog, 2023, settings_.lyric.auto_width_only_vertical);
+        EnableWindow(GetDlgItem(dialog, 2023), settings_.lyric.auto_width);
         for (const int control : {1155,1156,1158})
             MakeColorButton(dialog, control);
         const bool layered = LayeredWindowsAvailableForOptions();
@@ -5825,7 +5826,10 @@ bool PlayerWindow::CommitOptionsControl(
         case 2150: settings_.lyric.karaoke_mode = IsChecked(dialog, 2150); break;
         case 2151: settings_.lyric.transparent = IsChecked(dialog, 2151); break;
         case 2152: settings_.lyric.transparent_skin = IsChecked(dialog, 2152); break;
-        case 2022: settings_.lyric.auto_width = IsChecked(dialog, 2022); break;
+        case 2022:
+            settings_.lyric.auto_width = IsChecked(dialog, 2022);
+            EnableWindow(GetDlgItem(dialog, 2023), settings_.lyric.auto_width);
+            break;
         case 2023: settings_.lyric.auto_width_only_vertical = IsChecked(dialog, 2023); break;
         default: return false;
         }
@@ -6023,11 +6027,11 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
     if (all || template_id == 255) ApplyMediaLibraryConfiguration();
     if ((all || template_id == 256 || template_id == 384 ||
          template_id == 385 || template_id == 263) && lyric_window_) {
+        LayoutLyricControls();
         RebuildLyricFont(false);
         UpdateLyricEditorStyle();
         UpdateLyricScrollTimer();
         ApplyFullScreenLyricTransparency();
-        LayoutLyricControls();
         InvalidateRect(lyric_window_, nullptr, FALSE);
     }
     if (all || template_id == 256) {

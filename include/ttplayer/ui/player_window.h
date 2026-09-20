@@ -520,6 +520,7 @@ private:
     void LeaveDesktopLyricMode();
     void UpdateLyricWindowSkin(bool saved_bounds = false);
     void RebuildLyricFont(bool repaint = true);
+    void ApplyAutoLyricWidth();
     void ApplyFullScreenLyricTransparency();
     void UpdateFullScreenLyricInput();
     void DestroyFullScreenLyricInput();
