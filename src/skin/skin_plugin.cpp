@@ -55,7 +55,11 @@ std::vector<std::shared_ptr<SkinPluginModule>> SkinPluginModule::Discover(const 
            !api.probe || !api.create || !api.attach || !api.detach || !api.destroy || !api.preview || !api.shade || !api.paint || !api.translate) {
             FreeLibrary(module);continue;
         }
-        if(api.size<sizeof(api)) api.layout=nullptr;
+        if(api.size<offsetof(TtpSkinPlugin,handles)) api.layout=nullptr;
+        if(api.size<offsetof(TtpSkinPlugin,menu)) api.handles=nullptr;
+        if(api.size<offsetof(TtpSkinPlugin,content_state)) api.menu=nullptr;
+        if(api.size<offsetof(TtpSkinPlugin,lyric_colors)) api.content_state=nullptr;
+        if(api.size<sizeof(api)) api.lyric_colors=nullptr;
         std::unique_ptr<SkinPluginModule> provider;
         try {provider.reset(new SkinPluginModule(module,api));}
         catch(const std::invalid_argument&) {FreeLibrary(module);continue;}
@@ -75,8 +79,8 @@ std::unique_ptr<SkinPluginInstance> SkinPluginInstance::Create(std::shared_ptr<S
     catch(...) {module->Api().destroy(instance);throw;}
 }
 SkinPluginInstance::~SkinPluginInstance() { module_->Api().detach(instance_);module_->Api().destroy(instance_); }
-bool SkinPluginInstance::Attach(HWND player,HWND playlist,HWND equalizer) {
-    const TtpSkinWindows windows{sizeof(TtpSkinWindows),player,playlist,equalizer};
+bool SkinPluginInstance::Attach(HWND player,HWND playlist,HWND equalizer,HWND lyrics) {
+    const TtpSkinWindows windows{sizeof(TtpSkinWindows),player,playlist,equalizer,lyrics};
     return SUCCEEDED(module_->Api().attach(instance_,&windows));
 }
 void SkinPluginInstance::Detach() { module_->Api().detach(instance_); }

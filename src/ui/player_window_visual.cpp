@@ -1508,8 +1508,16 @@ void PlayerWindow::StartVisualWorker() {
             const auto audio = audio_;
             lock.unlock();
             if (stop.stop_requested()) return;
-            if (visual_worker_enabled_.load(std::memory_order_acquire) &&
+            const bool content_enabled=plugin_content_visual_enabled_.load(std::memory_order_acquire) &&
+                lyric_window_ && IsWindowVisible(lyric_window_);
+            if ((visual_worker_enabled_.load(std::memory_order_acquire) || content_enabled) &&
                 audio->State() == audio::PlaybackState::playing) {
+                const auto samples=audio->Visualization();
+                if(content_enabled && plugin_content_runtime_) {
+                    plugin_content_runtime_->Update(samples);
+                    InvalidateRect(lyric_window_,nullptr,FALSE);
+                }
+                if(!visual_worker_enabled_.load(std::memory_order_acquire)) continue;
                 // CPlayerWnd::Run invokes FUN_00457B11 on this worker.  It
                 // updates under the visual object's critical section, then
                 // obtains the child DC and paints immediately; no UI-thread
@@ -1518,7 +1526,7 @@ void PlayerWindow::StartVisualWorker() {
                 const auto runtime = visual_runtime_;
                 const HWND visual = visual_window_;
                 if (!runtime || !visual || !IsWindow(visual)) continue;
-                runtime->Update(audio->Visualization());
+                runtime->Update(samples);
                 if(visual_plugin_embedded_.load(std::memory_order_acquire)) {
                     // A provider paints into its own bounded surfaces. Never
                     // obtain the fallback skin child's DC in this mode.
@@ -1571,12 +1579,21 @@ void PlayerWindow::ApplySkinVisualSettings() {
 
 void PlayerWindow::UpdateVisualWindowLayout() {
     if (!window_) return;
+    plugin_content_visual_type_=-1;
+    if(!external_skin_ || !external_skin_->Handles(lyric_window_) || fullscreen_mode_!=0)
+        plugin_content_visual_enabled_.store(false,std::memory_order_release);
     const bool plugin_embedded=external_skin_ && !fullscreen_visual_detached_;
     visual_plugin_embedded_.store(plugin_embedded,std::memory_order_release);
     if(plugin_embedded && visual_window_) ShowWindow(visual_window_,SW_HIDE);
     if (!visual_runtime_) {
         visual_runtime_ = std::make_shared<VisualRuntime>();
         visual_runtime_->SetModule(ttpcomm_module_);
+    }
+    // Initialize before StartVisualWorker. Both shared pointers then remain
+    // stable for its lifetime; each renderer locks its own frame state.
+    if(!plugin_content_runtime_) {
+        plugin_content_runtime_=std::make_shared<VisualRuntime>();
+        plugin_content_runtime_->SetModule(ttpcomm_module_);
     }
     if (fullscreen_visual_detached_) {
         RECT client{};
@@ -1650,6 +1667,7 @@ void PlayerWindow::UpdateVisualFrame() {
         // step whenever a skin or visual type changes.
     } else if (state == audio::PlaybackState::stopped ||
                state == audio::PlaybackState::failed) {
+        if(plugin_content_runtime_) plugin_content_runtime_->ClearPlayback();
         // CPlayerWnd's stop/failure paths call FUN_00457BCF before the next
         // paint.  That routine clears both animated state and the decoded
         // picture; retaining the previous track's cover after Stop is not an
@@ -1672,6 +1690,7 @@ void PlayerWindow::UpdateVisualFrame() {
     if(external_skin_ && !fullscreen_visual_detached_) {
         InvalidateRect(window_,nullptr,FALSE);
         if(playlist_window_) InvalidateRect(playlist_window_,nullptr,FALSE);
+        if(external_skin_->Handles(lyric_window_)) InvalidateRect(lyric_window_,nullptr,FALSE);
     }
 }
 
@@ -1698,6 +1717,72 @@ BOOL WINAPI PlayerWindow::PaintSkinPluginVisual(void* context,HDC dc,const RECT*
         struct RestoreClip {HDC dc;int saved;~RestoreClip(){if(saved) RestoreDC(dc,saved);}} restore{dc,saved};
         IntersectClipRect(dc,bounds->left,bounds->top,bounds->right,bounds->bottom);
         self.visual_runtime_->Paint(dc,*bounds,colors);
+        return TRUE;
+    } catch(...) {return FALSE;}
+}
+
+void PlayerWindow::SkinPluginContentRects(const RECT& bounds,uint32_t mode,uint32_t visual_type,
+                                          RECT& visual,RECT& lyric,bool& overlay) const {
+    visual=lyric=bounds;overlay=false;
+    if(mode==TTP_SKIN_CONTENT_COMBINED) {
+        const size_t profile=settings_.fullscreen.visual_type?visual_type:0;
+        const int fraction=std::clamp(settings_.fullscreen.lyric_size[profile],0,10);
+        lyric.top+=(10-fraction)*(bounds.bottom-bounds.top)/10;
+        overlay=settings_.fullscreen.position_relation[profile]==1;
+        if(!overlay) visual.bottom=lyric.top;
+    }
+    if(mode==TTP_SKIN_CONTENT_VISUAL) SetRectEmpty(&lyric);
+    if(mode==TTP_SKIN_CONTENT_LYRICS) SetRectEmpty(&visual);
+}
+
+BOOL WINAPI PlayerWindow::PaintSkinPluginContent(void* context,HDC dc,const RECT* bounds,
+                                                uint32_t mode,uint32_t visual_type) {
+    if(!context || !dc || !bounds || IsRectEmpty(bounds) || mode<1 || mode>3 || visual_type>4)
+        return FALSE;
+    try {
+        auto& self=*static_cast<PlayerWindow*>(context);
+        const int saved=SaveDC(dc);
+        if(!saved) return FALSE;
+        struct Restore {HDC dc;int saved;~Restore(){RestoreDC(dc,saved);}} restore{dc,saved};
+        IntersectClipRect(dc,bounds->left,bounds->top,bounds->right,bounds->bottom);
+        FillRect(dc,bounds,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        const bool combined=mode==TTP_SKIN_CONTENT_COMBINED;
+        RECT visual{},lyric{};
+        bool overlay=false;
+        self.SkinPluginContentRects(*bounds,mode,visual_type,visual,lyric,overlay);
+        const bool have_visual=mode!=TTP_SKIN_CONTENT_LYRICS && !IsRectEmpty(&visual) && visual_type!=0;
+        self.plugin_content_visual_enabled_.store(have_visual,std::memory_order_release);
+        if(have_visual && self.plugin_content_runtime_) {
+            auto settings=self.settings_.visual;
+            settings.type=static_cast<int>(visual_type);
+            const SIZE size{visual.right-visual.left,visual.bottom-visual.top};
+            std::filesystem::path source;
+            audio::AudioMetadata metadata;
+            const auto playback=self.audio_->State();
+            if(playback==audio::PlaybackState::playing || playback==audio::PlaybackState::paused) {
+                if(const auto* track=self.PlaybackTrackForUi()) source=track->path;
+                metadata=self.audio_->Metadata();
+            }
+            auto& runtime=*self.plugin_content_runtime_;
+            if(self.plugin_content_visual_type_!=settings.type || self.plugin_content_size_.cx!=size.cx ||
+               self.plugin_content_size_.cy!=size.cy || self.plugin_content_combined_!=combined) {
+                // Reconfigure only at a mode/geometry/settings boundary. Doing
+                // this on every paint would reset spectrum decay and Goom.
+                if(visual_type==4 && combined)
+                    runtime.ConfigureAlbum(settings,size,self.settings_.fullscreen,
+                        self.settings_.lyric.fullscreen_background_color,source,metadata);
+                else runtime.Configure(settings,size,true);
+                self.plugin_content_visual_type_=settings.type;
+                self.plugin_content_size_=size;self.plugin_content_combined_=combined;
+            }
+            if(playback==audio::PlaybackState::playing || playback==audio::PlaybackState::paused)
+                runtime.SetSource(source,self.ResourceText(0x821b),metadata);
+            runtime.Paint(dc,visual);
+        }
+        // RichEdit owns these pixels while editing. Do not keep an animated
+        // lyric frame underneath it that can flash during a child repaint.
+        if(!self.lyric_editor_ && mode!=TTP_SKIN_CONTENT_VISUAL && !IsRectEmpty(&lyric))
+            self.PaintLyricControl(self.lyric_control_,dc,false,&lyric,overlay);
         return TRUE;
     } catch(...) {return FALSE;}
 }
@@ -1876,7 +1961,10 @@ void PlayerWindow::RestoreLyricControl() {
     // FUN_0044ABFC reverses POPUP/CHILD before invoking the generic restore.
     LONG_PTR style = GetWindowLongPtrW(lyric_control_, GWL_STYLE);
     style &= ~static_cast<LONG_PTR>(WS_POPUP);
-    style |= WS_CHILD | WS_VISIBLE;
+    const bool plugin_content=external_skin_ && external_skin_->Handles(lyric_window_);
+    style |= WS_CHILD;
+    if(plugin_content) style &= ~static_cast<LONG_PTR>(WS_VISIBLE);
+    else style |= WS_VISIBLE;
     SetWindowLongPtrW(lyric_control_, GWL_STYLE, style);
 
     SetWindowPos(lyric_control_, nullptr,
@@ -1884,7 +1972,7 @@ void PlayerWindow::RestoreLyricControl() {
         fullscreen_lyric_saved_rect_.top,
         fullscreen_lyric_saved_rect_.right - fullscreen_lyric_saved_rect_.left,
         fullscreen_lyric_saved_rect_.bottom - fullscreen_lyric_saved_rect_.top,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SWP_NOACTIVATE | (plugin_content?SWP_HIDEWINDOW:SWP_SHOWWINDOW));
     SetRectEmpty(&fullscreen_lyric_saved_rect_);
     SetParent(lyric_control_, fullscreen_lyric_parent_);
     if (fullscreen_lyric_was_empty_) {
@@ -2037,7 +2125,7 @@ void PlayerWindow::UpdateFullScreenLayout() {
     DetachLyricControl(lyric, HWND_TOPMOST);
 }
 
-void PlayerWindow::SetFullScreenMode(int mode, HWND origin) {
+void PlayerWindow::SetFullScreenMode(int mode, HWND origin, int visual_type_override) {
     mode = std::clamp(mode, 0, 3);
     if (mode == 0) {
         LeaveFullScreen();
@@ -2066,7 +2154,9 @@ void PlayerWindow::SetFullScreenMode(int mode, HWND origin) {
         if (lyric_editor_) LeaveLyricEditor(true);
         if (lyric_window_) ShowWindow(lyric_window_, SW_HIDE);
     }
-    if ((mode == 2 || mode == 3) &&
+    if(visual_type_override>=0 && visual_type_override<=4)
+        settings_.visual.type=visual_type_override;
+    else if ((mode == 2 || mode == 3) &&
         (settings_.visual.type == 0 || (mode == 2 && settings_.visual.type == 4)))
         settings_.visual.type = 1;
     fullscreen_mode_ = mode;
@@ -2101,6 +2191,10 @@ void PlayerWindow::LeaveFullScreen() {
     RestoreLyricControl();
     settings_.lyric.fullscreen_transparent =
         fullscreen_saved_lyric_transparent_;
+    if(plugin_content_fullscreen_saved_type_>=0) {
+        settings_.visual.type=plugin_content_fullscreen_saved_type_;
+        plugin_content_fullscreen_saved_type_=-1;
+    }
     if (lyric_window_) {
         if (desktop_lyric_mode_) {
             ShowWindow(lyric_window_, SW_HIDE);
@@ -2131,13 +2225,11 @@ void PlayerWindow::LeaveFullScreen() {
     UnregisterHotKey(window_, kFullscreenEscapeHotkey);
 }
 
-void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
-    if (context_menu_open_ || !visual_window_ ||
-        !IsWindowEnabled(window_)) return;
+HMENU PlayerWindow::CreateVisualContextMenu(bool detached,int mode,int type) {
     const HMODULE resources = ResourceModule();
     HMENU popup = DetachFirstPopup(
         LoadMenuW(resources, MAKEINTRESOURCEW(kMenuVisual)));
-    if (!popup) return;
+    if (!popup) return nullptr;
     HMENU fullscreen = DetachFirstPopup(
         LoadMenuW(resources, MAKEINTRESOURCEW(kMenuFullscreen)));
     if (fullscreen) {
@@ -2152,16 +2244,16 @@ void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
     EnableCommand(popup, kCmdFullscreenLyrics, may_enter);
     EnableCommand(popup, kCmdFullscreenVisual, may_enter);
     EnableCommand(popup, kCmdFullscreenAll, may_enter);
-    CheckCommand(popup, kCmdFullscreenLyrics, fullscreen_mode_ == 1);
-    CheckCommand(popup, kCmdFullscreenVisual, fullscreen_mode_ == 2);
-    CheckCommand(popup, kCmdFullscreenAll, fullscreen_mode_ == 3);
+    CheckCommand(popup, kCmdFullscreenLyrics, mode == 1);
+    CheckCommand(popup, kCmdFullscreenVisual, mode == 2);
+    CheckCommand(popup, kCmdFullscreenAll, mode == 3);
 
-    if (fullscreen_visual_detached_) {
+    if (detached) {
         // FUN_00458020 owns the detached-window path.  Its positional and
         // command deletions produce the compact seven-item menu and it uses
         // the saved main window directly as TrackPopupMenu's command owner.
         DeleteMenu(popup, 3, MF_BYPOSITION);
-        if (fullscreen_mode_ == 3) {
+        if (mode == 3) {
             const auto label = FullScreenMenuText(IDS_FULLSCREEN_ALBUM);
             ModifyMenuW(popup, kCmdVisualCover, MF_BYCOMMAND | MF_STRING,
                         kCmdVisualCover, label.c_str());
@@ -2174,15 +2266,9 @@ void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
         if (last >= 0) DeleteMenu(popup, last, MF_BYPOSITION);
         PopulateFullScreenMonitorMenu(popup);
         CheckMenuItem(popup,
-            static_cast<UINT>(kCmdVisualFirst + settings_.visual.type),
+            static_cast<UINT>(kCmdVisualFirst + type),
             MF_BYCOMMAND | MF_CHECKED);
-        context_menu_open_ = true;
-        TrackPlayerPopupMenu(popup, TPM_RIGHTBUTTON, screen_point.x, screen_point.y,
-                       0, window_, nullptr);
-        DestroyMenu(popup);
-        context_menu_open_ = false;
-        PostMessageW(window_, WM_NULL, 0, 0);
-        return;
+        return popup;
     }
 
     // Resource 145 also contains the full-screen host's direct "exit full
@@ -2200,15 +2286,21 @@ void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
     // Keep the complete resource menu here; the compact seven-item variant is
     // selected by the full-screen host, not merely by right-clicking Visual.
     CheckMenuItem(popup,
-        static_cast<UINT>(kCmdVisualFirst + settings_.visual.type),
+        static_cast<UINT>(kCmdVisualFirst + type),
         MF_BYCOMMAND | MF_CHECKED);
+    return popup;
+}
 
+void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
+    if (context_menu_open_ || !visual_window_ || !IsWindowEnabled(window_)) return;
+    const bool detached=fullscreen_visual_detached_;
+    const HMENU popup=CreateVisualContextMenu(detached,fullscreen_mode_,settings_.visual.type);
+    if(!popup) return;
     context_menu_open_ = true;
-    SetForegroundWindow(window_);
-    BeginPopupMenuStyle(popup, true);
+    if(!detached) {SetForegroundWindow(window_);BeginPopupMenuStyle(popup, true);}
     TrackPlayerPopupMenu(popup, TPM_RIGHTBUTTON, screen_point.x, screen_point.y,
                    0, window_, nullptr);
-    EndPopupMenuStyle();
+    if(!detached) EndPopupMenuStyle();
     DestroyMenu(popup);
     context_menu_open_ = false;
     PostMessageW(window_, WM_NULL, 0, 0);

@@ -6,6 +6,8 @@
 #include "ttplayer/skin/skin_paths.h"
 #include <algorithm>
 #include <limits>
+#include <windowsx.h>
+#include <richedit.h>
 
 namespace ttplayer::ui {
 using namespace detail;
@@ -28,7 +30,7 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
         if(!module->OwnsInstalledPackage(PlayerRuntimeDirectory()/L"Skin",path) || !module->Probe(path,info)) continue;
         const TtpSkinHost host{sizeof(TtpSkinHost),TTP_SKIN_ABI,this,
             QuerySkinPluginState,QuerySkinPluginTrack,PostSkinPluginCommand,HandleSkinPluginDrag,
-            QuerySkinPluginSelection,PaintSkinPluginVisual,QuerySkinPluginTip,ResizeSkinPluginWindow,QuerySkinPluginSpectrum};
+            QuerySkinPluginSelection,PaintSkinPluginVisual,QuerySkinPluginTip,ResizeSkinPluginWindow,QuerySkinPluginSpectrum,PaintSkinPluginContent,HandleSkinPluginContentInput};
         auto next=skin::SkinPluginInstance::Create(module,path,&host);
         if(!next) return false;
         // The native fallback supplies lyrics and application dialogs. Format
@@ -51,6 +53,15 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
         const auto previous_playlist=settings_.playlist;
         const auto previous_lyric=settings_.lyric;
         const auto previous_visual=settings_.visual;
+        // As with native skins, apply package defaults first and then overlay
+        // only the attributes present in the target profile. The resulting
+        // settings are shared by Lyrics Show, rendering and the editor.
+        TtpSkinLyricColors colors{sizeof(colors)};
+        if(restore_profile && next->LyricColors(nullptr,colors)) {
+            settings_.lyric.text_color=colors.text;
+            settings_.lyric.highlight_color=colors.highlight;
+            settings_.lyric.background_color=colors.background;
+        }
         auto profile=path;profile+=L".xml";
         std::wstring state;
         // Missing geometry in a partial target profile is a default layout,
@@ -81,14 +92,15 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
             static_cast<void>(CreateEqualizerWindow(true));
             if(profile_loaded) ApplySkinProfileWindowState();
         }
-        if(window_ && !next->Attach(window_,playlist_window_,equalizer_window_)) {
+        if(window_ && !next->Attach(window_,playlist_window_,equalizer_window_,lyric_window_)) {
             settings_.player=previous_player;settings_.playlist=previous_playlist;
             settings_.lyric=previous_lyric;settings_.visual=previous_visual;
             ApplySkinProfileWindowState();
-            if(previous) previous->Attach(window_,playlist_window_,equalizer_window_);
+            if(previous) previous->Attach(window_,playlist_window_,equalizer_window_,lyric_window_);
             external_skin_=std::move(previous);RemovePluginSkinNativeTips();return false;
         }
         external_skin_=std::move(next);
+        UpdateLyricEditorStyle();
         UpdateVisualWindowLayout();UpdateVisualFrame();
         RemovePluginSkinNativeTips();
         settings_.plugin_skin_file=skin::SkinPackageSelector(PlayerRuntimeDirectory()/L"Skin",path);
@@ -128,6 +140,7 @@ void PlayerWindow::RemovePluginSkinNativeTips() {
         if(IsWindow(tip)) SendMessageW(tip,TTM_POP,0,0);
     for(HWND owner:{window_,playlist_window_,equalizer_window_,playlist_track_control_})
         if(owner) RemoveToolTipTools(owner);
+    if(external_skin_->Handles(lyric_window_)) RemoveToolTipTools(lyric_window_);
 }
 BOOL WINAPI PlayerWindow::QuerySkinPluginTip(void* context,uint32_t action,int32_t value,wchar_t* text,uint32_t count) {
     if(!context || !text || !count) return FALSE;
@@ -219,7 +232,9 @@ BOOL WINAPI PlayerWindow::HandleSkinPluginDrag(void* context,const TtpSkinDrag* 
     auto& self = *static_cast<PlayerWindow*>(context);
     const HWND source = event->window;
     if (!source || (source != self.window_ && source != self.playlist_window_ &&
-                    source != self.equalizer_window_)) return FALSE;
+                    source != self.equalizer_window_ && source != self.lyric_window_)) return FALSE;
+    if(source==self.lyric_window_ && event->phase!=TTP_SKIN_DRAG_END &&
+       (!self.external_skin_ || !self.external_skin_->Handles(source))) return FALSE;
     try {
         // End must remain valid while LoadSkin/Detach has moved the instance
         // out of external_skin_. No callback here can unload or change a skin.
@@ -251,7 +266,8 @@ BOOL WINAPI PlayerWindow::ResizeSkinPluginWindow(void* context,HWND source,SIZE 
        size.cx<=0 || size.cy<=0 || size.cx>32767 || size.cy>32767) return FALSE;
     auto& self=*static_cast<PlayerWindow*>(context);
     if(!self.external_skin_ || (source!=self.window_ && source!=self.playlist_window_ &&
-       source!=self.equalizer_window_) || GetWindowThreadProcessId(source,nullptr)!=GetCurrentThreadId()) return FALSE;
+       source!=self.equalizer_window_ && !(source==self.lyric_window_ && self.external_skin_->Handles(source))) ||
+       GetWindowThreadProcessId(source,nullptr)!=GetCurrentThreadId()) return FALSE;
     try {
         RECT before{},client{};
         if(!GetWindowRect(source,&before) || !GetClientRect(source,&client)) return FALSE;
@@ -300,6 +316,167 @@ BOOL WINAPI PlayerWindow::ResizeSkinPluginWindow(void* context,HWND source,SIZE 
         return TRUE;
     } catch(...) {return FALSE;}
 }
+BOOL WINAPI PlayerWindow::HandleSkinPluginContentInput(void* context,const TtpSkinContent* content,
+                                                       const MSG* event,LRESULT* result) {
+    if(!context || !content || content->size<sizeof(*content) || !event || !result ||
+       content->mode<1 || content->mode>3 || content->visual_type>4) return FALSE;
+    auto& self=*static_cast<PlayerWindow*>(context);
+    if(event->hwnd!=content->window || content->window!=self.lyric_window_) return FALSE;
+    *result=0;
+    const UINT message=event->message;
+    const HWND window=content->window;
+    RECT visual{},lyric{};bool overlay{};
+    self.SkinPluginContentRects(content->bounds,content->mode,content->visual_type,visual,lyric,overlay);
+    const auto cancel=[&] {
+        if(self.plugin_content_drag_window_==window) {
+            self.plugin_content_drag_window_=nullptr;
+            self.HandleLyricControlMessage(window,WM_CANCELMODE,0,0,true);
+        }
+    };
+    if(message==WM_SIZE) {
+        cancel();
+        if(self.lyric_editor_) {
+            self.LayoutLyricEditor(&lyric);
+            const int show=IsRectEmpty(&lyric)?SW_HIDE:SW_SHOWNOACTIVATE;
+            ShowWindow(self.lyric_editor_,show);
+            if(self.lyric_editor_toolbar_) ShowWindow(self.lyric_editor_toolbar_,show);
+        }
+        return FALSE;
+    }
+    if(message==WM_CAPTURECHANGED || message==WM_CANCELMODE ||
+       (message==WM_SHOWWINDOW && !event->wParam) || (message==WM_ENABLE && !event->wParam)) {
+        cancel();return FALSE;
+    }
+    if(message==WM_RBUTTONUP || message==WM_CONTEXTMENU) {
+        cancel();
+        POINT point{GET_X_LPARAM(event->lParam),GET_Y_LPARAM(event->lParam)};
+        if(message==WM_RBUTTONUP) ClientToScreen(window,&point);
+        self.plugin_content_menu_point_=point;
+        self.plugin_content_menu_point_valid_=message!=WM_CONTEXTMENU || event->lParam!=LPARAM(-1);
+        return FALSE; // The DLL queues its menu request; no modal loop on its stack.
+    }
+    if(self.fullscreen_mode_ || self.lyric_editor_) return FALSE;
+    POINT point{GET_X_LPARAM(event->lParam),GET_Y_LPARAM(event->lParam)};
+    if(message==WM_SETCURSOR) {GetCursorPos(&point);ScreenToClient(window,&point);}
+    if(message==WM_MOUSEWHEEL) ScreenToClient(window,&point);
+    const bool dragging=self.plugin_content_drag_window_==window && self.lyric_line_dragging_;
+    const bool over_lyric=PtInRect(&lyric,point)!=FALSE;
+    const bool over_content=PtInRect(&content->bounds,point)!=FALSE;
+    switch(message) {
+    case WM_LBUTTONDOWN:
+        if(!over_content) return FALSE;
+        SetFocus(window);
+        if(!over_lyric) return TRUE;
+        self.plugin_content_drag_window_=window;
+        break;
+    case WM_LBUTTONUP:
+    case WM_MOUSEMOVE:
+        if(!dragging && !over_content) return FALSE;
+        if(!dragging && !over_lyric) return TRUE;
+        break;
+    case WM_LBUTTONDBLCLK:
+        return over_content; // Only menus/frame controls may change content.
+    case WM_MOUSEWHEEL:
+        if(!over_lyric) return FALSE;
+        // A lyric wheel never falls through to the DLL's volume adjustment.
+        if(!self.settings_.lyric.mouse_wheel_adjust) return TRUE;
+        break;
+    case WM_SETCURSOR:
+        if((!dragging && !over_lyric) || reinterpret_cast<HWND>(event->wParam)!=window ||
+           LOWORD(event->lParam)!=HTCLIENT) return FALSE;
+        break;
+    case WM_KEYDOWN:
+        if(IsRectEmpty(&lyric) || (event->wParam!=VK_UP && event->wParam!=VK_DOWN &&
+           event->wParam!=VK_LEFT && event->wParam!=VK_RIGHT && event->wParam!=VK_ESCAPE)) return FALSE;
+        break;
+    case WM_GETDLGCODE:
+        if(IsRectEmpty(&lyric)) return FALSE;
+        break;
+    default:return FALSE;
+    }
+    *result=self.HandleLyricControlMessage(window,message,event->wParam,event->lParam,true);
+    if(!self.lyric_line_dragging_) self.plugin_content_drag_window_=nullptr;
+    InvalidateRect(window,nullptr,FALSE);
+    return TRUE;
+}
+
+namespace {
+constexpr UINT kContentProviderMenuFirst=0xf000;
+void RemapContentMenu(HMENU menu,std::vector<UINT>& commands) {
+    for(int i=0;i<GetMenuItemCount(menu);++i) {
+        MENUITEMINFOW item{sizeof(item)};item.fMask=MIIM_ID|MIIM_SUBMENU|MIIM_FTYPE;
+        if(!GetMenuItemInfoW(menu,i,TRUE,&item)) continue;
+        if(item.hSubMenu) RemapContentMenu(item.hSubMenu,commands);
+        else if(!(item.fType&MFT_SEPARATOR)) {
+            commands.push_back(item.wID);item.fMask=MIIM_ID;
+            item.wID=kContentProviderMenuFirst+static_cast<UINT>(commands.size())-1;
+            SetMenuItemInfoW(menu,i,TRUE,&item);
+        }
+    }
+}
+}
+
+HMENU PlayerWindow::CreateSkinPluginContentMenu(const TtpSkinContent& content,std::vector<UINT>& commands) {
+    commands.clear();
+    HMENU popup{};
+    if(content.mode==TTP_SKIN_CONTENT_VISUAL) popup=CreateVisualContextMenu(false,0,content.visual_type);
+    else {
+        popup=DetachFirstPopup(LoadMenuW(ResourceModule(),MAKEINTRESOURCEW(
+            lyric_editor_?kMenuLyricEditor:kMenuLyricDisplay)));
+        if(popup) {
+            if(lyric_editor_) PrepareLyricEditorMenu(popup);else PrepareLyricMenu(popup);
+            if(content.mode==TTP_SKIN_CONTENT_COMBINED) {
+                if(const HMENU visual=CreateVisualContextMenu(false,0,content.visual_type))
+                    AppendMenuW(popup,MF_POPUP,reinterpret_cast<UINT_PTR>(visual),L"视觉效果");
+            }
+        }
+    }
+    if(!popup) return nullptr;
+    if(const HMENU provider=external_skin_->Menu(content.window)) {
+        RemapContentMenu(provider,commands);
+        AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+        AppendMenuW(popup,MF_POPUP,reinterpret_cast<UINT_PTR>(provider),L"显示内容");
+    }
+    return popup;
+}
+
+void PlayerWindow::HandleSkinPluginContentMenuCommand(UINT command,TtpSkinContent content) {
+    if(command>=kCmdVisualFirst && command<=kCmdVisualLast) {
+        content.visual_type=command-kCmdVisualFirst;
+        external_skin_->ContentState(content,true);
+    } else if(command>=kCmdFullscreenLyrics && command<=kCmdFullscreenAll) {
+        HandleSkinPluginCommand(TTP_SKIN_CONTENT_FULLSCREEN,
+            (command-kCmdFullscreenLyrics+1)|(content.visual_type<<8));
+    } else if(!HandleLyricCommand(command)) HandleContextCommand(command,content.window);
+}
+
+void PlayerWindow::ShowSkinPluginContentMenu(bool keyboard) {
+    if(context_menu_open_ || !external_skin_ || !external_skin_->Handles(lyric_window_) || !IsWindowEnabled(window_)) return;
+    auto* const instance=external_skin_.get();
+    const auto* provider=external_skin_->Provider();
+    TtpSkinContent content{sizeof(content),lyric_window_};
+    const bool native=external_skin_->ContentState(content);
+    std::vector<UINT> commands;
+    const HMENU popup=native?CreateSkinPluginContentMenu(content,commands):external_skin_->Menu(lyric_window_);
+    if(!popup) return;
+    POINT point=plugin_content_menu_point_;
+    if(!plugin_content_menu_point_valid_) GetCursorPos(&point);
+    plugin_content_menu_point_valid_=false;
+    if(keyboard) {point={content.bounds.left,content.bounds.top};ClientToScreen(lyric_window_,&point);}
+    const HWND owner=lyric_window_;
+    context_menu_open_=true;SetForegroundWindow(owner);BeginPopupMenuStyle(popup,true);
+    const UINT selected=TrackPlayerPopupMenuEx(popup,TPM_RIGHTBUTTON|TPM_RETURNCMD|TPM_NONOTIFY,
+        point.x,point.y,owner,nullptr);
+    EndPopupMenuStyle();DestroyMenu(popup);context_menu_open_=false;
+    if(selected && external_skin_.get()==instance && external_skin_->Provider()==provider) {
+        if(!native) external_skin_->Menu(owner,selected);
+        else if(selected>=kContentProviderMenuFirst && selected-kContentProviderMenuFirst<commands.size())
+            external_skin_->Menu(owner,commands[selected-kContentProviderMenuFirst]);
+        else HandleSkinPluginContentMenuCommand(selected,content);
+    }
+    PostMessageW(owner,WM_NULL,0,0);
+}
+
 void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     if(!external_skin_ || close_after_skin_window_fade_) return;
     switch(command) {
@@ -314,6 +491,14 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     case TTP_SKIN_PLAYLIST: TogglePlaylistWindow();break;
     case TTP_SKIN_EQUALIZER: ToggleEqualizerWindow();break;
     case TTP_SKIN_LYRICS: ToggleLyricWindow();break;
+    case TTP_SKIN_CONTENT_FULLSCREEN:
+        if(external_skin_->Handles(lyric_window_) && (value&255)>=1 && (value&255)<=3 &&
+           ((value>>8)&255)<=4 && audio_->State()==audio::PlaybackState::playing) {
+            if(fullscreen_mode_==0) plugin_content_fullscreen_saved_type_=settings_.visual.type;
+            SetFullScreenMode(value&255,lyric_window_,(value>>8)&255);
+        }
+        break;
+    case TTP_SKIN_CONTENT_MENU: ShowSkinPluginContentMenu(value==1);break;
     case TTP_SKIN_MENU: {POINT p{};GetCursorPos(&p);ShowContextMenu(p);break;}
     case TTP_SKIN_OPTIONS: ShowOptions();break;
     case TTP_SKIN_VOLUME:

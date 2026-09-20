@@ -23,6 +23,8 @@ enum TtpSkinCommand {
     TTP_SKIN_SELECT_ALL, TTP_SKIN_PROPERTIES, TTP_SKIN_ALWAYS_ON_TOP,
     TTP_SKIN_VISUAL_NEXT, TTP_SKIN_VISUAL_MENU, TTP_SKIN_EQ_BANDS,
     TTP_SKIN_MOVE_SELECTION, TTP_SKIN_COPY_SELECTION, // insertion row; current native selection
+    TTP_SKIN_CONTENT_FULLSCREEN, // low byte: content mode; next byte: visual type
+    TTP_SKIN_CONTENT_MENU, // enqueue a provider-defined menu on the content surface
     TTP_SKIN_EQ_VALUE = 100 // + 0: preamp, + 1..10: frequency bands; value -12..12
 };
 
@@ -72,6 +74,24 @@ typedef struct TtpSkinSpectrumFrame {
     int16_t magnitudes[256];
 } TtpSkinSpectrumFrame;
 
+enum TtpSkinContentMode {
+    TTP_SKIN_CONTENT_LYRICS = 1, TTP_SKIN_CONTENT_VISUAL, TTP_SKIN_CONTENT_COMBINED
+};
+
+// Provider geometry/state; bounds use content-window client coordinates.
+typedef struct TtpSkinContent {
+    uint32_t size;
+    HWND window;
+    RECT bounds;
+    uint32_t mode, visual_type;
+} TtpSkinContent;
+typedef struct TtpSkinLyricColors {
+    uint32_t size;
+    COLORREF text, highlight, background;
+} TtpSkinLyricColors;
+// Host-created content widgets remain visible inside a provider-owned frame.
+#define TTP_SKIN_CONTENT_CHILD L"TTPlayer.SkinPlugin.ContentChild.v1"
+
 typedef struct TtpSkinHost {
     uint32_t size, version;
     void* context;
@@ -97,13 +117,22 @@ typedef struct TtpSkinHost {
     // Client size is in physical pixels. FALSE requests a single-window fallback.
     BOOL (WINAPI *resize)(void*, HWND, SIZE);
     BOOL (WINAPI *spectrum)(void*, TtpSkinSpectrumFrame*);
+    // Optional bounded content canvas. Reuses the host lyric document and
+    // fullscreen visual renderer; never changes the main player's visual mode.
+    BOOL (WINAPI *content)(void*, HDC, const RECT*, uint32_t mode, uint32_t visual_type);
+    // Optional synchronous content input/layout. TRUE consumes the message.
+    // Coordinates remain those of window; capture belongs to that HWND.
+    // Never open modal UI or unload the provider in this callback.
+    BOOL (WINAPI *content_input)(void*, const TtpSkinContent*, const MSG*, LRESULT*);
 } TtpSkinHost;
 #define TTP_SKIN_HOST_V1_SIZE offsetof(TtpSkinHost, drag)
 
 typedef struct TtpSkinWindows {
     uint32_t size;
     HWND player, playlist, equalizer;
+    HWND lyrics; // Optional content surface; native window remains the fallback.
 } TtpSkinWindows;
+#define TTP_SKIN_WINDOWS_V1_SIZE offsetof(TtpSkinWindows, lyrics)
 
 typedef struct TtpSkinInfo {
     uint32_t size;
@@ -140,6 +169,17 @@ typedef struct TtpSkinPlugin {
     // Optional UI-thread snapshot. restore=TRUE stages state before attach;
     // FALSE captures live or last non-minimized state. No filesystem access.
     HRESULT (WINAPI *layout)(void*, TtpSkinLayout*, BOOL restore);
+    // Optional ownership query after attach, including added content surfaces.
+    BOOL (WINAPI *handles)(void*, HWND);
+    // Optional menu factory/dispatch. command=0 transfers an HMENU to the host;
+    // otherwise executes its selected ID. The host owns the modal menu loop,
+    // so providers never remain on the stack while a skin can be unloaded.
+    HMENU (WINAPI *menu)(void*, HWND, uint32_t command);
+    // Query content geometry/state; apply=TRUE changes mode/type only.
+    BOOL (WINAPI *content_state)(void*, TtpSkinContent*, BOOL apply);
+    // Optional package defaults. window=nullptr queries before attach; the
+    // host overlays saved/user colours and uses those for both UI and paint.
+    BOOL (WINAPI *lyric_colors)(void*, HWND, TtpSkinLyricColors*);
 } TtpSkinPlugin;
 #define TTP_SKIN_PLUGIN_V1_SIZE offsetof(TtpSkinPlugin, skin_directory)
 #define TTP_SKIN_PLUGIN_DECLARATION_SIZE offsetof(TtpSkinPlugin, layout)

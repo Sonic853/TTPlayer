@@ -374,9 +374,9 @@ std::wstring NormalizeEditorNewlines(std::wstring text) {
 } // namespace
 
 LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
-                                                WPARAM wparam, LPARAM lparam) {
+                                                WPARAM wparam, LPARAM lparam, bool content_surface) {
     const int identifier = GetDlgCtrlID(control);
-    const bool text_control = control == lyric_control_ ||
+    const bool text_control = content_surface || control == lyric_control_ ||
         identifier == kLyricControlId;
     switch (message) {
     case WM_WINDOWPOSCHANGED:
@@ -420,7 +420,7 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
     case WM_MOUSEMOVE:
         if (text_control) {
             if (lyric_line_dragging_ && !ActiveLyricDragAllowed())
-                return HandleLyricControlMessage(control, WM_CANCELMODE, 0, 0);
+                return HandleLyricControlMessage(control, WM_CANCELMODE, 0, 0, content_surface);
             if (lyric_line_dragging_ && GetCapture() == control) {
                 lyric_line_drag_offset_ = ActiveLyricScrollMode() != 0
                     ? GET_X_LPARAM(lparam) - lyric_line_drag_origin_.x
@@ -955,6 +955,11 @@ void PlayerWindow::CaptureActiveLyricWindowState() {
 
 void PlayerWindow::ApplyActiveLyricWindowState() {
     if (!lyric_window_ || !skin_ || !skin_->Lyric().valid) return;
+    if(external_skin_ && external_skin_->Handles(lyric_window_)) {
+        RebuildLyricFont(false);UpdateLyricScrollTimer();
+        ShowWindow(lyric_window_,ActiveLyricVisible()?SW_SHOWNOACTIVATE:SW_HIDE);
+        ApplySkinWindowTopMost();InvalidateRect(lyric_window_,nullptr,FALSE);return;
+    }
     // 00464B6C swaps the active lyric object before installing its settings.
     // A drag cannot cross that swap, and the new ScrollMode/ScrollMode2 must
     // also select its own animation cadence immediately.
@@ -1162,21 +1167,13 @@ void PlayerWindow::CreateLyricControls() {
             instance_, this);
 
     RebuildLyricFont(false);
-    if (lyric_editor_) {
-        const bool modified = SendMessageW(lyric_editor_, EM_GETMODIFY, 0, 0) != 0;
-        SetLyricEditorFont(settings_.lyric.font_valid
-            ? settings_.lyric.font : skin_->Lyric().font);
-        SendMessageW(lyric_editor_, EM_SETBKGNDCOLOR, 0,
-            settings_.lyric.background_color != CLR_INVALID
-                ? settings_.lyric.background_color : skin_->Lyric().background_color);
-        FormatLyricEditorAll();
-        SendMessageW(lyric_editor_, EM_SETMODIFY, modified, 0);
-    }
+    UpdateLyricEditorStyle();
     LayoutLyricControls();
     UpdateLyricToolRects();
 }
 
 void PlayerWindow::RebuildLyricFont(bool repaint) {
+    lyric_line_layouts_.clear();lyric_layout_font_=nullptr;
     if (!skin_ || !skin_->Lyric().valid) return;
 
     LOGFONTW font = fullscreen_lyric_detached_
@@ -1428,6 +1425,7 @@ RECT PlayerWindow::LyricTextBounds() const {
 
 void PlayerWindow::LayoutLyricControls() {
     if (!lyric_window_ || !skin_ || !skin_->Lyric().valid) return;
+    if(external_skin_ && external_skin_->Handles(lyric_window_)) {LayoutLyricEditor();return;}
     const auto move = [this](HWND control, const skin::SkinElement& element) {
         if (!control) return;
         const RECT bounds = LyricElementBounds(element);
@@ -1475,6 +1473,7 @@ void PlayerWindow::LayoutLyricControls() {
 void PlayerWindow::UpdateLyricToolRects() {
     if (!lyric_window_ || !CreateToolTipWindow()) return;
     RemoveToolTipTools(lyric_window_);
+    if(external_skin_ && external_skin_->Handles(lyric_window_)) return;
     if (!skin_ || !skin_->Lyric().valid) return;
     if (skin_->Lyric().close.image) AddToolTipControl(lyric_close_, kCmdShowLyrics);
     if (skin_->Lyric().ontop.image) AddToolTipControl(lyric_ontop_, kCmdLyricTopMost);
@@ -1483,6 +1482,7 @@ void PlayerWindow::UpdateLyricToolRects() {
 
 void PlayerWindow::UpdateLyricWindowRegion() {
     if (!lyric_window_ || !skin_ || !skin_->Lyric().valid) return;
+    if(external_skin_ && external_skin_->Handles(lyric_window_)) return;
     if (mini_mode_) {
         // FUN_00449577 removes the shaped normal-skin region in mini mode.
         SetWindowRgn(lyric_window_, nullptr, TRUE);
@@ -1566,14 +1566,16 @@ void PlayerWindow::PaintLyricWindow(HDC dc) const {
     DeleteDC(canvas);
 }
 
-void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered) const {
+void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
+                                    const RECT* target, bool overlay) const {
     RECT client{};
-    GetClientRect(control, &client);
+    if(target) client={0,0,target->right-target->left,target->bottom-target->top};
+    else GetClientRect(control, &client);
     const int width = client.right;
     const int height = client.bottom;
     if (width <= 0 || height <= 0 || !skin_ || !skin_->Lyric().valid) return;
     const auto& layout = skin_->Lyric();
-    const bool text_control = control == lyric_control_ ||
+    const bool text_control = target || control == lyric_control_ ||
         GetDlgCtrlID(control) == kLyricControlId;
 
     const HDC canvas = CreateCompatibleDC(dc);
@@ -1594,7 +1596,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
         return;
     }
     const HGDIOBJ old_buffer = SelectObject(canvas, buffer);
-    const bool alpha_text = text_control && fullscreen_lyric_detached_ && ActiveLyricTransparent();
+    const bool alpha_text = overlay || (!target && text_control && fullscreen_lyric_detached_ && ActiveLyricTransparent());
     std::optional<LyricAlphaMask> alpha_mask;
     if (alpha_text) {
         alpha_mask.emplace(dc, width, height);
@@ -1664,7 +1666,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
         const auto playback_position = audio_->Position();
         const auto playback_line = lyrics_.LineAt(playback_position);
         const auto position = LyricDragPosition(canvas, drag,
-                                                playback_position);
+                                                playback_position,width);
         const size_t current = position.first;
         const int phase = position.second;
 
@@ -1698,8 +1700,8 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
         };
 
         const auto draw_lyric_line = [&](size_t index, RECT line, UINT format,
-                                         bool horizontal_stream) {
-            const auto text = LyricLineText(index);
+                                         bool horizontal_stream,const std::wstring& text,
+                                         int row_offset=0,int total_width=0) {
             if (index != current) {
                 SetTextColor(canvas, animated_line_color(index));
                 draw_text(text, line, format);
@@ -1733,9 +1735,11 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
                     : start + std::chrono::seconds(60);
                 const auto clock = playback_position - lyrics_.offset;
                 const auto span = std::max<long long>(1, (end - start).count());
-                const int highlighted = static_cast<int>(
-                    std::clamp<long long>((clock - start).count(), 0, span) *
-                    measured.cx / span);
+                // Wrapped rows share one timestamp and one karaoke progress.
+                // Consume the preceding rows before highlighting this row.
+                const int highlighted = static_cast<int>(std::clamp<long long>(
+                    std::clamp<long long>((clock-start).count(),0,span) *
+                    (total_width>0?total_width:measured.cx)/span-row_offset,0,measured.cx));
                 highlight_clip.left = text_left;
                 highlight_clip.right = text_left + highlighted;
             }
@@ -1793,24 +1797,32 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
                     const int extent = LyricLineExtent(canvas, index);
                     const RECT line{left, 0, left + extent, height};
                     if (line.right > 0 && line.left < width) {
-                        draw_lyric_line(index, line, format, true);
+                        draw_lyric_line(index, line, format, true,LyricLineText(index));
                     }
                     left += extent;
                 }
             } else {
-                const int line_height = LyricLineExtent(canvas, current);
+                const int line_height = LyricLineExtent(canvas, current,width);
                 int top = height / 2 - phase;
                 for (size_t index = current; index > 0; --index)
-                    top -= LyricLineExtent(canvas, index - 1);
+                    top -= LyricLineExtent(canvas, index - 1,width);
                 UINT format = DT_SINGLELINE | DT_NOPREFIX | DT_VCENTER;
                 if (ActiveLyricTextAlign() == 1) format |= DT_CENTER;
                 else if (ActiveLyricTextAlign() >= 2) format |= DT_RIGHT;
                 for (size_t index = 0; index < lyrics_.lines.size(); ++index) {
                     const int extent = index == current ? line_height
-                        : LyricLineExtent(canvas, index);
+                        : LyricLineExtent(canvas, index,width);
                     RECT line{0, top, width, top + extent};
                     if (line.bottom > 0 && line.top < height) {
-                        draw_lyric_line(index, line, format, false);
+                        const auto& wrapped=LayoutLyricLine(canvas,index,width);
+                        const int row_height=extent/static_cast<int>(wrapped.rows.size());
+                        int row_top=top,row_offset=0;
+                        for(const auto& row:wrapped.rows) {
+                            const RECT row_bounds{0,row_top,width,row_top+row_height};
+                            if(row_bounds.bottom>0 && row_bounds.top<height)
+                                draw_lyric_line(index,row_bounds,format,false,row.text,row_offset,wrapped.width);
+                            row_top+=row_height;row_offset+=row.width;
+                        }
                     }
                     top += extent;
                 }
@@ -1823,8 +1835,8 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
                 highlight_color, background_color, 1, 2);
             const HPEN pen = CreatePen(PS_SOLID, 1, guide_color);
             const HGDIOBJ old_pen = SelectObject(canvas, pen);
-            std::optional<std::chrono::milliseconds> target =
-                LyricDragTime(canvas, drag);
+            std::optional<std::chrono::milliseconds> guide_time =
+                LyricDragTime(canvas, drag,width);
             const HGDIOBJ guide_font = SelectObject(
                 canvas, GetStockObject(DEFAULT_GUI_FONT));
             SetTextColor(canvas, guide_color);
@@ -1849,16 +1861,16 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
             else draw_guide(canvas);
             if (ActiveLyricScrollMode() != 0) {
                 const int centre = width / 2;
-                if (target) {
+                if (guide_time) {
                     RECT label{centre + 1, 1, width, height - 1};
-                    const auto text = FormatInfoDuration(*target);
+                    const auto text = FormatInfoDuration(*guide_time);
                     draw_text(text, label, DT_SINGLELINE | DT_BOTTOM);
                 }
             } else {
                 const int centre = height / 2;
-                if (target) {
+                if (guide_time) {
                     RECT label{1, centre + 1, width - 1, height};
-                    const auto text = FormatInfoDuration(*target);
+                    const auto text = FormatInfoDuration(*guide_time);
                     draw_text(text, label, DT_SINGLELINE | DT_RIGHT);
                 }
             }
@@ -1867,7 +1879,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
             DeleteObject(pen);
         }
 
-        if (!lyrics_.lines.empty() && lyric_pixels && !ActiveLyricTransparent() &&
+        if (!lyrics_.lines.empty() && lyric_pixels && !alpha_text && !ActiveLyricTransparent() &&
             ActiveLyricFadeIndex() > 0) {
             // FUN_004416E0 divides the active axis by FadeIndex, then blends
             // every edge pixel toward BkgndColor.  It is a bitmap gradient,
@@ -1900,7 +1912,10 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
         }
         SelectObject(canvas, old_font);
     }
-    if (alpha_text && present_layered) {
+    if (overlay && target) {
+        const BLENDFUNCTION blend{AC_SRC_OVER,0,255,AC_SRC_ALPHA};
+        AlphaBlend(dc,target->left,target->top,width,height,canvas,0,0,width,height,blend);
+    } else if (alpha_text && present_layered) {
         SIZE size{width, height};
         POINT source{};
         BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
@@ -1909,7 +1924,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered)
         if (!UpdateLayeredWindow(control, nullptr, nullptr, &size, canvas,
                 &source, 0, &blend, ULW_ALPHA))
             OutputDebugStringW(L"TTPlayer: fullscreen lyric alpha presentation failed\n");
-    } else BitBlt(dc, 0, 0, width, height, canvas, 0, 0, SRCCOPY);
+    } else BitBlt(dc, target?target->left:0, target?target->top:0, width, height, canvas, 0, 0, SRCCOPY);
     SelectObject(canvas, old_buffer);
     DeleteObject(buffer);
     DeleteDC(canvas);
@@ -1921,7 +1936,69 @@ std::wstring PlayerWindow::LyricLineText(size_t index) const {
     catch (const std::exception&) { return {}; }
 }
 
-int PlayerWindow::LyricLineExtent(HDC dc, size_t index) const {
+int PlayerWindow::LyricLayoutWidth() const {
+    TtpSkinContent content{sizeof(content),lyric_window_};
+    if(!fullscreen_lyric_detached_ && external_skin_ && external_skin_->ContentState(content))
+        return std::max(1L,content.bounds.right-content.bounds.left);
+    RECT bounds{};
+    return lyric_control_ && GetClientRect(lyric_control_,&bounds)
+        ? std::max(1L,bounds.right-bounds.left) : 32767;
+}
+
+const PlayerWindow::LyricLineLayout& PlayerWindow::LayoutLyricLine(HDC dc,size_t index,int width) const {
+    width=width>0?width:LyricLayoutWidth();
+    const auto font=GetCurrentObject(dc,OBJ_FONT);
+    if(lyric_layout_font_!=font || lyric_layout_width_!=width) {
+        lyric_line_layouts_.clear();lyric_layout_font_=font;lyric_layout_width_=width;
+    }
+    lyric_line_layouts_.resize(lyrics_.lines.size());
+    auto& layout=lyric_line_layouts_.at(index);
+    const auto& source=lyrics_.lines[index].text;
+    if(!layout.rows.empty() && layout.source==source) return layout;
+    layout.source=source;layout.rows.clear();layout.width=0;
+    const auto text=LyricLineText(index);
+    // Measure with the selected GDI font, retaining UTF-16 clusters at hard
+    // breaks. Prefer word boundaries; CJK and long unbroken words still fit.
+    std::vector<WORD> types(text.size());
+    if(!text.empty()) GetStringTypeW(CT_CTYPE3,text.data(),static_cast<int>(text.size()),types.data());
+    const auto continuation=[&](size_t at) {
+        return at<text.size() && at>0 &&
+            ((text[at]>=0xdc00 && text[at]<=0xdfff) ||
+             (types[at]&(C3_NONSPACING|C3_DIACRITIC|C3_VOWELMARK)) ||
+             text[at]==0x200d || text[at-1]==0x200d);
+    };
+    const auto append=[&](size_t begin,size_t end) {
+        LyricDisplayRow row{text.substr(begin,end-begin)};SIZE size{};
+        if(!row.text.empty()) GetTextExtentPoint32W(dc,row.text.data(),static_cast<int>(row.text.size()),&size);
+        row.width=size.cx;layout.width+=row.width;layout.rows.push_back(std::move(row));
+    };
+    size_t begin=0;
+    do {
+        size_t paragraph=text.find_first_of(L"\r\n",begin);
+        if(paragraph==std::wstring::npos) paragraph=text.size();
+        if(begin==paragraph) append(begin,begin);
+        while(begin<paragraph) {
+            int fit{};SIZE measured{};
+            if(!GetTextExtentExPointW(dc,text.data()+begin,static_cast<int>(paragraph-begin),
+                                     width,&fit,nullptr,&measured)) fit=1;
+            size_t end=std::min(paragraph,begin+std::max(1,fit));
+            while(end>begin && continuation(end)) --end;
+            if(end==begin) {++end;while(end<paragraph && continuation(end)) ++end;}
+            if(end<paragraph && !iswspace(text[end]) && !iswspace(text[end-1])) {
+                size_t word=end;
+                while(word>begin && !iswspace(text[word-1])) --word;
+                if(word>begin) end=word;
+            }
+            append(begin,end);begin=end;
+        }
+        if(paragraph==text.size()) break;
+        begin=paragraph+1;
+        if(text[paragraph]==L'\r' && begin<text.size() && text[begin]==L'\n') ++begin;
+    } while(begin<=text.size());
+    return layout;
+}
+
+int PlayerWindow::LyricLineExtent(HDC dc, size_t index,int wrap_width) const {
     if (!skin_ || !skin_->Lyric().valid) return 1;
     if (ActiveLyricScrollMode() == 0) {
         LOGFONTW active_font{};
@@ -1933,8 +2010,9 @@ int PlayerWindow::LyricLineExtent(HDC dc, size_t index) const {
                 : (settings_.lyric.font_valid
                     ? settings_.lyric.font.lfHeight
                     : skin_->Lyric().font.lfHeight));
-        return std::max(1L, std::labs(font_height)) +
-               std::max(0, ActiveLyricRowInterval());
+        const int row_height=std::max(1L,std::labs(font_height))+std::max(0,ActiveLyricRowInterval());
+        return index<lyrics_.lines.size()
+            ? row_height*static_cast<int>(LayoutLyricLine(dc,index,wrap_width).rows.size()) : row_height;
     }
     const auto text = LyricLineText(index);
     RECT measured{};
@@ -1950,12 +2028,12 @@ std::pair<size_t, int> PlayerWindow::LyricDragPosition(HDC dc, int delta) const 
 }
 
 std::pair<size_t, int> PlayerWindow::LyricDragPosition(
-    HDC dc, int delta, std::chrono::milliseconds playback_position) const {
+    HDC dc, int delta, std::chrono::milliseconds playback_position,int wrap_width) const {
     if (lyrics_.lines.empty()) return {0, 0};
     const auto selected = lyrics_.LineAt(playback_position);
     size_t line = selected.value_or(0);
     line = std::min(line, lyrics_.lines.size() - 1);
-    int extent = LyricLineExtent(dc, line);
+    int extent = LyricLineExtent(dc, line,wrap_width);
     int phase{};
     if (selected) {
         const auto start = lyrics_.lines[line].time;
@@ -1973,17 +2051,17 @@ std::pair<size_t, int> PlayerWindow::LyricDragPosition(
     }
 
     // This is FUN_0043FA1D: subtract the captured pixel delta, walking over
-    // variable horizontal widths or the fixed vertical row interval.
+    // variable horizontal widths or the wrapped vertical block height.
     phase -= delta;
     while (phase < 0 && line > 0) {
         --line;
-        phase += LyricLineExtent(dc, line);
+        phase += LyricLineExtent(dc, line,wrap_width);
     }
-    extent = LyricLineExtent(dc, line);
+    extent = LyricLineExtent(dc, line,wrap_width);
     while (phase > extent && line + 1 < lyrics_.lines.size()) {
         phase -= extent;
         ++line;
-        extent = LyricLineExtent(dc, line);
+        extent = LyricLineExtent(dc, line,wrap_width);
     }
     if (line == 0 && phase < 0) phase = 0;
     if (line + 1 == lyrics_.lines.size() && phase > extent) phase = extent;
@@ -1991,10 +2069,10 @@ std::pair<size_t, int> PlayerWindow::LyricDragPosition(
 }
 
 std::optional<std::chrono::milliseconds> PlayerWindow::LyricDragTime(
-    HDC dc, int delta) const {
+    HDC dc, int delta,int wrap_width) const {
     if (lyrics_.lines.empty()) return std::nullopt;
-    const auto [line, phase] = LyricDragPosition(dc, delta);
-    const int extent = std::max(1, LyricLineExtent(dc, line));
+    const auto [line, phase] = LyricDragPosition(dc, delta,audio_->Position(),wrap_width);
+    const int extent = std::max(1, LyricLineExtent(dc, line,wrap_width));
     const auto start = lyrics_.lines[line].time;
     const auto end = line + 1 < lyrics_.lines.size()
         ? lyrics_.lines[line + 1].time : start + std::chrono::seconds(60);
@@ -2017,7 +2095,8 @@ bool PlayerWindow::LyricTextHitTest(HWND control, POINT point) const {
     if (!dc) return false;
     const HGDIOBJ old_font = SelectObject(dc,
         lyric_font_ ? lyric_font_ : GetStockObject(DEFAULT_GUI_FONT));
-    const auto [current, phase] = LyricDragPosition(dc, 0);
+    const int width=client.right-client.left;
+    const auto [current, phase] = LyricDragPosition(dc, 0,audio_->Position(),width);
     bool hit{};
     if (ActiveLyricScrollMode() != 0) {
         int left = (client.right - client.left) / 2 - phase;
@@ -2041,20 +2120,22 @@ bool PlayerWindow::LyricTextHitTest(HWND control, POINT point) const {
     } else {
         int top = (client.bottom - client.top) / 2 - phase;
         for (size_t index = current; index > 0; --index)
-            top -= LyricLineExtent(dc, index - 1);
+            top -= LyricLineExtent(dc, index - 1,width);
         for (size_t index = 0; index < lyrics_.lines.size() && !hit; ++index) {
-            const auto text = LyricLineText(index);
-            SIZE measured{};
-            GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &measured);
-            const int extent = LyricLineExtent(dc, index);
-            int left{};
-            if (ActiveLyricTextAlign() == 1)
-                left = ((client.right - client.left) - measured.cx) / 2;
-            else if (ActiveLyricTextAlign() >= 2)
-                left = (client.right - client.left) - measured.cx;
-            const RECT text_bounds{left, top + (extent - measured.cy) / 2,
-                left + measured.cx, top + (extent + measured.cy) / 2};
-            hit = !text.empty() && PtInRect(&text_bounds, point) != FALSE;
+            const int extent=LyricLineExtent(dc,index,width);
+            const auto& wrapped=LayoutLyricLine(dc,index,width);
+            const int row_height=extent/static_cast<int>(wrapped.rows.size());
+            int row_top=top;
+            for(const auto& row:wrapped.rows) {
+                SIZE measured{};GetTextExtentPoint32W(dc,row.text.c_str(),static_cast<int>(row.text.size()),&measured);
+                int left{};
+                if(ActiveLyricTextAlign()==1) left=(width-measured.cx)/2;
+                else if(ActiveLyricTextAlign()>=2) left=width-measured.cx;
+                const RECT text_bounds{left,row_top+(row_height-measured.cy)/2,
+                    left+measured.cx,row_top+(row_height+measured.cy)/2};
+                hit=hit || (!row.text.empty() && PtInRect(&text_bounds,point));
+                row_top+=row_height;
+            }
             top += extent;
         }
     }
@@ -2201,6 +2282,21 @@ void PlayerWindow::InitializeLyricEditorRichText() {
     FormatLyricEditorAll();
     if (lyric_editor_document_)
         lyric_editor_document_->Undo(tomResume, nullptr);
+}
+
+void PlayerWindow::UpdateLyricEditorStyle() {
+    if(!lyric_editor_ || !skin_ || !skin_->Lyric().valid) return;
+    const bool modified=SendMessageW(lyric_editor_,EM_GETMODIFY,0,0)!=FALSE;
+    LOGFONTW font=settings_.lyric.font_valid?settings_.lyric.font:skin_->Lyric().font;
+    if(settings_.lyric.charset) font.lfCharSet=static_cast<BYTE>(settings_.lyric.charset);
+    SetLyricEditorFont(font);
+    const COLORREF background=settings_.lyric.background_color!=CLR_INVALID
+        ? settings_.lyric.background_color:skin_->Lyric().background_color;
+    if(lyric_editor_document_) lyric_editor_document_->Undo(tomSuspend,nullptr);
+    SendMessageW(lyric_editor_,EM_SETBKGNDCOLOR,0,background);
+    if(lyric_editor_document_) lyric_editor_document_->Undo(tomResume,nullptr);
+    FormatLyricEditorAll();
+    SendMessageW(lyric_editor_,EM_SETMODIFY,modified,0);
 }
 
 void PlayerWindow::SetLyricEditorFont(const LOGFONTW& font) {
@@ -2560,6 +2656,8 @@ bool PlayerWindow::EnterLyricEditor() {
                           reinterpret_cast<DWORD_PTR>(this));
         InitializeLyricEditorRichText();
     }
+    SetPropW(lyric_editor_,TTP_SKIN_CONTENT_CHILD,reinterpret_cast<HANDLE>(1));
+    if(lyric_editor_toolbar_) SetPropW(lyric_editor_toolbar_,TTP_SKIN_CONTENT_CHILD,reinterpret_cast<HANDLE>(1));
 
     // +0x32C remains empty for a new document.  The adjacent sound-file name
     // is only a Save-dialog suggestion; treating it as an existing target
@@ -2625,12 +2723,18 @@ bool PlayerWindow::EnterLyricEditor() {
     return true;
 }
 
-void PlayerWindow::LayoutLyricEditor() {
+void PlayerWindow::LayoutLyricEditor(const RECT* content_bounds) {
     if (!lyric_editor_ && !lyric_editor_toolbar_) return;
     RECT bounds = LyricTextBounds();
     if (settings_.lyric.transparent && settings_.lyric.transparent_skin) {
         GetClientRect(lyric_window_, &bounds);
     }
+    TtpSkinContent content{sizeof(content),lyric_window_};
+    if(!content_bounds && external_skin_ && external_skin_->ContentState(content)) {
+        RECT visual{};bool overlay{};
+        SkinPluginContentRects(content.bounds,content.mode,content.visual_type,visual,bounds,overlay);
+    }
+    if(content_bounds) bounds=*content_bounds;
     const int width = std::max<LONG>(0, bounds.right - bounds.left);
     const int height = std::max<LONG>(0, bounds.bottom - bounds.top);
     const int toolbar_height = std::min(24, height);
@@ -2761,7 +2865,8 @@ void PlayerWindow::FinishLyricDocument(bool close_editor) {
             // Do not reload/auto-embed the old file while a caller is in the
             // middle of publishing a new playlist identity.
             DestroyLyricEditor();
-            if (lyric_control_) ShowWindow(lyric_control_, SW_SHOW);
+            if (lyric_control_) ShowWindow(lyric_control_,
+                external_skin_ && external_skin_->Handles(lyric_window_)?SW_HIDE:SW_SHOW);
             if (lyric_desklrc_) EnableWindow(lyric_desklrc_, TRUE);
         }
     }
@@ -2801,7 +2906,8 @@ void PlayerWindow::LeaveLyricEditor(bool prompt_to_save) {
     lyric_editor_internal_change_ = false;
     lyric_editor_edit_kind_ = 0;
     if (lyric_editor_toolbar_) ShowWindow(lyric_editor_toolbar_, SW_HIDE);
-    if (lyric_control_) ShowWindow(lyric_control_, SW_SHOW);
+    if (lyric_control_) ShowWindow(lyric_control_,
+        external_skin_ && external_skin_->Handles(lyric_window_)?SW_HIDE:SW_SHOW);
     EnableWindow(lyric_desklrc_, TRUE);
     if (embedded || (modified && !saved)) {
         try {
@@ -3337,6 +3443,10 @@ void PlayerWindow::ShowLyricContextMenu(POINT screen_point) {
     if (fullscreen_lyric_detached_ && !lyric_editor_) {
         ShowFullScreenLyricContextMenu(screen_point);
         return;
+    }
+    if(external_skin_ && external_skin_->Handles(lyric_window_)) {
+        plugin_content_menu_point_=screen_point;plugin_content_menu_point_valid_=true;
+        ShowSkinPluginContentMenu(false);return;
     }
     HMENU menu = DetachFirstPopup(
         LoadMenuW(ResourceModule(), MAKEINTRESOURCEW(

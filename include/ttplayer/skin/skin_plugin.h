@@ -30,13 +30,21 @@ public:
     static std::unique_ptr<SkinPluginInstance> Create(std::shared_ptr<SkinPluginModule> module,
         const std::filesystem::path& path,const TtpSkinHost* host);
     ~SkinPluginInstance();
-    bool Attach(HWND player,HWND playlist,HWND equalizer);
+    bool Attach(HWND player,HWND playlist,HWND equalizer,HWND lyrics=nullptr);
     void Detach();
     const SkinPluginModule* Provider() const noexcept { return module_.get(); }
     HBITMAP Preview() const { return module_->Api().preview(instance_); }
     void Shade() { module_->Api().shade(instance_); }
     void Paint(HWND window,HDC dc) const { module_->Api().paint(instance_,window,dc); }
     bool Translate(const MSG& message) const { return module_->Api().translate(instance_,&message)!=FALSE; }
+    bool Handles(HWND window) const { return window && module_->Api().handles && module_->Api().handles(instance_,window); }
+    HMENU Menu(HWND window,uint32_t command=0) const { return module_->Api().menu?module_->Api().menu(instance_,window,command):nullptr; }
+    bool ContentState(TtpSkinContent& state,bool apply=false) const {
+        return module_->Api().content_state && module_->Api().content_state(instance_,&state,apply);
+    }
+    bool LyricColors(HWND window,TtpSkinLyricColors& colors) const noexcept {
+        return module_->Api().lyric_colors && module_->Api().lyric_colors(instance_,window,&colors);
+    }
     bool Layout(TtpSkinLayout& state,bool restore) const {
         return module_->Api().layout && SUCCEEDED(module_->Api().layout(instance_,&state,restore));
     }

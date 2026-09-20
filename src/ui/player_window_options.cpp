@@ -5985,6 +5985,7 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
     if ((all || template_id == 256 || template_id == 384 ||
          template_id == 385 || template_id == 263) && lyric_window_) {
         RebuildLyricFont(false);
+        UpdateLyricEditorStyle();
         UpdateLyricScrollTimer();
         ApplyFullScreenLyricTransparency();
         LayoutLyricControls();

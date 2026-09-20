@@ -2257,7 +2257,7 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
         if (skin_) static_cast<void>(ApplyLoadedSkin(false));
         external_skin_ = std::move(previous_external);
         if (external_skin_)
-            external_skin_->Attach(window_, playlist_window_, equalizer_window_);
+            external_skin_->Attach(window_, playlist_window_, equalizer_window_, lyric_window_);
         RemovePluginSkinNativeTips();
         return false;
     }
@@ -2470,7 +2470,7 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
-    if (external_skin_ && !external_skin_->Attach(window_, playlist_window_, equalizer_window_)) {
+    if (external_skin_ && !external_skin_->Attach(window_, playlist_window_, equalizer_window_, lyric_window_)) {
         external_skin_.reset();
         UpdateMainToolRects();UpdatePlaylistToolRects();UpdateEqualizerToolRects();
     }
@@ -5544,7 +5544,8 @@ void PlayerWindow::ApplySkinWindowAlpha(HWND target, BYTE alpha) {
         SetWindowLongPtrW(target, GWL_EXSTYLE, extended | WS_EX_LAYERED);
     COLORREF color_key{};
     DWORD flags = LWA_ALPHA;
-    if (target == lyric_window_ && settings_.lyric.transparent) {
+    if (target == lyric_window_ && settings_.lyric.transparent &&
+        !(external_skin_ && external_skin_->Handles(lyric_window_))) {
         // Match the actual painter, including optional mini-only skin colours.
         color_key = ActiveLyricBackgroundColor();
         flags |= LWA_COLORKEY;
