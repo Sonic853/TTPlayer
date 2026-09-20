@@ -25,12 +25,13 @@ class GeneralOptionsTabs {
     void Layout() {
         if (laying_out_) return;
         laying_out_ = true;
-        RECT client{}, padding{0, 0, 7, 7}, inset{0, 0, 4, 4};
+        // Match InitializeOptionsSkinTabs: the tab frame fills the page,
+        // including its top/left origin, without a second outer gutter.
+        RECT client{}, inset{0, 0, 4, 4};
         GetClientRect(page_, &client);
-        MapDialogRect(page_, &padding);
         MapDialogRect(page_, &inset);
-        SetWindowPos(tab_, HWND_BOTTOM, padding.right, padding.bottom,
-                     client.right - 2 * padding.right, client.bottom - 2 * padding.bottom,
+        SetWindowPos(tab_, HWND_BOTTOM, client.left, client.top,
+                     client.right - client.left, client.bottom - client.top,
                      SWP_NOACTIVATE);
         RECT content{};
         GetClientRect(tab_, &content);

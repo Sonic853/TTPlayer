@@ -4330,15 +4330,16 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             const HWND shutdown_time = GetDlgItem(dialog, 2183);
             SetWindowPos(shutdown_time, GetDlgItem(dialog, 2182), 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            place(discord, {13, 124, 267, 134}, shutdown_time);
+            // Continue the resource's 13-DLU row cadence below shutdown.
+            place(discord, {13, 122, 267, 132}, shutdown_time);
             const HWND lyrics = add(WC_BUTTONW, i18n::Literal(L"向 Discord 发送歌词"),
-                kOptionsDiscordLyrics, WS_TABSTOP | BS_AUTOCHECKBOX, {13, 139, 267, 149}, discord);
+                kOptionsDiscordLyrics, WS_TABSTOP | BS_AUTOCHECKBOX, {13, 135, 267, 145}, discord);
             if (language_available) {
                 const HWND label = add(WC_STATICW, i18n::Literal(L"界面语言"), kOptionsLanguageLabel,
-                    0, {13, 160, 83, 172}, lyrics);
+                    0, {13, 152, 83, 164}, lyrics);
                 const HWND languages = add(WC_COMBOBOXW, L"", kOptionsLanguage,
                     WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
-                    {85, 156, 197, 276}, label);
+                    {85, 148, 197, 268}, label);
                 std::vector<std::wstring> choices{L"auto", L"source"};
                 const auto available = i18n::Languages(PlayerRuntimeDirectory());
                 for (const auto& locale : available)
@@ -4364,7 +4365,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                     if (locale == selected) SendMessageW(languages, CB_SETCURSEL, item, 0);
                 }
                 add(WC_STATICW, i18n::Literal(L"界面语言将在下次启动播放器时生效。"),
-                    kOptionsLanguageNotice, 0, {13, 175, 267, 193}, languages);
+                    kOptionsLanguageNotice, 0, {13, 164, 267, 182}, languages);
             }
         }
         SetChecked(dialog, 2088, value.startup_minimize);
