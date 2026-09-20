@@ -1,4 +1,5 @@
 #include "ttplayer/settings/settings.h"
+#include "ttplayer/skin/skin_paths.h"
 
 #include <algorithm>
 #include <cstring>
@@ -1334,6 +1335,11 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         auto v=Attribute(n,L"PackageName");
         if (v.vt==VT_EMPTY) v=Attribute(n,L"SkinFile");
         if (v.vt!=VT_EMPTY) s.skin_file=static_cast<const wchar_t*>(_bstr_t(v));
+        // Plugin selection is stored only in CustomPackageName. Retired
+        // attributes and PackageName must not restore a plugin selection.
+        s.plugin_skin_file=StringAttr(n,L"CustomPackageName");
+        if (!skin::IsNativeSkinPackage(s.skin_file)) s.skin_file=L"<Default_Skin>";
+        s.plugin_skin_file=skin::NormalizePluginSkinPackageName(s.plugin_skin_file).wstring();
     }
     return s;
 }
@@ -1462,7 +1468,8 @@ bool LoadSkinVisualProfile(const std::filesystem::path& path,
                            PlayerSettings& player,
                            PlaylistSettings& playlist,
                            LyricSettings& lyric,
-                           VisualSettings& visual) {
+                           VisualSettings& visual,std::wstring* plugin_state) {
+    if(plugin_state) plugin_state->clear();
     try {
         ComInit com;
         if(FAILED(com.hr) && com.hr!=RPC_E_CHANGED_MODE) return false;
@@ -1528,6 +1535,10 @@ bool LoadSkinVisualProfile(const std::filesystem::path& path,
         playlist=std::move(next_playlist);
         lyric=std::move(next_lyric);
         visual=std::move(next_visual);
+        if(plugin_state) {
+            if(auto node=SelectOwned(document.Get(),L"/ttplayer/PluginSkin"))
+                *plugin_state=StringAttr(node.Get(),L"State");
+        }
         return true;
     } catch (const _com_error&) {
         return false;
@@ -1541,7 +1552,8 @@ bool SaveSkinVisualProfile(const std::filesystem::path& path,
                            const PlaylistSettings& playlist,
                            const LyricSettings& lyric,
                            const VisualSettings& visual,
-                           const std::filesystem::path& global_settings_path) {
+                           const std::filesystem::path& global_settings_path,
+                           const std::wstring* plugin_state) {
     if(path.empty()) return false;
     ComInit com;
     if(FAILED(com.hr) && com.hr!=RPC_E_CHANGED_MODE) return false;
@@ -1550,6 +1562,12 @@ bool SaveSkinVisualProfile(const std::filesystem::path& path,
     auto document_owner=AdoptCom(document);
 
     static_cast<void>(global_settings_path);
+    if(plugin_state) {
+        if(auto* element=EnsureElement(document,L"PluginSkin")) {
+            auto owner=AdoptCom(element);
+            SetAttribute(element,L"State",*plugin_state);
+        }
+    }
 
     // The profile serializer writes this complete subset even though it
     // intentionally leaves the global Type/FramesPerSec untouched.
@@ -2086,6 +2104,10 @@ void SaveWindowState(const std::filesystem::path& path,
         const std::wstring package=settings.skin_file.empty()
             ? std::wstring(L"<Default_Skin>") : settings.skin_file;
         SetAttribute(element,L"PackageName",package);
+        // Always write the empty value too: SaveWindowState updates an
+        // existing document, which can still contain the previous plugin skin.
+        SetAttribute(element,L"CustomPackageName",settings.plugin_skin_file);
+        element->removeAttribute(_bstr_t(L"WinampPackageName"));
     }
     document->save(_variant_t(path.wstring().c_str()));
 }

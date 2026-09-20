@@ -1361,6 +1361,7 @@ PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(se
 }
 
 PlayerWindow::~PlayerWindow() {
+    external_skin_.reset();
 #if !defined(TTPLAYER_LEGACY_WINDOWS)
     system_media_controls_.Reset();
 #endif
@@ -2044,6 +2045,11 @@ bool PlayerWindow::DrawPopupMenuItem(const DRAWITEMSTRUCT& item) const {
 
 bool PlayerWindow::LoadStartupSkin(HMODULE module) {
     if (window_) return false;
+    DiscoverSkinPlugins();
+    // PackageName selects the native fallback; only CustomPackageName may
+    // select a provider. Do not migrate retired combined configurations.
+    if (!skin::IsNativeSkinPackage(settings_.skin_file)) settings_.skin_file=L"<Default_Skin>";
+    const auto requested_plugin = settings_.plugin_skin_file;
     const bool requested_default = settings_.skin_file.empty() ||
         _wcsicmp(settings_.skin_file.c_str(), L"<Default_Skin>") == 0;
     const bool loaded = requested_default ? LoadSkinResource(module) :
@@ -2106,11 +2112,21 @@ bool PlayerWindow::LoadStartupSkin(HMODULE module) {
         // Only an actual package replacement applies its visual palette.
         settings_.visual = global_visual;
     }
+    // Native first: lyrics and all other unowned windows retain this package.
+    // A native load normally clears the provider selection; restore the saved
+    // request here, including when the optional DLL is temporarily absent.
+    settings_.plugin_skin_file = requested_plugin;
+    if (!requested_plugin.empty() && LoadPluginSkin(skin::ResolveSkinPackagePath(
+            PlayerRuntimeDirectory() / L"Skin", requested_plugin))) {
+        settings_.player.mini_mode = false;
+    }
     return true;
 }
 
 bool PlayerWindow::LoadSkinPackage(const std::filesystem::path& path, bool restore_profile) {
     try {
+        if (IsPluginSkinPackage(path)) return LoadPluginSkin(path, restore_profile);
+        if (!skin::IsNativeSkinPackage(path)) return false;
         auto package = skin::SkinPackage::Open(path);
         const auto stamp = std::filesystem::last_write_time(path).time_since_epoch().count();
         const auto cache = std::filesystem::temp_directory_path() / L"TTPlayerRebuild" /
@@ -2172,6 +2188,7 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
     const auto previous_lyric = settings_.lyric;
     const auto previous_visual = settings_.visual;
     const auto previous_selector = settings_.skin_file;
+    const auto previous_plugin = settings_.plugin_skin_file;
     if (window_ && mini_mode_) {
         ToggleMiniMode();
         // 00464B6C is synchronous in the original.  The recovered fade is a
@@ -2188,6 +2205,8 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
     // DeskLrcBar owns borrowed HBITMAP pointers from LegacySkin. Detach them
     // before optional::emplace destroys the package object, then rebind only
     // after the replacement has passed ApplyLoadedSkin's region validation.
+    auto previous_external = std::move(external_skin_);
+    if (previous_external) previous_external->Detach();
     desktop_lyrics_.SetSkin(nullptr);
     auto previous = std::move(skin_);
     ResetSkinControlAnimations();
@@ -2222,6 +2241,7 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
         }
     }
     settings_.skin_file = selector;
+    settings_.plugin_skin_file.clear();
     if (window_ && !ApplyLoadedSkin(false, profile_loaded || !restore_profile)) {
         skin_.reset();
         skin_ = std::move(previous);
@@ -2230,7 +2250,12 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
         settings_.lyric = previous_lyric;
         settings_.visual = previous_visual;
         settings_.skin_file = previous_selector;
+        settings_.plugin_skin_file = previous_plugin;
         if (skin_) static_cast<void>(ApplyLoadedSkin(false));
+        external_skin_ = std::move(previous_external);
+        if (external_skin_)
+            external_skin_->Attach(window_, playlist_window_, equalizer_window_, lyric_window_);
+        RemovePluginSkinNativeTips();
         return false;
     }
     if (window_ && (profile_loaded || !restore_profile)) ApplySkinProfileWindowState();
@@ -2442,6 +2467,11 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
+    if (external_skin_ && !external_skin_->Attach(window_, playlist_window_, equalizer_window_, lyric_window_)) {
+        external_skin_.reset();
+        UpdateMainToolRects();UpdatePlaylistToolRects();UpdateEqualizerToolRects();
+    }
+    RemovePluginSkinNativeTips();
     ApplyWindowShadow();
     if (skinned) {
         // CPlayerApp_CreateMainWindow (004C01CD) passes the sentinel 100 to
@@ -2531,6 +2561,11 @@ LRESULT CALLBACK PlayerWindow::PlaybackTipWindowProc(
 }
 
 LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
+    static const UINT skin_plugin_command = RegisterWindowMessageW(TTP_SKIN_COMMAND_MESSAGE);
+    if (message == skin_plugin_command) {
+        HandleSkinPluginCommand(static_cast<uint32_t>(wparam), static_cast<int32_t>(lparam));
+        return 0;
+    }
     static const UINT taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     static const UINT taskbar_button_created = RegisterWindowMessageW(L"TaskbarButtonCreated");
     if (message == kMsgPlaylistInfoReady)
@@ -2869,16 +2904,17 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             PreparePlaylistModeMenu(popup);
             return 0;
         }
-        // The skin submenu now starts with Options (0x7918), ahead of the
-        // default skin. The root popup starts the scan; expansion publishes
-        // the latest complete asynchronous snapshot into this HMENU.
+        // The resource skin submenu starts with Default (0x7919); after
+        // population it starts with Options (0x7918). Publish only a ready
+        // asynchronous catalog here, including when reopening the submenu.
         if (popup && (GetMenuItemID(popup, 0) == kCmdFirstTrack ||
                       GetMenuItemID(popup, 0) == 0x7ef4)) {
             // 00461BAE -> 004813C1. DeskLrcBar forwards this notification
             // (0041907F), so both entry points populate the same track menu.
             PopulateTrackMenu(popup);
             ApplyPopupMenuStyle(popup);
-        } else if (popup && GetMenuItemID(popup, 0) == kCmdSkinOptions) {
+        } else if (popup && (GetMenuItemID(popup, 0) == kCmdDefaultSkin ||
+                             GetMenuItemID(popup, 0) == kCmdSkinOptions)) {
             PopulateSkinMenu(popup);
             ApplyPopupMenuStyle(popup);
         } else if (popup && GetMenuItemID(popup, 0) == kCmdVisualDream) {
@@ -3404,7 +3440,8 @@ std::filesystem::path PlayerWindow::CurrentSkinProfilePath() const {
         global_settings = std::filesystem::path(executable).parent_path() /
                           settings::kSettingsFileName;
     }
-    return ResolveSkinProfilePath(global_settings, settings_.skin_file);
+    // Keep plugin skin window geometry out of the selected native skin's sidecar.
+    return ResolveSkinProfilePath(global_settings, ActiveSkinSelector());
 }
 
 void PlayerWindow::SaveCurrentSkinProfile() {
@@ -3412,11 +3449,20 @@ void PlayerWindow::SaveCurrentSkinProfile() {
     CaptureWindowState();
     const auto profile = CurrentSkinProfilePath();
     if (profile.empty()) return;
+    std::wstring plugin_state;
+    TtpSkinLayout layout{};layout.size=sizeof(layout);
+    const bool have_layout=external_skin_ && external_skin_->Layout(layout,false);
+    if(have_layout) {
+        settings_.player.player_window=layout.windows[0];
+        settings_.player.playlist_window=layout.windows[1];
+        settings_.player.equalizer_window=layout.windows[2];
+        plugin_state.assign(layout.state,wcsnlen_s(layout.state,std::size(layout.state)));
+    }
     // FUN_0045D5FA captures the outgoing package's windows and invokes the
     // common serializer with DAT_00547744 set before loading the replacement.
     static_cast<void>(settings::SaveSkinVisualProfile(
         profile, settings_.player, settings_.playlist, settings_.lyric,
-        settings_.visual, settings_.source_path));
+        settings_.visual, settings_.source_path,have_layout?&plugin_state:nullptr));
 }
 
 void PlayerWindow::PersistWindowState() {
@@ -3444,14 +3490,7 @@ void PlayerWindow::PersistWindowState() {
     // flags on the next launch.  FUN_0045D5FA uses this same per-skin branch
     // when leaving a package; commit the active package snapshot at shutdown
     // as well, before the root state that owns mini visibility/top-most data.
-    if (skin_ && skin_->Valid()) {
-        const auto profile = CurrentSkinProfilePath();
-        if (!profile.empty()) {
-            static_cast<void>(settings::SaveSkinVisualProfile(
-                profile, settings_.player, settings_.playlist,
-                settings_.lyric, settings_.visual, settings_.source_path));
-        }
-    }
+    SaveCurrentSkinProfile();
     settings::SaveWindowState(settings_.source_path, settings_);
     if (!lyric_associations_.Save())
         OutputDebugStringW(L"TTPlayerRebuild: cannot save lyric associations; previous .rll retained.\n");
@@ -3480,6 +3519,7 @@ void PlayerWindow::LayoutControls(int width, int height) const {
 }
 
 void PlayerWindow::Paint(HDC dc) const {
+    if (external_skin_) { external_skin_->Paint(window_, dc); return; }
     if (skin_) {
         PaintSkin(dc);
         return;
@@ -3995,7 +4035,10 @@ std::vector<HWND> PlayerWindow::RegisteredDragWindows() const {
 
 void PlayerWindow::BuildAttachedDragGroup() {
     attached_drag_windows_.clear();
-    if (skin_drag_window_ != window_) return;
+    // FUN_004708B4 stops translating its attached set when the magnetic
+    // distance is zero. Auxiliary-originated drags always detach independently.
+    if (skin_drag_window_ != window_ || skin_drag_hit_ != kDragMove ||
+        !DecodePackedRuntimeOption(settings_.general.snap_windows, 1, 100).enabled) return;
 
     const auto registered = RegisteredDragWindows();
     bool added = true;
@@ -4075,12 +4118,14 @@ unsigned int PlayerWindow::PlaylistDragHitTest(POINT point) const {
     return hit == 0 ? kDragMove : hit;
 }
 
-void PlayerWindow::BeginSkinBackgroundDrag(HWND source, POINT point, unsigned int hit) {
+void PlayerWindow::BeginSkinBackgroundDrag(HWND source, POINT point, unsigned int hit,
+                                          SIZE minimum) {
     pressed_skin_element_.clear();
     dragging_skin_background_ = true;
     skin_drag_window_ = source;
     skin_drag_anchor_ = point;
     skin_drag_hit_ = hit;
+    skin_drag_minimum_ = minimum;
     GetWindowRect(source, &skin_drag_initial_rect_);
     skin_drag_screen_anchor_ = point;
     ClientToScreen(source, &skin_drag_screen_anchor_);
@@ -4103,8 +4148,8 @@ void PlayerWindow::ContinueSkinBackgroundDrag(HWND source, POINT point) {
         if ((skin_drag_hit_ & kDragTop) != 0) proposed.top += dy;
         if ((skin_drag_hit_ & kDragBottom) != 0) proposed.bottom += dy;
 
-        SIZE native{};
-        if (skin_) {
+        SIZE native = skin_drag_minimum_;
+        if (native.cx <= 0 && native.cy <= 0 && skin_) {
             if (source == lyric_window_ && !mini_mode_)
                 native = skin_->Lyric().background.size;
             else if (source == playlist_window_) native = skin_->Playlist().background.size;
@@ -4255,11 +4300,13 @@ void PlayerWindow::EndSkinMouseCapture() {
     dragging_skin_background_ = false;
     skin_drag_window_ = nullptr;
     skin_drag_hit_ = 0;
+    skin_drag_minimum_ = {};
     attached_drag_windows_.clear();
     if (captured && GetCapture() == captured) ReleaseCapture();
 }
 
 void PlayerWindow::ToggleMiniMode() {
+    if (external_skin_) { external_skin_->Shade(); return; }
     if (!window_ || !skin_ || !skin_->SupportsMiniMode()) return;
     if (mini_mode_fade_pending_ && !mini_mode_fade_continuation_) {
         // A synchronous 00464B6C would leave the second command queued until
@@ -4506,7 +4553,8 @@ HMENU PlayerWindow::BuildContextMenu() {
 std::vector<PlayerWindow::SkinMenuEntry> PlayerWindow::LoadSkinMenuCatalog(
     const std::filesystem::path& skin_directory, HMODULE skin_resources,
     HMODULE ttpcomm_module,
-    const std::shared_ptr<std::atomic_bool>& cancel) {
+    const std::shared_ptr<std::atomic_bool>& cancel,
+    const std::vector<std::shared_ptr<skin::SkinPluginModule>>& providers) {
     const auto cancelled = [&cancel] {
         return cancel && cancel->load(std::memory_order_acquire);
     };
@@ -4530,10 +4578,19 @@ std::vector<PlayerWindow::SkinMenuEntry> PlayerWindow::LoadSkinMenuCatalog(
 
     if (cancelled()) return {};
     catalog.push_back(std::move(embedded));
+    if (skin_directory.empty()) return catalog;
 
     std::vector<SkinMenuEntry> installed;
-    for (const auto& directory : skin::SkinSearchDirectories(skin_directory)) {
-        if (directory.empty()) continue;
+    std::vector<std::pair<std::filesystem::path,bool>> directories{
+        {skin_directory,false},{skin_directory/L"new",false}};
+    for(const auto& provider:providers) {
+        const auto path=provider->Directory(skin_directory);
+        if(std::none_of(directories.begin(),directories.end(),[&](const auto& entry) {
+            return _wcsicmp(entry.first.c_str(),path.c_str())==0;
+        })) directories.emplace_back(path,true);
+    }
+    for (const auto& [directory,external] : directories) {
+        if(directory.empty()) continue;
         std::error_code error;
         std::filesystem::directory_iterator iterator(directory, error);
         const std::filesystem::directory_iterator end;
@@ -4546,6 +4603,19 @@ std::vector<PlayerWindow::SkinMenuEntry> PlayerWindow::LoadSkinMenuCatalog(
                 continue;
             const auto& path = directory_entry.path();
             const auto extension = path.extension().wstring();
+            if (external) {
+                for (const auto& provider : providers) {
+                    TtpSkinInfo info{};
+                    if (!provider->OwnsInstalledPackage(skin_directory,path) || !provider->Probe(path, info)) continue;
+                    skin::SkinMetadata metadata;
+                    metadata.name = info.name;
+                    metadata.author = info.author;
+                    installed.push_back(SkinMenuEntry{0, path,
+                        skin::SkinPackageSelector(skin_directory, path), metadata, false, true, provider});
+                    break;
+                }
+                continue;
+            }
             if (_wcsicmp(extension.c_str(), L".skn") != 0 &&
                 _wcsicmp(extension.c_str(), L".zip") != 0) {
                 continue;
@@ -4591,12 +4661,14 @@ void PlayerWindow::StartSkinMenuCatalogLoad() {
     const auto skin_directory = FindRuntimePath(L"Skin");
     const HMODULE resources = ResourceModule();
     const HMODULE ttpcomm = ttpcomm_module_;
+    DiscoverSkinPlugins();
+    const auto providers = skin_plugins_;
     try {
         auto cancel = std::make_shared<std::atomic_bool>(false);
         skin_catalog_future_ = std::async(std::launch::async,
-            [skin_directory, resources, ttpcomm, cancel] {
+            [skin_directory, resources, ttpcomm, cancel, providers] {
                 return LoadSkinMenuCatalog(skin_directory, resources,
-                                           ttpcomm, cancel);
+                                           ttpcomm, cancel, providers);
             });
         skin_catalog_cancel_ = std::move(cancel);
     } catch (const std::exception&) {
@@ -4659,10 +4731,37 @@ void PlayerWindow::InvalidateSkinMenuCatalog() noexcept {
 void PlayerWindow::PopulateSkinMenu(HMENU menu) {
     if (!menu) return;
 
-    // Keep Options/separator/default/separator at positions 0..3, replacing
-    // only the dynamically populated skin entries on every expansion.
-    for (int position = GetMenuItemCount(menu) - 1; position >= 4; --position)
-        DeleteMenu(menu, position, MF_BYPOSITION);
+    // Preserve the two resource commands and their owner-draw records, but
+    // discard the previous catalog, including its owned plugin skin submenus.
+    // Position-based cleanup from 0045E518 no longer fits the grouped menu.
+    for (int position = GetMenuItemCount(menu) - 1; position >= 0; --position) {
+        const UINT command = GetMenuItemID(menu, position);
+        if (command != kCmdDefaultSkin && command != kCmdSkinOptions)
+            DeleteMenu(menu, position, MF_BYPOSITION);
+    }
+    if (GetMenuItemID(menu, 0) != kCmdSkinOptions) {
+        MENUITEMINFOW options{sizeof(options)};
+        options.fMask = MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_SUBMENU |
+                        MIIM_CHECKMARKS | MIIM_DATA | MIIM_BITMAP;
+        if (GetMenuItemInfoW(menu, kCmdSkinOptions, FALSE, &options)) {
+            std::wstring label;
+            if (const auto* visual = FindPopupMenuItem(options.dwItemData)) {
+                label = visual->text;
+            } else {
+                const int length = GetMenuStringW(menu, kCmdSkinOptions,
+                    nullptr, 0, MF_BYCOMMAND);
+                label.resize(static_cast<size_t>(std::max(0, length)) + 1);
+                GetMenuStringW(menu, kCmdSkinOptions, label.data(),
+                    static_cast<int>(label.size()), MF_BYCOMMAND);
+            }
+            options.fMask |= MIIM_STRING;
+            options.dwTypeData = label.data();
+            // Insert before removing so allocation failure retains Options.
+            if (InsertMenuItemW(menu, 0, TRUE, &options))
+                RemoveMenu(menu, 2, MF_BYPOSITION);
+        }
+    }
+    InsertMenuW(menu, 1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
     skin_commands_.clear();
 
     // Root-menu construction already starts the asynchronous worker.  Menu
@@ -4686,38 +4785,44 @@ void PlayerWindow::PopulateSkinMenu(HMENU menu) {
     for (const auto& entry : skin_catalog_cache_) {
         if (entry.embedded_default)
             embedded = entry;
-        else
+        else if (!entry.external || std::find(skin_plugins_.begin(),skin_plugins_.end(),entry.provider)!=skin_plugins_.end())
             installed.push_back(entry);
     }
 
+    // Use the same validated provider discovery as the Options page. A
+    // missing/unloadable DLL must not expose unusable plugin skin commands.
+    std::vector<HMENU> plugin_menus;
+    plugin_menus.reserve(skin_plugins_.size());
+    for(size_t index=0;index<skin_plugins_.size();++index) plugin_menus.push_back(CreatePopupMenu());
     UINT command = kCmdFirstSkin;
-    int position = 4;
     bool current_found{};
     for (auto& entry : installed) {
         entry.command = command++;
-        InsertMenuW(menu, position++, MF_BYPOSITION | MF_STRING,
-                    entry.command, entry.metadata.name.c_str());
+        const auto provider=std::find(skin_plugins_.begin(),skin_plugins_.end(),entry.provider);
+        const HMENU target=entry.external
+            ? plugin_menus[static_cast<size_t>(provider-skin_plugins_.begin())] : menu;
+        AppendMenuW(target, MF_STRING, entry.command, entry.metadata.name.c_str());
         if (!current_found && _wcsicmp(entry.package_name.c_str(),
-                                      settings_.skin_file.c_str()) == 0) {
-            CheckMenuItem(menu, entry.command, MF_BYCOMMAND | MF_CHECKED);
+                                      ActiveSkinSelector().c_str()) == 0) {
+            CheckMenuItem(target, entry.command, MF_BYCOMMAND | MF_CHECKED);
             current_found = true;
         }
     }
 
     // The command-to-object invariant used by 00465695 is index =
     // command-0x7919, so insert the resource object at vector index zero only
-    // after assigning all sorted external commands.
+    // after assigning all sorted package commands, across both menu levels.
     skin_commands_.reserve(installed.size() + 1);
     skin_commands_.push_back(std::move(embedded));
     skin_commands_.insert(skin_commands_.end(),
                           std::make_move_iterator(installed.begin()),
                           std::make_move_iterator(installed.end()));
 
-    if (settings_.skin_file == L"<Default_Skin>" ||
-        settings_.skin_file.empty()) {
-        CheckMenuItem(menu, kCmdDefaultSkin, MF_BYCOMMAND | MF_CHECKED);
-        current_found = true;
-    }
+    const bool default_skin = ActiveSkinSelector() == L"<Default_Skin>" ||
+        ActiveSkinSelector().empty();
+    CheckMenuItem(menu, kCmdDefaultSkin, MF_BYCOMMAND |
+        (default_skin ? MF_CHECKED : MF_UNCHECKED));
+    if (default_skin) current_found = true;
 
     // The native code makes one final load attempt for a configured package
     // that was not present in the successful enumeration and appends it at
@@ -4725,7 +4830,7 @@ void PlayerWindow::PopulateSkinMenu(HMENU menu) {
     // the original DAT_00547504 base path does.
     if (!catalog_pending && !skin_catalog_cache_.empty() &&
         !current_found && !skin_directory.empty() &&
-        !settings_.skin_file.empty()) {
+        !external_skin_ && !settings_.skin_file.empty()) {
         const auto package_name = skin::NormalizeSkinPackageName(settings_.skin_file);
         const auto configured = skin::ResolveSkinPackagePath(skin_directory, settings_.skin_file);
         try {
@@ -4735,13 +4840,21 @@ void PlayerWindow::PopulateSkinMenu(HMENU menu) {
             if (metadata) {
                 SkinMenuEntry entry{command, configured,
                     package_name.wstring(), *metadata, false};
-                InsertMenuW(menu, position, MF_BYPOSITION | MF_STRING,
-                            command, entry.metadata.name.c_str());
+                AppendMenuW(menu, MF_STRING, command, entry.metadata.name.c_str());
                 CheckMenuItem(menu, command, MF_BYCOMMAND | MF_CHECKED);
                 skin_commands_.push_back(std::move(entry));
             }
         } catch (const std::exception&) {
         }
+    }
+    UINT position=1;
+    for(size_t index=0;index<plugin_menus.size();++index) {
+        const HMENU plugin_menu=plugin_menus[index];
+        if(!plugin_menu) continue;
+        const UINT flags=MF_BYPOSITION|MF_POPUP|MF_STRING|
+            (GetMenuItemCount(plugin_menu)==0?MF_GRAYED:0);
+        if(InsertMenuW(menu,position,flags,reinterpret_cast<UINT_PTR>(plugin_menu),skin_plugins_[index]->Name().c_str())) ++position;
+        else DestroyMenu(plugin_menu);
     }
 }
 
@@ -4945,14 +5058,14 @@ void PlayerWindow::PrepareContextMenu(HMENU menu) {
         CheckCommand(menu, command,
             static_cast<int>(command - kCmdVisualFirst) == settings_.visual.type);
 
-    const bool default_skin = settings_.skin_file.empty() ||
-        settings_.skin_file == L"<Default_Skin>";
+    const bool default_skin = ActiveSkinSelector().empty() ||
+        ActiveSkinSelector() == L"<Default_Skin>";
     CheckCommand(menu, kCmdDefaultSkin, default_skin);
     for (const auto& entry : skin_commands_) {
         if (!entry.embedded_default)
             CheckCommand(menu, entry.command, !default_skin &&
                 _wcsicmp(entry.package_name.c_str(),
-                         settings_.skin_file.c_str()) == 0);
+                         ActiveSkinSelector().c_str()) == 0);
     }
 
     // Menu 0x8A grafts resource 0x8F into the player's context menu.  Its
@@ -5075,7 +5188,8 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
         return true;
     }
     if (command == kCmdDefaultSkin) {
-        if (!settings_.skin_file.empty() && settings_.skin_file != L"<Default_Skin>")
+        if (!settings_.plugin_skin_file.empty() || external_skin_ ||
+            (!settings_.skin_file.empty() && settings_.skin_file != L"<Default_Skin>"))
             static_cast<void>(LoadSkinResource(skin_resources_, L"<Default_Skin>"));
         skin_commands_.clear();
         return true;
@@ -5084,7 +5198,8 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
         if (!entry.embedded_default && command == entry.command) {
             // 00465695 compares selectors case-sensitively, then invokes one
             // 0045D5FA transaction (save outgoing, load target, rebind in place).
-            if (settings_.skin_file != entry.package_name) {
+            if (ActiveSkinSelector() != entry.package_name ||
+                (!entry.external && !settings_.plugin_skin_file.empty())) {
                 const auto path = entry.path;
                 static_cast<void>(LoadSkinPackage(path));
             }
@@ -5426,7 +5541,8 @@ void PlayerWindow::ApplySkinWindowAlpha(HWND target, BYTE alpha) {
         SetWindowLongPtrW(target, GWL_EXSTYLE, extended | WS_EX_LAYERED);
     COLORREF color_key{};
     DWORD flags = LWA_ALPHA;
-    if (target == lyric_window_ && settings_.lyric.transparent) {
+    if (target == lyric_window_ && settings_.lyric.transparent &&
+        !(external_skin_ && external_skin_->Handles(lyric_window_))) {
         // Match the actual painter, including optional mini-only skin colours.
         color_key = ActiveLyricBackgroundColor();
         flags |= LWA_COLORKEY;

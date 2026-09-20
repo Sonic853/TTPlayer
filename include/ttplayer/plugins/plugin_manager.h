@@ -47,6 +47,7 @@ struct ThumbnailData {
 struct PluginInfo {
     std::filesystem::path path;
     bool has_legacy_entry{};
+    bool skin_provider{};
     bool instance_created{};
     bool registered{};
     size_t reader_count{};

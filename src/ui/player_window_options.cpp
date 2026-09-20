@@ -79,6 +79,7 @@ constexpr int kOptionsDiscordLyrics = 0xe913;
 constexpr int kOptionsLanguage = 0xe914;
 constexpr int kOptionsLanguageLabel = 0xe916;
 constexpr int kOptionsLanguageNotice = 0xe917;
+constexpr int kOptionsSkinKindTab = 0xe918;
 
 std::wstring AlbumOptionText(UINT id) {
     return i18n::ResourceText(GetModuleHandleW(nullptr), id);
@@ -4874,6 +4875,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         InstallButtonBitmap(dialog, 1039, resources, 1039);
         for (const int control : {1066, 1067, 2109})
             MakeOptionsHyperlink(dialog, control);
+        InitializeOptionsSkinTabs(dialog);
         PopulateOptionsSkinPage(dialog);
         break;
     case 263: {
@@ -6021,6 +6023,7 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
     if ((all || template_id == 256 || template_id == 384 ||
          template_id == 385 || template_id == 263) && lyric_window_) {
         RebuildLyricFont(false);
+        UpdateLyricEditorStyle();
         UpdateLyricScrollTimer();
         ApplyFullScreenLyricTransparency();
         LayoutLyricControls();
@@ -6065,6 +6068,7 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
         playback_state == audio::PlaybackState::paused);
     const auto output_restart_position = audio_->Position();
     if (all || (mask & 0x800U) != 0) {
+        const auto plugin_skin = settings_.plugin_skin_file;
         const bool use_default = settings_.skin_file.empty() ||
             _wcsicmp(settings_.skin_file.c_str(), L"<Default_Skin>") == 0;
         if (use_default) {
@@ -6075,6 +6079,11 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
             const auto skin_path = skin::ResolveSkinPackagePath(
                 CurrentExecutablePath().parent_path() / L"Skin", settings_.skin_file);
             static_cast<void>(LoadSkinPackage(skin_path, false));
+        }
+        if (!plugin_skin.empty()) {
+            settings_.plugin_skin_file = plugin_skin;
+            static_cast<void>(LoadPluginSkin(skin::ResolveSkinPackagePath(
+                CurrentExecutablePath().parent_path() / L"Skin", plugin_skin), false));
         }
     }
 
@@ -6245,10 +6254,71 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
     }
 }
 
+void PlayerWindow::InitializeOptionsSkinTabs(HWND dialog) {
+    // Discover validates the ABI and all required entry points. A missing or
+    // unusable DLL leaves the original resource layout completely intact.
+    if (skin_plugins_.empty() || GetDlgItem(dialog, kOptionsSkinKindTab)) return;
+    RECT tab_bounds{};
+    GetClientRect(dialog, &tab_bounds);
+    const HWND tab = CreateWindowExW(0, WC_TABCONTROLW, L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS,
+        tab_bounds.left, tab_bounds.top,
+        tab_bounds.right - tab_bounds.left, tab_bounds.bottom - tab_bounds.top,
+        dialog, reinterpret_cast<HMENU>(kOptionsSkinKindTab),
+        GetModuleHandleW(nullptr), nullptr);
+    if (!tab) return;
+    SendMessageW(tab, WM_SETFONT, SendMessageW(dialog, WM_GETFONT, 0, 0), FALSE);
+    TCITEMW native{};native.mask=TCIF_TEXT;native.pszText=const_cast<wchar_t*>(L"\u539f\u751f");
+    TabCtrl_InsertItem(tab,0,&native);
+    int selected=0;
+    for(size_t index=0;index<skin_plugins_.size();++index) {
+        TCITEMW item{};item.mask=TCIF_TEXT;
+        item.pszText=const_cast<wchar_t*>(skin_plugins_[index]->Name().c_str());
+        const int inserted=TabCtrl_InsertItem(tab,static_cast<int>(index+1),&item);
+        if(external_skin_ && external_skin_->Provider()==skin_plugins_[index].get()) selected=inserted;
+    }
+    TabCtrl_SetCurSel(tab,selected);
+
+    // A tab control draws a complete pane, not just its header. Let that pane
+    // contain the existing controls instead of drawing an empty shallow box
+    // above them. Use its actual font/theme metrics for the header height.
+    RECT content = tab_bounds;
+    TabCtrl_AdjustRect(tab, FALSE, &content);
+    const int offset = content.top - tab_bounds.top;
+    // Keep the original heading margin and the metadata/bottom buttons in
+    // place; only the list and preview sacrifice vertical space.
+    RECT list_bounds{};
+    GetWindowRect(GetDlgItem(dialog, 1064), &list_bounds);
+    MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&list_bounds), 2);
+    for (HWND child = GetWindow(dialog, GW_CHILD); child;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        if (child == tab) continue;
+        RECT bounds{};
+        GetWindowRect(child, &bounds);
+        MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&bounds), 2);
+        if (bounds.top > list_bounds.top) continue;
+        const int id = GetDlgCtrlID(child);
+        const int shrink = id == 1064 || id == 1068 ? offset : 0;
+        SetWindowPos(child, nullptr, bounds.left, bounds.top + offset,
+            bounds.right - bounds.left, bounds.bottom - bounds.top - shrink,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    // The pane and controls are siblings. Keep the pane behind them so its
+    // WS_CLIPSIBLINGS excludes their pixels during selection/focus repaint.
+    SetWindowPos(tab, HWND_BOTTOM, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
 void PlayerWindow::PopulateOptionsSkinPage(HWND dialog) {
     if (!dialog || !IsWindow(dialog)) return;
     const HWND list = GetDlgItem(dialog, 1064);
     if (!list) return;
+    std::wstring previous;
+    const auto old_row = SendMessageW(list, LB_GETCURSEL, 0, 0);
+    const auto old_data = old_row == LB_ERR ? LB_ERR
+        : SendMessageW(list, LB_GETITEMDATA, old_row, 0);
+    if (old_data >= 0 && static_cast<size_t>(old_data) < options_skin_entries_.size())
+        previous = options_skin_entries_[static_cast<size_t>(old_data)].package_name;
     static_cast<void>(PublishReadySkinMenuCatalog(0));
     options_skin_entries_ = skin_catalog_cache_;
     if (options_skin_entries_.empty()) {
@@ -6264,10 +6334,21 @@ void PlayerWindow::PopulateOptionsSkinPage(HWND dialog) {
         embedded.metadata.email = L"none";
         options_skin_entries_.push_back(std::move(embedded));
     }
+    const HWND tab = GetDlgItem(dialog, kOptionsSkinKindTab);
+    const int selection=tab?TabCtrl_GetCurSel(tab):0;
+    const auto provider=selection>0 && static_cast<size_t>(selection)<=skin_plugins_.size()
+        ? skin_plugins_[static_cast<size_t>(selection-1)] : nullptr;
+    std::erase_if(options_skin_entries_,[&](const SkinMenuEntry& entry) {
+        return provider ? !entry.external || entry.provider!=provider : entry.external;
+    });
+    const bool retain_selection = std::any_of(options_skin_entries_.begin(),
+        options_skin_entries_.end(), [&](const SkinMenuEntry& entry) {
+            return _wcsicmp(entry.package_name.c_str(), previous.c_str()) == 0;
+        });
 
     SendMessageW(list, WM_SETREDRAW, FALSE, 0);
     SendMessageW(list, LB_RESETCONTENT, 0, 0);
-    int selected{};
+    int selected = options_skin_entries_.empty() ? -1 : 0;
     for (size_t index = 0; index < options_skin_entries_.size(); ++index) {
         auto& entry = options_skin_entries_[index];
         auto label = entry.embedded_default
@@ -6277,12 +6358,15 @@ void PlayerWindow::PopulateOptionsSkinPage(HWND dialog) {
             reinterpret_cast<LPARAM>(label.c_str()));
         if (row != LB_ERR && row != LB_ERRSPACE)
             SendMessageW(list, LB_SETITEMDATA, row, index);
+        const auto& selector = entry.external ? settings_.plugin_skin_file : settings_.skin_file;
         const bool active = entry.embedded_default
             ? settings_.skin_file.empty() ||
               _wcsicmp(settings_.skin_file.c_str(), L"<Default_Skin>") == 0
-            : _wcsicmp(settings_.skin_file.c_str(),
+            : _wcsicmp(selector.c_str(),
                        entry.package_name.c_str()) == 0;
-        if (active && row >= 0) selected = static_cast<int>(row);
+        const bool select = retain_selection
+            ? _wcsicmp(previous.c_str(), entry.package_name.c_str()) == 0 : active;
+        if (select && row >= 0) selected = static_cast<int>(row);
     }
     SendMessageW(list, LB_SETCURSEL, selected, 0);
     SendMessageW(list, WM_SETREDRAW, TRUE, 0);
@@ -6307,6 +6391,7 @@ void PlayerWindow::UpdateOptionsSkinDetails(HWND dialog) {
     SetDlgItemTextW(dialog, 2001,
         entry ? entry->package_name.c_str() : L"");
     EnableWindow(GetDlgItem(dialog, 1039), entry && !entry->embedded_default);
+    EnableWindow(GetDlgItem(dialog, 1098), entry != nullptr);
 
     if (options_skin_preview_) DeleteObject(options_skin_preview_);
     options_skin_preview_ = nullptr;
@@ -6316,6 +6401,14 @@ void PlayerWindow::UpdateOptionsSkinDetails(HWND dialog) {
     options_skin_preview_transparent_ = CLR_INVALID;
     if (entry) {
         try {
+            if (entry->external) {
+                if(entry->provider) {
+                    auto preview=skin::SkinPluginInstance::Create(entry->provider,entry->path,nullptr);
+                    if(preview) options_skin_preview_=preview->Preview();
+                }
+                InvalidateRect(GetDlgItem(dialog, 1068), nullptr, TRUE);
+                return;
+            }
             // FUN_0049A372 owns an independent CSkinManager for every list
             // item.  FUN_0049B010 lazily loads that object and FUN_0049A9A3
             // renders a temporary hidden player; even the active package does
@@ -7370,6 +7463,11 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
     case WM_NOTIFY: {
         const auto* header = reinterpret_cast<const NMHDR*>(lparam);
         if (!header) break;
+        if (template_id == 261 && header->idFrom == kOptionsSkinKindTab &&
+            header->code == TCN_SELCHANGE) {
+            PopulateOptionsSkinPage(dialog);
+            return TRUE;
+        }
         if (template_id == 250 && header->idFrom == 2183 &&
             header->code == DTN_DATETIMECHANGE &&
             GetPropW(dialog, kPageReadyProperty)) {

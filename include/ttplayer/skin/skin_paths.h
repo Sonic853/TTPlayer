@@ -8,17 +8,40 @@
 
 namespace ttplayer::skin {
 
-// Selectors are relative to the EXE's Skin directory. Keep the legacy
-// filename-only fallback for other/absolute paths, but retain the supported
-// new/ namespace so identically named BMP/PNG packages cannot share profiles.
+[[nodiscard]] inline bool IsNativeSkinPackage(const std::filesystem::path& path) {
+    const auto extension=path.extension().wstring();
+    return extension.empty() || _wcsicmp(extension.c_str(),L".skn")==0 ||
+           _wcsicmp(extension.c_str(),L".zip")==0;
+}
+
+[[nodiscard]] inline bool IsRelativeSkinPath(const std::filesystem::path& path) {
+    if(path.empty() || path.has_root_path()) return false;
+    for(const auto& part:path) {
+        if(part==L".." || part.native().find_first_of(L":*?\"<>|")!=std::wstring::npos) return false;
+    }
+    return true;
+}
+
+// Configuration uses a complete Skin-relative selector. Provider directories
+// and file suffixes are declared by the DLL, never inferred by the settings reader.
+[[nodiscard]] inline std::filesystem::path NormalizePluginSkinPackageName(std::wstring_view selector) {
+    const std::filesystem::path path(selector);
+    if(!IsRelativeSkinPath(path)) return {};
+    const auto normalized=path.lexically_normal();
+    if(normalized.parent_path().empty() || normalized.parent_path()==L"." ||
+       normalized.filename().empty() || normalized.filename()==L"." || IsNativeSkinPackage(normalized)) return {};
+    return normalized;
+}
+
+// Native filename-only resolution is retained; valid relative namespaces are
+// kept verbatim so each plugin can own a different child directory.
 [[nodiscard]] inline std::filesystem::path NormalizeSkinPackageName(std::wstring_view selector) {
-    const auto path = std::filesystem::path(selector).lexically_normal();
-    auto name = path.filename();
-    if (name.empty() || name == L"." || name == L"..") return {};
-    if (name.extension().empty()) name += L".skn";
-    if (!path.has_root_path() &&
-        _wcsicmp(path.parent_path().lexically_normal().c_str(), L"new") == 0)
-        return std::filesystem::path(L"new") / name;
+    const auto path=std::filesystem::path(selector).lexically_normal();
+    auto name=path.filename();
+    if(name.empty() || name==L"." || name==L"..") return {};
+    if(name.extension().empty()) name+=L".skn";
+    if(IsRelativeSkinPath(std::filesystem::path(selector)) &&
+       (!IsNativeSkinPackage(name) || _wcsicmp(path.parent_path().c_str(),L"new")==0)) return path.parent_path()/name;
     return name;
 }
 
@@ -32,9 +55,19 @@ namespace ttplayer::skin {
 
 [[nodiscard]] inline std::wstring SkinPackageSelector(
     const std::filesystem::path& skin_directory, const std::filesystem::path& package) {
-    const auto new_directory = (skin_directory / L"new").lexically_normal();
-    if (_wcsicmp(package.parent_path().lexically_normal().c_str(), new_directory.c_str()) == 0)
-        return (std::filesystem::path(L"new") / package.filename()).wstring();
+    auto parent=package.parent_path().lexically_normal();
+    const auto root=skin_directory.lexically_normal();
+    auto relative=package.filename();
+    while(!parent.empty() && _wcsicmp(parent.c_str(),root.c_str())!=0) {
+        const auto next=parent.parent_path();
+        if(next==parent) break;
+        relative=parent.filename()/relative;parent=next;
+    }
+    if(!parent.empty() && _wcsicmp(parent.c_str(),root.c_str())==0 && IsRelativeSkinPath(relative)) {
+        if(!IsNativeSkinPackage(package)) return relative.wstring();
+        if(_wcsicmp(relative.parent_path().c_str(),L"new")==0)
+            return (std::filesystem::path(L"new")/package.filename()).wstring();
+    }
     return package.filename().wstring();
 }
 

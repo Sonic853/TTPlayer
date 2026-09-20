@@ -583,6 +583,7 @@ public:
         width_ = next_width;
         height_ = next_height;
         full_screen_ = full_screen;
+        cover_frame_.reset();
         album_background_mode_ = false;
         album_frame_dirty_ = true;
         // FUN_0045775A reinitializes the active renderer on every call, even
@@ -595,6 +596,7 @@ public:
         previous_peaks_.assign(static_cast<size_t>(width_), int16_t{});
         scope_.assign(static_cast<size_t>(width_ + 2) * (height_ + 2), 0);
         have_dynamic_frame_ = false;
+        ++spectrum_generation_;
         dream_bits_ = nullptr;
         if (geometry_changed || !surface_dc_ || !surface_bits_)
             RecreateSurface();
@@ -728,10 +730,26 @@ public:
         }
     }
 
-    void Paint(HDC dc, const RECT& bounds) {
+    void Paint(HDC dc, const RECT& bounds, const TtpSkinVisualColors* colors = nullptr) {
         std::scoped_lock lock(mutex_);
         if (!dc || bounds.right <= bounds.left || bounds.bottom <= bounds.top)
             return;
+        // The native renderer and FFT remain authoritative. A provider may
+        // supply a temporary palette without changing persisted visual options.
+        const auto original = settings_;
+        struct Restore {
+            VisualRuntime& runtime;
+            const settings::VisualSettings& settings;
+            ~Restore() {runtime.settings_ = settings; runtime.paint_colors_ = nullptr;}
+        } restore{*this, original};
+        paint_colors_ = colors;
+        if (colors) {
+            settings_.spectrum_top_color = colors->top;
+            settings_.spectrum_middle_color = colors->middle;
+            settings_.spectrum_bottom_color = colors->bottom;
+            settings_.spectrum_peak_color = colors->peak;
+            settings_.blur_scope_color = colors->scope;
+        }
         switch (settings_.type) {
         case 1:
             PaintCachedBackground(dc, bounds);
@@ -754,6 +772,14 @@ public:
         }
     }
 
+    void SpectrumFrame(TtpSkinSpectrumFrame& frame) const {
+        std::scoped_lock lock(mutex_);
+        frame.type=static_cast<uint32_t>(settings_.type);
+        frame.generation=spectrum_generation_;frame.revision=spectrum_revision_;
+        frame.count=settings_.type==2 && have_dynamic_frame_?256:0;
+        if(frame.count) std::copy_n(analysis_work_.begin()+kAnalysisSamples*2,frame.count,frame.magnitudes);
+    }
+
     void PaintBackgroundOnly(HDC dc, const RECT& bounds) {
         std::scoped_lock lock(mutex_);
         if (!dc || bounds.right <= bounds.left || bounds.bottom <= bounds.top)
@@ -770,6 +796,24 @@ public:
     }
 
 private:
+    struct CoverFrame {
+        WTL::CDC dc;
+        WTL::CBitmap bitmap;
+        HGDIOBJ previous{};
+        SIZE size{};
+
+        explicit CoverFrame(SIZE target) : size(target) {
+            dc.CreateCompatibleDC();
+            if (!dc) return;
+            BITMAPINFO info{};
+            info.bmiHeader = {sizeof(BITMAPINFOHEADER), size.cx, -size.cy, 1, 32, BI_RGB};
+            void* pixels{};
+            bitmap.Attach(CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0));
+            if (bitmap) previous = SelectObject(dc, bitmap);
+        }
+        ~CoverFrame() { if (previous) SelectObject(dc, previous); }
+    };
+
     void DestroySurface() noexcept {
         if (surface_dc_ && surface_old_bitmap_)
             SelectObject(surface_dc_, surface_old_bitmap_);
@@ -826,11 +870,13 @@ private:
             surface_bits_, surface_bits_ + static_cast<size_t>(width_) * height_);
     }
 
+    const TtpSkinVisualColors* paint_colors_{}; // protected by mutex_, paint call only
+
     bool RestoreBackground() {
         const size_t pixels = static_cast<size_t>(width_) * height_;
         if (!surface_bits_ || background_pixels_.size() != pixels) return false;
-        std::copy(background_pixels_.begin(), background_pixels_.end(),
-                  surface_bits_);
+        if (paint_colors_) std::fill_n(surface_bits_,pixels,DibColor(paint_colors_->background));
+        else std::copy(background_pixels_.begin(), background_pixels_.end(),surface_bits_);
         return true;
     }
 
@@ -907,6 +953,7 @@ private:
     }
 
     void UpdateSpectrum(const audio::VisualizationSamples&) {
+        ++spectrum_revision_;
         if (spectrum_.size() != static_cast<size_t>(width_))
             spectrum_.assign(static_cast<size_t>(width_), int16_t{});
         if (peaks_.size() != spectrum_.size()) peaks_ = spectrum_;
@@ -1163,11 +1210,30 @@ private:
         // DC first and only then alpha-blended the cover bitmap. At the visual
         // worker cadence that exposed a real background-only intermediate
         // frame, especially while the layered parent was being refreshed.
-        // Compose the complete Type 4 frame in the persistent DIB and publish
-        // it with one final blit. WIC/GDI+ return premultiplied pixels; IPicture is
-        // still the fallback, but neither path can now be observed half drawn.
+        // Compose at the actual destination size. Plugin main/list/shade views
+        // can have a different aspect ratio from the native analysis surface;
+        // stretching an already fitted cover with that surface distorts it.
+        // Keep the complete frame buffered so no background-only intermediate
+        // frame is visible. Only the skin backing may be stretched.
         if (!RestoreBackground()) return;
-        const RECT frame{0, 0, width_, height_};
+        const SIZE size{bounds.right - bounds.left, bounds.bottom - bounds.top};
+        if (!cover_frame_ || !cover_frame_->previous ||
+            cover_frame_->size.cx < size.cx || cover_frame_->size.cy < size.cy) {
+            // Retain capacity for alternating main/list paints instead of
+            // allocating GDI objects on every frame. Configure releases it.
+            const SIZE capacity{std::max(size.cx, cover_frame_ ? cover_frame_->size.cx : 0L),
+                                std::max(size.cy, cover_frame_ ? cover_frame_->size.cy : 0L)};
+            cover_frame_ = std::make_unique<CoverFrame>(capacity);
+        }
+        if (!cover_frame_->previous) return;
+        const HDC frame_dc = cover_frame_->dc;
+        const RECT frame{0, 0, size.cx, size.cy};
+        SetStretchBltMode(frame_dc, COLORONCOLOR);
+        StretchBlt(frame_dc, 0, 0, size.cx, size.cy,
+                   surface_dc_, 0, 0, width_, height_, SRCCOPY);
+        const auto present = [&] {
+            BitBlt(dc, bounds.left, bounds.top, size.cx, size.cy, frame_dc, 0, 0, SRCCOPY);
+        };
         if (cover_payload_present_) {
             if (cover_bitmap_) {
                 const int source_width = cover_bitmap_size_.cx;
@@ -1183,11 +1249,11 @@ private:
                     static_cast<int>(source_height * scale));
                 const int x = frame.left + (available_width - width) / 2;
                 const int y = frame.top + (available_height - height) / 2;
-                const HDC source = CreateCompatibleDC(surface_dc_);
+                const HDC source = CreateCompatibleDC(frame_dc);
                 if (source) {
                     const HGDIOBJ old = SelectObject(source, cover_bitmap_);
                     BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-                    AlphaBlend(surface_dc_, x, y, width, height, source, 0, 0,
+                    AlphaBlend(frame_dc, x, y, width, height, source, 0, 0,
                                source_width, source_height, blend);
                     SelectObject(source, old);
                     DeleteDC(source);
@@ -1198,11 +1264,11 @@ private:
                 cover_->get_Width(&himetric_width);
                 cover_->get_Height(&himetric_height);
                 const int source_width = MulDiv(
-                    himetric_width, GetDeviceCaps(surface_dc_, LOGPIXELSX), 2540);
+                    himetric_width, GetDeviceCaps(frame_dc, LOGPIXELSX), 2540);
                 const int source_height = MulDiv(
-                    himetric_height, GetDeviceCaps(surface_dc_, LOGPIXELSY), 2540);
+                    himetric_height, GetDeviceCaps(frame_dc, LOGPIXELSY), 2540);
                 if (source_width <= 0 || source_height <= 0) {
-                    BlitSurface(dc, bounds);
+                    present();
                     return;
                 }
                 const int available_width = frame.right - frame.left;
@@ -1216,19 +1282,19 @@ private:
                     static_cast<int>(source_height * scale));
                 const int x = frame.left + (available_width - width) / 2;
                 const int y = frame.top + (available_height - height) / 2;
-                cover_->Render(surface_dc_, x, y, width, height, 0, himetric_height,
+                cover_->Render(frame_dc, x, y, width, height, 0, himetric_height,
                                himetric_width, -himetric_height, nullptr);
             }
         } else if (!fallback_.empty()) {
             const LOGFONTW description = settings_.font_valid
                 ? settings_.font : DefaultVisualFont();
             const HFONT font = CreateFontIndirectW(&description);
-            const HGDIOBJ old_font = font ? SelectObject(surface_dc_, font)
+            const HGDIOBJ old_font = font ? SelectObject(frame_dc, font)
                                           : nullptr;
-            SetBkMode(surface_dc_, TRANSPARENT);
-            SetTextColor(surface_dc_, settings_.text_color);
+            SetBkMode(frame_dc, TRANSPARENT);
+            SetTextColor(frame_dc, settings_.text_color);
             RECT measured{};
-            DrawTextW(surface_dc_, fallback_.c_str(), -1, &measured,
+            DrawTextW(frame_dc, fallback_.c_str(), -1, &measured,
                       DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
             const int width = std::min<int>(measured.right - measured.left,
                                             frame.right - frame.left);
@@ -1239,25 +1305,16 @@ private:
                 frame.top + ((frame.bottom - frame.top) - height) / 2,
                 frame.left + ((frame.right - frame.left) + width) / 2,
                 frame.top + ((frame.bottom - frame.top) + height) / 2};
-            DrawTextW(surface_dc_, fallback_.c_str(), -1, &text_bounds,
+            DrawTextW(frame_dc, fallback_.c_str(), -1, &text_bounds,
                       DT_SINGLELINE | DT_NOPREFIX);
-            const int output_width = bounds.right - bounds.left;
-            const int output_height = bounds.bottom - bounds.top;
-            fallback_bounds_ = {
-                bounds.left + MulDiv(text_bounds.left, output_width,
-                                     std::max(1, width_)),
-                bounds.top + MulDiv(text_bounds.top, output_height,
-                                    std::max(1, height_)),
-                bounds.left + MulDiv(text_bounds.right, output_width,
-                                     std::max(1, width_)),
-                bounds.top + MulDiv(text_bounds.bottom, output_height,
-                                    std::max(1, height_))};
+            fallback_bounds_ = text_bounds;
+            OffsetRect(&fallback_bounds_, bounds.left, bounds.top);
             if (font) {
-                SelectObject(surface_dc_, old_font);
+                SelectObject(frame_dc, old_font);
                 DeleteObject(font);
             }
         }
-        BlitSurface(dc, bounds);
+        present();
     }
 
     void BlitSurface(HDC dc, const RECT& bounds) const {
@@ -1350,6 +1407,7 @@ private:
     HBITMAP surface_bitmap_{};
     HGDIOBJ surface_old_bitmap_{};
     uint32_t* surface_bits_{};
+    std::unique_ptr<CoverFrame> cover_frame_;
     void* dream_{};
     const uint32_t* dream_bits_{};
     int dream_width_{};
@@ -1377,6 +1435,7 @@ private:
     std::vector<int16_t> previous_peaks_;
     std::vector<unsigned char> scope_;
     bool have_dynamic_frame_{};
+    uint64_t spectrum_generation_{},spectrum_revision_{};
     std::filesystem::path source_;
     std::wstring fallback_;
     bool thumbnail_interface_{};
@@ -1477,8 +1536,16 @@ void PlayerWindow::StartVisualWorker() {
             const auto audio = audio_;
             lock.unlock();
             if (stop.stop_requested()) return;
-            if (visual_worker_enabled_.load(std::memory_order_acquire) &&
+            const bool content_enabled=plugin_content_visual_enabled_.load(std::memory_order_acquire) &&
+                lyric_window_ && IsWindowVisible(lyric_window_);
+            if ((visual_worker_enabled_.load(std::memory_order_acquire) || content_enabled) &&
                 audio->State() == audio::PlaybackState::playing) {
+                const auto samples=audio->Visualization();
+                if(content_enabled && plugin_content_runtime_) {
+                    plugin_content_runtime_->Update(samples);
+                    InvalidateRect(lyric_window_,nullptr,FALSE);
+                }
+                if(!visual_worker_enabled_.load(std::memory_order_acquire)) continue;
                 // CPlayerWnd::Run invokes FUN_00457B11 on this worker.  It
                 // updates under the visual object's critical section, then
                 // obtains the child DC and paints immediately; no UI-thread
@@ -1487,7 +1554,14 @@ void PlayerWindow::StartVisualWorker() {
                 const auto runtime = visual_runtime_;
                 const HWND visual = visual_window_;
                 if (!runtime || !visual || !IsWindow(visual)) continue;
-                runtime->Update(audio->Visualization());
+                runtime->Update(samples);
+                if(visual_plugin_embedded_.load(std::memory_order_acquire)) {
+                    // A provider paints into its own bounded surfaces. Never
+                    // obtain the fallback skin child's DC in this mode.
+                    InvalidateRect(window_,nullptr,FALSE);
+                    if(playlist_window_) InvalidateRect(playlist_window_,nullptr,FALSE);
+                    continue;
+                }
                 const HDC dc = GetDC(visual);
                 if (dc) {
                     RECT client{};
@@ -1533,9 +1607,21 @@ void PlayerWindow::ApplySkinVisualSettings() {
 
 void PlayerWindow::UpdateVisualWindowLayout() {
     if (!window_) return;
+    plugin_content_visual_type_=-1;
+    if(!external_skin_ || !external_skin_->Handles(lyric_window_) || fullscreen_mode_!=0)
+        plugin_content_visual_enabled_.store(false,std::memory_order_release);
+    const bool plugin_embedded=external_skin_ && !fullscreen_visual_detached_;
+    visual_plugin_embedded_.store(plugin_embedded,std::memory_order_release);
+    if(plugin_embedded && visual_window_) ShowWindow(visual_window_,SW_HIDE);
     if (!visual_runtime_) {
         visual_runtime_ = std::make_shared<VisualRuntime>();
         visual_runtime_->SetModule(ttpcomm_module_);
+    }
+    // Initialize before StartVisualWorker. Both shared pointers then remain
+    // stable for its lifetime; each renderer locks its own frame state.
+    if(!plugin_content_runtime_) {
+        plugin_content_runtime_=std::make_shared<VisualRuntime>();
+        plugin_content_runtime_->SetModule(ttpcomm_module_);
     }
     if (fullscreen_visual_detached_) {
         RECT client{};
@@ -1565,21 +1651,21 @@ void PlayerWindow::UpdateVisualWindowLayout() {
         return;
     }
     const auto* element = FindActiveSkinElement(L"visual");
-    if (!visual_window_ || !element ||
-        element->bounds.right <= element->bounds.left ||
-        element->bounds.bottom <= element->bounds.top) {
+    RECT analysis_bounds=element?element->bounds:RECT{};
+    if(plugin_embedded && IsRectEmpty(&analysis_bounds)) GetClientRect(window_,&analysis_bounds);
+    if (!visual_window_ || IsRectEmpty(&analysis_bounds)) {
         if (visual_window_) ShowWindow(visual_window_, SW_HIDE);
         visual_worker_enabled_.store(false, std::memory_order_release);
         return;
     }
-    const int width = element->bounds.right - element->bounds.left;
-    const int height = element->bounds.bottom - element->bounds.top;
-    SetWindowPos(visual_window_, nullptr, element->bounds.left,
-                 element->bounds.top, width, height,
-                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
+    const int width = analysis_bounds.right - analysis_bounds.left;
+    const int height = analysis_bounds.bottom - analysis_bounds.top;
+    SetWindowPos(visual_window_, nullptr, analysis_bounds.left,
+                 analysis_bounds.top, width, height,
+                 SWP_NOACTIVATE | SWP_NOZORDER | (plugin_embedded?SWP_HIDEWINDOW:SWP_SHOWWINDOW));
     const auto background = ActiveSkinBackground();
     visual_runtime_->Configure(settings_.visual, {width, height}, false,
-                               background, &element->bounds);
+                               plugin_embedded?skin::SkinImage{}:background, &analysis_bounds);
     const UINT interval = settings_.visual.frames_per_second > 0
         ? std::max(1, 1000 / settings_.visual.frames_per_second) : 50;
     visual_interval_ms_.store(interval, std::memory_order_relaxed);
@@ -1587,6 +1673,10 @@ void PlayerWindow::UpdateVisualWindowLayout() {
                                  std::memory_order_release);
     visual_worker_condition_.notify_all();
     InvalidateRect(visual_window_, nullptr, FALSE);
+    if(plugin_embedded) {
+        InvalidateRect(window_,nullptr,FALSE);
+        if(playlist_window_) InvalidateRect(playlist_window_,nullptr,FALSE);
+    }
 }
 
 void PlayerWindow::UpdateVisualFrame() {
@@ -1605,6 +1695,7 @@ void PlayerWindow::UpdateVisualFrame() {
         // step whenever a skin or visual type changes.
     } else if (state == audio::PlaybackState::stopped ||
                state == audio::PlaybackState::failed) {
+        if(plugin_content_runtime_) plugin_content_runtime_->ClearPlayback();
         // CPlayerWnd's stop/failure paths call FUN_00457BCF before the next
         // paint.  That routine clears both animated state and the decoded
         // picture; retaining the previous track's cover after Stop is not an
@@ -1613,7 +1704,7 @@ void PlayerWindow::UpdateVisualFrame() {
         // FUN_00457BCF calls FUN_00457600 before invalidating: clear the
         // visible child synchronously instead of waiting for a later UI
         // WM_PAINT (the render worker has already stopped at this point).
-        const HDC dc = GetDC(visual_window_);
+        const HDC dc = external_skin_ && !fullscreen_visual_detached_?nullptr:GetDC(visual_window_);
         if (dc) {
             RECT client{};
             GetClientRect(visual_window_, &client);
@@ -1624,10 +1715,109 @@ void PlayerWindow::UpdateVisualFrame() {
         }
     }
     InvalidateRect(visual_window_, nullptr, FALSE);
+    if(external_skin_ && !fullscreen_visual_detached_) {
+        InvalidateRect(window_,nullptr,FALSE);
+        if(playlist_window_) InvalidateRect(playlist_window_,nullptr,FALSE);
+        if(external_skin_->Handles(lyric_window_)) InvalidateRect(lyric_window_,nullptr,FALSE);
+    }
+}
+
+BOOL WINAPI PlayerWindow::QuerySkinPluginSpectrum(void* context,TtpSkinSpectrumFrame* frame) {
+    if(!context || !frame || frame->size<sizeof(*frame)) return FALSE;
+    try {
+        auto& self=*static_cast<PlayerWindow*>(context);
+        if(!self.visual_runtime_) return FALSE;
+        *frame={};frame->size=sizeof(*frame);
+        self.visual_runtime_->SpectrumFrame(*frame);
+        frame->playback=static_cast<uint32_t>(self.audio_->State());
+        if(frame->playback!=2 && frame->playback!=3) frame->count=0;
+        return TRUE;
+    } catch(...) {return FALSE;}
+}
+
+BOOL WINAPI PlayerWindow::PaintSkinPluginVisual(void* context,HDC dc,const RECT* bounds,
+                                                const TtpSkinVisualColors* colors) {
+    if(!context || !dc || !bounds) return FALSE;
+    try {
+        auto& self=*static_cast<PlayerWindow*>(context);
+        if(!self.visual_runtime_ || self.settings_.visual.type==0) return FALSE;
+        const int saved=SaveDC(dc);
+        struct RestoreClip {HDC dc;int saved;~RestoreClip(){if(saved) RestoreDC(dc,saved);}} restore{dc,saved};
+        IntersectClipRect(dc,bounds->left,bounds->top,bounds->right,bounds->bottom);
+        self.visual_runtime_->Paint(dc,*bounds,colors);
+        return TRUE;
+    } catch(...) {return FALSE;}
+}
+
+void PlayerWindow::SkinPluginContentRects(const RECT& bounds,uint32_t mode,uint32_t visual_type,
+                                          RECT& visual,RECT& lyric,bool& overlay) const {
+    visual=lyric=bounds;overlay=false;
+    if(mode==TTP_SKIN_CONTENT_COMBINED) {
+        const size_t profile=settings_.fullscreen.visual_type?visual_type:0;
+        const int fraction=std::clamp(settings_.fullscreen.lyric_size[profile],0,10);
+        lyric.top+=(10-fraction)*(bounds.bottom-bounds.top)/10;
+        overlay=settings_.fullscreen.position_relation[profile]==1;
+        if(!overlay) visual.bottom=lyric.top;
+    }
+    if(mode==TTP_SKIN_CONTENT_VISUAL) SetRectEmpty(&lyric);
+    if(mode==TTP_SKIN_CONTENT_LYRICS) SetRectEmpty(&visual);
+}
+
+BOOL WINAPI PlayerWindow::PaintSkinPluginContent(void* context,HDC dc,const RECT* bounds,
+                                                uint32_t mode,uint32_t visual_type) {
+    if(!context || !dc || !bounds || IsRectEmpty(bounds) || mode<1 || mode>3 || visual_type>4)
+        return FALSE;
+    try {
+        auto& self=*static_cast<PlayerWindow*>(context);
+        const int saved=SaveDC(dc);
+        if(!saved) return FALSE;
+        struct Restore {HDC dc;int saved;~Restore(){RestoreDC(dc,saved);}} restore{dc,saved};
+        IntersectClipRect(dc,bounds->left,bounds->top,bounds->right,bounds->bottom);
+        FillRect(dc,bounds,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        const bool combined=mode==TTP_SKIN_CONTENT_COMBINED;
+        RECT visual{},lyric{};
+        bool overlay=false;
+        self.SkinPluginContentRects(*bounds,mode,visual_type,visual,lyric,overlay);
+        const bool have_visual=mode!=TTP_SKIN_CONTENT_LYRICS && !IsRectEmpty(&visual) && visual_type!=0;
+        self.plugin_content_visual_enabled_.store(have_visual,std::memory_order_release);
+        if(have_visual && self.plugin_content_runtime_) {
+            auto settings=self.settings_.visual;
+            settings.type=static_cast<int>(visual_type);
+            const SIZE size{visual.right-visual.left,visual.bottom-visual.top};
+            std::filesystem::path source;
+            audio::AudioMetadata metadata;
+            const auto playback=self.audio_->State();
+            if(playback==audio::PlaybackState::playing || playback==audio::PlaybackState::paused) {
+                if(const auto* track=self.PlaybackTrackForUi()) source=track->path;
+                metadata=self.audio_->Metadata();
+            }
+            auto& runtime=*self.plugin_content_runtime_;
+            if(self.plugin_content_visual_type_!=settings.type || self.plugin_content_size_.cx!=size.cx ||
+               self.plugin_content_size_.cy!=size.cy || self.plugin_content_combined_!=combined) {
+                // Reconfigure only at a mode/geometry/settings boundary. Doing
+                // this on every paint would reset spectrum decay and Goom.
+                if(visual_type==4 && combined)
+                    runtime.ConfigureAlbum(settings,size,self.settings_.fullscreen,
+                        self.settings_.lyric.fullscreen_background_color,source,metadata);
+                else runtime.Configure(settings,size,true);
+                self.plugin_content_visual_type_=settings.type;
+                self.plugin_content_size_=size;self.plugin_content_combined_=combined;
+            }
+            if(playback==audio::PlaybackState::playing || playback==audio::PlaybackState::paused)
+                runtime.SetSource(source,self.ResourceText(0x821b),metadata);
+            runtime.Paint(dc,visual);
+        }
+        // RichEdit owns these pixels while editing. Do not keep an animated
+        // lyric frame underneath it that can flash during a child repaint.
+        if(!self.lyric_editor_ && mode!=TTP_SKIN_CONTENT_VISUAL && !IsRectEmpty(&lyric))
+            self.PaintLyricControl(self.lyric_control_,dc,false,&lyric,overlay);
+        return TRUE;
+    } catch(...) {return FALSE;}
 }
 
 void PlayerWindow::PaintVisualControl(HDC dc) const {
     if (!dc || !visual_window_) return;
+    if(external_skin_ && !fullscreen_visual_detached_) return;
     RECT client{};
     GetClientRect(visual_window_, &client);
     if (fullscreen_visual_detached_) {
@@ -1799,7 +1989,10 @@ void PlayerWindow::RestoreLyricControl() {
     // FUN_0044ABFC reverses POPUP/CHILD before invoking the generic restore.
     LONG_PTR style = GetWindowLongPtrW(lyric_control_, GWL_STYLE);
     style &= ~static_cast<LONG_PTR>(WS_POPUP);
-    style |= WS_CHILD | WS_VISIBLE;
+    const bool plugin_content=external_skin_ && external_skin_->Handles(lyric_window_);
+    style |= WS_CHILD;
+    if(plugin_content) style &= ~static_cast<LONG_PTR>(WS_VISIBLE);
+    else style |= WS_VISIBLE;
     SetWindowLongPtrW(lyric_control_, GWL_STYLE, style);
 
     SetWindowPos(lyric_control_, nullptr,
@@ -1807,7 +2000,7 @@ void PlayerWindow::RestoreLyricControl() {
         fullscreen_lyric_saved_rect_.top,
         fullscreen_lyric_saved_rect_.right - fullscreen_lyric_saved_rect_.left,
         fullscreen_lyric_saved_rect_.bottom - fullscreen_lyric_saved_rect_.top,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SWP_NOACTIVATE | (plugin_content?SWP_HIDEWINDOW:SWP_SHOWWINDOW));
     SetRectEmpty(&fullscreen_lyric_saved_rect_);
     SetParent(lyric_control_, fullscreen_lyric_parent_);
     if (fullscreen_lyric_was_empty_) {
@@ -1960,7 +2153,7 @@ void PlayerWindow::UpdateFullScreenLayout() {
     DetachLyricControl(lyric, HWND_TOPMOST);
 }
 
-void PlayerWindow::SetFullScreenMode(int mode, HWND origin) {
+void PlayerWindow::SetFullScreenMode(int mode, HWND origin, int visual_type_override) {
     mode = std::clamp(mode, 0, 3);
     if (mode == 0) {
         LeaveFullScreen();
@@ -1989,7 +2182,9 @@ void PlayerWindow::SetFullScreenMode(int mode, HWND origin) {
         if (lyric_editor_) LeaveLyricEditor(true);
         if (lyric_window_) ShowWindow(lyric_window_, SW_HIDE);
     }
-    if ((mode == 2 || mode == 3) &&
+    if(visual_type_override>=0 && visual_type_override<=4)
+        settings_.visual.type=visual_type_override;
+    else if ((mode == 2 || mode == 3) &&
         (settings_.visual.type == 0 || (mode == 2 && settings_.visual.type == 4)))
         settings_.visual.type = 1;
     fullscreen_mode_ = mode;
@@ -2024,6 +2219,10 @@ void PlayerWindow::LeaveFullScreen() {
     RestoreLyricControl();
     settings_.lyric.fullscreen_transparent =
         fullscreen_saved_lyric_transparent_;
+    if(plugin_content_fullscreen_saved_type_>=0) {
+        settings_.visual.type=plugin_content_fullscreen_saved_type_;
+        plugin_content_fullscreen_saved_type_=-1;
+    }
     if (lyric_window_) {
         if (desktop_lyric_mode_) {
             ShowWindow(lyric_window_, SW_HIDE);
@@ -2054,13 +2253,11 @@ void PlayerWindow::LeaveFullScreen() {
     UnregisterHotKey(window_, kFullscreenEscapeHotkey);
 }
 
-void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
-    if (context_menu_open_ || !visual_window_ ||
-        !IsWindowEnabled(window_)) return;
+HMENU PlayerWindow::CreateVisualContextMenu(bool detached,int mode,int type) {
     const HMODULE resources = ResourceModule();
     HMENU popup = DetachFirstPopup(
         i18n::LoadMenu(resources, MAKEINTRESOURCEW(kMenuVisual)));
-    if (!popup) return;
+    if (!popup) return nullptr;
     HMENU fullscreen = DetachFirstPopup(
         i18n::LoadMenu(resources, MAKEINTRESOURCEW(kMenuFullscreen)));
     if (fullscreen) {
@@ -2075,16 +2272,16 @@ void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
     EnableCommand(popup, kCmdFullscreenLyrics, may_enter);
     EnableCommand(popup, kCmdFullscreenVisual, may_enter);
     EnableCommand(popup, kCmdFullscreenAll, may_enter);
-    CheckCommand(popup, kCmdFullscreenLyrics, fullscreen_mode_ == 1);
-    CheckCommand(popup, kCmdFullscreenVisual, fullscreen_mode_ == 2);
-    CheckCommand(popup, kCmdFullscreenAll, fullscreen_mode_ == 3);
+    CheckCommand(popup, kCmdFullscreenLyrics, mode == 1);
+    CheckCommand(popup, kCmdFullscreenVisual, mode == 2);
+    CheckCommand(popup, kCmdFullscreenAll, mode == 3);
 
-    if (fullscreen_visual_detached_) {
+    if (detached) {
         // FUN_00458020 owns the detached-window path.  Its positional and
         // command deletions produce the compact seven-item menu and it uses
         // the saved main window directly as TrackPopupMenu's command owner.
         DeleteMenu(popup, 3, MF_BYPOSITION);
-        if (fullscreen_mode_ == 3) {
+        if (mode == 3) {
             const auto label = FullScreenMenuText(IDS_FULLSCREEN_ALBUM);
             ModifyMenuW(popup, kCmdVisualCover, MF_BYCOMMAND | MF_STRING,
                         kCmdVisualCover, label.c_str());
@@ -2097,15 +2294,9 @@ void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
         if (last >= 0) DeleteMenu(popup, last, MF_BYPOSITION);
         PopulateFullScreenMonitorMenu(popup);
         CheckMenuItem(popup,
-            static_cast<UINT>(kCmdVisualFirst + settings_.visual.type),
+            static_cast<UINT>(kCmdVisualFirst + type),
             MF_BYCOMMAND | MF_CHECKED);
-        context_menu_open_ = true;
-        TrackPlayerPopupMenu(popup, TPM_RIGHTBUTTON, screen_point.x, screen_point.y,
-                       0, window_, nullptr);
-        DestroyMenu(popup);
-        context_menu_open_ = false;
-        PostMessageW(window_, WM_NULL, 0, 0);
-        return;
+        return popup;
     }
 
     // Resource 145 also contains the full-screen host's direct "exit full
@@ -2123,15 +2314,21 @@ void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
     // Keep the complete resource menu here; the compact seven-item variant is
     // selected by the full-screen host, not merely by right-clicking Visual.
     CheckMenuItem(popup,
-        static_cast<UINT>(kCmdVisualFirst + settings_.visual.type),
+        static_cast<UINT>(kCmdVisualFirst + type),
         MF_BYCOMMAND | MF_CHECKED);
+    return popup;
+}
 
+void PlayerWindow::ShowVisualContextMenu(POINT screen_point) {
+    if (context_menu_open_ || !visual_window_ || !IsWindowEnabled(window_)) return;
+    const bool detached=fullscreen_visual_detached_;
+    const HMENU popup=CreateVisualContextMenu(detached,fullscreen_mode_,settings_.visual.type);
+    if(!popup) return;
     context_menu_open_ = true;
-    SetForegroundWindow(window_);
-    BeginPopupMenuStyle(popup, true);
+    if(!detached) {SetForegroundWindow(window_);BeginPopupMenuStyle(popup, true);}
     TrackPlayerPopupMenu(popup, TPM_RIGHTBUTTON, screen_point.x, screen_point.y,
                    0, window_, nullptr);
-    EndPopupMenuStyle();
+    if(!detached) EndPopupMenuStyle();
     DestroyMenu(popup);
     context_menu_open_ = false;
     PostMessageW(window_, WM_NULL, 0, 0);

@@ -12,6 +12,7 @@
 #include "ttplayer/settings/settings.h"
 #include "ttplayer/skin/skin.h"
 #include "ttplayer/skin/skin_package.h"
+#include "ttplayer/skin/skin_plugin.h"
 #include "ttplayer/ui/desktop_lyrics.h"
 #include "ttplayer/ui/playlist_rating_input.h"
 #include "ttplayer/ui/playlist_marquee.h"
@@ -94,6 +95,34 @@ public:
     [[nodiscard]] HWND Handle() const noexcept { return window_; }
 
 private:
+    void DiscoverSkinPlugins();
+    bool IsPluginSkinPackage(const std::filesystem::path& path);
+    bool LoadPluginSkin(const std::filesystem::path& path, bool restore_profile = true);
+    [[nodiscard]] const std::wstring& ActiveSkinSelector() const;
+    bool InstallPluginSkin(const std::filesystem::path& path);
+    static BOOL WINAPI QuerySkinPluginState(void*, TtpSkinState*);
+    static BOOL WINAPI QuerySkinPluginTrack(void*, uint32_t, TtpSkinTrack*);
+    static uint32_t WINAPI QuerySkinPluginSelection(void*, uint32_t);
+    static BOOL WINAPI PaintSkinPluginVisual(void*, HDC, const RECT*, const TtpSkinVisualColors*);
+    static BOOL WINAPI QuerySkinPluginTip(void*, uint32_t, int32_t, wchar_t*, uint32_t);
+    void RemovePluginSkinNativeTips();
+    static void WINAPI PostSkinPluginCommand(void*, uint32_t, int32_t);
+    static BOOL WINAPI HandleSkinPluginDrag(void*, const TtpSkinDrag*);
+    static BOOL WINAPI ResizeSkinPluginWindow(void*, HWND, SIZE);
+    static BOOL WINAPI QuerySkinPluginSpectrum(void*, TtpSkinSpectrumFrame*);
+    static BOOL WINAPI PaintSkinPluginContent(void*, HDC, const RECT*, uint32_t, uint32_t);
+    static BOOL WINAPI HandleSkinPluginContentInput(void*, const TtpSkinContent*, const MSG*, LRESULT*);
+    void SkinPluginContentRects(const RECT&, uint32_t, uint32_t, RECT&, RECT&, bool&) const;
+    HMENU CreateSkinPluginContentMenu(const TtpSkinContent&, std::vector<UINT>&);
+    void ShowSkinPluginContentMenu(bool keyboard);
+    void HandleSkinPluginContentMenuCommand(UINT, TtpSkinContent);
+    HWND plugin_content_drag_window_{};
+    POINT plugin_content_menu_point_{};
+    bool plugin_content_menu_point_valid_{};
+    void HandleSkinPluginCommand(uint32_t command, int32_t value);
+    std::vector<std::shared_ptr<skin::SkinPluginModule>> skin_plugins_;
+    std::unique_ptr<skin::SkinPluginInstance> external_skin_;
+    bool skin_plugins_discovered_{};
     friend struct ttplayer::testing::ProgressSeekAccess;
     friend struct ttplayer::testing::SkinRebindAccess;
     enum class FileDropSurface { player, playlist, lyric };
@@ -125,6 +154,8 @@ private:
         std::wstring package_name;
         skin::SkinMetadata metadata;
         bool embedded_default{};
+        bool external{};
+        std::shared_ptr<skin::SkinPluginModule> provider;
     };
 
     struct AssociationOptionNode {
@@ -168,7 +199,7 @@ private:
     LRESULT HandleMessage(UINT, WPARAM, LPARAM);
     LRESULT HandlePlaylistMessage(UINT, WPARAM, LPARAM, HWND mouse_source);
     LRESULT HandleLyricMessage(UINT, WPARAM, LPARAM);
-    LRESULT HandleLyricControlMessage(HWND, UINT, WPARAM, LPARAM);
+    LRESULT HandleLyricControlMessage(HWND, UINT, WPARAM, LPARAM, bool content_surface=false);
     LRESULT HandlePlaylistControlMessage(HWND, UINT, WPARAM, LPARAM);
     LRESULT HandleEqualizerMessage(UINT, WPARAM, LPARAM);
     LRESULT HandleEqualizerControlMessage(HWND, UINT, WPARAM, LPARAM);
@@ -288,6 +319,7 @@ private:
     void RefreshOptionsAssociationIcon(HWND dialog);
     void SetOptionsAssociationIcon(HWND dialog, const std::wstring& icon);
     void PopulateOptionsSkinPage(HWND dialog);
+    void InitializeOptionsSkinTabs(HWND dialog);
     void UpdateOptionsSkinDetails(HWND dialog);
     void StartOptionsDspScan(HWND dialog,
                              const std::filesystem::path& folder);
@@ -301,8 +333,9 @@ private:
     INT_PTR HandleVisualOptionsDialog(HWND, UINT, WPARAM, LPARAM);
     void InvokeVisualAction(POINT point);
     void ShowVisualContextMenu(POINT screen_point);
+    HMENU CreateVisualContextMenu(bool detached, int mode, int type);
     [[nodiscard]] bool VisualFallbackHit(POINT point) const;
-    void SetFullScreenMode(int mode, HWND origin = nullptr);
+    void SetFullScreenMode(int mode, HWND origin = nullptr, int visual_type_override = -1);
     [[nodiscard]] MONITORINFOEXW FullScreenMonitorInfo(HWND origin = nullptr) const;
     void PopulateFullScreenMonitorMenu(HMENU menu);
     bool HandleFullScreenCommand(UINT command, HWND origin);
@@ -313,7 +346,8 @@ private:
     void RestoreLyricControl();
     void LeaveFullScreen();
     void ToggleMiniMode();
-    void BeginSkinBackgroundDrag(HWND source, POINT point, unsigned int hit = 1);
+    void BeginSkinBackgroundDrag(HWND source, POINT point, unsigned int hit = 1,
+                                 SIZE minimum = {});
     void ContinueSkinBackgroundDrag(HWND source, POINT point);
     void EndSkinMouseCapture();
     [[nodiscard]] unsigned int PlaylistDragHitTest(POINT point) const;
@@ -324,7 +358,8 @@ private:
     static std::vector<SkinMenuEntry> LoadSkinMenuCatalog(
         const std::filesystem::path& skin_directory,
         HMODULE skin_resources, HMODULE ttpcomm_module,
-        const std::shared_ptr<std::atomic_bool>& cancel);
+        const std::shared_ptr<std::atomic_bool>& cancel,
+        const std::vector<std::shared_ptr<skin::SkinPluginModule>>& providers = {});
     void StartSkinMenuCatalogLoad();
     [[nodiscard]] bool PublishReadySkinMenuCatalog(DWORD wait_milliseconds = 0);
     void InvalidateSkinMenuCatalog() noexcept;
@@ -401,7 +436,7 @@ private:
     void ClearPlaylistDropCue() noexcept;
     void LoadDroppedLyrics(const std::filesystem::path& path);
     void RefreshPlaylist();
-    bool CreatePlaylistWindow();
+    bool CreatePlaylistWindow(bool for_provider = false);
     void TogglePlaylistWindow();
     void UpdatePlaylistWindowSkin(bool saved_bounds = false);
     void UpdatePlaylistWindowRegion();
@@ -515,15 +550,27 @@ private:
     void CaptureActiveLyricWindowState();
     void ApplyActiveLyricWindowState();
     void PaintLyricWindow(HDC dc) const;
-    void PaintLyricControl(HWND control, HDC dc, bool present_layered = true) const;
+    void PaintLyricControl(HWND control, HDC dc, bool present_layered = true,
+                           const RECT* target = nullptr, bool overlay = false) const;
     [[nodiscard]] std::wstring LyricLineText(size_t index) const;
-    [[nodiscard]] int LyricLineExtent(HDC dc, size_t index) const;
+    struct LyricDisplayRow { std::wstring text; int width{}; };
+    struct LyricLineLayout {
+        std::string source;
+        std::vector<LyricDisplayRow> rows;
+        int width{};
+    };
+    mutable std::vector<LyricLineLayout> lyric_line_layouts_;
+    mutable HGDIOBJ lyric_layout_font_{};
+    mutable int lyric_layout_width_{};
+    [[nodiscard]] int LyricLayoutWidth() const;
+    [[nodiscard]] const LyricLineLayout& LayoutLyricLine(HDC, size_t, int) const;
+    [[nodiscard]] int LyricLineExtent(HDC dc, size_t index, int wrap_width=0) const;
     [[nodiscard]] std::pair<size_t, int> LyricDragPosition(HDC dc,
                                                            int delta) const;
     [[nodiscard]] std::pair<size_t, int> LyricDragPosition(
-        HDC dc, int delta, std::chrono::milliseconds playback_position) const;
+        HDC dc, int delta, std::chrono::milliseconds playback_position, int wrap_width=0) const;
     [[nodiscard]] std::optional<std::chrono::milliseconds> LyricDragTime(
-        HDC dc, int delta) const;
+        HDC dc, int delta, int wrap_width=0) const;
     [[nodiscard]] bool LyricTextHitTest(HWND control, POINT point) const;
     [[nodiscard]] RECT LyricElementBounds(const skin::SkinElement& element) const;
     [[nodiscard]] RECT LyricTextBounds() const;
@@ -537,12 +584,13 @@ private:
     bool EnterLyricEditor();
     void LeaveLyricEditor(bool prompt_to_save);
     void DestroyLyricEditor();
-    void LayoutLyricEditor();
+    void LayoutLyricEditor(const RECT* content_bounds=nullptr);
     [[nodiscard]] std::filesystem::path DefaultLyricEditorPath() const;
     [[nodiscard]] std::wstring LyricEditorText() const;
     void SetLyricEditorText(std::wstring_view text, bool modified);
     void InitializeLyricEditorRichText();
     void SetLyricEditorFont(const LOGFONTW& font);
+    void UpdateLyricEditorStyle();
     void FormatLyricEditorAll();
     void FormatLyricEditorLines(LONG begin, LONG end);
     void FormatLyricEditorRange(LONG begin, LONG end);
@@ -578,7 +626,7 @@ private:
     void SeekLyricLine(std::ptrdiff_t delta);
     [[nodiscard]] bool HandleToolTipNotification(HWND owner, LPARAM notification);
     [[nodiscard]] std::wstring ToolTipText(HWND owner, UINT_PTR tool) const;
-    bool CreateEqualizerWindow();
+    bool CreateEqualizerWindow(bool for_provider = false);
     void CreateEqualizerControls();
     void DestroyEqualizerControls();
     void UpdateEqualizerControlState();
@@ -646,6 +694,7 @@ private:
     [[nodiscard]] int FindPlaylistControlPrefix(
         bool catalogue, int start, const LVFINDINFOW& find) const;
     void FinishPlaylistTrackDrag(POINT point);
+    void ReorderSelectedPlaylistRows(size_t insertion, bool copy);
     void FinishPlaylistListDrag();
     void BeginPlaylistOleDrag();
     void ChoosePlaylistFile(bool replace_active);
@@ -818,11 +867,18 @@ private:
     DesktopLyricsWindow desktop_lyrics_;
     std::optional<skin::LegacySkin> skin_;
     std::shared_ptr<VisualRuntime> visual_runtime_;
+    std::shared_ptr<VisualRuntime> plugin_content_runtime_;
+    SIZE plugin_content_size_{};
+    int plugin_content_visual_type_{-1};
+    bool plugin_content_combined_{};
+    int plugin_content_fullscreen_saved_type_{-1};
+    std::atomic_bool plugin_content_visual_enabled_{};
     std::jthread visual_worker_;
     std::condition_variable_any visual_worker_condition_;
     std::mutex visual_worker_mutex_;
     std::atomic_uint visual_interval_ms_{50};
     std::atomic_bool visual_worker_enabled_{};
+    std::atomic_bool visual_plugin_embedded_{};
     int fullscreen_mode_{}; // 0 normal, 1 lyric, 2 visual, 3 lyric+visual
     std::wstring fullscreen_monitor_device_; // active display, survives mode changes
     RECT fullscreen_monitor_rect_{}; // nearest-display fallback after unplugging
@@ -917,6 +973,7 @@ private:
     POINT skin_drag_anchor_{};
     POINT skin_drag_screen_anchor_{};
     RECT skin_drag_initial_rect_{};
+    SIZE skin_drag_minimum_{};
     unsigned int skin_drag_hit_{};
     std::vector<HWND> attached_drag_windows_;
     bool mini_mode_{};

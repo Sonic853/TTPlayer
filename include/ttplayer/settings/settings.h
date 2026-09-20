@@ -407,7 +407,8 @@ struct Settings {
     ConvertSettings convert;
     DspPluginSettings plugin;
     HistorySettings history;
-    std::wstring skin_file;
+    std::wstring skin_file; // Native package, also supplies windows not owned by a provider.
+    std::wstring plugin_skin_file; // Empty when the user selects a native skin.
     std::filesystem::path source_path;
 };
 
@@ -441,13 +442,15 @@ bool LoadSkinVisualProfile(const std::filesystem::path& path,
                            PlayerSettings& player,
                            PlaylistSettings& playlist,
                            LyricSettings& lyric,
-                           VisualSettings& visual);
+                           VisualSettings& visual,
+                           std::wstring* plugin_state = nullptr);
 bool SaveSkinVisualProfile(const std::filesystem::path& path,
                            const PlayerSettings& player,
                            const PlaylistSettings& playlist,
                            const LyricSettings& lyric,
                            const VisualSettings& visual,
-                           const std::filesystem::path& global_settings_path = {});
+                           const std::filesystem::path& global_settings_path = {},
+                           const std::wstring* plugin_state = nullptr);
 void SaveWindowState(const std::filesystem::path& path,
                      const Settings& settings);
 }

@@ -387,9 +387,9 @@ LRESULT PlayerWindow::HandleEqualizerMessage(UINT message, WPARAM wparam,
     return DefWindowProcW(equalizer_window_, message, wparam, lparam);
 }
 
-bool PlayerWindow::CreateEqualizerWindow() {
+bool PlayerWindow::CreateEqualizerWindow(bool for_provider) {
     if (equalizer_window_) return true;
-    if (!skin_ || !skin_->Equalizer().valid) return false;
+    if (!skin_ || (!skin_->Equalizer().valid && !for_provider && !external_skin_)) return false;
     const auto& layout = skin_->Equalizer();
     RECT player{};
     GetWindowRect(window_, &player);
@@ -400,8 +400,8 @@ bool PlayerWindow::CreateEqualizerWindow() {
         x = saved.left;
         y = saved.top;
     }
-    const int width = layout.background.size.cx;
-    const int height = layout.background.size.cy;
+    const int width = layout.valid ? layout.background.size.cx : 1;
+    const int height = layout.valid ? layout.background.size.cy : 1;
     if (width <= 0 || height <= 0) return false;
     // FUN_0046AF50 creates "Equalizer" as an owned WS_POPUP with
     // WS_EX_TOOLWINDOW (0x80). It deliberately has no native caption/frame.
@@ -553,7 +553,7 @@ void PlayerWindow::UpdateEqualizerWindowRegion() {
 void PlayerWindow::UpdateEqualizerToolRects() {
     if (!equalizer_window_ || !CreateToolTipWindow()) return;
     RemoveToolTipTools(equalizer_window_);
-    if (!skin_ || !skin_->Equalizer().valid) return;
+    if (external_skin_ || !skin_ || !skin_->Equalizer().valid) return;
     for (const auto& [hit, control] : equalizer_controls_) {
         UINT_PTR identifier{};
         if (hit == kEqHitEnabled) identifier = kEqCommandEnable;

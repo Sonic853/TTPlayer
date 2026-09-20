@@ -2843,16 +2843,18 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
     return DefWindowProcW(playlist_window_, message, wparam, lparam);
 }
 
-bool PlayerWindow::CreatePlaylistWindow() {
+bool PlayerWindow::CreatePlaylistWindow(bool for_provider) {
     if (playlist_window_) return true;
-    if (!skin_ || !skin_->Playlist().valid) return false;
+    if (!skin_ || (!skin_->Playlist().valid && !for_provider && !external_skin_)) return false;
     const auto& layout = skin_->Playlist();
     RECT main_bounds{};
     GetWindowRect(window_, &main_bounds);
     int x = main_bounds.left + layout.position.left;
     int y = main_bounds.top + layout.position.top;
-    int width = layout.background.size.cx;
-    int height = layout.background.size.cy;
+    // A provider can own a surface absent from the selected native package.
+    // It supplies the actual geometry when attaching to this empty container.
+    int width = layout.valid ? layout.background.size.cx : 1;
+    int height = layout.valid ? layout.background.size.cy : 1;
     const RECT saved = settings_.player.playlist_window;
     if (saved.right > saved.left && saved.bottom > saved.top) {
         x = saved.left;
@@ -3197,6 +3199,7 @@ bool PlayerWindow::RoutePlaylistMouseWheel(const MSG& message) const {
 }
 
 bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
+    if (external_skin_ && external_skin_->Translate(message)) return true;
     if (RoutePlaylistMouseWheel(message)) return true;
     if (TranslateLyricUploadMessage(message)) return true;
     auto* queued = const_cast<MSG*>(&message);
@@ -3246,6 +3249,10 @@ bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
             return true;
         }
     }
+    // Provider-owned windows use their own geometry and tooltip lifecycle.
+    // Never relay their mouse events into the backing native skin's tools.
+    if(external_skin_ && (message.hwnd==window_ || message.hwnd==playlist_window_ ||
+        message.hwnd==equalizer_window_)) return false;
     for (const HWND target : {tooltip_, playlist_item_tooltip_}) {
         if (!target || !IsWindow(target)) continue;
         // Preserve hwnd/time/screen coordinates from the original queued MSG;
@@ -3310,7 +3317,7 @@ void PlayerWindow::AddPlaylistToolTipControl(HWND control,
 void PlayerWindow::UpdateMainToolRects() {
     if (!window_ || !CreateToolTipWindow()) return;
     RemoveToolTipTools(window_);
-    if (!skin_) return;
+    if (external_skin_ || !skin_) return;
 
     std::set<UINT_PTR> registered;
     for (const auto& element : ActiveSkinElements()) {
@@ -3369,7 +3376,7 @@ void PlayerWindow::UpdatePlaylistToolRects() {
                              SWP_NOZORDER | SWP_NOACTIVATE);
         }
     };
-    if (!skin_ || !skin_->Playlist().valid) { park_unused(); return; }
+    if (external_skin_ || !skin_ || !skin_->Playlist().valid) { park_unused(); return; }
     RECT client{};
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
@@ -3491,7 +3498,7 @@ void PlayerWindow::UpdatePlaylistItemTipRects() {
             item = tooltip_tools_.erase(item);
         }
     }
-    if (!skin_ || !skin_->Playlist().valid) return;
+    if (external_skin_ || !skin_ || !skin_->Playlist().valid) return;
 
     RECT client{};
     GetClientRect(playlist_window_, &client);
@@ -5198,7 +5205,13 @@ void PlayerWindow::FinishPlaylistTrackDrag(POINT point) {
             0, metrics.visible_rows)),
             ActivePlaylist().Tracks().size());
     }
-    if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+    ReorderSelectedPlaylistRows(insertion,(GetKeyState(VK_CONTROL) & 0x8000)!=0);
+}
+
+void PlayerWindow::ReorderSelectedPlaylistRows(size_t insertion,bool copy) {
+    if(settings_.playlist.library_mode || playlist_selected_rows_.empty()) return;
+    insertion=std::min(insertion,ActivePlaylist().Tracks().size());
+    if(copy) {
         // Files' OLE drop target advertises COPY while Ctrl is held.  A copy
         // back into the same Files list clones the selected CPlayItem range
         // at the insertion mark; it must not route through Reorder(), which
