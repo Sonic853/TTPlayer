@@ -45,6 +45,9 @@ public:
     bool LyricColors(HWND window,TtpSkinLyricColors& colors) const noexcept {
         return module_->Api().lyric_colors && module_->Api().lyric_colors(instance_,window,&colors);
     }
+    int32_t LyricFontHeight() const noexcept {
+        return module_->Api().lyric_font_height?module_->Api().lyric_font_height(instance_):0;
+    }
     bool Layout(TtpSkinLayout& state,bool restore) const {
         return module_->Api().layout && SUCCEEDED(module_->Api().layout(instance_,&state,restore));
     }

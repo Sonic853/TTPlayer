@@ -2353,8 +2353,11 @@ void PlayerWindow::UpdateLyricEditorStyle() {
     SendMessageW(lyric_editor_,EM_SETMODIFY,modified,0);
 }
 
-void PlayerWindow::SetLyricEditorFont(const LOGFONTW& font) {
-    if (!lyric_editor_) return;
+LONG PlayerWindow::LyricEditorFontHeight(const LOGFONTW& font) const {
+    // The original editor clamps to 9 pt. Provider content may have a
+    // smaller pixel font (11 px = 8.25 pt at 96 DPI), which must remain
+    // consistent with Lyrics Show and the playback lyrics.
+    const LONG minimum=external_skin_ && external_skin_->Handles(lyric_window_)?1:180;
     LONG height = 180;
     if (font.lfHeight != 0) {
         const HDC dc = GetDC(lyric_editor_);
@@ -2364,9 +2367,15 @@ void PlayerWindow::SetLyricEditorFont(const LOGFONTW& font) {
             const LONG scaled = static_cast<LONG>(
                 (static_cast<long long>(std::abs(font.lfHeight)) * 1440) /
                 dpi);
-            height = std::max<LONG>(180, scaled);
+            height = std::max(minimum, scaled);
         }
     }
+    return height;
+}
+
+void PlayerWindow::SetLyricEditorFont(const LOGFONTW& font) {
+    if (!lyric_editor_) return;
+    const LONG height=LyricEditorFontHeight(font);
     const COLORREF text_color = settings_.lyric.text_color != CLR_INVALID
         ? settings_.lyric.text_color
         : (skin_ ? skin_->Lyric().text_color : GetSysColor(COLOR_WINDOWTEXT));
@@ -2417,17 +2426,7 @@ void PlayerWindow::FormatLyricEditorRange(LONG begin, LONG end) {
                  reinterpret_cast<LPARAM>(&saved));
     const LOGFONTW font = settings_.lyric.font_valid
         ? settings_.lyric.font : (skin_ ? skin_->Lyric().font : LOGFONTW{});
-    LONG height = 180;
-    if (font.lfHeight != 0) {
-        const HDC dc = GetDC(lyric_editor_);
-        const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
-        if (dc) ReleaseDC(lyric_editor_, dc);
-        if (dpi > 0) {
-            height = std::max<LONG>(180, static_cast<LONG>(
-                (static_cast<long long>(std::abs(font.lfHeight)) * 1440) /
-                dpi));
-        }
-    }
+    const LONG height=LyricEditorFontHeight(font);
     const COLORREF text_color = settings_.lyric.text_color != CLR_INVALID
         ? settings_.lyric.text_color
         : (skin_ ? skin_->Lyric().text_color : GetSysColor(COLOR_WINDOWTEXT));

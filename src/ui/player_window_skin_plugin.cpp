@@ -63,6 +63,13 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
             settings_.lyric.highlight_color=colors.highlight;
             settings_.lyric.background_color=colors.background;
         }
+        const auto font_height=next->LyricFontHeight();
+        if(font_height && font_height>=-4096 && font_height<=4096) {
+            if(!settings_.lyric.font_valid) settings_.lyric.font=skin_->Lyric().font;
+            settings_.lyric.font.lfHeight=font_height;
+            settings_.lyric.font.lfWidth=0;
+            settings_.lyric.font_valid=true;
+        }
         auto profile=path;profile+=L".xml";
         std::wstring state;
         // Missing geometry in a partial target profile is a default layout,
@@ -101,6 +108,7 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
             external_skin_=std::move(previous);RemovePluginSkinNativeTips();return false;
         }
         external_skin_=std::move(next);
+        RebuildLyricFont(false);
         UpdateLyricEditorStyle();
         UpdateVisualWindowLayout();UpdateVisualFrame();
         RemovePluginSkinNativeTips();

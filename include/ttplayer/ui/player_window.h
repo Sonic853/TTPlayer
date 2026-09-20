@@ -591,6 +591,7 @@ private:
     void SetLyricEditorText(std::wstring_view text, bool modified);
     void InitializeLyricEditorRichText();
     void SetLyricEditorFont(const LOGFONTW& font);
+    LONG LyricEditorFontHeight(const LOGFONTW& font) const;
     void UpdateLyricEditorStyle();
     void FormatLyricEditorAll();
     void FormatLyricEditorLines(LONG begin, LONG end);

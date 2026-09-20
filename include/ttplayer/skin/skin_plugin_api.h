@@ -180,6 +180,10 @@ typedef struct TtpSkinPlugin {
     // Optional package defaults. window=nullptr queries before attach; the
     // host overlays saved/user colours and uses those for both UI and paint.
     BOOL (WINAPI *lyric_colors)(void*, HWND, TtpSkinLyricColors*);
+    // Optional default LOGFONT height for window lyrics (negative = glyph
+    // pixels, zero = host default). Query before attach, then overlay the
+    // user's saved lyric font; never override it during painting.
+    int32_t (WINAPI *lyric_font_height)(void*);
 } TtpSkinPlugin;
 #define TTP_SKIN_PLUGIN_V1_SIZE offsetof(TtpSkinPlugin, skin_directory)
 #define TTP_SKIN_PLUGIN_DECLARATION_SIZE offsetof(TtpSkinPlugin, layout)

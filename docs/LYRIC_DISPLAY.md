@@ -59,6 +59,16 @@ survive every profile load unchanged.
 
 ## Painting semantics
 
+### Plugin lyric font defaults
+
+A provider may declare a default window-lyric LOGFONT height through the
+optional `lyric_font_height` ABI field. Winamp declares `-11` (11 glyph pixels).
+The host applies this before loading the skin's saved lyric font. The Lyrics
+Show font chooser, playback renderer and editor then use the same settings;
+later font choices survive skin reselect and restart. Playlist and fullscreen
+font settings remain independent. The provider editor accepts sizes below the
+native editor's 9-point minimum, so 11 pixels stays 8.25 points at 96 DPI.
+
 ### Long vertical lines
 
 Vertical lyrics now wrap to the actual content width, including the native
