@@ -38,7 +38,27 @@
 - WIC 仍是第一解码器，只有 WIC 失败才调用 `OleLoadPicture`。reader 的
   `ISoundThumbnail`、第 0 张图片、缓存失效、点击命中和菜单行为均未改变。
 
-## Windows Sandbox 验证
+## 插件皮肤中的封面比例修复
+
+主窗口复用 `VisualRuntime` 时，其分析缓冲仍按原生皮肤的 `visual` 尺寸初始化，
+插件则通过 `PaintSkinPluginVisual` 传入自身的主窗口、播放列表或折叠区域。此前
+`PaintCover` 在分析缓冲中完成等比例缩放后，又整体 `StretchBlt` 到插件区域；
+两处宽高比不同就会再次横向或纵向缩放封面。像素回归复现了正方形封面在
+`72 × 16` 区域被压成 `15 × 16` 的情况。
+
+现在普通封面按最终绘制区域的尺寸，在独立的 32 位缓冲中恢复背景并合成图片，
+再一次 `BitBlt` 提交完整帧。保持原版 `FUN_00455175` 的居中、等比例缩小、
+小图不放大策略；WIC/GDI+ 位图与 OLE 回退使用同一目标尺寸。无封面提示的绘制
+和命中矩形也直接使用目标坐标。全屏专辑背景仍沿用自身的裁剪与透明度逻辑。
+
+缓冲使用 WTL 管理 GDI 资源，容量足够时复用，避免主窗口与播放列表交替刷新时
+重复分配；切换视觉类型或重新配置时释放。修复位于重建版宿主，无插件 ABI 改动。
+
+本地回归位于 `tests/waskin/host_tests.cpp` 的 `--visual-only` 分支，覆盖正方形、
+横图、竖图、小图、折叠区、双倍尺寸的 DC 映射、区域裁剪、暂停和反复切换尺寸，
+并检查原生／插件皮肤切换。测试不进入分发包或 Actions。
+
+## Windows Sandbox 验证（原闪烁修复）
 
 运行：
 
@@ -57,4 +77,3 @@
 
 报告由 Sandbox 账户 `WDAGUtilityAccount` 写出，位于
 `build/sandbox-cover/20260904-154727/cover-flicker-report.json`。
-

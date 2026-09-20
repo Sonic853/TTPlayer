@@ -585,6 +585,7 @@ public:
         width_ = next_width;
         height_ = next_height;
         full_screen_ = full_screen;
+        cover_frame_.reset();
         album_background_mode_ = false;
         album_frame_dirty_ = true;
         // FUN_0045775A reinitializes the active renderer on every call, even
@@ -797,6 +798,24 @@ public:
     }
 
 private:
+    struct CoverFrame {
+        WTL::CDC dc;
+        WTL::CBitmap bitmap;
+        HGDIOBJ previous{};
+        SIZE size{};
+
+        explicit CoverFrame(SIZE target) : size(target) {
+            dc.CreateCompatibleDC();
+            if (!dc) return;
+            BITMAPINFO info{};
+            info.bmiHeader = {sizeof(BITMAPINFOHEADER), size.cx, -size.cy, 1, 32, BI_RGB};
+            void* pixels{};
+            bitmap.Attach(CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0));
+            if (bitmap) previous = SelectObject(dc, bitmap);
+        }
+        ~CoverFrame() { if (previous) SelectObject(dc, previous); }
+    };
+
     void DestroySurface() noexcept {
         if (surface_dc_ && surface_old_bitmap_)
             SelectObject(surface_dc_, surface_old_bitmap_);
@@ -1193,11 +1212,30 @@ private:
         // DC first and only then alpha-blended the cover bitmap. At the visual
         // worker cadence that exposed a real background-only intermediate
         // frame, especially while the layered parent was being refreshed.
-        // Compose the complete Type 4 frame in the persistent DIB and publish
-        // it with one final blit. WIC/GDI+ return premultiplied pixels; IPicture is
-        // still the fallback, but neither path can now be observed half drawn.
+        // Compose at the actual destination size. Plugin main/list/shade views
+        // can have a different aspect ratio from the native analysis surface;
+        // stretching an already fitted cover with that surface distorts it.
+        // Keep the complete frame buffered so no background-only intermediate
+        // frame is visible. Only the skin backing may be stretched.
         if (!RestoreBackground()) return;
-        const RECT frame{0, 0, width_, height_};
+        const SIZE size{bounds.right - bounds.left, bounds.bottom - bounds.top};
+        if (!cover_frame_ || !cover_frame_->previous ||
+            cover_frame_->size.cx < size.cx || cover_frame_->size.cy < size.cy) {
+            // Retain capacity for alternating main/list paints instead of
+            // allocating GDI objects on every frame. Configure releases it.
+            const SIZE capacity{std::max(size.cx, cover_frame_ ? cover_frame_->size.cx : 0L),
+                                std::max(size.cy, cover_frame_ ? cover_frame_->size.cy : 0L)};
+            cover_frame_ = std::make_unique<CoverFrame>(capacity);
+        }
+        if (!cover_frame_->previous) return;
+        const HDC frame_dc = cover_frame_->dc;
+        const RECT frame{0, 0, size.cx, size.cy};
+        SetStretchBltMode(frame_dc, COLORONCOLOR);
+        StretchBlt(frame_dc, 0, 0, size.cx, size.cy,
+                   surface_dc_, 0, 0, width_, height_, SRCCOPY);
+        const auto present = [&] {
+            BitBlt(dc, bounds.left, bounds.top, size.cx, size.cy, frame_dc, 0, 0, SRCCOPY);
+        };
         if (cover_payload_present_) {
             if (cover_bitmap_) {
                 const int source_width = cover_bitmap_size_.cx;
@@ -1213,11 +1251,11 @@ private:
                     static_cast<int>(source_height * scale));
                 const int x = frame.left + (available_width - width) / 2;
                 const int y = frame.top + (available_height - height) / 2;
-                const HDC source = CreateCompatibleDC(surface_dc_);
+                const HDC source = CreateCompatibleDC(frame_dc);
                 if (source) {
                     const HGDIOBJ old = SelectObject(source, cover_bitmap_);
                     BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-                    AlphaBlend(surface_dc_, x, y, width, height, source, 0, 0,
+                    AlphaBlend(frame_dc, x, y, width, height, source, 0, 0,
                                source_width, source_height, blend);
                     SelectObject(source, old);
                     DeleteDC(source);
@@ -1228,11 +1266,11 @@ private:
                 cover_->get_Width(&himetric_width);
                 cover_->get_Height(&himetric_height);
                 const int source_width = MulDiv(
-                    himetric_width, GetDeviceCaps(surface_dc_, LOGPIXELSX), 2540);
+                    himetric_width, GetDeviceCaps(frame_dc, LOGPIXELSX), 2540);
                 const int source_height = MulDiv(
-                    himetric_height, GetDeviceCaps(surface_dc_, LOGPIXELSY), 2540);
+                    himetric_height, GetDeviceCaps(frame_dc, LOGPIXELSY), 2540);
                 if (source_width <= 0 || source_height <= 0) {
-                    BlitSurface(dc, bounds);
+                    present();
                     return;
                 }
                 const int available_width = frame.right - frame.left;
@@ -1246,19 +1284,19 @@ private:
                     static_cast<int>(source_height * scale));
                 const int x = frame.left + (available_width - width) / 2;
                 const int y = frame.top + (available_height - height) / 2;
-                cover_->Render(surface_dc_, x, y, width, height, 0, himetric_height,
+                cover_->Render(frame_dc, x, y, width, height, 0, himetric_height,
                                himetric_width, -himetric_height, nullptr);
             }
         } else if (!fallback_.empty()) {
             const LOGFONTW description = settings_.font_valid
                 ? settings_.font : DefaultVisualFont();
             const HFONT font = CreateFontIndirectW(&description);
-            const HGDIOBJ old_font = font ? SelectObject(surface_dc_, font)
+            const HGDIOBJ old_font = font ? SelectObject(frame_dc, font)
                                           : nullptr;
-            SetBkMode(surface_dc_, TRANSPARENT);
-            SetTextColor(surface_dc_, settings_.text_color);
+            SetBkMode(frame_dc, TRANSPARENT);
+            SetTextColor(frame_dc, settings_.text_color);
             RECT measured{};
-            DrawTextW(surface_dc_, fallback_.c_str(), -1, &measured,
+            DrawTextW(frame_dc, fallback_.c_str(), -1, &measured,
                       DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
             const int width = std::min<int>(measured.right - measured.left,
                                             frame.right - frame.left);
@@ -1269,25 +1307,16 @@ private:
                 frame.top + ((frame.bottom - frame.top) - height) / 2,
                 frame.left + ((frame.right - frame.left) + width) / 2,
                 frame.top + ((frame.bottom - frame.top) + height) / 2};
-            DrawTextW(surface_dc_, fallback_.c_str(), -1, &text_bounds,
+            DrawTextW(frame_dc, fallback_.c_str(), -1, &text_bounds,
                       DT_SINGLELINE | DT_NOPREFIX);
-            const int output_width = bounds.right - bounds.left;
-            const int output_height = bounds.bottom - bounds.top;
-            fallback_bounds_ = {
-                bounds.left + MulDiv(text_bounds.left, output_width,
-                                     std::max(1, width_)),
-                bounds.top + MulDiv(text_bounds.top, output_height,
-                                    std::max(1, height_)),
-                bounds.left + MulDiv(text_bounds.right, output_width,
-                                     std::max(1, width_)),
-                bounds.top + MulDiv(text_bounds.bottom, output_height,
-                                    std::max(1, height_))};
+            fallback_bounds_ = text_bounds;
+            OffsetRect(&fallback_bounds_, bounds.left, bounds.top);
             if (font) {
-                SelectObject(surface_dc_, old_font);
+                SelectObject(frame_dc, old_font);
                 DeleteObject(font);
             }
         }
-        BlitSurface(dc, bounds);
+        present();
     }
 
     void BlitSurface(HDC dc, const RECT& bounds) const {
@@ -1380,6 +1409,7 @@ private:
     HBITMAP surface_bitmap_{};
     HGDIOBJ surface_old_bitmap_{};
     uint32_t* surface_bits_{};
+    std::unique_ptr<CoverFrame> cover_frame_;
     void* dream_{};
     const uint32_t* dream_bits_{};
     int dream_width_{};
