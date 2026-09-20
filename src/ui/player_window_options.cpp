@@ -6219,11 +6219,12 @@ void PlayerWindow::InitializeOptionsSkinTabs(HWND dialog) {
     // Discover validates the ABI and all required entry points. A missing or
     // unusable DLL leaves the original resource layout completely intact.
     if (skin_plugins_.empty() || GetDlgItem(dialog, kOptionsSkinKindTab)) return;
-    RECT strip{7, 0, 273, 20};
-    MapDialogRect(dialog, &strip);
+    RECT tab_bounds{};
+    GetClientRect(dialog, &tab_bounds);
     const HWND tab = CreateWindowExW(0, WC_TABCONTROLW, L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS,
-        strip.left, strip.top, strip.right - strip.left, strip.bottom - strip.top,
+        tab_bounds.left, tab_bounds.top,
+        tab_bounds.right - tab_bounds.left, tab_bounds.bottom - tab_bounds.top,
         dialog, reinterpret_cast<HMENU>(kOptionsSkinKindTab),
         GetModuleHandleW(nullptr), nullptr);
     if (!tab) return;
@@ -6239,10 +6240,14 @@ void PlayerWindow::InitializeOptionsSkinTabs(HWND dialog) {
     }
     TabCtrl_SetCurSel(tab,selected);
 
-    // Make room above the existing headings. Keep the metadata and bottom
-    // buttons in place; only the list and preview sacrifice vertical space.
-    RECT offset{0, 0, 0, 22};
-    MapDialogRect(dialog, &offset);
+    // A tab control draws a complete pane, not just its header. Let that pane
+    // contain the existing controls instead of drawing an empty shallow box
+    // above them. Use its actual font/theme metrics for the header height.
+    RECT content = tab_bounds;
+    TabCtrl_AdjustRect(tab, FALSE, &content);
+    const int offset = content.top - tab_bounds.top;
+    // Keep the original heading margin and the metadata/bottom buttons in
+    // place; only the list and preview sacrifice vertical space.
     RECT list_bounds{};
     GetWindowRect(GetDlgItem(dialog, 1064), &list_bounds);
     MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&list_bounds), 2);
@@ -6254,13 +6259,14 @@ void PlayerWindow::InitializeOptionsSkinTabs(HWND dialog) {
         MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&bounds), 2);
         if (bounds.top > list_bounds.top) continue;
         const int id = GetDlgCtrlID(child);
-        const int shrink = id == 1064 || id == 1068 ? offset.bottom : 0;
-        SetWindowPos(child, nullptr, bounds.left, bounds.top + offset.bottom,
+        const int shrink = id == 1064 || id == 1068 ? offset : 0;
+        SetWindowPos(child, nullptr, bounds.left, bounds.top + offset,
             bounds.right - bounds.left, bounds.bottom - bounds.top - shrink,
             SWP_NOZORDER | SWP_NOACTIVATE);
     }
-    // Put the selector first in the page's keyboard navigation order.
-    SetWindowPos(tab, HWND_TOP, 0, 0, 0, 0,
+    // The pane and controls are siblings. Keep the pane behind them so its
+    // WS_CLIPSIBLINGS excludes their pixels during selection/focus repaint.
+    SetWindowPos(tab, HWND_BOTTOM, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
