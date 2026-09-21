@@ -1,5 +1,7 @@
 # 歌词读取与“关联歌词”恢复
 
+> 2026-09-21 补充：相关功能已在 XP SP3 / Win7 SP1 虚拟机中执行回归。覆盖项、修复和未覆盖边界见 [虚拟机验证记录](XP_WIN7_VM_VALIDATION.md)。下文保留原日期的历史结论。
+
 本次只以根目录 5.7.9 的 `reverse/decompiled/TTPlayer.exe.pseudo.c`、
 `TTPlayer.exe` 及 `ttpres.dll` 为依据，不引用 6.1.2 的非皮肤行为。
 

@@ -38,8 +38,9 @@ public:
 // boundary. Mouse/paint traffic handled by the skin does not copy selections.
 struct NativeListState {
     PlayerWindow* owner{};
-    bool ready{}, synchronizing{};
+    bool ready{}, synchronizing{}, row_height_checked{};
     HFONT font{};
+    int font_height{13};
     int count{-1}, width{-1};
     DWORD extended_style{MAXDWORD};
     std::set<size_t> selected;
@@ -129,8 +130,9 @@ LRESULT PlayerWindow::DefaultPlaylistListMessage(
                                 : playlist_selection_anchor_;
     state->synchronizing = true;
     if (!state->font) {
-        // 16-pixel rows, independent of the font used by the skin renderer.
-        state->font = CreateFontW(-10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        // This font serves native scrolling/keyboard geometry only. The skin
+        // renderer owns the visible font and uses 16-pixel rows.
+        state->font = CreateFontW(state->font_height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             DEFAULT_QUALITY, DEFAULT_PITCH, L"Tahoma");
         Native(window, WM_SETFONT, reinterpret_cast<WPARAM>(state->font), FALSE);
@@ -152,6 +154,30 @@ LRESULT PlayerWindow::DefaultPlaylistListMessage(
     if (count_changed) {
         state->count = native_count;
         Native(window, LVM_SETITEMCOUNT, native_count, LVSICF_NOSCROLL | LVSICF_NOINVALIDATEALL);
+    }
+    if (native_count && !state->row_height_checked) {
+        // The same Tahoma font produces 13-pixel rows on XP but 16-pixel
+        // rows on newer ComCtl32. Measure the real control before exposing
+        // its paging/scrolling results to the 16-pixel skin projection.
+        // Empty lists defer this until a real owner-data row is available.
+        state->row_height_checked = true;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            RECT bounds{LVIR_BOUNDS};
+            if (!Native(window, LVM_GETITEMRECT, 0, reinterpret_cast<LPARAM>(&bounds))) break;
+            const int height = bounds.bottom - bounds.top;
+            if (height == 16) break;
+            // Positive lfHeight specifies the whole cell. Negative character
+            // heights can jump over the desired size on XP's font mapper.
+            const int font_height = std::clamp(state->font_height + 16 - height, 4, 32);
+            if (font_height == state->font_height) break;
+            const HFONT font = CreateFontW(font_height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY, DEFAULT_PITCH, L"Tahoma");
+            if (!font) break;
+            Native(window, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+            if (state->font) DeleteObject(state->font);
+            state->font = font; state->font_height = font_height;
+        }
     }
     const DWORD extended = catalogue ? playlist_list_extended_style_ : playlist_track_extended_style_;
     if (state->extended_style != extended) {

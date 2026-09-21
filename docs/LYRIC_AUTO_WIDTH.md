@@ -1,5 +1,7 @@
 # 歌词窗口自动适应宽度（2026-09-21）
 
+> 2026-09-21 补充：相关功能已在 XP SP3 / Win7 SP1 虚拟机中执行回归。覆盖项、修复和未覆盖边界见 [虚拟机验证记录](XP_WIN7_VM_VALIDATION.md)。下文保留原日期的历史结论。
+
 ## 原版依据
 
 对照 `reverse/decompiled/TTPlayer.exe.pseudo.c`：

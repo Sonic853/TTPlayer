@@ -299,3 +299,9 @@ XP／Win7 版始终单份随机索引循环，以及跨轮回退、
 `ctest --test-dir <构建目录> -C Release -R '^taskbar_preview_tests$' --output-on-failure`。
 验证封面切换／无封面回退、图片比例与 alpha、缓存释放、播放状态，以及本机 DWM 普通和最小化预览。
 测试仅供本地手动运行。详见 [TASKBAR_ALBUM_PREVIEW.md](TASKBAR_ALBUM_PREVIEW.md)。
+
+## 最新虚拟机验证补充
+
+2026-09-21 的 XP/Win7 回归、旧系统修复、已知验证边界及两份带版本号的 ZIP
+见 [XP / Win7 虚拟机验证记录](XP_WIN7_VM_VALIDATION.md)。测试仍保留在本地 `tests/`，
+不随发行包上传，Actions 不运行测试。

@@ -1,5 +1,7 @@
 # TTPlayer 选项窗口恢复证据与行为基线
 
+> 2026-09-21 补充：相关功能已在 XP SP3 / Win7 SP1 虚拟机中执行回归。覆盖项、修复和未覆盖边界见 [虚拟机验证记录](XP_WIN7_VM_VALIDATION.md)。下文保留原日期的历史结论。
+
 本文记录从 `reverse/decompiled/TTPlayer.exe.pseudo.c` 静态恢复，并由历史
 Windows Sandbox 证据及当前宿主机双版本对照确认的选项窗口行为。地址均为
 原版 `TTPlayer.exe` 的虚拟

@@ -263,9 +263,15 @@ void SkinPackage::ExtractTo(const std::filesystem::path& directory) const {
         release();
         throw std::runtime_error("cannot open skin as a compressed folder");
     }
-    _variant_t content(static_cast<IDispatch*>(items));
-    _variant_t options(static_cast<long>(FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT));
-    const HRESULT copied = target->CopyHere(content, options);
+    const HRESULT copied = [&] {
+        // The dispatch VARIANT owns an additional reference to FolderItems.
+        // Release it while the COM apartment is still initialized, including
+        // on XP/Win7 where releasing Shell objects after CoUninitialize can
+        // access already unloaded Shell code.
+        _variant_t content(static_cast<IDispatch*>(items));
+        _variant_t options(static_cast<long>(FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT));
+        return target->CopyHere(content, options);
+    }();
     if (FAILED(copied)) {
         release();
         throw std::runtime_error("skin extraction failed");

@@ -1,5 +1,7 @@
 # 桌面歌词按钮悬停闪烁
 
+> 2026-09-21 补充：相关功能已在 XP SP3 / Win7 SP1 虚拟机中执行回归。覆盖项、修复和未覆盖边界见 [虚拟机验证记录](XP_WIN7_VM_VALIDATION.md)。下文保留原日期的历史结论。
+
 本次只以 5.7.9 `reverse/decompiled/TTPlayer.exe.pseudo.c` 为原程序依据。
 不把 TTPlayer6120 的非皮肤代码作为参考，也不将新增的 PNG 合成方式宣称为原版二进制实现。
 

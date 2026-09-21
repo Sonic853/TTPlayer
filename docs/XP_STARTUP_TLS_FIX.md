@@ -1,5 +1,7 @@
 # XP 启动崩溃：ttpcomm 静态 TLS 加载修复
 
+> 2026-09-21 补充：相关功能已在 XP SP3 / Win7 SP1 虚拟机中执行回归。覆盖项、修复和未覆盖边界见 [虚拟机验证记录](XP_WIN7_VM_VALIDATION.md)。下文保留原日期的历史结论。
+
 ## 结论
 
 2026-09-18 在用户提供的 VirtualBox `XP` 虚拟机中复现。系统为 Windows XP Professional

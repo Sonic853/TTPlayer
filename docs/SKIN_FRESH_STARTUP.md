@@ -1,5 +1,7 @@
 # 无配置首次启动的默认皮肤配色
 
+> 2026-09-21 补充：相关功能已在 XP SP3 / Win7 SP1 虚拟机中执行回归。覆盖项、修复和未覆盖边界见 [虚拟机验证记录](XP_WIN7_VM_VALIDATION.md)。下文保留原日期的历史结论。
+
 ## 问题与复现
 
 `TTPlayerRebuild 2026.09.15.7z` 包含皮肤和运行 DLL，但没有 `TTPlayerRebuild.xml`、

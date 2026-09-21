@@ -1,5 +1,7 @@
 # 选项窗口其它页面绘制一致性审计
 
+> 2026-09-21 补充：相关功能已在 XP SP3 / Win7 SP1 虚拟机中执行回归。覆盖项、修复和未覆盖边界见 [虚拟机验证记录](XP_WIN7_VM_VALIDATION.md)。下文保留原日期的历史结论。
+
 日期：2026-09-16。对照对象为随项目保存的原版 5.7.9 `TTPlayer.exe`、
 `reverse/decompiled/TTPlayer.exe.pseudo.c`、`ttpres.dll` 资源和当前重建源码。
 

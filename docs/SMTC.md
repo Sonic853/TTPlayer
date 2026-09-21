@@ -43,6 +43,10 @@ SMTC 初始化失败不阻止播放。只有普通版链接 `runtimeobject`、`s
 
 ## 本地验证
 
+2026-09-21 补充：兼容版已在 XP SP3 / Win7 SP1 虚拟机通过启动回归和静态导入审计，
+见 [虚拟机记录](XP_WIN7_VM_VALIDATION.md)。这验证了排除 SMTC 后的旧系统包，
+不代表在旧系统中运行 WinRT/SMTC 功能。
+
 测试源码位于本地 `tests/ui/system_media_controls_tests.cpp`。
 `BUILD_TESTING=ON` 且为普通版时才创建该测试目标；Actions 继续使用 `BUILD_TESTING=OFF`。
 
