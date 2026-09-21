@@ -98,3 +98,8 @@ The probe temporarily moves the cursor, restores it on exit and operates only
 on its own player instance. It requires a unique visible player taskbar entry;
 it stops if that identification is ambiguous. Host shell policy, an inactive
 desktop or concurrent mouse use can prevent a preview from opening.
+
+
+## Win7 Aero verification — 2026-09-21
+
+The legacy Release passed the real Win7 Explorer hover test. Physical pause/resume clicks changed the thumbnail button labels while the player remained minimized. Returning from mini/fullscreen restored all three buttons. This run did not physically click previous/next or restart Explorer. See the [Aero VM report](XP_WIN7_VM_VALIDATION.md#aero-开启后的补充验证2026-09-21) for evidence and scope.

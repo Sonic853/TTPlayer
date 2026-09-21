@@ -215,3 +215,8 @@ absent), so this host result is deliberately not labelled as isolated proof.
 `run_fullscreen_sandbox.ps1 -GenerateOnly` validates the `.wsb`; after the
 optional feature is installed, the same launcher performs and automatically
 checks the isolated comparison.
+
+
+## Win7 Aero shell verification — 2026-09-21
+
+The current legacy Release passed the same 15 shell checkpoints on Win7 SP1 with Aero enabled, using a local native harness and silent fixtures. Coverage includes repeated overlay/spectrum transitions, a physical click in the native visual menu, transparent lyrics using the work area, visual-only/combined reentry and exit. The window hit at the taskbar position belonged to the player during fullscreen and to Explorer after exit. `TaskbarCreated` was simulated; Explorer was not restarted. See the [Aero VM report](XP_WIN7_VM_VALIDATION.md#aero-开启后的补充验证2026-09-21).

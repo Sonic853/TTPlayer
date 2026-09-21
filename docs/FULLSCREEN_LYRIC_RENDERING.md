@@ -83,3 +83,8 @@ ctest --test-dir build -C Release -R "^fullscreen_lyric_render_tests$" --output-
 可给测试 EXE 第二个参数指定 PNG 路径，保存实际离屏结果的合成图；第一个参数
 为包含原 `ttpres.dll` 的目录。本轮没有在其它 Windows 版本、HDR 或混合 DPI
 环境实测，也没有声称透明渲染与原版关闭抗锯齿的像素一致。
+
+
+## 2026-09-21 Win7 Aero 补测
+
+已在开启 Aero 的 Win7 SP1 虚拟机中验证两个真实背景各 150 个字形边缘像素、预乘 alpha、卡拉 OK、透明/不透明迁移及 HWND 恢复。首轮一次取样失败未复现；本地测试补充稳定帧等待后连续三轮通过，未修改生产绘制代码。详细过程和 Win8+ 输入覆盖窗口的跳过边界见 [Aero 补充验证](XP_WIN7_VM_VALIDATION.md#aero-开启后的补充验证2026-09-21)。
