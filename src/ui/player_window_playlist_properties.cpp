@@ -5,6 +5,9 @@
 #include "file_info_probe_protocol.h"
 #include "file_info_probe_client.h"
 #include "file_info_mp3_policy.h"
+#include "file_info_editing.h"
+#include "options_buttons.h"
+#include "../audio/tag_genres.h"
 #include "modern_file_dialog.h"
 
 #include "ttplayer/audio/archive_member.h"
@@ -32,6 +35,7 @@
 #include <utility>
 #include <vector>
 #include <shlwapi.h>
+#include <shellapi.h>
 
 namespace ttplayer::ui {
 namespace {
@@ -70,7 +74,6 @@ struct FileInfoStrings {
     std::wstring reload;
     std::wstring previous;
     std::wstring next;
-    std::wstring advanced;
     std::wstring id3v2_utf8_warning;
     std::vector<std::wstring> channel_names;
 };
@@ -96,6 +99,7 @@ struct FileInfoRecord {
     std::uint32_t sample_rate_hz{};
     int duration_ms{-2};
     bool reader_opened{};
+    DWORD cover_maximum_bytes{};
     bool writable{};
     bool cover_writable{};
 };
@@ -114,6 +118,7 @@ struct FileInfoCombined {
     std::vector<unsigned char> cover;
     std::vector<std::pair<std::wstring, std::wstring>> metadata;
     size_t cover_count{};
+    DWORD cover_maximum_bytes{detail::kFileInfoProbeMaximumCoverBytes};
     bool writable{};
     bool cover_writable{};
 };
@@ -126,7 +131,8 @@ struct FileInfoReadResult {
 struct FileInfoWriteResult {
     struct Item {
         size_t row{};
-        std::vector<std::pair<size_t, std::wstring>> values;
+        detail::FileInfoFields values;
+        bool cover_saved{};
     };
     std::vector<Item> items;
     HRESULT error{S_OK};
@@ -149,9 +155,16 @@ struct FileInfoContext : std::enable_shared_from_this<FileInfoContext> {
     std::optional<playlist::Track> explicit_source;
     std::vector<playlist::Track> tracks;
     std::vector<size_t> rows;
-    std::optional<size_t> playing_row;
     FileInfoStrings strings;
     FileInfoCombined combined;
+    std::vector<FileInfoRecord> originals;
+    std::vector<FileInfoRecord> drafts;
+    HWND toolbar{};
+    HIMAGELIST toolbar_images{};
+    UINT codepage{GetACP()};
+    bool populating{};
+    HWND inline_edit{};
+    std::string inline_name;
     std::set<size_t> touched_rows;
     std::atomic<HWND> post_target{};
     std::mutex pending_mutex;
@@ -172,6 +185,7 @@ struct FileInfoContext : std::enable_shared_from_this<FileInfoContext> {
 
     ~FileInfoContext() {
         if (cover_bitmap) DeleteObject(cover_bitmap);
+        if (toolbar_images) ImageList_Destroy(toolbar_images);
     }
 };
 
@@ -253,20 +267,6 @@ std::pair<std::wstring, std::wstring> SplitStatus(std::wstring value) {
     return {std::move(value), std::move(question)};
 }
 
-std::wstring FormatDuration(int duration_ms) {
-    if (duration_ms < 0) return {};
-    const auto total = static_cast<unsigned int>(duration_ms / 1000);
-    const unsigned int hours = total / 3600;
-    const unsigned int minutes = total / 60 % 60;
-    const unsigned int seconds = total % 60;
-    wchar_t value[32]{};
-    if (hours != 0)
-        swprintf_s(value, L"%u:%02u:%02u", hours, minutes, seconds);
-    else
-        swprintf_s(value, L"%u:%02u", total / 60, seconds);
-    return value;
-}
-
 std::wstring FormatChannels(WORD channels,
                             const std::vector<std::wstring>& names) {
     if (channels != 0 && channels <= names.size())
@@ -333,9 +333,9 @@ FileInfoRecord ReadFileInfoRecord(
     if (track.sample_rate_hz != 0)
         record.sample_rate = std::to_wstring(track.sample_rate_hz) + L" Hz";
     if ((track.bitrate_bps & 0x7fffffffU) != 0)
-        record.bitrate = std::to_wstring(
-            (track.bitrate_bps & 0x7fffffffU) / 1000U) + L" Kbps";
-    record.duration = FormatDuration(track.duration_ms);
+        record.bitrate = detail::FileInfoBitrate(track.bitrate_bps & 0x7fffffffU,
+                                               (track.bitrate_bps & 0x80000000U) != 0);
+    record.duration = detail::FileInfoDuration(track.duration_ms);
     record.gain = TrackMetadataValue(track, "replaygain_track_gain");
 
     if (record.path.empty() || LooksLikeNetworkPath(record.path.native()) ||
@@ -352,6 +352,7 @@ FileInfoRecord ReadFileInfoRecord(
     record.writable = (probe->capabilities & 4U) != 0 &&
         !audio::ParseArchiveMemberPath(record.path.native(), archive_member);
     record.cover_writable = record.writable && probe->cover_writable != 0;
+    record.cover_maximum_bytes = probe->cover_maximum_bytes;
 
     static constexpr std::array<std::wstring_view, 7> names{
         L"Title", L"Artist", L"Album", L"Tracknumber", L"Genre", L"Date",
@@ -362,7 +363,7 @@ FileInfoRecord ReadFileInfoRecord(
             value = ProbeMetadataValue(*probe, L"Author");
         if (index == 5 && value.empty())
             value = ProbeMetadataValue(*probe, L"Year");
-        if (!value.empty()) record.tags[index] = std::move(value);
+        record.tags[index] = std::move(value);
     }
 
     record.metadata.clear();
@@ -374,19 +375,22 @@ FileInfoRecord ReadFileInfoRecord(
     }
     const WAVEFORMATEX& format = probe->format;
     record.codec = probe->codec;
+    if (const auto separator = record.codec.find(L'|'); separator != std::wstring::npos)
+        record.codec.erase(0, separator + 1);
     record.channels = FormatChannels(format.nChannels, strings.channel_names);
     if (format.nSamplesPerSec != 0)
         record.sample_rate = std::to_wstring(format.nSamplesPerSec) + L" Hz";
     if (format.wBitsPerSample != 0)
-        record.bits = std::to_wstring(format.wBitsPerSample) + L" bit";
+        record.bits = std::to_wstring(format.wBitsPerSample) + L" Bits";
     const std::uint64_t encoded = probe->encoded_bits_per_second != 0
         ? probe->encoded_bits_per_second
         : static_cast<std::uint64_t>(format.nAvgBytesPerSec) * 8U;
     if (encoded != 0)
-        record.bitrate = std::to_wstring(encoded / 1000U) + L" Kbps";
+        record.bitrate = detail::FileInfoBitrate(encoded & 0x7fffffffU,
+                                                (encoded & 0x80000000U) != 0);
     record.duration_ms = static_cast<int>(std::min<DWORD>(
         probe->duration_ms, static_cast<DWORD>(INT_MAX)));
-    record.duration = FormatDuration(record.duration_ms);
+    record.duration = detail::FileInfoDuration(record.duration_ms);
     record.gain = ProbeMetadataValue(*probe, L"replaygain_track_gain");
     record.cover = probe->cover;
     record.media_type = SafeUtf8(record.codec);
@@ -435,6 +439,8 @@ FileInfoCombined CombineRecords(const std::vector<FileInfoRecord>& records,
         CombineValue(combined.gain, record.gain, strings.different, first);
         combined.writable = combined.writable || record.writable;
         combined.cover_writable = combined.cover_writable || record.cover_writable;
+        if (record.cover_writable && record.cover_maximum_bytes)
+            combined.cover_maximum_bytes = std::min(combined.cover_maximum_bytes, record.cover_maximum_bytes);
         if (!record.cover.empty()) {
             ++combined.cover_count;
             if (combined.cover.empty()) combined.cover = record.cover;
@@ -475,6 +481,115 @@ FileInfoCombined CombineRecords(const std::vector<FileInfoRecord>& records,
 HBITMAP DecodeCoverBitmap(const std::vector<unsigned char>& bytes,
                           int target_width, int target_height) {
     return DecodeCoverPreview(bytes, {target_width, target_height}, GetSysColor(COLOR_WINDOW));
+}
+
+detail::FileInfoFields RecordFields(const FileInfoRecord& record) {
+    detail::FileInfoFields fields;
+    for (const auto& [name, value] : record.metadata)
+        fields.emplace_back(name, SafeWide(value));
+    return fields;
+}
+
+void SetRecordField(FileInfoRecord& record, std::string_view name,
+                    std::wstring_view value) {
+    auto fields = RecordFields(record);
+    detail::SetFileInfoField(fields, name, value);
+    record.metadata.clear();
+    for (const auto& field : fields)
+        record.metadata.emplace_back(field.first, SafeUtf8(field.second));
+    for (size_t index = 0; index < kTagNames.size(); ++index) {
+        record.tags[index] = detail::FileInfoField(fields, kTagNames[index]);
+        if (index == 1 && record.tags[index].empty())
+            record.tags[index] = detail::FileInfoField(fields, "Author");
+        if (index == 5 && record.tags[index].empty())
+            record.tags[index] = detail::FileInfoField(fields, "Year");
+    }
+    record.gain = detail::FileInfoField(fields, "replaygain_track_gain");
+}
+
+using FileInfoChangesByRow = std::map<size_t, detail::FileInfoFields>;
+
+FileInfoChangesByRow CollectFileInfoChanges(const FileInfoContext& context) {
+    FileInfoChangesByRow changes;
+    for (size_t i = 0; i < context.drafts.size() && i < context.originals.size(); ++i) {
+        if (!context.drafts[i].writable) continue;
+        auto fields = detail::FileInfoChanges(RecordFields(context.originals[i]),
+                                              RecordFields(context.drafts[i]));
+        if (!fields.empty()) changes.emplace(context.drafts[i].row, std::move(fields));
+    }
+    return changes;
+}
+
+bool FileInfoDirty(const FileInfoContext& context) {
+    if (!CollectFileInfoChanges(context).empty()) return true;
+    for (size_t i = 0; i < context.drafts.size() && i < context.originals.size(); ++i)
+        if (context.drafts[i].cover_writable &&
+            context.drafts[i].cover != context.originals[i].cover) return true;
+    return false;
+}
+
+void UpdateSheetState(FileInfoContext& context);
+void PopulatePropertiesPage(FileInfoContext& context);
+void FinishFileInfoCell(FileInfoContext& context, bool commit);
+
+void RefreshFileInfoDraft(FileInfoContext& context, bool populate = true) {
+    context.combined = CombineRecords(context.drafts, context.strings);
+    if (populate) PopulatePropertiesPage(context);
+    UpdateSheetState(context);
+}
+
+void EditFileInfoField(FileInfoContext& context, std::string_view name,
+                       std::wstring_view value, bool populate = true) {
+    for (auto& record : context.drafts)
+        if (record.writable) SetRecordField(record, name, value);
+    RefreshFileInfoDraft(context, populate);
+}
+
+std::wstring FileInfoResource(HMODULE resources, UINT id,
+                              std::wstring_view fallback = {}) {
+    wchar_t buffer[2048]{};
+    const int count = LoadStringW(resources, id, buffer, static_cast<int>(std::size(buffer)));
+    return count > 0 ? std::wstring(buffer, count) : std::wstring(fallback);
+}
+
+HWND CreateFileInfoToolbar(HWND page, HMODULE resources, const RECT& bounds,
+                           HIMAGELIST& images, bool editor = false) {
+    const HWND toolbar = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr,
+        WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS | TBSTYLE_LIST |
+            CCS_NORESIZE | CCS_NOPARENTALIGN | CCS_NODIVIDER,
+        bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
+        page, reinterpret_cast<HMENU>(0xe800), nullptr, nullptr);
+    if (!toolbar) return nullptr;
+    SendMessageW(toolbar, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+    SendMessageW(toolbar, TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_DRAWDDARROWS | TBSTYLE_EX_MIXEDBUTTONS);
+    images = ImageList_LoadImageW(resources, MAKEINTRESOURCEW(149), 16, 0,
+                                 RGB(192, 192, 192), IMAGE_BITMAP, LR_CREATEDIBSECTION);
+    SendMessageW(toolbar, TB_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(images));
+    const UINT commands[]{0x875, 0, 0x86c, 0x86b, 0x8076, 0, 0x834,
+                          0x8077, 0x8078, 0x8079, 0, 0x8075};
+    int image{};
+    for (const auto command : commands) {
+        TBBUTTON button{};
+        button.idCommand = command;
+        button.fsState = TBSTATE_ENABLED;
+        button.fsStyle = command ? BTNS_BUTTON : BTNS_SEP;
+        button.iBitmap = command ? image++ : 6;
+        button.iString = -1;
+        if (editor && command != 0x86c && command != 0x86b && command != 0x8076)
+            continue;
+        if (command == 0x86c || command == 0x86b) button.fsStyle |= BTNS_WHOLEDROPDOWN;
+        if (command == 0x875) {
+            button.fsStyle |= BTNS_CHECK | BTNS_SHOWTEXT | BTNS_AUTOSIZE;
+            auto text = FileInfoResource(resources, command, L"高级");
+            const auto last = text.find_last_of(L'\n');
+            if (last != text.npos) text.erase(0, last + 1);
+            text.push_back(L'\0');
+            button.iString = SendMessageW(toolbar, TB_ADDSTRINGW, 0,
+                                          reinterpret_cast<LPARAM>(text.c_str()));
+        }
+        SendMessageW(toolbar, TB_ADDBUTTONSW, 1, reinterpret_cast<LPARAM>(&button));
+    }
+    return toolbar;
 }
 
 std::optional<std::vector<unsigned char>> ReadCoverBytes(
@@ -589,14 +704,17 @@ void PopulateAdvancedMetadata(FileInfoContext& context) {
         GetClientRect(list, &bounds);
         LVCOLUMNW column{};
         column.mask = LVCF_WIDTH | LVCF_TEXT;
-        wchar_t empty[] = L"";
-        column.pszText = empty;
+        auto names = Split(FileInfoResource(context.resources, 0x8156), L'|');
+        names.resize(2);
+        column.pszText = names[0].data();
         column.cx = std::max<LONG>(70, (bounds.right - bounds.left) / 3);
         ListView_InsertColumn(list, 0, &column);
         column.cx = std::max<LONG>(
             80, bounds.right - bounds.left - column.cx - 4);
+        column.pszText = names[1].data();
         ListView_InsertColumn(list, 1, &column);
     }
+    const int selected = ListView_GetNextItem(list, -1, LVNI_SELECTED);
     ListView_DeleteAllItems(list);
     for (size_t index = 0; index < context.combined.metadata.size(); ++index) {
         const auto& [name, value] = context.combined.metadata[index];
@@ -614,46 +732,48 @@ void PopulateAdvancedMetadata(FileInfoContext& context) {
                          reinterpret_cast<LPARAM>(&subitem));
         }
     }
+    if (!context.combined.metadata.empty())
+        ListView_SetItemState(list, std::clamp(selected, 0,
+            static_cast<int>(context.combined.metadata.size()) - 1),
+            LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
 }
 
 void SetAdvancedMetadataMode(FileInfoContext& context, bool enabled) {
     context.advanced_mode = enabled;
     const HWND list = GetDlgItem(context.properties_page, 2164);
-    for (const int identifier : kTagControls)
-        ShowWindow(GetDlgItem(context.properties_page, identifier),
-                   enabled ? SW_HIDE : SW_SHOW);
-    if (list) {
-        ShowWindow(list, enabled ? SW_SHOW : SW_HIDE);
-        if (enabled)
-            SetWindowPos(list, HWND_TOP, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    RECT area{};
+    GetWindowRect(list, &area);
+    // 0043144E hides intersecting labels and the artist link as well as edits.
+    for (HWND child = GetWindow(context.properties_page, GW_CHILD); child;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        RECT bounds{}, intersection{};
+        GetWindowRect(child, &bounds);
+        if (child != list && IntersectRect(&intersection, &bounds, &area) &&
+            bounds.top >= area.top && bounds.bottom <= area.bottom)
+            ShowWindow(child, enabled ? SW_HIDE : SW_SHOW);
     }
-    CheckDlgButton(context.properties_page, kFileInfoAdvanced,
-                   enabled ? BST_CHECKED : BST_UNCHECKED);
+    ShowWindow(list, enabled ? SW_SHOW : SW_HIDE);
+    SendMessageW(context.toolbar, TB_CHECKBUTTON, kFileInfoAdvanced, MAKELONG(enabled, 0));
+    SendMessageW(context.toolbar, TB_HIDEBUTTON, 0x834, MAKELONG(enabled, 0));
+    for (const UINT command : {0x8077U, 0x8078U, 0x8079U})
+        SendMessageW(context.toolbar, TB_HIDEBUTTON, command, MAKELONG(!enabled, 0));
+    InvalidateRect(context.properties_page, nullptr, TRUE);
 }
 
-void CreateAdvancedMetadataButton(FileInfoContext& context) {
-    if (!context.properties_page ||
-        GetDlgItem(context.properties_page, kFileInfoAdvanced)) return;
-    RECT bounds{151, 140, 207, 155};
-    MapDialogRect(context.properties_page, &bounds);
-    const HWND button = CreateWindowExW(
-        0, WC_BUTTONW, context.strings.advanced.c_str(),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-        bounds.left, bounds.top, bounds.right - bounds.left,
-        bounds.bottom - bounds.top, context.properties_page,
-        reinterpret_cast<HMENU>(
-            static_cast<UINT_PTR>(kFileInfoAdvanced)), nullptr, nullptr);
-    if (button) {
-        const HFONT font = reinterpret_cast<HFONT>(SendDlgItemMessageW(
-            context.properties_page, 1009, WM_GETFONT, 0, 0));
-        SendMessageW(button, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-    }
+void CreateFileInfoEditorToolbar(FileInfoContext& context) {
+    RECT bounds{};
+    GetWindowRect(GetDlgItem(context.properties_page, 2164), &bounds);
+    MapWindowPoints(nullptr, context.properties_page, reinterpret_cast<POINT*>(&bounds), 2);
+    bounds.top = bounds.bottom + 6;
+    bounds.bottom = bounds.top + 24;
+    context.toolbar = CreateFileInfoToolbar(context.properties_page, context.resources,
+                                             bounds, context.toolbar_images);
 }
 
 void PopulatePropertiesPage(FileInfoContext& context) {
     const HWND page = context.properties_page;
     if (!page || !context.loaded) return;
+    context.populating = true;
     for (size_t index = 0; index < kTagControls.size(); ++index)
         SetDialogText(page, kTagControls[index], context.combined.tags[index]);
     SetDialogText(page, 2001, context.combined.file_name);
@@ -670,6 +790,7 @@ void PopulatePropertiesPage(FileInfoContext& context) {
     for (const int identifier : kTagControls)
         EnableWindow(GetDlgItem(page, identifier), context.combined.writable);
     SetAdvancedMetadataMode(context, context.advanced_mode);
+    context.populating = false;
 }
 
 void PopulateCoverPage(FileInfoContext& context) {
@@ -684,8 +805,9 @@ void PopulateCoverPage(FileInfoContext& context) {
     }
     RECT bounds{};
     GetClientRect(picture, &bounds);
-    context.cover_bitmap = DecodeCoverBitmap(
-        context.combined.cover, bounds.right, bounds.bottom);
+    if (context.rows.size() == 1 || context.cover_action == detail::FileInfoProbeCoverAction::replace)
+        context.cover_bitmap = DecodeCoverBitmap(
+            context.combined.cover, bounds.right, bounds.bottom);
     if (context.cover_bitmap) {
         const LONG_PTR style = GetWindowLongPtrW(picture, GWL_STYLE);
         SetWindowLongPtrW(picture, GWL_STYLE,
@@ -693,13 +815,19 @@ void PopulateCoverPage(FileInfoContext& context) {
         SendMessageW(picture, STM_SETIMAGE, IMAGE_BITMAP,
                      reinterpret_cast<LPARAM>(context.cover_bitmap));
     } else {
+        const LONG_PTR style = GetWindowLongPtrW(picture, GWL_STYLE);
+        SetWindowLongPtrW(picture, GWL_STYLE, (style & ~SS_TYPEMASK) | SS_CENTER | SS_CENTERIMAGE);
+        wchar_t text[256]{};
+        swprintf_s(text, FileInfoResource(context.resources, 0x8219,
+            L"%d个文件中含有专辑封面信息").c_str(), static_cast<int>(context.combined.cover_count));
+        SetWindowTextW(picture, text);
         InvalidateRect(picture, nullptr, TRUE);
     }
     const bool ready = context.loaded && !context.loading && !context.saving &&
                        context.combined.cover_writable;
     EnableWindow(GetDlgItem(page, 2220), ready);
     EnableWindow(GetDlgItem(page, 2221),
-                 ready && !context.combined.cover.empty());
+                 ready && context.combined.cover_count != 0);
 }
 
 std::wstring FormatFileInfoTitle(const FileInfoContext& context) {
@@ -710,7 +838,7 @@ std::wstring FormatFileInfoTitle(const FileInfoContext& context) {
             swprintf_s(title, format.c_str(),
                        static_cast<int>(context.rows.size()));
     } else if (!context.rows.empty()) {
-        if (context.playing_row && *context.playing_row == context.rows.front())
+        if (context.explicit_playback_track)
             return context.strings.playing_title;
         const auto& format = context.strings.indexed_title;
         if (!format.empty())
@@ -732,19 +860,27 @@ void UpdateSheetState(FileInfoContext& context) {
         for (const int identifier : kTagControls)
             EnableWindow(GetDlgItem(context.properties_page, identifier),
                          ready && context.combined.writable);
-        EnableWindow(GetDlgItem(context.properties_page, kFileInfoAdvanced),
-                     ready);
         EnableWindow(GetDlgItem(context.properties_page, 2164), ready);
+        EnableWindow(GetDlgItem(context.properties_page, 2160), ready && context.combined.writable);
+        SendMessageW(context.toolbar, TB_ENABLEBUTTON, kFileInfoAdvanced, MAKELONG(ready, 0));
+        const bool selected = ListView_GetNextItem(GetDlgItem(context.properties_page, 2164),
+                                                   -1, LVNI_SELECTED) >= 0;
+        for (const UINT command : {0x86cU, 0x86bU, 0x8076U, 0x834U, 0x8077U, 0x8078U, 0x8079U, 0x8075U}) {
+            bool enabled = ready && context.combined.writable;
+            if (command == 0x8078 || command == 0x8079) enabled = enabled && selected;
+            if (command == 0x8075) enabled = enabled && !CollectFileInfoChanges(context).empty();
+            SendMessageW(context.toolbar, TB_ENABLEBUTTON, command, MAKELONG(enabled, 0));
+        }
     }
     if (context.cover_page) {
         EnableWindow(GetDlgItem(context.cover_page, 2220),
                      ready && context.combined.cover_writable);
         EnableWindow(GetDlgItem(context.cover_page, 2221),
                      ready && context.combined.cover_writable &&
-                         !context.combined.cover.empty());
+                         context.combined.cover_count != 0);
     }
     EnableWindow(GetDlgItem(context.sheet, kFileInfoSave),
-                 ready && context.combined.writable);
+                 ready && FileInfoDirty(context));
     EnableWindow(GetDlgItem(context.sheet, kFileInfoReload), ready);
     const bool single = ready && context.rows.size() == 1;
     const size_t row = single ? context.rows.front() : 0;
@@ -756,6 +892,9 @@ void UpdateSheetState(FileInfoContext& context) {
 
 void ApplyReadResult(FileInfoContext& context, FileInfoReadResult result) {
     if (result.generation != context.generation || context.closing) return;
+    context.originals = result.records;
+    context.drafts = result.records;
+    context.codepage = GetACP();
     context.combined = CombineRecords(result.records, context.strings);
     context.cover_action = detail::FileInfoProbeCoverAction::unchanged;
     for (const auto& record : result.records) {
@@ -785,6 +924,7 @@ void ApplyReadResult(FileInfoContext& context, FileInfoReadResult result) {
 void BeginRead(const std::shared_ptr<FileInfoContext>& context) {
     if (!context || context->closing || context->loading || context->saving)
         return;
+    FinishFileInfoCell(*context, false);
     if (context->read_worker.joinable()) context->read_worker.join();
     context->loaded = false;
     context->loading = true;
@@ -892,24 +1032,12 @@ bool MakeFilesWritable(FileInfoContext& context) {
     return true;
 }
 
-std::vector<std::pair<size_t, std::wstring>> CollectFileInfoChanges(
-    const FileInfoContext& context) {
-    std::vector<std::pair<size_t, std::wstring>> changes;
-    for (size_t field = 0; field < kTagControls.size(); ++field) {
-        const auto value = GetControlText(context.properties_page,
-                                          kTagControls[field]);
-        if (value != context.combined.tags[field])
-            changes.emplace_back(field, value);
-    }
-    return changes;
-}
-
 std::optional<detail::FileInfoProbeWriteResult> RunFileInfoWriteProbe(
     std::stop_token stop, const std::filesystem::path& helper,
     const std::filesystem::path& addin_directory,
     const std::filesystem::path& logical_path,
     const std::filesystem::path& ttpcomm_path,
-    const std::vector<std::pair<size_t, std::wstring>>& changes,
+    const detail::FileInfoFields& changes,
     detail::FileInfoProbeCoverAction cover_action,
     const std::vector<unsigned char>& cover,
     const detail::FileInfoProbeMp3Policy& mp3_policy) {
@@ -924,8 +1052,7 @@ std::optional<detail::FileInfoProbeWriteResult> RunFileInfoWriteProbe(
     request.mp3 = mp3_policy;
     request.fields.reserve(changes.size());
     for (const auto& [field, value] : changes) {
-        if (field < kTagNames.size())
-            request.fields.push_back({kTagNames[field], value});
+        request.fields.push_back({field, value});
     }
     request.cover_action = cover_action;
     if (cover_action == detail::FileInfoProbeCoverAction::replace)
@@ -947,7 +1074,7 @@ std::optional<detail::FileInfoProbeWriteResult> RunFileInfoWriteProbe(
 
 void BeginSave(
     const std::shared_ptr<FileInfoContext>& context,
-    std::vector<std::pair<size_t, std::wstring>> changes,
+    FileInfoChangesByRow changes,
     int navigation_after_save) {
     if (!context ||
         (changes.empty() && context->cover_action ==
@@ -958,33 +1085,36 @@ void BeginSave(
     context->saving = true;
     context->navigation_after_save = navigation_after_save;
     UpdateSheetState(*context);
-    const auto rows = context->rows;
     const auto tracks = context->tracks;
     const auto helper = context->helper;
     const auto addin_directory = context->addin_directory;
     const auto ttpcomm_path = context->ttpcomm_path;
     const auto mp3_policy = ProbeMp3Policy(context->general_settings);
     const auto cover_action = context->cover_action;
-    const auto cover = context->combined.cover;
+    const auto drafts = context->drafts;
+    const auto originals = context->originals;
     context->save_worker = std::jthread(
-        [context, rows, tracks, changes = std::move(changes), helper,
-         addin_directory, ttpcomm_path, mp3_policy, cover_action, cover]
+        [context, tracks, changes = std::move(changes), helper,
+         addin_directory, ttpcomm_path, mp3_policy, cover_action, drafts, originals]
         (std::stop_token stop) {
         const HRESULT initialized = CoInitializeEx(nullptr,
                                                    COINIT_MULTITHREADED);
         auto result = std::make_unique<FileInfoWriteResult>();
-        for (const size_t row : rows) {
+        for (size_t record_index = 0; record_index < drafts.size(); ++record_index) {
             if (stop.stop_requested()) break;
-            if (row >= tracks.size()) continue;
-            audio::ArchiveMemberPath member;
-            if (LooksLikeNetworkPath(tracks[row].path.native()) ||
-                audio::ParseArchiveMemberPath(tracks[row].path.native(), member)) {
-                if (SUCCEEDED(result->error)) result->error = E_ACCESSDENIED;
-                continue;
-            }
+            const auto& draft = drafts[record_index];
+            const size_t row = draft.row;
+            if (row >= tracks.size() || !draft.writable) continue;
+            const auto found = changes.find(row);
+            const detail::FileInfoFields fields = found == changes.end()
+                ? detail::FileInfoFields{} : found->second;
+            const auto action = draft.cover_writable && record_index < originals.size() &&
+                draft.cover != originals[record_index].cover ? cover_action
+                    : detail::FileInfoProbeCoverAction::unchanged;
+            if (fields.empty() && action == detail::FileInfoProbeCoverAction::unchanged) continue;
             const auto written = RunFileInfoWriteProbe(
                 stop, helper, addin_directory, tracks[row].path,
-                ttpcomm_path, changes, cover_action, cover, mp3_policy);
+                ttpcomm_path, fields, action, draft.cover, mp3_policy);
             if (!written) {
                 if (!stop.stop_requested() && SUCCEEDED(result->error))
                     result->error = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
@@ -994,24 +1124,25 @@ void BeginSave(
             item.row = row;
             if (FAILED(written->status) && SUCCEEDED(result->error))
                 result->error = written->status;
-            if (written->fields.size() != changes.size() &&
+            if (written->fields.size() != fields.size() &&
                 SUCCEEDED(result->error))
                 result->error = E_UNEXPECTED;
             const size_t count = std::min(written->fields.size(),
-                                          changes.size());
+                                          fields.size());
             for (size_t index = 0; index < count; ++index) {
                 if (SUCCEEDED(written->fields[index]))
-                    item.values.push_back(changes[index]);
+                    item.values.push_back(fields[index]);
                 else if (SUCCEEDED(result->error))
                     result->error = written->fields[index];
             }
-            if (cover_action !=
+            if (action !=
                     detail::FileInfoProbeCoverAction::unchanged &&
                 FAILED(written->cover_status) && SUCCEEDED(result->error)) {
                 result->error = written->cover_status;
             }
-            if (!item.values.empty())
-                result->items.push_back(std::move(item));
+            item.cover_saved = action != detail::FileInfoProbeCoverAction::unchanged &&
+                SUCCEEDED(written->cover_status);
+            result->items.push_back(std::move(item));
         }
         if (SUCCEEDED(initialized)) CoUninitialize();
         if (stop.stop_requested()) return;
@@ -1036,8 +1167,14 @@ void ApplyWriteResult(FileInfoContext& context,
         if (item.row >= context.tracks.size()) continue;
         auto& track = context.tracks[item.row];
         for (const auto& [field, value] : item.values) {
-            if (field < kTagNames.size())
-                MergeTrackMetadata(track, kTagNames[field], value);
+            MergeTrackMetadata(track, field, value);
+            for (auto& original : context.originals)
+                if (original.row == item.row) SetRecordField(original, field, value);
+        }
+        if (item.cover_saved) {
+            for (size_t i = 0; i < context.originals.size(); ++i)
+                if (context.originals[i].row == item.row)
+                    context.originals[i].cover = context.drafts[i].cover;
         }
         context.touched_rows.insert(item.row);
     }
@@ -1067,9 +1204,9 @@ void NavigateFileInfo(const std::shared_ptr<FileInfoContext>& context,
     if ((direction < 0 && current == 0) ||
         (direction > 0 && current + 1 >= context->tracks.size()))
         return;
+    FinishFileInfoCell(*context, true);
     auto changes = CollectFileInfoChanges(*context);
-    if (!changes.empty() || context->cover_action !=
-                                detail::FileInfoProbeCoverAction::unchanged) {
+    if (FileInfoDirty(*context)) {
         if (MakeFilesWritable(*context))
             BeginSave(context, std::move(changes), direction);
         return;
@@ -1082,6 +1219,7 @@ void NavigateFileInfo(const std::shared_ptr<FileInfoContext>& context,
 void SaveFileInfo(const std::shared_ptr<FileInfoContext>& context) {
     if (!context || !context->loaded || context->loading || context->saving ||
         !context->properties_page) return;
+    FinishFileInfoCell(*context, true);
     auto changes = CollectFileInfoChanges(*context);
     if (changes.empty() && context->cover_action ==
                                detail::FileInfoProbeCoverAction::unchanged) {
@@ -1090,6 +1228,320 @@ void SaveFileInfo(const std::shared_ptr<FileInfoContext>& context) {
     }
     if (MakeFilesWritable(*context))
         BeginSave(context, std::move(changes), 0);
+}
+
+std::wstring ConvertFileInfoText(const std::wstring& value, UINT from, UINT to) {
+    if (value.empty() || from == to) return value;
+    const int bytes = WideCharToMultiByte(from, 0, value.data(),
+        static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0) return value;
+    std::string encoded(bytes, '\0');
+    if (!WideCharToMultiByte(from, 0, value.data(), static_cast<int>(value.size()),
+                             encoded.data(), bytes, nullptr, nullptr)) return value;
+    const int count = MultiByteToWideChar(to, 0, encoded.data(), bytes, nullptr, 0);
+    if (count <= 0) return value;
+    std::wstring converted(count, L'\0');
+    if (!MultiByteToWideChar(to, 0, encoded.data(), bytes, converted.data(), count)) return value;
+    return converted;
+}
+
+std::wstring MapFileInfoChinese(const std::wstring& value, UINT command) {
+    if (value.empty()) return value;
+    const DWORD flags = command == 0x86d ? LCMAP_TRADITIONAL_CHINESE : LCMAP_SIMPLIFIED_CHINESE;
+    const int count = LCMapStringW(MAKELCID(MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED),
+        SORT_DEFAULT), flags, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (count <= 0) return value;
+    std::wstring converted(count, L'\0');
+    if (!LCMapStringW(MAKELCID(MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED),
+        SORT_DEFAULT), flags, value.data(), static_cast<int>(value.size()), converted.data(), count))
+        return value;
+    return converted;
+}
+
+thread_local std::vector<UINT>* file_info_codepages{};
+BOOL CALLBACK CollectFileInfoCodepage(LPWSTR text) {
+    if (file_info_codepages) file_info_codepages->push_back(wcstoul(text, nullptr, 10));
+    return TRUE;
+}
+
+UINT FileInfoTransformMenu(HWND page, HWND toolbar, HMODULE resources,
+                           UINT command, UINT codepage) {
+    RECT bounds{};
+    SendMessageW(toolbar, TB_GETRECT, command, reinterpret_cast<LPARAM>(&bounds));
+    MapWindowPoints(toolbar, nullptr, reinterpret_cast<POINT*>(&bounds), 2);
+    const HMENU menu = CreatePopupMenu();
+    if (command == 0x86c) {
+        for (const UINT id : {0x86dU, 0x86eU})
+            AppendMenuW(menu, MF_STRING, id, FileInfoResource(resources, id).c_str());
+    } else {
+        std::vector<UINT> pages;
+        file_info_codepages = &pages;
+        EnumSystemCodePagesW(CollectFileInfoCodepage, CP_INSTALLED);
+        file_info_codepages = nullptr;
+        std::sort(pages.begin(), pages.end());
+        for (const auto cp : pages) {
+            CPINFOEXW info{};
+            if (GetCPInfoExW(cp, 0, &info))
+                AppendMenuW(menu, MF_STRING | (cp == codepage ? MF_CHECKED : 0), cp,
+                             info.CodePageName);
+        }
+        SetMenuDefaultItem(menu, GetACP(), FALSE);
+    }
+    const UINT choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                       bounds.left, bounds.bottom, 0, page, nullptr);
+    DestroyMenu(menu);
+    return choice;
+}
+
+bool FileInfoTooltip(HMODULE resources, LPARAM value) {
+    auto* info = reinterpret_cast<NMTTDISPINFOW*>(value);
+    if (!info || info->hdr.code != TTN_GETDISPINFOW) return false;
+    static thread_local std::wstring text;
+    text = FileInfoResource(resources, static_cast<UINT>(info->hdr.idFrom));
+    text.resize(text.find(L'\n') == text.npos ? text.size() : text.find(L'\n'));
+    info->lpszText = text.data();
+    return true;
+}
+
+struct FileInfoFieldDialog {
+    FileInfoContext* context{};
+    std::wstring name, value;
+    bool adding{};
+    HWND toolbar{};
+    HIMAGELIST images{};
+    UINT codepage{GetACP()};
+    ~FileInfoFieldDialog() { if (images) ImageList_Destroy(images); }
+};
+
+INT_PTR CALLBACK FileInfoFieldDialogProc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* state = reinterpret_cast<FileInfoFieldDialog*>(GetWindowLongPtrW(dialog, DWLP_USER));
+    if (message == WM_INITDIALOG) {
+        state = reinterpret_cast<FileInfoFieldDialog*>(lparam);
+        SetWindowLongPtrW(dialog, DWLP_USER, lparam);
+        const HWND combo = GetDlgItem(dialog, 1005);
+        for (const auto* name : {"Title", "Artist", "Album", "Tracknumber", "Genre", "Date",
+                                "Comment", "replaygain_track_gain", "Lyrics"})
+            SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(SafeWide(name).c_str()));
+        if (state->context->history_settings)
+            for (const auto& name : state->context->history_settings->tag_names)
+                if (SendMessageW(combo, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1),
+                        reinterpret_cast<LPARAM>(name.c_str())) == CB_ERR)
+                    SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
+        SetWindowTextW(combo, state->name.c_str());
+        SetDlgItemTextW(dialog, 1052, state->name.c_str());
+        SendDlgItemMessageW(dialog, 1052, EM_SETREADONLY, TRUE, 0);
+        ShowWindow(combo, state->adding ? SW_SHOW : SW_HIDE);
+        ShowWindow(GetDlgItem(dialog, 1052), state->adding ? SW_HIDE : SW_SHOW);
+        SetDlgItemTextW(dialog, 2168, state->value.c_str());
+        SendDlgItemMessageW(dialog, 2168, EM_SETLIMITTEXT, 1024 * 1024, 0);
+        RECT button{}, name{};
+        GetWindowRect(GetDlgItem(dialog, IDOK), &button);
+        GetWindowRect(combo, &name);
+        MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&button), 2);
+        MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&name), 2);
+        const RECT bounds{name.left, button.bottom - 24, button.left - 2, button.bottom};
+        state->toolbar = CreateFileInfoToolbar(dialog, state->context->resources,
+                                               bounds, state->images, true);
+        return TRUE;
+    }
+    if (!state) return FALSE;
+    if (message == WM_COMMAND) {
+        const UINT command = LOWORD(wparam);
+        if (command == IDCANCEL) { EndDialog(dialog, IDCANCEL); return TRUE; }
+        if (command == IDOK) {
+            if (state->adding) state->name = detail::FileInfoTrim(GetControlText(dialog, 1005));
+            if (state->name.empty()) { SetFocus(GetDlgItem(dialog, 1005)); return TRUE; }
+            state->value = detail::FileInfoTrim(GetControlText(dialog, 2168));
+            EndDialog(dialog, IDOK);
+            return TRUE;
+        }
+        if (command == 0x8076) {
+            SetDialogText(dialog, 2168, detail::FileInfoTitleCase(GetControlText(dialog, 2168)));
+            return TRUE;
+        }
+    }
+    if (message == WM_NOTIFY) {
+        if (FileInfoTooltip(state->context->resources, lparam)) return TRUE;
+        const auto* info = reinterpret_cast<NMTOOLBARW*>(lparam);
+        if (info->hdr.hwndFrom == state->toolbar && info->hdr.code == TBN_DROPDOWN) {
+            const UINT choice = FileInfoTransformMenu(dialog, state->toolbar,
+                state->context->resources, info->iItem, state->codepage);
+            if (choice) {
+                auto text = GetControlText(dialog, 2168);
+                if (info->iItem == 0x86c) text = MapFileInfoChinese(text, choice);
+                else {
+                    text = ConvertFileInfoText(text, state->codepage, choice);
+                    state->codepage = choice;
+                }
+                SetDialogText(dialog, 2168, text);
+            }
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+void EditAdvancedFileInfo(FileInfoContext& context, bool adding) {
+    if (!context.loaded || context.loading || context.saving || !context.combined.writable) return;
+    FileInfoFieldDialog state;
+    state.context = &context;
+    state.adding = adding;
+    if (!adding) {
+        const int selected = ListView_GetNextItem(GetDlgItem(context.properties_page, 2164), -1, LVNI_SELECTED);
+        if (selected < 0 || static_cast<size_t>(selected) >= context.combined.metadata.size()) return;
+        state.name = context.combined.metadata[selected].first;
+        state.value = context.combined.metadata[selected].second;
+        if (state.value == context.strings.different) state.value.clear();
+    }
+    if (ShowWtlModalDialog(context.resources, MAKEINTRESOURCEW(225), context.sheet,
+            FileInfoFieldDialogProc, reinterpret_cast<LPARAM>(&state)) != IDOK) return;
+    EditFileInfoField(context, SafeUtf8(state.name), state.value);
+    if (adding && context.history_settings) {
+        auto& names = context.history_settings->tag_names;
+        if (std::none_of(names.begin(), names.end(), [&](const auto& name) {
+                return WideAsciiEquals(name, state.name); })) names.push_back(state.name);
+    }
+}
+
+struct FileInfoPatternDialog { std::wstring pattern; };
+INT_PTR CALLBACK FileInfoPatternDialogProc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* state = reinterpret_cast<FileInfoPatternDialog*>(GetWindowLongPtrW(dialog, DWLP_USER));
+    if (message == WM_INITDIALOG) {
+        state = reinterpret_cast<FileInfoPatternDialog*>(lparam);
+        SetWindowLongPtrW(dialog, DWLP_USER, lparam);
+        for (const auto* pattern : {L"%(Artist) - %(Title)", L"%(Artist) - %(TrackNumber).%(Title)",
+             L"%(TrackNumber).%(Artist) - %(Title)", L"%(Artist)\\%(Title)",
+             L"%(Album)\\%(TrackNumber).%(Title)", L"%(Artist)\\%(Album)\\%(Title)",
+             L"%(Genre)\\%(Album)\\%(Title)"})
+            SendDlgItemMessageW(dialog, 2161, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(pattern));
+        if (state->pattern.empty()) SendDlgItemMessageW(dialog, 2161, CB_SETCURSEL, 0, 0);
+        else SetDialogText(dialog, 2161, state->pattern);
+        return TRUE;
+    }
+    if (message == WM_COMMAND && state) {
+        if (LOWORD(wparam) == IDCANCEL) { EndDialog(dialog, IDCANCEL); return TRUE; }
+        if (LOWORD(wparam) == IDOK) {
+            state->pattern = detail::FileInfoTrim(GetControlText(dialog, 2161));
+            if (!state->pattern.empty()) EndDialog(dialog, IDOK);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+void GuessFileInfoTags(FileInfoContext& context) {
+    FileInfoPatternDialog state{context.history_settings ? context.history_settings->tag_pattern : L""};
+    if (ShowWtlModalDialog(context.resources, MAKEINTRESOURCEW(224), context.sheet,
+            FileInfoPatternDialogProc, reinterpret_cast<LPARAM>(&state)) != IDOK) return;
+    if (context.history_settings) context.history_settings->tag_pattern = state.pattern;
+    for (auto& record : context.drafts)
+        if (record.writable)
+            for (const auto& [name, value] : detail::GuessFileInfoFields(record.path.native(), state.pattern))
+                SetRecordField(record, SafeUtf8(name), value);
+    RefreshFileInfoDraft(context);
+}
+
+void FileInfoTransform(FileInfoContext& context, UINT command, UINT codepage = 0) {
+    if (codepage && context.codepage != GetACP()) {
+        // 00431FDE restores the original fields before choosing another codepage.
+        for (size_t i = 0; i < context.drafts.size(); ++i) {
+            auto cover = std::move(context.drafts[i].cover);
+            context.drafts[i] = context.originals[i];
+            context.drafts[i].cover = std::move(cover);
+        }
+    }
+    for (auto& record : context.drafts) {
+        if (!record.writable) continue;
+        for (const auto& [name, value] : RecordFields(record)) {
+            const auto text = codepage ? ConvertFileInfoText(value, GetACP(), codepage)
+                : command == 0x8076 ? detail::FileInfoTitleCase(value) : MapFileInfoChinese(value, command);
+            SetRecordField(record, name, text);
+        }
+    }
+    if (codepage) context.codepage = codepage;
+    RefreshFileInfoDraft(context);
+}
+
+std::wstring FileInfoUrlParameter(std::wstring_view text) {
+    const auto bytes = SafeUtf8(text);
+    static constexpr wchar_t digits[] = L"0123456789ABCDEF";
+    std::wstring result;
+    for (const unsigned char ch : bytes) {
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.') result += ch;
+        else { result += L'%'; result += digits[ch >> 4]; result += digits[ch & 15]; }
+    }
+    return result;
+}
+
+void OpenFileInfoDetails(FileInfoContext& context, bool album) {
+    const auto field = [&](size_t index) {
+        return context.combined.tags[index] == context.strings.different
+            ? std::wstring{} : FileInfoUrlParameter(context.combined.tags[index]);
+    };
+    auto url = FileInfoResource(context.resources, 0x8298, L"http://www.qianqian.com");
+    url += album ? L"/ttclient/zhuanji_ttpsh.php?" : L"/ttclient/geshouku_ttpsh.php?";
+    if (album) url += L"album=" + field(2) + L"&";
+    url += L"artist=" + field(1) + L"&";
+    ShellExecuteW(context.sheet, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+LRESULT CALLBACK FileInfoLinkProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
+                                  UINT_PTR, DWORD_PTR) {
+    if (message == WM_SETCURSOR) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, FileInfoLinkProc, 1);
+    return DefSubclassProc(window, message, wparam, lparam);
+}
+
+void InitializeFileInfoLink(HWND page) {
+    const HWND link = GetDlgItem(page, 1066);
+    SetWindowLongPtrW(link, GWL_STYLE, GetWindowLongPtrW(link, GWL_STYLE) | SS_NOTIFY);
+    SetWindowSubclass(link, FileInfoLinkProc, 1, 0);
+}
+
+void FinishFileInfoCell(FileInfoContext& context, bool commit) {
+    const HWND edit = std::exchange(context.inline_edit, nullptr);
+    if (!edit) return;
+    auto text = GetControlText(context.properties_page, 0xe801);
+    const auto name = std::exchange(context.inline_name, {});
+    DestroyWindow(edit);
+    if (commit) EditFileInfoField(context, name, text);
+}
+
+LRESULT CALLBACK FileInfoCellProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
+                                  UINT_PTR, DWORD_PTR reference) {
+    auto& context = *reinterpret_cast<FileInfoContext*>(reference);
+    if (message == WM_GETDLGCODE) return DLGC_WANTALLKEYS;
+    if (message == WM_KILLFOCUS || (message == WM_KEYDOWN && (wparam == VK_RETURN || wparam == VK_ESCAPE))) {
+        PostMessageW(context.properties_page, WM_APP + 0x418,
+                     message == WM_KILLFOCUS ? 1 : wparam == VK_RETURN ? 3 : 2,
+                     reinterpret_cast<LPARAM>(window));
+        if (message == WM_KEYDOWN) return 0;
+    }
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, FileInfoCellProc, 1);
+    return DefSubclassProc(window, message, wparam, lparam);
+}
+
+void BeginFileInfoCell(FileInfoContext& context, int row) {
+    if (!context.combined.writable || !context.loaded || context.loading || context.saving || row < 0 ||
+        static_cast<size_t>(row) >= context.combined.metadata.size()) return;
+    FinishFileInfoCell(context, true);
+    const HWND list = GetDlgItem(context.properties_page, 2164);
+    RECT bounds{};
+    ListView_GetSubItemRect(list, row, 1, LVIR_BOUNDS, &bounds);
+    MapWindowPoints(list, context.properties_page, reinterpret_cast<POINT*>(&bounds), 2);
+    const auto [name, value] = context.combined.metadata[row];
+    context.inline_name = SafeUtf8(name);
+    context.inline_edit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW,
+        value == context.strings.different ? L"" : value.c_str(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
+        context.properties_page, reinterpret_cast<HMENU>(0xe801), nullptr, nullptr);
+    SetWindowSubclass(context.inline_edit, FileInfoCellProc, 1, reinterpret_cast<DWORD_PTR>(&context));
+    SendMessageW(context.inline_edit, WM_SETFONT, SendMessageW(list, WM_GETFONT, 0, 0), TRUE);
+    SendMessageW(context.inline_edit, EM_SETLIMITTEXT, detail::kFileInfoProbeMaximumCharacters, 0);
+    SendMessageW(context.inline_edit, EM_SETSEL, 0, -1);
+    SetFocus(context.inline_edit);
 }
 
 INT_PTR CALLBACK FileInfoPropertiesPageProc(HWND dialog, UINT message,
@@ -1104,7 +1556,11 @@ INT_PTR CALLBACK FileInfoPropertiesPageProc(HWND dialog, UINT message,
                           reinterpret_cast<LONG_PTR>(context));
         if (context) {
             context->properties_page = dialog;
-            CreateAdvancedMetadataButton(*context);
+            CreateFileInfoEditorToolbar(*context);
+            InitializeFileInfoLink(dialog);
+            for (const auto name : audio::kTagGenres)
+                SendDlgItemMessageW(dialog, 1030, CB_ADDSTRING, 0,
+                                    reinterpret_cast<LPARAM>(SafeWide(name).c_str()));
             PopulateMp3PolicyControls(*context);
             for (const int identifier : kTagControls)
                 SendDlgItemMessageW(dialog, identifier, EM_SETLIMITTEXT,
@@ -1113,16 +1569,147 @@ INT_PTR CALLBACK FileInfoPropertiesPageProc(HWND dialog, UINT message,
         }
         return TRUE;
     }
+    if (message == WM_CTLCOLORSTATIC && context && GetDlgCtrlID(reinterpret_cast<HWND>(value)) == 1066) {
+        SetTextColor(reinterpret_cast<HDC>(wparam), RGB(0, 0, 255));
+        SetBkMode(reinterpret_cast<HDC>(wparam), TRANSPARENT);
+        return reinterpret_cast<INT_PTR>(GetSysColorBrush(COLOR_3DFACE));
+    }
+    if (message == WM_APP + 0x418 && context && reinterpret_cast<HWND>(value) == context->inline_edit) {
+        FinishFileInfoCell(*context, (wparam & 1) != 0);
+        if (wparam & 2) SetFocus(GetDlgItem(dialog, 2164));
+        return TRUE;
+    }
+    if (message == WM_CTLCOLOREDIT && context) {
+        const HWND edit = reinterpret_cast<HWND>(value);
+        int id = GetDlgCtrlID(edit);
+        if (GetDlgCtrlID(GetParent(edit)) == 1030) id = 1030;
+        const auto control = std::find(kTagControls.begin(), kTagControls.end(), id);
+        if (control != kTagControls.end()) {
+            const auto index = static_cast<size_t>(control - kTagControls.begin());
+            bool changed{};
+            for (size_t i = 0; i < context->drafts.size(); ++i)
+                changed |= context->drafts[i].tags[index] != context->originals[i].tags[index];
+            const auto color = changed ? RGB(0, 0, 255)
+                : context->combined.tags[index] == context->strings.different ? RGB(255, 0, 0)
+                    : GetSysColor(COLOR_WINDOWTEXT);
+            SetTextColor(reinterpret_cast<HDC>(wparam), color);
+            SetBkColor(reinterpret_cast<HDC>(wparam), GetSysColor(COLOR_WINDOW));
+            return reinterpret_cast<INT_PTR>(GetSysColorBrush(COLOR_WINDOW));
+        }
+    }
+    if (message == WM_NOTIFY && context) {
+        if (FileInfoTooltip(context->resources, value)) return TRUE;
+        const auto* info = reinterpret_cast<NMHDR*>(value);
+        if (info->hwndFrom == context->toolbar && info->code == TBN_DROPDOWN) {
+            FinishFileInfoCell(*context, true);
+            const auto* toolbar = reinterpret_cast<NMTOOLBARW*>(value);
+            const UINT choice = FileInfoTransformMenu(dialog, context->toolbar,
+                context->resources, toolbar->iItem, context->codepage);
+            if (choice) FileInfoTransform(*context, choice, toolbar->iItem == 0x86b ? choice : 0);
+            return TRUE;
+        }
+        if (info->idFrom == 2164) {
+            if (info->code == NM_CLICK) {
+                const auto* click = reinterpret_cast<NMITEMACTIVATE*>(value);
+                if (click->iSubItem == 1) BeginFileInfoCell(*context, click->iItem);
+                return TRUE;
+            }
+            if (info->code == NM_DBLCLK) {
+                FinishFileInfoCell(*context, true);
+                EditAdvancedFileInfo(*context, false);
+                return TRUE;
+            }
+            if (info->code == LVN_KEYDOWN && reinterpret_cast<NMLVKEYDOWN*>(value)->wVKey == VK_DELETE) {
+                SendMessageW(dialog, WM_COMMAND, 0x8078, 0);
+                return TRUE;
+            }
+            if (info->code == LVN_ITEMCHANGED && !context->populating) UpdateSheetState(*context);
+            if (info->code == NM_CUSTOMDRAW) {
+                auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(value);
+                LRESULT result = CDRF_DODEFAULT;
+                if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) result = CDRF_NOTIFYITEMDRAW;
+                else if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) result = CDRF_NOTIFYSUBITEMDRAW;
+                else if (draw->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM) && draw->iSubItem == 1 &&
+                         draw->nmcd.dwItemSpec < context->combined.metadata.size()) {
+                    const auto& [name, text] = context->combined.metadata[draw->nmcd.dwItemSpec];
+                    bool changed{};
+                    for (size_t i = 0; i < context->drafts.size(); ++i)
+                        changed |= detail::FileInfoField(RecordFields(context->drafts[i]), SafeUtf8(name)) !=
+                            detail::FileInfoField(RecordFields(context->originals[i]), SafeUtf8(name));
+                    draw->clrText = changed ? RGB(0, 0, 255) : text == context->strings.different
+                        ? RGB(255, 0, 0) : GetSysColor(COLOR_WINDOWTEXT);
+                    draw->clrTextBk = GetSysColor(COLOR_WINDOW);
+                }
+                SetWindowLongPtrW(dialog, DWLP_MSGRESULT, result);
+                return TRUE;
+            }
+        }
+    }
     if (message == WM_COMMAND && context) {
         const UINT identifier = LOWORD(wparam);
         const UINT notification = HIWORD(wparam);
         if (identifier == kFileInfoAdvanced && notification == BN_CLICKED) {
-            SetAdvancedMetadataMode(*context,
-                IsDlgButtonChecked(dialog, kFileInfoAdvanced) == BST_CHECKED);
+            FinishFileInfoCell(*context, true);
+            PopulateAdvancedMetadata(*context);
+            SetAdvancedMetadataMode(*context, !context->advanced_mode);
             if (context->history_settings)
                 context->history_settings->advance_file_info =
                     context->advanced_mode;
             return TRUE;
+        }
+        if (identifier == 1066) { OpenFileInfoDetails(*context, false); return TRUE; }
+        if (context->loaded && !context->loading && !context->saving && !context->populating) {
+            const auto control = std::find(kTagControls.begin(), kTagControls.end(), identifier);
+            if (control != kTagControls.end() &&
+                (notification == EN_CHANGE || (identifier == 1030 &&
+                    (notification == CBN_EDITCHANGE || notification == CBN_SELCHANGE)))) {
+                auto text = GetControlText(dialog, identifier);
+                if (identifier == 1030 && notification == CBN_SELCHANGE) {
+                    const auto selected = SendDlgItemMessageW(dialog, 1030, CB_GETCURSEL, 0, 0);
+                    const auto length = SendDlgItemMessageW(dialog, 1030, CB_GETLBTEXTLEN, selected, 0);
+                    if (selected != CB_ERR && length >= 0) {
+                        text.resize(static_cast<size_t>(length) + 1);
+                        SendDlgItemMessageW(dialog, 1030, CB_GETLBTEXT, selected, reinterpret_cast<LPARAM>(text.data()));
+                        text.resize(length);
+                    }
+                }
+                EditFileInfoField(*context, kTagNames[control - kTagControls.begin()], text, false);
+                InvalidateRect(reinterpret_cast<HWND>(value), nullptr, FALSE);
+                return TRUE;
+            }
+            if (context->combined.writable && notification == 0) {
+                FinishFileInfoCell(*context, identifier != 0x8075);
+                switch (identifier) {
+                case 2160: GuessFileInfoTags(*context); return TRUE;
+                case 0x8076: FileInfoTransform(*context, identifier); return TRUE;
+                case 0x834:
+                    for (auto& record : context->drafts) if (record.writable) {
+                        for (const auto* name : kTagNames) SetRecordField(record, name, L"");
+                        SetRecordField(record, "replaygain_track_gain", L"");
+                    }
+                    RefreshFileInfoDraft(*context);
+                    return TRUE;
+                case 0x8077: EditAdvancedFileInfo(*context, true); return TRUE;
+                case 0x8079: EditAdvancedFileInfo(*context, false); return TRUE;
+                case 0x8078: {
+                    const int selected = ListView_GetNextItem(GetDlgItem(dialog, 2164), -1, LVNI_SELECTED);
+                    if (selected >= 0 && static_cast<size_t>(selected) < context->combined.metadata.size()) {
+                        const auto name = SafeUtf8(context->combined.metadata[selected].first);
+                        EditFileInfoField(*context, name, L"");
+                    }
+                    return TRUE;
+                }
+                case 0x8075:
+                    for (size_t i = 0; i < context->drafts.size(); ++i) {
+                        auto cover = std::move(context->drafts[i].cover);
+                        context->drafts[i] = context->originals[i];
+                        context->drafts[i].cover = std::move(cover);
+                    }
+                    context->codepage = GetACP();
+                    RefreshFileInfoDraft(*context);
+                    return TRUE;
+                }
+            }
         }
         if (!context->general_settings) return FALSE;
         auto& general = *context->general_settings;
@@ -1174,8 +1761,18 @@ INT_PTR CALLBACK FileInfoCoverPageProc(HWND dialog, UINT message,
                           reinterpret_cast<LONG_PTR>(context));
         if (context) {
             context->cover_page = dialog;
+            InitializeFileInfoLink(dialog);
             PopulateCoverPage(*context);
         }
+        return TRUE;
+    }
+    if (message == WM_CTLCOLORSTATIC && GetDlgCtrlID(reinterpret_cast<HWND>(value)) == 1066) {
+        SetTextColor(reinterpret_cast<HDC>(wparam), RGB(0, 0, 255));
+        SetBkMode(reinterpret_cast<HDC>(wparam), TRANSPARENT);
+        return reinterpret_cast<INT_PTR>(GetSysColorBrush(COLOR_3DFACE));
+    }
+    if (message == WM_COMMAND && context && LOWORD(wparam) == 1066) {
+        OpenFileInfoDetails(*context, true);
         return TRUE;
     }
     if (message == WM_COMMAND && context &&
@@ -1195,18 +1792,33 @@ INT_PTR CALLBACK FileInfoCoverPageProc(HWND dialog, UINT message,
             const auto selected = detail::ModernOpenFile(options);
             if (!selected) return TRUE;
             auto bytes = ReadCoverBytes(*selected);
-            if (!bytes) return TRUE;
-            context->combined.cover = std::move(*bytes);
+            if (!bytes) {
+                MessageBoxW(dialog, L"无法读取专辑封面：图片格式无效或超过允许的大小。",
+                            nullptr, MB_OK | MB_ICONERROR);
+                return TRUE;
+            }
+            if (bytes->size() > context->combined.cover_maximum_bytes) {
+                wchar_t text[256]{};
+                swprintf_s(text, FileInfoResource(context->resources, 0x821a).c_str(),
+                           static_cast<int>(context->combined.cover_maximum_bytes));
+                MessageBoxW(dialog, text, nullptr, MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            for (auto& record : context->drafts)
+                if (record.cover_writable) record.cover = *bytes;
             context->cover_action =
                 detail::FileInfoProbeCoverAction::replace;
+            context->combined = CombineRecords(context->drafts, context->strings);
             PopulateCoverPage(*context);
             UpdateSheetState(*context);
             return TRUE;
         }
         if (identifier == 2221) {
-            context->combined.cover.clear();
+            for (auto& record : context->drafts)
+                if (record.cover_writable) record.cover.clear();
             context->cover_action =
                 detail::FileInfoProbeCoverAction::remove;
+            context->combined = CombineRecords(context->drafts, context->strings);
             PopulateCoverPage(*context);
             UpdateSheetState(*context);
             return TRUE;
@@ -1235,21 +1847,26 @@ void CreateFileInfoButtons(FileInfoContext& context) {
     const int width = cancel_bounds.right - cancel_bounds.left;
     const int height = cancel_bounds.bottom - cancel_bounds.top;
     const DWORD style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON;
-    const auto create = [&](UINT identifier, const std::wstring& text, int x) {
+    const auto create = [&](UINT identifier, const std::wstring& text, int x, int button_width) {
         const HWND button = CreateWindowExW(
-            0, WC_BUTTONW, text.c_str(), style, x, cancel_bounds.top, width,
+            0, WC_BUTTONW, text.c_str(), style, x, cancel_bounds.top, button_width,
             height, context.sheet, reinterpret_cast<HMENU>(
                 static_cast<UINT_PTR>(identifier)), nullptr, nullptr);
         if (button) SendMessageW(button, WM_SETFONT,
             SendMessageW(cancel, WM_GETFONT, 0, 0), TRUE);
     };
-    create(kFileInfoSave, context.strings.save, 8);
-    create(kFileInfoReload, context.strings.reload, 14 + width);
+    const int save_x = cancel_bounds.left - width - 16;
+    create(kFileInfoSave, context.strings.save, save_x, width + 10);
+    create(kFileInfoReload, context.strings.reload, save_x - width - 16, width + 10);
+    detail::InstallOptionsBitmapButton(context.sheet, IDCANCEL, context.resources, 2);
     if (context.rows.size() == 1) {
-        create(kFileInfoPrevious, context.strings.previous,
-               cancel_bounds.left - width * 2 - 12);
-        create(kFileInfoNext, context.strings.next,
-               cancel_bounds.left - width - 6);
+        RECT client{};
+        GetClientRect(context.sheet, &client);
+        const int margin = client.right - cancel_bounds.right;
+        create(kFileInfoPrevious, context.strings.previous, margin, width);
+        create(kFileInfoNext, context.strings.next, margin + width + 6, width);
+        detail::InstallOptionsBitmapButton(context.sheet, kFileInfoPrevious, context.resources, 0x412);
+        detail::InstallOptionsBitmapButton(context.sheet, kFileInfoNext, context.resources, 0x415);
     }
 }
 
@@ -1383,8 +2000,6 @@ void PlayerWindow::ShowPlaylistProperties(
         }
     }
     context->rows = std::move(rows);
-    context->playing_row = explicit_track
-        ? std::optional<size_t>{0} : VisiblePlaylistPlayingRow();
 
     std::wstring executable(MAX_PATH, L'\0');
     DWORD executable_length = GetModuleFileNameW(
@@ -1421,9 +2036,6 @@ void PlayerWindow::ShowPlaylistProperties(
     context->strings.reload = ResourceText(0x821d);
     context->strings.previous = ResourceText(0x8217);
     context->strings.next = ResourceText(0x8218);
-    auto advanced = Split(ResourceText(0x875), L'\n');
-    if (!advanced.empty())
-        context->strings.advanced = std::move(advanced.front());
     context->strings.id3v2_utf8_warning = ResourceText(0x8170);
     context->strings.channel_names = Split(ResourceText(0x8154), L'|');
 

@@ -27,7 +27,11 @@ Common Item Dialog，这是有意兼容改动。
   x86 SEH 边界；
 - `src/audio/audio_engine.cpp`：reader/decoder 解码与统一源；
 - `src/ui/playlist_transforms.cpp`：encoder 配置和批量转换；
-- `tools/file_info_probe.cpp`：metadata 与 thumbnail 写回。
+- `src/ui/player_window_playlist_properties.cpp`：文件属性、基本／高级标签编辑、封面与批量保存；
+- `src/app/file_info_worker.cpp`：隔离工作进程中的 metadata 与 thumbnail 写回。
+
+文件属性窗口的完整功能对照、底层标签修复和验证范围见
+[文件属性恢复](FILE_PROPERTIES_RECOVERY.md)。
 
 reader 使用 `IStream` 打开并通过六槽宿主 buffer 输出；decoder 选择遵循
 `004CD045`，读/seek/reset 对应 `004E3CF3/004E3E64`。encoder 遵循

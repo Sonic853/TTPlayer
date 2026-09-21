@@ -73,6 +73,7 @@ void PopulateReaderResult(
     result.capabilities = reader.Capabilities();
     result.cover_writable = reader.HasThumbnailInterface() &&
                             (reader.Capabilities() & 4U) != 0;
+    result.cover_maximum_bytes = reader.MaximumThumbnailBytes();
     result.format = reader.Format();
     result.duration_ms = static_cast<DWORD>(std::clamp<std::int64_t>(
         reader.DurationMilliseconds(), 0,
@@ -125,6 +126,7 @@ void PopulateBuiltinResult(
     result.status = S_OK;
     result.capabilities = source.capabilities;
     result.cover_writable = (source.capabilities & 4U) != 0;
+    result.cover_maximum_bytes = ttplayer::ui::detail::kFileInfoProbeMaximumCoverBytes;
     result.format = source.format;
     result.duration_ms = source.duration_ms;
     result.encoded_bits_per_second = source.encoded_bits_per_second;

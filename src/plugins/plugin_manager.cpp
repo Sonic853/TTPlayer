@@ -1338,6 +1338,13 @@ bool LegacyReaderSession::HasThumbnailInterface() const noexcept {
     return impl_ && impl_->thumbnail_object;
 }
 
+DWORD LegacyReaderSession::MaximumThumbnailBytes() const noexcept {
+    DWORD maximum{};
+    if (impl_ && impl_->thumbnail_object &&
+        SUCCEEDED(InvokeThumbnailDword(impl_->thumbnail_object, 4, &maximum))) return maximum;
+    return 0;
+}
+
 const std::vector<unsigned char>& LegacyReaderSession::Thumbnail() const noexcept {
     static const std::vector<unsigned char> empty;
     return impl_ ? impl_->thumbnail : empty;

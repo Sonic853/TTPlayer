@@ -103,6 +103,7 @@ public:
     // kept separate so callers do not bypass the reader ABI with an unrelated
     // file parser when the plug-in deliberately reports no first picture.
     [[nodiscard]] bool HasThumbnailInterface() const noexcept;
+    [[nodiscard]] DWORD MaximumThumbnailBytes() const noexcept;
     [[nodiscard]] const std::vector<unsigned char>& Thumbnail() const noexcept;
     // FUN_004AD663 first requires reader capability bit 4, obtains the
     // current item count (slot 3) and the 60000-byte-per-item limit (slot 4),

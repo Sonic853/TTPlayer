@@ -1,6 +1,7 @@
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/builtin_file_info.h"
 #include "ttplayer/audio/midi_player.h"
+#include "tag_genres.h"
 
 #include <algorithm>
 #include <array>
@@ -256,7 +257,10 @@ std::wstring DecodeUtf16(std::span<const unsigned char> value,
 
 std::wstring DecodeText(unsigned char encoding,
                         std::span<const unsigned char> value) {
-    while (!value.empty() && value.back() == 0) value = value.first(value.size() - 1);
+    // UTF-16 terminators are whole code units. Trimming individual zero bytes
+    // drops the high byte of a final ASCII character (including TXXX names).
+    if (encoding == 0 || encoding == 3)
+        while (!value.empty() && value.back() == 0) value = value.first(value.size() - 1);
     switch (encoding) {
     case 0: return DecodeLatin1(value);
     case 1: return DecodeUtf16(value, false);
@@ -267,13 +271,25 @@ std::wstring DecodeText(unsigned char encoding,
 }
 
 Bytes EncodeUtf8(std::wstring_view value) {
-    if (value.empty()) return {};
-    const int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
-        value.data(), static_cast<int>(std::min<size_t>(value.size(), INT_MAX)),
+    if (value.empty() || value.size() > INT_MAX) return {};
+    // WC_ERR_INVALID_CHARS is Vista+. XP rejects it even for plain ASCII,
+    // which used to silently write empty APEv2 values and extended names.
+    // Validate UTF-16 ourselves so flags=0 retains strict conversion on XP.
+    for (size_t index = 0; index < value.size(); ++index) {
+        const auto unit = static_cast<unsigned>(value[index]);
+        if (unit >= 0xd800U && unit <= 0xdbffU) {
+            if (++index == value.size() || value[index] < 0xdc00U ||
+                value[index] > 0xdfffU) return {};
+        } else if (unit >= 0xdc00U && unit <= 0xdfffU) {
+            return {};
+        }
+    }
+    const int count = WideCharToMultiByte(CP_UTF8, 0,
+        value.data(), static_cast<int>(value.size()),
         nullptr, 0, nullptr, nullptr);
     if (count <= 0) return {};
     Bytes result(static_cast<size_t>(count));
-    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+    if (WideCharToMultiByte(CP_UTF8, 0, value.data(),
             static_cast<int>(value.size()),
             reinterpret_cast<char*>(result.data()), count, nullptr,
             nullptr) != count)
@@ -366,12 +382,14 @@ std::wstring ApeDisplayField(std::string_view name) {
 std::string FrameSemantic(std::string_view identifier) {
     if (identifier == "TIT2" || identifier == "TT2") return "Title";
     if (identifier == "TPE1" || identifier == "TP1") return "Artist";
+    if (identifier == "TPE2" || identifier == "TP2") return "AlbumArtist";
     if (identifier == "TALB" || identifier == "TAL") return "Album";
     if (identifier == "TRCK" || identifier == "TRK") return "Tracknumber";
     if (identifier == "TCON" || identifier == "TCO") return "Genre";
     if (identifier == "TDRC" || identifier == "TYER" ||
         identifier == "TYE") return "Date";
     if (identifier == "COMM" || identifier == "COM") return "Comment";
+    if (identifier == "USLT" || identifier == "ULT") return "Lyrics";
     return {};
 }
 
@@ -412,18 +430,18 @@ void DecodeId3Frame(std::string_view identifier,
     if (payload.empty()) return;
     const unsigned char encoding = payload[0];
     const auto semantic = FrameSemantic(identifier);
-    if (!semantic.empty() && identifier != "COMM" && identifier != "COM") {
+    if (!semantic.empty() && semantic != "Comment" && semantic != "Lyrics") {
         SetField(data, std::wstring(semantic.begin(), semantic.end()),
                  DecodeText(encoding, payload.subspan(1)), false);
         return;
     }
-    if (identifier == "COMM" || identifier == "COM") {
+    if (semantic == "Comment" || semantic == "Lyrics") {
         if (payload.size() < 4) return;
         auto text = payload.subspan(4);
         const size_t separator = FindEncodedTerminator(text, encoding);
         const size_t skip = separator < text.size()
             ? separator + EncodedTerminatorSize(encoding) : text.size();
-        SetField(data, L"Comment", DecodeText(encoding, text.subspan(skip)),
+        SetField(data, semantic == "Lyrics" ? L"Lyrics" : L"Comment", DecodeText(encoding, text.subspan(skip)),
                  false);
         return;
     }
@@ -692,8 +710,10 @@ TagData ReadId3v1(std::span<const unsigned char, 128> tag) {
         97, version_11 ? 28U : 30U)), false);
     if (version_11)
         SetField(data, L"Tracknumber", std::to_wstring(tag[126]), false);
-    if (tag[127] != 0xffU)
-        SetField(data, L"Genre", std::to_wstring(tag[127]), false);
+    if (tag[127] < kTagGenres.size()) {
+        const auto name = kTagGenres[tag[127]];
+        SetField(data, L"Genre", std::wstring(name.begin(), name.end()), false);
+    } else if (tag[127] != 0xffU) SetField(data, L"Genre", std::to_wstring(tag[127]), false);
     return data;
 }
 
@@ -1067,14 +1087,15 @@ void AppendTextFrame(Bytes& frames, unsigned char major,
 }
 
 void AppendCommentFrame(Bytes& frames, unsigned char major,
-                        std::wstring_view value, unsigned char encoding) {
+                        std::wstring_view value, unsigned char encoding,
+                        std::string_view identifier = "COMM") {
     if (value.empty()) return;
     Bytes payload{encoding, 'e', 'n', 'g'};
     const size_t terminator = EncodedTerminatorSize(encoding);
     payload.insert(payload.end(), terminator, 0);
     auto encoded = EncodeText(value, encoding);
     payload.insert(payload.end(), encoded.begin(), encoded.end());
-    frames.insert(frames.end(), {'C', 'O', 'M', 'M'});
+    frames.insert(frames.end(), identifier.begin(), identifier.end());
     if (major == 4) AppendSynchsafe(frames,
         static_cast<std::uint32_t>(payload.size()));
     else AppendBe32(frames, static_cast<std::uint32_t>(payload.size()));
@@ -1140,7 +1161,8 @@ void AppendPictureFrame(Bytes& frames, unsigned char major,
 
 Bytes BuildId3v2(const Id3Tag& previous, const TagData& fields,
                  const Mp3TagPolicy& policy,
-                 BuiltinCoverAction cover_action) {
+                 BuiltinCoverAction cover_action,
+                 const std::vector<std::wstring>& modified) {
     const unsigned char encoding = EffectiveId3Encoding(
         policy.id3v2_encoding);
     const unsigned char major = static_cast<unsigned char>(previous.present &&
@@ -1151,6 +1173,8 @@ Bytes BuildId3v2(const Id3Tag& previous, const TagData& fields,
     bool retained_picture{};
     for (const auto& frame : previous.frames) {
         if (!frame.semantic.empty()) continue;
+        if (!frame.metadata_name.empty() && std::any_of(modified.begin(), modified.end(),
+            [&frame](const auto& name) { return WideAsciiEqual(name, frame.metadata_name); })) continue;
         const bool picture = frame.identifier == "APIC" ||
                              frame.identifier == "PIC";
         if (picture && cover_action != BuiltinCoverAction::unchanged)
@@ -1164,6 +1188,7 @@ Bytes BuildId3v2(const Id3Tag& previous, const TagData& fields,
                     encoding);
     AppendTextFrame(frames, major, "TPE1", GetField(fields, L"Artist"),
                     encoding);
+    AppendTextFrame(frames, major, "TPE2", GetField(fields, L"AlbumArtist"), encoding);
     AppendTextFrame(frames, major, "TALB", GetField(fields, L"Album"),
                     encoding);
     AppendTextFrame(frames, major, "TRCK", GetField(fields, L"Tracknumber"),
@@ -1175,8 +1200,10 @@ Bytes BuildId3v2(const Id3Tag& previous, const TagData& fields,
         date.find(L'-') == std::wstring::npos ? "TYER" : "TDRC", date,
         encoding);
     AppendCommentFrame(frames, major, GetField(fields, L"Comment"), encoding);
+    AppendCommentFrame(frames, major, GetField(fields, L"Lyrics"), encoding, "USLT");
     for (const auto& field : fields.fields) {
         if (field.value.empty() || IsStandardField(field.name) ||
+            WideAsciiEqual(field.name, L"AlbumArtist") || WideAsciiEqual(field.name, L"Lyrics") ||
             std::any_of(retained_names.begin(), retained_names.end(),
                 [&field](const auto& name) {
                     return WideAsciiEqual(name, field.name);
@@ -1248,16 +1275,23 @@ Bytes ApeBlock(bool header, std::uint32_t size,
 }
 
 Bytes BuildApe(const ApeTag& previous, const TagData& fields,
-               BuiltinCoverAction cover_action) {
+               BuiltinCoverAction cover_action,
+               const std::vector<std::wstring>& modified = {}) {
     Bytes items;
     std::uint32_t count{};
     bool retained_cover{};
+    std::vector<std::wstring> retained_names;
     for (const auto& item : previous.items) {
         if (!item.semantic.empty()) continue;
+        const bool text = item.raw.size() >= 8 && ((ReadLe32(item.raw.data() + 4) >> 1U) & 3U) == 0;
+        const auto name = ApeDisplayField(item.key);
+        if (text && std::any_of(modified.begin(), modified.end(),
+            [&name](const auto& changed) { return WideAsciiEqual(changed, name); })) continue;
         if (item.cover && cover_action != BuiltinCoverAction::unchanged)
             continue;
         items.insert(items.end(), item.raw.begin(), item.raw.end());
         retained_cover = retained_cover || item.cover;
+        if (text) retained_names.push_back(name);
         ++count;
     }
     const auto add = [&items, &count, &fields](std::string_view key,
@@ -1274,6 +1308,15 @@ Bytes BuildApe(const ApeTag& previous, const TagData& fields,
     add("Genre", L"Genre");
     add("Year", L"Date");
     add("Comment", L"Comment");
+    for (const auto& field : fields.fields) {
+        if (field.value.empty() || IsStandardField(field.name) ||
+            std::any_of(retained_names.begin(), retained_names.end(),
+                [&field](const auto& name) { return WideAsciiEqual(field.name, name); })) continue;
+        const auto encoded = EncodeUtf8(field.name);
+        AppendApeTextItem(items, std::string_view(reinterpret_cast<const char*>(encoded.data()),
+                                                encoded.size()), field.value);
+        ++count;
+    }
     if (!retained_cover && !fields.cover.empty()) {
         AppendApeCoverItem(items, fields.cover);
         ++count;
@@ -1326,9 +1369,16 @@ Bytes BuildId3v1(const TagData& fields) {
     const auto genre = GetField(fields, L"Genre");
     end = nullptr;
     const long genre_number = std::wcstol(genre.c_str(), &end, 10);
-    output[127] = end != genre.c_str() && genre_number >= 0 &&
+    output[127] = end != genre.c_str() && *end == 0 && genre_number >= 0 &&
             genre_number <= 255
         ? static_cast<unsigned char>(genre_number) : 0xffU;
+    for (size_t index = 0; index < kTagGenres.size(); ++index) {
+        const auto name = kTagGenres[index];
+        if (WideAsciiEqual(genre, std::wstring(name.begin(), name.end()))) {
+            output[127] = static_cast<unsigned char>(index);
+            break;
+        }
+    }
     return output;
 }
 
@@ -1434,13 +1484,15 @@ HRESULT WriteMp3(const std::filesystem::path& path,
     TagData fields = MergeMp3Tags(layout, policy.read_priority);
     bool has_supported = cover_action != BuiltinCoverAction::unchanged;
     field_results.reserve(requested.size());
+    std::vector<std::wstring> modified;
     for (const auto& request : requested) {
-        const auto canonical = CanonicalField(request.name);
-        if (canonical.empty()) {
-            field_results.push_back(E_NOTIMPL);
+        auto canonical = ApeDisplayField(request.name);
+        if (canonical.empty() || request.name.find('\0') != std::string::npos) {
+            field_results.push_back(E_INVALIDARG);
             continue;
         }
         SetField(fields, canonical, request.value);
+        modified.push_back(std::move(canonical));
         field_results.push_back(S_OK);
         has_supported = true;
     }
@@ -1476,9 +1528,9 @@ HRESULT WriteMp3(const std::filesystem::path& path,
     Bytes id3v1;
     try {
         if (write_type & 8U)
-            id3v2 = BuildId3v2(layout.id3v2, fields, policy, cover_action);
+            id3v2 = BuildId3v2(layout.id3v2, fields, policy, cover_action, modified);
         if (write_type & 4U)
-            ape = BuildApe(layout.ape, fields, cover_action);
+            ape = BuildApe(layout.ape, fields, cover_action, modified);
         if (write_type & 1U) id3v1 = BuildId3v1(fields);
     } catch (...) {
         return E_OUTOFMEMORY;
