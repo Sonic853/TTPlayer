@@ -236,7 +236,7 @@ jobs:
           GITEE_REPO: ${{ inputs.release_to_gitee && secrets.GITEE_REPO || '' }}
           GITEE_TOKEN: ${{ inputs.release_to_gitee && secrets.GITEE_TOKEN || '' }}
           RELEASE_INSTALL_NOTES: |
-            使用该程序前确保本地已安装有 [5.7.9](https://github.com/user-attachments/files/32431580/TTPlayer579.zip) 版本的千千静听，请按照以下步骤安装重建版：
+            使用该程序前确保本地已安装有 [5.7.9](https://github.com/user-attachments/files/32431580/TTPlayer579.zip) 版本的千千静听（没装有？[点这里](https://github.com/user-attachments/files/32431580/TTPlayer579.zip)），请按照以下步骤安装重建版：
             1. Windows XP / Windows 7 下载并解压 TTPlayerRebuild-XP-Win7-{version}.zip；现代 Windows 下载并解压 TTPlayerRebuild-{version}.zip。
             2. 打开开始菜单。
             3. 打开所有程序——千千静听——右键千千静听程序图标。
