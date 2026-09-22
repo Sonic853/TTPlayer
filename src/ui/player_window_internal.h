@@ -270,6 +270,7 @@ constexpr UINT kEqCommandFlat = 0x7e2d;
 constexpr UINT kEqCommandCustom = 0x7e2e;
 constexpr UINT kEqCommandLoad = 0x7e2f;
 constexpr UINT kEqCommandSave = 0x7e30;
+constexpr UINT kEqCommandReset = 0x7e31;
 constexpr UINT kEqCommandPresetFirst = 0x7e90;
 constexpr UINT kEqCommandSurround = 0x7dfa;
 constexpr int kEqHitClose = 1;

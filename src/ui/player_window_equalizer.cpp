@@ -945,6 +945,15 @@ void PlayerWindow::PopulateEqualizerPresetMenu(HMENU menu) const {
 }
 
 void PlayerWindow::PrepareEqualizerMenu(HMENU menu) const {
+    // Expose the skin's Reset button through both copies of the EQ popup.
+    // Reuse its localized resource label and keep repeated preparation safe.
+    if (const HMENU commands = FindCommandMenu(menu, kEqCommandEnable);
+        commands && !FindCommandMenu(commands, kEqCommandReset)) {
+        auto label = ResourceText(0x8176);
+        if (label.empty()) label = i18n::Text(L"重设均衡器");
+        InsertMenuW(commands, kEqCommandEnable, MF_BYCOMMAND | MF_STRING,
+                    kEqCommandReset, label.c_str());
+    }
     HMENU profiles = FindCommandMenu(menu, kEqCommandPresetFirst);
     if (!profiles) profiles = FindCommandMenu(menu, kEqCommandPresetFirst + 1);
     if (profiles) PopulateEqualizerPresetMenu(profiles);
@@ -1007,6 +1016,14 @@ bool PlayerWindow::HandleEqualizerCommand(UINT command) {
         settings_.equalizer.surround =
             settings_.equalizer.surround != 0 ? 0 : 8;
         ApplyEqualizer();
+    } else if (command == kEqCommandReset) {
+        settings_.equalizer.current.fill(0);
+        settings_.equalizer.custom = settings_.equalizer.current;
+        if (settings_.equalizer.profile != -2) {
+            settings_.equalizer.profile_last = settings_.equalizer.profile;
+            settings_.equalizer.profile = -1;
+        }
+        ApplyEqualizer();
     } else if (command == kEqCommandLoad || command == kEqCommandSave) {
         // Keep the original spelling as fallback; only translate the label.
         const std::vector<ModernDialogFilter> filters{{
@@ -1062,14 +1079,7 @@ void PlayerWindow::InvokeEqualizerControl(int control, POINT screen_point) {
         ShowEqualizerProfileMenu(screen_point);
     }
     else if (control == kEqHitReset) {
-        settings_.equalizer.current.fill(0);
-        settings_.equalizer.custom = settings_.equalizer.current;
-        if (settings_.equalizer.profile != -2) {
-            settings_.equalizer.profile_last = settings_.equalizer.profile;
-            settings_.equalizer.profile = -1;
-        }
-        ApplyEqualizer();
-        InvalidateRect(equalizer_window_, nullptr, FALSE);
+        HandleEqualizerCommand(kEqCommandReset);
     }
 }
 
