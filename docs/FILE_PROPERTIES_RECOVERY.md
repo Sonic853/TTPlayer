@@ -70,6 +70,6 @@ XP 实测发现并修复了 `EncodeUtf8` 使用 `WC_ERR_INVALID_CHARS` 的兼容
 
 \* 测试所用原版 `ttp_asf.dll` 依赖 `msvcr110.dll`。XP 虚拟机最初缺少它，插件加载返回 126；仅在独立测试目录补齐 x86 VC++ 2012 运行库后 WMA 测试通过。没有安装或替换系统 DLL。原插件依赖仍须由运行环境提供。
 
-VirtualBox Guest Control 在不可见的服务桌面运行这些测试，因此窗口检查依据控件状态、消息响应及实际保存结果，不能据此宣称已经完成 XP／Win7 交互桌面的像素级绘制核对或人工播放试听。交互截图核对仍为宿主机结果。原始日志保留在本地 `rebuild/tests/vm_results/XP` 和 `Win7`，测试源码及结果均不上传，Actions 继续使用 `BUILD_TESTING=OFF`。
+VirtualBox Guest Control 在不可见的服务桌面运行这些测试，因此窗口检查依据控件状态、消息响应及实际保存结果，不能据此宣称已经完成 XP／Win7 交互桌面的像素级绘制核对或人工播放试听。交互截图核对仍为宿主机结果。原始日志保留在本地 `rebuild/out/test-artifacts/vm_results/XP` 和 `Win7`，测试源码及结果均不上传，Actions 继续使用 `BUILD_TESTING=OFF`。
 
 各媒体格式的可写能力继续由对应读取插件决定；不把只读格式显示为可写。歌手／专辑详情使用原版千千网站路由，网站服务的可用性不属于本地窗口恢复能保证的范围。

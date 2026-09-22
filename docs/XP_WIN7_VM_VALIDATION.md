@@ -77,7 +77,7 @@ VARIANT。XP 和 Win7 的 `skin-tt2012` 测试均出现 `0xC0000005`。
 
 本轮 35 个用例在 XP 和 Win7 上最终均返回 0。先完成整轮，再只复测修正涉及的失败项；
 这不是声称所有历史测试、所有功能都完整运行。详细日志仅保留在本地
-`tests/vm_validation/`，不会进入发行 ZIP。
+`out/test-artifacts/vm_validation/`，不会进入发行 ZIP。
 
 | 文档/功能 | 实际覆盖 |
 | --- | --- |
@@ -159,7 +159,7 @@ VirtualBox 7.2.18 WDDM 驱动；Themes、UxSms 服务均正常运行。
 - 当前样式：`Aero.msstyles`，`NormalColor` / `NormalSize`；截图可见透明窗口边框。
 - 屏幕保护仍关闭；此次临时验证任务和来宾验证程序已清除。
 
-日志和截图保存在本地 `tests/vm_validation/aero/`。此次确认的是 Aero 环境启用，
+日志和截图保存在本地 `out/test-artifacts/vm_validation/aero/`。此次确认的是 Aero 环境启用，
 不将前面的 35 项测试改称为开启 Aero 后的回归，也不等于完成播放器的全部 Shell 悬停测试。
 
 ## Aero 开启后的补充验证（2026-09-21）
@@ -212,9 +212,9 @@ VirtualBox 7.2.18 WDDM 驱动；Themes、UxSms 服务均正常运行。
 
 ### 记录与边界
 
-日志保存在本地 `tests/vm_validation/Win7-Aero-*`，实际桌面/缩略图/Peek 截图在
-`tests/vm_validation/aero/`。保留首轮失败日志，不用后续通过覆盖历史记录。
-最终通过项及对应日志哈希汇总在本地 `tests/vm_validation/aero/final-report.json`。
+日志保存在本地 `out/test-artifacts/vm_validation/Win7-Aero-*`，实际桌面/缩略图/Peek 截图在
+`out/test-artifacts/vm_validation/aero/`。保留首轮失败日志，不用后续通过覆盖历史记录。
+最终通过项及对应日志哈希汇总在本地 `out/test-artifacts/vm_validation/aero/final-report.json`。
 
 结束时再次确认 DWM 合成开启、刷新率 60/1 Hz、屏保关闭及显存 256 MB/3D 加速设置。
 日志归档后清理本轮独立播放器副本、测试可执行文件、截图和临时目录，回收约 262 MiB；
