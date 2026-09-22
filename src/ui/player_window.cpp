@@ -2471,6 +2471,7 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
         external_skin_.reset();
         UpdateMainToolRects();UpdatePlaylistToolRects();UpdateEqualizerToolRects();
     }
+    if (external_skin_) ApplyAutoLyricWidth();
     RemovePluginSkinNativeTips();
     ApplyWindowShadow();
     if (skinned) {
@@ -5277,7 +5278,9 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
                 playback != nullptr,
                 focus == playlist_tree_control_ ||
                     focus == playlist_list_control_,
-                focus == playlist_track_control_ || focus == playlist_view_);
+                focus == playlist_track_control_ || focus == playlist_view_ ||
+                    (focus == playlist_window_ && external_skin_ &&
+                     external_skin_->Handles(playlist_window_)));
             if (target == FileInfoCommandTarget::current_playback && playback)
                 ShowPlaylistProperties(playback);
             else

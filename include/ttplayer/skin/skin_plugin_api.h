@@ -25,6 +25,7 @@ enum TtpSkinCommand {
     TTP_SKIN_MOVE_SELECTION, TTP_SKIN_COPY_SELECTION, // insertion row; current native selection
     TTP_SKIN_CONTENT_FULLSCREEN, // low byte: content mode; next byte: visual type
     TTP_SKIN_CONTENT_MENU, // enqueue a provider-defined menu on the content surface
+    TTP_SKIN_DRAG_SELECTION, // enqueue host OLE drag after releasing provider capture
     TTP_SKIN_EQ_VALUE = 100 // + 0: preamp, + 1..10: frequency bands; value -12..12
 };
 
@@ -197,6 +198,10 @@ typedef struct TtpSkinPlugin {
     // handled the query, including a rejected point. QUERY must not scroll;
     // PREVIEW updates its insertion cue, LEAVE clears it. Host imports files.
     BOOL (WINAPI *playlist_drop)(void*, TtpSkinPlaylistDrop*);
+    // Optional minimum client size for a provider-owned content window.
+    // Lets the host fit lyrics using content_state bounds without native
+    // fallback skin margins. Read-only; size is in physical pixels.
+    BOOL (WINAPI *content_minimum)(void*, HWND, SIZE*);
 } TtpSkinPlugin;
 #define TTP_SKIN_PLUGIN_V1_SIZE offsetof(TtpSkinPlugin, skin_directory)
 #define TTP_SKIN_PLUGIN_DECLARATION_SIZE offsetof(TtpSkinPlugin, layout)

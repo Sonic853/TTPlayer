@@ -1277,17 +1277,24 @@ void PlayerWindow::ApplyAutoLyricWidth() {
     if (!settings_.lyric.auto_width || fullscreen_lyric_detached_ ||
         !lyric_window_ || !lyric_control_ || !lyric_font_ ||
         !skin_ || !skin_->Lyric().valid ||
-        (external_skin_ && external_skin_->Handles(lyric_window_)) ||
         (settings_.lyric.auto_width_only_vertical && ActiveLyricScrollMode() != 0))
         return;
     const auto& layout = skin_->Lyric();
-    if (IsRectEmpty(&layout.resize_rect)) return;
+    const bool provider=external_skin_ && external_skin_->Handles(lyric_window_);
+    TtpSkinContent plugin_content{sizeof(plugin_content),lyric_window_};
+    SIZE minimum{};
+    if(provider) {
+        if(!external_skin_->ContentState(plugin_content) ||
+           plugin_content.mode==TTP_SKIN_CONTENT_VISUAL ||
+           !external_skin_->ContentMinimum(lyric_window_,minimum) || minimum.cx<=0) return;
+    } else if (IsRectEmpty(&layout.resize_rect)) return;
 
     RECT work{}, player{}, bounds{}, content{};
     if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0) ||
         !GetWindowRect(window_, &player) ||
-        !GetWindowRect(lyric_window_, &bounds) ||
-        !GetClientRect(lyric_control_, &content)) return;
+        !GetWindowRect(lyric_window_, &bounds)) return;
+    if(provider) content=plugin_content.bounds;
+    else if(!GetClientRect(lyric_control_, &content)) return;
     const HDC dc = GetDC(lyric_control_);
     if (!dc) return;
     const HGDIOBJ previous = SelectObject(dc, lyric_font_);
@@ -1307,7 +1314,7 @@ void PlayerWindow::ApplyAutoLyricWidth() {
     widest = std::min(widest, work.right - work.left);
     // Retain the actual skin/mini/transparent margins. Empty lyrics reduce
     // to the skin's minimum width; fallback prompts do not size the popup.
-    const LONG width = std::max(layout.background.size.cx,
+    const LONG width = std::max(provider?minimum.cx:layout.background.size.cx,
         bounds.right - bounds.left - (content.right - content.left) + widest);
     if (width == bounds.right - bounds.left) return;
     // Preserve the edge beside the player (or the work area's right edge),
@@ -2611,6 +2618,16 @@ bool PlayerWindow::EnterLyricEditor() {
     // to their ordinary owner before creating and laying out the editor.
     if (fullscreen_mode_ != 0) LeaveFullScreen();
     if (!lyric_window_ || !lyric_control_) return false;
+
+    // Main-menu editing must expose the editor even when a provider's video
+    // window was showing only a visualization. Keep combined mode intact.
+    if(external_skin_ && external_skin_->Handles(lyric_window_)) {
+        TtpSkinContent content{sizeof(content),lyric_window_};
+        if(external_skin_->ContentState(content) && content.mode==TTP_SKIN_CONTENT_VISUAL) {
+            content.mode=TTP_SKIN_CONTENT_LYRICS;
+            external_skin_->ContentState(content,true);
+        }
+    }
 
     // FUN_0044CB58 creates the editor only after RichEdit20W is available.
     // Keep the module loaded for exactly the lifetime of the editor controls.

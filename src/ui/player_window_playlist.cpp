@@ -4979,12 +4979,13 @@ void PlayerWindow::BeginPlaylistOleDrag() {
     if (SUCCEEDED(CoCreateInstance(CLSID_DragDropHelper, nullptr,
             CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&helper))) && helper) {
         POINT origin = playlist_track_drag_origin_;
-        if (playlist_track_control_)
+        const HWND source_window = external_skin_ && external_skin_->Handles(playlist_window_)
+            ? playlist_window_ : playlist_track_control_ ? playlist_track_control_ : playlist_window_;
+        if (source_window != playlist_window_)
             MapWindowPoints(playlist_window_, playlist_track_control_,
                             &origin, 1);
         static_cast<void>(helper->InitializeFromWindow(
-            playlist_track_control_ ? playlist_track_control_ : playlist_window_,
-            &origin, data));
+            source_window, &origin, data));
         helper->Release();
     }
 

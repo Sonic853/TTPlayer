@@ -61,7 +61,8 @@ std::vector<std::shared_ptr<SkinPluginModule>> SkinPluginModule::Discover(const 
         if(api.size<offsetof(TtpSkinPlugin,lyric_colors)) api.content_state=nullptr;
         if(api.size<offsetof(TtpSkinPlugin,lyric_font_height)) api.lyric_colors=nullptr;
         if(api.size<offsetof(TtpSkinPlugin,playlist_drop)) api.lyric_font_height=nullptr;
-        if(api.size<sizeof(api)) api.playlist_drop=nullptr;
+        if(api.size<offsetof(TtpSkinPlugin,content_minimum)) api.playlist_drop=nullptr;
+        if(api.size<sizeof(api)) api.content_minimum=nullptr;
         std::unique_ptr<SkinPluginModule> provider;
         try {provider.reset(new SkinPluginModule(module,api));}
         catch(const std::invalid_argument&) {FreeLibrary(module);continue;}

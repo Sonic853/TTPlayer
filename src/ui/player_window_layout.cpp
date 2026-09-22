@@ -22,7 +22,7 @@ bool PlayerWindow::ResetPluginWindowLayout() {
     TtpSkinLayout previous{};
     previous.size = sizeof(previous);
     if (!external_skin_->Layout(previous, false)) return false;
-    TtpSkinContent content{sizeof(content)};
+    TtpSkinContent content{sizeof(content),lyric_window_};
     const bool have_content = external_skin_->ContentState(content);
     RECT previous_lyric{};
     GetWindowRect(lyric_window_, &previous_lyric);
