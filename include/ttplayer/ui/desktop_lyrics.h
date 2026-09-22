@@ -47,6 +47,7 @@ public:
     // ordinary skin/visibility refreshes preserve owner Z order.
     void RefreshTopmost(bool raise_owner_group = false);
     void CaptureBounds() noexcept;
+    void Rearrange();
 
     void Show(bool visible);
     void Toggle();

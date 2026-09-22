@@ -346,6 +346,8 @@ private:
     void RestoreLyricControl();
     void LeaveFullScreen();
     void ToggleMiniMode();
+    void RearrangeWindows();
+    bool ResetPluginWindowLayout();
     void BeginSkinBackgroundDrag(HWND source, POINT point, unsigned int hit = 1,
                                  SIZE minimum = {});
     void ContinueSkinBackgroundDrag(HWND source, POINT point);
@@ -653,6 +655,8 @@ private:
     void ApplyEqualizer();
     void InvokeEqualizerControl(int control, POINT screen_point);
     void ShowEqualizerProfileMenu(POINT screen_point);
+    void PopulateEqualizerPresetMenu(HMENU menu) const;
+    void PrepareEqualizerMenu(HMENU menu) const;
     bool HandleEqualizerCommand(UINT command);
     void PaintPlaylist(HDC dc) const;
     void UpdatePlaylistMarquee(POINT point);

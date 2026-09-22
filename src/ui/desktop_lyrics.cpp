@@ -71,7 +71,7 @@ constexpr unsigned int kDragTop = 0x80;
 constexpr int kMinimumWidth = 400;
 constexpr int kMaximumWidth = 10000;
 constexpr int kMinimumLineHeight = 24;
-constexpr int kMaximumLineHeight = 150;
+constexpr int kMaximumLineHeight = 300;
 
 struct ScopedDc final {
     HWND window{};
@@ -436,6 +436,24 @@ public:
     void CaptureBounds() noexcept {
         if (control_ && IsWindow(control_) && persisted_bounds_)
             GetWindowRect(control_, persisted_bounds_);
+    }
+
+    void Rearrange() {
+        if (!control_ || !settings_) return;
+        // 0046C7F3 -> 0044AA0C: independently reposition the desktop surface,
+        // even when the normal lyric window is the currently visible one.
+        RECT current{};
+        GetWindowRect(control_, &current);
+        const int lines = std::clamp(settings_->lines, 1, 2);
+        const int height = std::clamp(Height(current), 24 * lines, 150 * lines);
+        const int width = std::clamp(Width(current), 640, 1000);
+        const int screen_width = GetSystemMetrics(SM_CXFULLSCREEN);
+        const int bottom = GetSystemMetrics(SM_CYFULLSCREEN) - 50;
+        RECT target{0, bottom - height, screen_width, bottom};
+        InflateRect(&target, (width - screen_width) / 2, 0);
+        EndDrag();
+        PositionWindows(target, true);
+        RenderLayered();
     }
 
     void Show(bool show) {
@@ -2155,6 +2173,7 @@ void DesktopLyricsWindow::UpdatePlayback(std::chrono::milliseconds position,
 void DesktopLyricsWindow::ApplySettings() { impl_->ApplySettings(); }
 void DesktopLyricsWindow::RefreshTopmost(bool raise_owner_group) { impl_->RefreshTopmost(raise_owner_group); }
 void DesktopLyricsWindow::CaptureBounds() noexcept { impl_->CaptureBounds(); }
+void DesktopLyricsWindow::Rearrange() { impl_->Rearrange(); }
 void DesktopLyricsWindow::Show(bool visible) { impl_->Show(visible); }
 void DesktopLyricsWindow::Toggle() { impl_->Toggle(); }
 bool DesktopLyricsWindow::Visible() const noexcept { return impl_->Visible(); }

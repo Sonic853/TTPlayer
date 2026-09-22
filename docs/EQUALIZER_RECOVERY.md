@@ -1,5 +1,9 @@
 # Equalizer recovery
 
+2026-09-23: the main-window and equalizer popups now share preset population,
+check states and command dispatch. See [shared menu audit](SHARED_MENU_PARITY.md)
+for the missing `00461BAE -> 004299CD` path and the related lyric/menu fixes.
+
 This implementation follows the private equalizer path in
 `TTPlayer.exe.pseudo.c`; it is not a generic replacement dialog.
 

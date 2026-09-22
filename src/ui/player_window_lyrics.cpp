@@ -2605,6 +2605,11 @@ void PlayerWindow::ReplaceLyricEditorRange(LONG begin, LONG end,
 }
 
 bool PlayerWindow::EnterLyricEditor() {
+    CompleteSkinWindowFadeForReplacement();
+    if (!IsWindow(window_) || close_after_skin_window_fade_) return false;
+    // 0044CB58 starts with 0044AB8F: return detached/fullscreen lyric controls
+    // to their ordinary owner before creating and laying out the editor.
+    if (fullscreen_mode_ != 0) LeaveFullScreen();
     if (!lyric_window_ || !lyric_control_) return false;
 
     // FUN_0044CB58 creates the editor only after RichEdit20W is available.
@@ -2758,8 +2763,16 @@ bool PlayerWindow::EnterLyricEditor() {
     ShowWindow(lyric_control_, SW_HIDE);
     EnableWindow(lyric_desklrc_, FALSE);
     if (lyric_editor_toolbar_) ShowWindow(lyric_editor_toolbar_, SW_SHOW);
+    ShowWindow(lyric_editor_, SW_SHOW);
     LayoutLyricEditor();
-    SetActiveWindow(window_);
+    // The main menu can enter editing while Lyrics Show is closed. Original
+    // 0044CB58 -> 00446EB4 -> main 0x7D64 opens that hidden surface. Complete
+    // our asynchronous show fade before assigning the editor's keyboard focus.
+    if (!IsWindowVisible(lyric_window_) && !desktop_lyrics_.Visible()) {
+        ToggleLyricWindow();
+        CompleteSkinWindowFadeForReplacement();
+    }
+    SetActiveWindow(lyric_window_);
     SetFocus(lyric_editor_);
     if (!lyric_editor_accelerators_) {
         constexpr BYTE control_key = FVIRTKEY | FCONTROL;

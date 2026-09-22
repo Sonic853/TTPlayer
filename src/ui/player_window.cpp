@@ -2913,6 +2913,12 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             // (0041907F), so both entry points populate the same track menu.
             PopulateTrackMenu(popup);
             ApplyPopupMenuStyle(popup);
+        } else if (popup && (GetMenuItemID(popup, 0) == kEqCommandPresetFirst ||
+                             GetMenuItemID(popup, 0) == kEqCommandPresetFirst + 1)) {
+            // 00461BAE -> 004299CD: the main menu's category resource is
+            // dynamic too. Refresh checks when an existing submenu reopens.
+            PopulateEqualizerPresetMenu(popup);
+            ApplyPopupMenuStyle(popup);
         } else if (popup && (GetMenuItemID(popup, 0) == kCmdDefaultSkin ||
                              GetMenuItemID(popup, 0) == kCmdSkinOptions)) {
             PopulateSkinMenu(popup);
@@ -4478,7 +4484,8 @@ HMENU PlayerWindow::BuildContextMenu() {
     // CPlayerWnd_ShowMainContextMenu deletes 0x94 in the ordinary player
     // state and keeps 0x8f (the lyric-display menu).  The reverse branch is
     // used only while the dedicated lyric editor is active.
-    DeleteMenu(popup, kMenuLyricEditor, MF_BYCOMMAND);
+    DeleteMenu(popup, lyric_editor_ ? kMenuLyricDisplay : kMenuLyricEditor,
+               MF_BYCOMMAND);
 
     // The original 0045DFBA performs this same placeholder-resource graft:
     // each command ID in menu 0x8a is tried as another RT_MENU resource ID.
@@ -4507,6 +4514,20 @@ HMENU PlayerWindow::BuildContextMenu() {
                 DeleteMenu(child, GetMenuItemCount(child) - 1, MF_BYPOSITION);
                 DeleteMenu(child, GetMenuItemCount(child) - 1, MF_BYPOSITION);
                 InsertMenuW(child, 1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+            }
+        } else if (resource_id == kMenuLyricDisplay) {
+            // 0045DFBA gives desktop mode a single Return-to-window action.
+            // In window mode it omits the four host/fullscreen-only entries
+            // at position 17; those remain available on the lyric window.
+            if (desktop_lyric_mode_) {
+                while (GetMenuItemCount(child) > 1)
+                    DeleteMenu(child, 0, MF_BYPOSITION);
+                const auto label = ResourceCommandLabel(resources, kCmdDesktopLyricReturn);
+                ModifyMenuW(child, 0, MF_BYPOSITION | MF_STRING,
+                            kCmdDesktopLyricReturn, label.c_str());
+            } else {
+                for (int remove = 0; remove < 4 && GetMenuItemCount(child) > 17; ++remove)
+                    DeleteMenu(child, 17, MF_BYPOSITION);
             }
         } else if (resource_id == kMenuVisual) {
             // CPlayerWnd_ShowMainContextMenu (0045E126..0045E1E3) removes
@@ -5036,6 +5057,14 @@ void PlayerWindow::PrepareContextMenu(HMENU menu) {
     CheckCommand(menu, kCmdFullscreenVisual, fullscreen_mode_ == 2);
     CheckCommand(menu, kCmdFullscreenAll, fullscreen_mode_ == 3);
     CheckCommand(menu, kCmdMute, settings_.player.mute);
+    CheckCommand(menu, kCmdOpaqueWhenActive, settings_.player.opaque_when_active);
+    BOOL system_shadow{};
+    const bool shadow_supported = SystemParametersInfoW(
+        SPI_GETDROPSHADOW, 0, &system_shadow, 0) != FALSE;
+    EnableCommand(menu, kCmdWindowShadow, shadow_supported);
+    CheckCommand(menu, kCmdWindowShadow, system_shadow && window_ &&
+        (GetClassLongPtrW(window_, GCL_STYLE) & CS_DROPSHADOW) != 0);
+    CheckCommand(menu, kPlaylistLibraryMode, settings_.playlist.library_mode);
     CheckCommand(menu, kCmdAlwaysOnTop,
                  mini_mode_ ? settings_.player.mini_top_most
                             : settings_.player.top_most);
@@ -5049,8 +5078,8 @@ void PlayerWindow::PrepareContextMenu(HMENU menu) {
     CheckCommand(menu, kCmdShowPlaylist,
                  playlist_window_ && IsWindowVisible(playlist_window_));
 
-    for (UINT command = kCmdPlayModeFirst; command <= kCmdPlayModeLast; ++command)
-        CheckCommand(menu, command, static_cast<int>(command - kCmdPlayModeFirst) == settings_.player.play_mode);
+    PreparePlaylistModeMenu(menu);
+    PrepareEqualizerMenu(menu);
     if (current_) CheckCommand(menu, kCmdFirstTrack + static_cast<UINT>(*current_), true);
     for (UINT command = kCmdFirstAlpha; command <= kCmdLastAlpha; ++command)
         CheckCommand(menu, command, static_cast<int>(command - kCmdFirstAlpha) * 10 == transparency_percent_);
@@ -5071,16 +5100,18 @@ void PlayerWindow::PrepareContextMenu(HMENU menu) {
     // Menu 0x8A grafts resource 0x8F into the player's context menu.  Its
     // dynamic label/check state is prepared by the same CLyricWnd path as the
     // dedicated lyric-window popup (FUN_0045DFBA -> FUN_004427B1).
-    PrepareLyricMenu(menu);
+    if (lyric_editor_) PrepareLyricEditorMenu(menu);
+    else PrepareLyricMenu(menu);
 
     // 0045DFBA replaces the ordinary "desktop lyrics" action while desktop
     // mode is active.  This is the only mouse-accessible unlock route after
     // CDeskLrcCtrl has made itself transparent and hidden CDeskLrcBar.
-    if (desktop_lyric_mode_ || desktop_lyrics_.Visible()) {
-        // Menu 0x8A contains another 0x8039 in its grafted lyric submenu.
-        // 0045DFBA calls ModifyMenuW on the root popup itself; recursively
-        // locating the command changes that nested duplicate and leaves the
-        // only reachable root action as "show desktop lyrics".
+    if (lyric_editor_) {
+        EnableMenuItem(menu, kCmdDesktopLyrics, MF_BYCOMMAND | MF_GRAYED);
+    } else if (desktop_lyric_mode_ || desktop_lyrics_.Visible()) {
+        // Update the root desktop-lyrics action by position so its caption
+        // and state always belong to this entry, independently of submenus.
+        // This also follows 0045DFBA's ModifyMenuW on the root popup itself.
         int desktop_position = -1;
         for (int position = 0; position < GetMenuItemCount(menu); ++position) {
             if (GetMenuItemID(menu, position) == kCmdDesktopLyrics) {
@@ -5154,6 +5185,9 @@ void PlayerWindow::ShowContextMenu(POINT screen_point, HWND origin) {
 
 bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
     if (OpenProjectLink(window_, command)) return true;
+    // The original player's command map chains to the equalizer object
+    // (00453D7E), including when its own window is hidden or has no skin.
+    if (HandleEqualizerCommand(command)) return true;
     if (HandleFullScreenCommand(command, fullscreen_origin ? fullscreen_origin :
             (context_menu_open_ && main_context_menu_origin_
                 ? main_context_menu_origin_ : window_))) return true;
@@ -5279,6 +5313,17 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
         audio_->SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
         break;
     case kCmdMute: ToggleMute(); break;
+    case kCmdOpaqueWhenActive:
+        settings_.player.opaque_when_active = !settings_.player.opaque_when_active;
+        CompleteSkinWindowFadeForReplacement();
+        for (const HWND target : {window_, lyric_window_, playlist_window_, equalizer_window_})
+            ApplySkinWindowAlpha(target, EffectiveSkinWindowAlpha(target));
+        rendered_skin_window_alpha_ = EffectiveSkinWindowAlpha(window_);
+        break;
+    case kCmdWindowShadow:
+        settings_.player.window_shadow = !settings_.player.window_shadow;
+        ApplyWindowShadow();
+        break;
     case kCmdAlwaysOnTop: {
         bool& top_most = mini_mode_ ? settings_.player.mini_top_most
                                     : settings_.player.top_most;
@@ -5327,6 +5372,7 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
         break;
     case kCmdSkinOptions: ShowOptions(12); break;
     case kCmdMiniMode: ToggleMiniMode(); break;
+    case kCmdRearrangeWindows: RearrangeWindows(); break;
     case kCmdMinimize: ShowWindow(window_, SW_MINIMIZE); break;
     case kCmdExit: PostMessageW(window_, WM_CLOSE, 0, 0); break;
     default: return false;

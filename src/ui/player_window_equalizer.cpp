@@ -359,6 +359,10 @@ LRESULT PlayerWindow::HandleEqualizerMessage(UINT message, WPARAM wparam,
     case WM_COMMAND:
         if (HandleEqualizerCommand(LOWORD(wparam))) return 0;
         break;
+    case WM_INITMENUPOPUP:
+        // Use the player's shared dynamic submenu dispatcher, just as the
+        // original popup notification route through CPlayerWnd does.
+        return SendMessageW(window_, message, wparam, lparam);
     case WM_MENUCHAR:
         if (const auto result = PopupMenuChar(wparam, lparam)) return *result;
         break;
@@ -921,40 +925,48 @@ void PlayerWindow::ApplyEqualizer() {
                         settings_.equalizer.current);
 }
 
+void PlayerWindow::PopulateEqualizerPresetMenu(HMENU menu) const {
+    if (!menu) return;
+    // FUN_004299CD keeps the final Load/Save pair, then recreates the
+    // separator and twelve localized categories. This also handles reopening
+    // an already-populated popup without duplicate rows or stale checks.
+    for (int position = GetMenuItemCount(menu) - 3; position >= 0; --position)
+        DeleteMenu(menu, position, MF_BYPOSITION);
+    InsertMenuW(menu, 0, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+    for (size_t index = 1; index < std::size(kEqualizerPresets); ++index) {
+        UINT flags = MF_BYPOSITION | MF_STRING;
+        if (settings_.equalizer.profile == static_cast<int>(index))
+            flags |= MF_CHECKED | MF_USECHECKBITMAPS;
+        auto name = ResourceListItem(ResourceModule(), 0x8174, index);
+        if (name.empty()) name = kEqualizerPresets[index].name;
+        InsertMenuW(menu, static_cast<UINT>(index - 1), flags,
+            kEqCommandPresetFirst + static_cast<UINT>(index), name.c_str());
+    }
+}
+
+void PlayerWindow::PrepareEqualizerMenu(HMENU menu) const {
+    HMENU profiles = FindCommandMenu(menu, kEqCommandPresetFirst);
+    if (!profiles) profiles = FindCommandMenu(menu, kEqCommandPresetFirst + 1);
+    if (profiles) PopulateEqualizerPresetMenu(profiles);
+    // CPlayerWnd's common UI update (0045Axxx) owns these states for both
+    // menu 0x90 and the copy grafted into the main menu by 0045DFBA.
+    CheckCommand(menu, kEqCommandFlat, settings_.equalizer.profile == 0);
+    CheckCommand(menu, kEqCommandCustom, settings_.equalizer.profile == -1);
+    CheckCommand(menu, kEqCommandEnable, settings_.equalizer.profile != -2);
+    CheckCommand(menu, kEqCommandSurround, settings_.equalizer.surround != 0);
+}
+
 void PlayerWindow::ShowEqualizerProfileMenu(POINT screen_point) {
     if (!equalizer_window_ || context_menu_open_) return;
-    // FUN_00429D20/FUN_00429EF4 use menu resource 0x90. Its top-level popup
-    // contains Recommended, Custom, the category submenu, Enable EQ and
-    // Dolby Surround. Only the preset placeholder is replaced at runtime.
     HMENU menu = DetachFirstPopup(
         i18n::LoadMenu(ResourceModule(), MAKEINTRESOURCEW(kMenuEqualizer)));
     if (!menu) return;
-    if (HMENU profiles = GetSubMenu(menu, 2)) {
-        DeleteMenu(profiles, 0, MF_BYPOSITION); // resource "<>" placeholder
-        for (size_t index = 1; index < std::size(kEqualizerPresets); ++index) {
-            UINT flags = MF_BYPOSITION | MF_STRING;
-            if (settings_.equalizer.profile == static_cast<int>(index))
-                flags |= MF_CHECKED;
-            auto name = ResourceListItem(ResourceModule(), 0x8174, index);
-            if (name.empty()) name = kEqualizerPresets[index].name;
-            InsertMenuW(profiles, static_cast<UINT>(index - 1), flags,
-                kEqCommandPresetFirst + static_cast<UINT>(index),
-                name.c_str());
-        }
-    }
-    CheckMenuItem(menu, kEqCommandFlat, MF_BYCOMMAND |
-        (settings_.equalizer.profile == 0 ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(menu, kEqCommandCustom, MF_BYCOMMAND |
-        (settings_.equalizer.profile == -1 ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(menu, kEqCommandEnable, MF_BYCOMMAND |
-        (settings_.equalizer.profile != -2 ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(menu, kEqCommandSurround, MF_BYCOMMAND |
-        (settings_.equalizer.surround != 0 ? MF_CHECKED : MF_UNCHECKED));
+    PrepareEqualizerMenu(menu);
     context_menu_open_ = true;
     SetForegroundWindow(equalizer_window_);
     BeginPopupMenuStyle(menu, true);
     const UINT command = TrackPlayerPopupMenuEx(menu,
-        TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+        TPM_RIGHTBUTTON | TPM_RETURNCMD,
         screen_point.x, screen_point.y, equalizer_window_, nullptr);
     EndPopupMenuStyle();
     DestroyMenu(menu);
@@ -1002,13 +1014,13 @@ bool PlayerWindow::HandleEqualizerCommand(UINT command) {
         std::optional<std::filesystem::path> file;
         if (command == kEqCommandLoad) {
             ModernOpenFileOptions dialog;
-            dialog.owner = equalizer_window_;
+            dialog.owner = IsWindowVisible(equalizer_window_) ? equalizer_window_ : window_;
             dialog.filters = filters;
             dialog.default_extension = L"tteq_cfg";
             file = ModernOpenFile(dialog);
         } else {
             ModernSaveFileOptions dialog;
-            dialog.owner = equalizer_window_;
+            dialog.owner = IsWindowVisible(equalizer_window_) ? equalizer_window_ : window_;
             dialog.filters = filters;
             dialog.initial_path = L"Equalizer.tteq_cfg";
             dialog.default_extension = L"tteq_cfg";

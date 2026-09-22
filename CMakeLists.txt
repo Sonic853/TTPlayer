@@ -94,6 +94,7 @@ add_library(ttplayer_core
   src/ui/directory_change_monitor.cpp
   src/ui/file_info_probe_client.cpp
   src/ui/player_window.cpp
+  src/ui/player_window_layout.cpp
   src/ui/player_window_skin_plugin.cpp
   src/ui/player_window_skin_animation.cpp
   src/ui/player_window_taskbar.cpp
@@ -489,6 +490,28 @@ target_compile_definitions(project_links_tests PRIVATE UNICODE _UNICODE NOMINMAX
 target_compile_options(project_links_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(project_links_tests PRIVATE ttplayer_core)
 add_test(NAME project_links_tests COMMAND project_links_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
+add_executable(shared_menu_tests tests/ui/shared_menu_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(shared_menu_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(shared_menu_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(shared_menu_tests PRIVATE ttplayer_core)
+add_test(NAME shared_menu_tests COMMAND shared_menu_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(shared_menu_tests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+add_executable(rearrange_window_tests tests/ui/rearrange_window_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(rearrange_window_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(rearrange_window_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(rearrange_window_tests PRIVATE ttplayer_core)
+add_test(NAME rearrange_window_tests COMMAND rearrange_window_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(rearrange_window_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+add_executable(lyric_main_menu_tests tests/ui/lyric_main_menu_tests.cpp
+  src/app/resources.rc src/app/ttplayer.manifest)
+target_compile_definitions(lyric_main_menu_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(lyric_main_menu_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(lyric_main_menu_tests PRIVATE ttplayer_core)
+add_test(NAME lyric_main_menu_tests COMMAND lyric_main_menu_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(lyric_main_menu_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
 add_executable(wtl_behavior_tests tests/ui/wtl_behavior_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
