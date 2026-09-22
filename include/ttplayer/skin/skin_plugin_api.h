@@ -92,6 +92,13 @@ typedef struct TtpSkinLyricColors {
 } TtpSkinLyricColors;
 // Host-created content widgets remain visible inside a provider-owned frame.
 #define TTP_SKIN_CONTENT_CHILD L"TTPlayer.SkinPlugin.ContentChild.v1"
+// Property values. All nonzero values protect the live widget during normal
+// parent painting. Transparent widgets also request a clean parent background
+// through WM_ERASEBKGND; opaque editors must remain excluded from that path.
+enum TtpSkinContentChildRole {
+    TTP_SKIN_CONTENT_CHILD_OPAQUE = 1,
+    TTP_SKIN_CONTENT_CHILD_TRANSPARENT = 2
+};
 
 enum TtpSkinDropPhase { TTP_SKIN_DROP_QUERY, TTP_SKIN_DROP_PREVIEW, TTP_SKIN_DROP_LEAVE };
 typedef struct TtpSkinPlaylistDrop {

@@ -2731,8 +2731,9 @@ bool PlayerWindow::EnterLyricEditor() {
                           reinterpret_cast<DWORD_PTR>(this));
         InitializeLyricEditorRichText();
     }
-    SetPropW(lyric_editor_,TTP_SKIN_CONTENT_CHILD,reinterpret_cast<HANDLE>(1));
-    if(lyric_editor_toolbar_) SetPropW(lyric_editor_toolbar_,TTP_SKIN_CONTENT_CHILD,reinterpret_cast<HANDLE>(1));
+    SetPropW(lyric_editor_,TTP_SKIN_CONTENT_CHILD,reinterpret_cast<HANDLE>(TTP_SKIN_CONTENT_CHILD_OPAQUE));
+    if(lyric_editor_toolbar_) SetPropW(lyric_editor_toolbar_,TTP_SKIN_CONTENT_CHILD,
+        reinterpret_cast<HANDLE>(TTP_SKIN_CONTENT_CHILD_TRANSPARENT));
 
     // +0x32C remains empty for a new document.  The adjacent sound-file name
     // is only a Save-dialog suggestion; treating it as an existing target
