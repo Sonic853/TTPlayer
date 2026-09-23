@@ -73,7 +73,9 @@ add_library(ttplayer_core
   src/audio/audio_engine.cpp
   src/audio/builtin_file_info.cpp
   src/audio/cue_sheet.cpp
+  src/audio/directshow_source.cpp
   src/audio/file_encoder.cpp
+  src/audio/format_probe.cpp
   src/audio/kernel_streaming_sink.cpp
   src/audio/legacy_windows_source.cpp
   src/audio/midi_player.cpp
@@ -281,6 +283,20 @@ endif()
 # Standalone development/test front ends only. The shipped player embeds all
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
+if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/audio/extension_mismatch_tests.cpp")
+  add_executable(extension_mismatch_tests tests/audio/extension_mismatch_tests.cpp src/app/exports.cpp)
+  target_compile_definitions(extension_mismatch_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(extension_mismatch_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  target_link_libraries(extension_mismatch_tests PRIVATE ttplayer_core)
+  if(TTPLAYER_LEGACY_WINDOWS)
+    add_dependencies(extension_mismatch_tests ttplayer_legacy_ttpcomm_import)
+    target_link_libraries(extension_mismatch_tests PRIVATE "${ttpcomm_import_library}")
+    target_link_options(extension_mismatch_tests PRIVATE /INCLUDE:__imp__srand48)
+  endif()
+  add_test(NAME extension_mismatch_tests COMMAND extension_mismatch_tests --self)
+  set_tests_properties(extension_mismatch_tests PROPERTIES TIMEOUT 30)
+endif()
+
 if(BUILD_TESTING OR TTPLAYER_BUILD_PREVIEW_TESTS)
 enable_testing()
 add_executable(taskbar_preview_tests tests/ui/taskbar_preview_tests.cpp)

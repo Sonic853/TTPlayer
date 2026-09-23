@@ -1,5 +1,8 @@
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/builtin_file_info.h"
+#include "ttplayer/audio/format_probe.h"
+#include "ttplayer/audio/directshow_source.h"
+#include <mfapi.h>
 #include "ttplayer/audio/midi_player.h"
 #include "tag_genres.h"
 
@@ -846,6 +849,16 @@ std::optional<MpegHeader> FindMpegHeader(HANDLE file,
     for (size_t index = 0; index + 4 <= bytes.size(); ++index) {
         const std::uint32_t header = ReadBe32(bytes.data() + index);
         if (auto decoded = DecodeMpegHeader(header)) {
+            // 004E5303 checks the next frame, not just an isolated sync word.
+            const size_t padding = (header >> 9U) & 1U;
+            const size_t frame_bytes = decoded->layer == 1
+                ? (12U * decoded->bitrate_kbps * 1000U / decoded->sample_rate + padding) * 4U
+                : ((decoded->layer == 3 && decoded->version != 1 ? 72U : 144U) *
+                    decoded->bitrate_kbps * 1000U / decoded->sample_rate + padding);
+            if (index + frame_bytes + 4U > bytes.size()) continue;
+            const auto next = DecodeMpegHeader(ReadBe32(bytes.data() + index + frame_bytes));
+            if (!next || next->version != decoded->version || next->layer != decoded->layer ||
+                next->sample_rate != decoded->sample_rate) continue;
             if (decoded->layer == 3) {
                 const size_t side = decoded->version == 1
                     ? (decoded->channels == 1 ? 17U : 32U)
@@ -876,13 +889,15 @@ HRESULT ReadMp3(const std::filesystem::path& path,
     FileLayout layout;
     if (!ReadMp3Layout(file.Get(), layout))
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    const auto header = FindMpegHeader(file.Get(), layout);
+    if (!header) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     const auto tags = MergeMp3Tags(layout, policy.read_priority);
     result.capabilities = 4U;
     result.codec = L"MPEG Audio";
     result.metadata = tags.fields;
     result.cover = tags.cover;
-    if (const auto header = FindMpegHeader(file.Get(), layout)) {
-        result.format.wFormatTag = WAVE_FORMAT_MPEGLAYER3;
+    {
+        result.format.wFormatTag = header->layer == 3 ? WAVE_FORMAT_MPEGLAYER3 : WAVE_FORMAT_MPEG;
         result.format.nChannels = static_cast<WORD>(header->channels);
         result.format.nSamplesPerSec = header->sample_rate;
         result.format.wBitsPerSample = 16;
@@ -894,7 +909,8 @@ HRESULT ReadMp3(const std::filesystem::path& path,
         if (header->bitrate_kbps != 0 && layout.body_end > layout.body_begin) {
             // LAME's Xing/Info frame carries the actual frame count. The
             // first frame bitrate is not the bitrate of a VBR/ABR stream.
-            const unsigned frame_samples = header->version == 1 ? 1152U : 576U;
+            const unsigned frame_samples = header->layer == 1 ? 384U :
+                header->layer == 3 && header->version != 1 ? 576U : 1152U;
             const std::uint64_t milliseconds = header->frames
                 ? static_cast<std::uint64_t>(header->frames) * frame_samples *
                     1000ULL / header->sample_rate
@@ -978,6 +994,9 @@ HRESULT ReadWave(const std::filesystem::path& path, BuiltinFileInfo& result) {
         }
         offset = begin + size + (size & 1U);
     }
+    if (!result.format.nChannels || !result.format.nSamplesPerSec ||
+        !result.format.nAvgBytesPerSec || !result.format.nBlockAlign || !data_bytes)
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     if (result.format.nAvgBytesPerSec != 0) {
         result.duration_ms = static_cast<DWORD>(std::min<std::uint64_t>(
             data_bytes * 1000ULL / result.format.nAvgBytesPerSec, MAXDWORD));
@@ -1479,7 +1498,7 @@ HRESULT WriteMp3(const std::filesystem::path& path,
         FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!source) return HRESULT_FROM_WIN32(GetLastError());
     FileLayout layout;
-    if (!ReadMp3Layout(source.Get(), layout))
+    if (!ReadMp3Layout(source.Get(), layout) || !FindMpegHeader(source.Get(), layout))
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     TagData fields = MergeMp3Tags(layout, policy.read_priority);
     bool has_supported = cover_action != BuiltinCoverAction::unchanged;
@@ -1822,9 +1841,21 @@ HRESULT CreateStandardContent(IStream* stream, DWORD write_type,
     }
 }
 
+HRESULT ReadBuiltinMpegFileInfo(const std::filesystem::path& path,
+                               const Mp3TagPolicy& policy,
+                               BuiltinFileInfo& result) noexcept {
+    try {
+        BuiltinFileInfo decoded;
+        const HRESULT status = ReadMp3(path, policy, decoded);
+        if (SUCCEEDED(status)) result = std::move(decoded);
+        return status;
+    } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+    catch (...) { return HRESULT_FROM_WIN32(ERROR_INVALID_DATA); }
+}
+
 HRESULT ReadBuiltinFileInfo(const std::filesystem::path& path,
                             const Mp3TagPolicy& policy,
-                            BuiltinFileInfo& result) noexcept {
+                            BuiltinFileInfo& result, bool allow_system_fallback) noexcept {
     try {
         BuiltinFileInfo decoded;
         if (IsMidiPath(path)) {
@@ -1841,12 +1872,52 @@ HRESULT ReadBuiltinFileInfo(const std::filesystem::path& path,
             result = std::move(decoded);
             return S_OK;
         }
-        HRESULT status = E_NOINTERFACE;
-        if (ExtensionIs(path, L".mp3"))
+        std::wstring hint;
+        HRESULT status = ProbeAudioFormatHint(path, hint);
+        if (FAILED(status)) return status;
+        status = E_NOINTERFACE;
+        if (hint == L".mp3" || hint == L".mp2" || hint == L".mp1" ||
+            hint == L".mpa" || hint == L".mp3pro")
             status = ReadMp3(path, policy, decoded);
-        else if (ExtensionIs(path, L".wav") || ExtensionIs(path, L".wave"))
+        else if (hint == L".wav" || hint == L".wave")
             status = ReadWave(path, decoded);
-        if (FAILED(status)) status = ReadShellFallback(path, decoded);
+        if (FAILED(status) && allow_system_fallback && !IsTerminalAudioOpenError(status)) {
+            // Build the same audio graph as playback, but never run it. Shell
+            // properties alone are not evidence that a file is decodable.
+            struct MediaLifetime {
+                HRESULT status{E_FAIL};
+                ~MediaLifetime() { if (SUCCEEDED(status)) platform::MFShutdown(); }
+            } media;
+            auto source = CreateDirectShowSource();
+            if (!source->Open(path, {})) {
+                const HRESULT opened = source->ErrorResult();
+                if (IsTerminalAudioOpenError(opened)) return opened;
+                source.reset();
+                // Retain the modern extension (MF/WM) used by playback, too.
+                // The helper owns COM; no graph is run for metadata queries.
+                media.status = platform::MFStartup(MF_VERSION, MFSTARTUP_LITE);
+                source = CreateDecodedAudioSource(path, 0, nullptr, nullptr);
+                if (!source->Open(path, {})) return source->ErrorResult();
+            }
+            const auto format = source->DisplayFormat();
+            decoded = {};
+            decoded.format = source->OutputFormat();
+            decoded.format.cbSize = 0;
+            decoded.format.wFormatTag = format.format_tag;
+            decoded.format.nAvgBytesPerSec = format.bytes_per_second;
+            decoded.codec = format.codec_name;
+            decoded.duration_ms = static_cast<DWORD>(std::clamp<int64_t>(source->Duration().count(), 0, MAXDWORD));
+            decoded.encoded_bits_per_second = format.bytes_per_second * 8U;
+            BuiltinFileInfo tags;
+            if ((format.format_tag == WAVE_FORMAT_MPEG || format.format_tag == WAVE_FORMAT_MPEGLAYER3) &&
+                SUCCEEDED(ReadMp3(path, policy, tags))) {
+                decoded = std::move(tags);
+            } else if (SUCCEEDED(ReadShellFallback(path, tags))) {
+                decoded.metadata = std::move(tags.metadata);
+                decoded.cover = std::move(tags.cover);
+            }
+            status = S_OK;
+        }
         if (SUCCEEDED(status)) result = std::move(decoded);
         return status;
     } catch (const std::bad_alloc&) {
@@ -1863,18 +1934,12 @@ BuiltinTagWriteResult WriteBuiltinFileInfo(
     std::span<const unsigned char> cover) noexcept {
     BuiltinTagWriteResult result;
     try {
-        if (!ExtensionIs(path, L".mp3")) {
-            result.status = E_NOINTERFACE;
-            result.fields.assign(fields.size(), E_NOINTERFACE);
-            if (cover_action != BuiltinCoverAction::unchanged)
-                result.cover_status = E_NOINTERFACE;
-            return result;
-        }
         result.status = WriteMp3(path, policy, fields, result.fields,
                                  cover_action, cover);
         if (cover_action != BuiltinCoverAction::unchanged)
             result.cover_status = result.status;
         if (FAILED(result.status)) {
+            if (result.fields.empty()) result.fields.assign(fields.size(), result.status);
             for (auto& field : result.fields) {
                 if (SUCCEEDED(field)) field = result.status;
             }

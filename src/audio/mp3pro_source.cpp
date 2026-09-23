@@ -462,6 +462,9 @@ public:
     std::wstring Error() const override {
         return error_.empty() ? fallback_->Error() : error_;
     }
+    HRESULT ErrorResult() const override {
+        return error_.empty() ? fallback_->ErrorResult() : E_FAIL;
+    }
     AudioMetadata Metadata() const override { return fallback_->Metadata(); }
     bool CanOverlapPlayback() const override {
         // The Winamp input ABI has a single active decoder. Release it before

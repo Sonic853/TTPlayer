@@ -1,5 +1,8 @@
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/audio_engine.h"
+#include "ttplayer/audio/builtin_file_info.h"
+#include "ttplayer/audio/directshow_source.h"
+#include "ttplayer/audio/format_probe.h"
 #include "ttplayer/audio/midi_player.h"
 #include "ttplayer/audio/playback_clock.h"
 #include "ttplayer/audio/archive_member.h"
@@ -174,7 +177,7 @@ ComPtr<IStream> MemoryStream(const std::vector<unsigned char>& bytes) {
     return stream;
 }
 
-std::wstring CodecNameFromTag(uint32_t tag, const std::filesystem::path& path) {
+std::wstring CodecNameFromTag(uint32_t tag, const std::filesystem::path&) {
     switch (tag) {
     case WAVE_FORMAT_PCM: return L"PCM";
     case WAVE_FORMAT_IEEE_FLOAT: return L"IEEE Float";
@@ -190,15 +193,6 @@ std::wstring CodecNameFromTag(uint32_t tag, const std::filesystem::path& path) {
     case 0xf1ac: return L"FLAC";
     default: break;
     }
-    const auto extension = LowerExtension(path);
-    if (extension == L".aac" || extension == L".m4a" || extension == L".m4b" ||
-        extension == L".mp4") return L"AAC";
-    if (extension == L".flac") return L"FLAC";
-    if (extension == L".ogg" || extension == L".oga") return L"Vorbis/Ogg";
-    if (extension == L".wma" || extension == L".wmv" || extension == L".asf")
-        return L"Windows Media Audio";
-    if (extension == L".mp3" || extension == L".mp2" || extension == L".mp1" ||
-        extension == L".mpa" || extension == L".mp3pro") return L"MPEG Audio";
     return L"Audio";
 }
 
@@ -1132,6 +1126,107 @@ private:
     WAVEFORMATEX format_{MidiReaderFormat()};
 };
 
+// 004CBC1F keeps walking factories after an ordinary Open failure. Choosing
+// a factory is not choosing a decoder: only a successful Open commits it.
+class RecoveredFileSource final : public DecodedAudioSource {
+public:
+    RecoveredFileSource(const plugins::PluginManager* manager, HMODULE comm)
+        : manager_(manager), comm_(comm) {}
+    bool Open(const std::filesystem::path& path, const PlaybackOptions& options) override {
+        source_.reset(); metadata_ = {}; error_.clear(); result_ = E_FAIL;
+        metadata_override_ = false;
+        ArchiveMemberPath member;
+        const bool archive = ParseArchiveMemberPath(path.native(), member);
+        std::wstring hint = AudioExtensionHint(path);
+        if (!archive) {
+            result_ = ProbeAudioFormatHint(path, hint);
+            if (FAILED(result_)) { error_ = HResultMessage(L"Open media file", result_); return false; }
+        }
+        const auto attempt = [&](std::unique_ptr<DecodedAudioSource> candidate, bool builtin_tags) {
+            if (!candidate->Open(path, options)) {
+                error_ = candidate->Error(); result_ = candidate->ErrorResult();
+                return false;
+            }
+            source_ = std::move(candidate);
+            metadata_ = source_->Metadata();
+            if (builtin_tags && !archive) {
+                BuiltinFileInfo info;
+                if (SUCCEEDED(ReadBuiltinMpegFileInfo(path, {}, info))) {
+                    metadata_override_ = true;
+                    // A system decoder need not expose ID3/APEv2 or artwork.
+                    metadata_ = {};
+                    for (auto& field : info.metadata) {
+                        if (MetadataKeyEquals(field.name, L"title")) metadata_.title = field.value;
+                        else if (MetadataKeyEquals(field.name, L"artist")) metadata_.artist = field.value;
+                        else if (MetadataKeyEquals(field.name, L"album")) metadata_.album = field.value;
+                        else if (MetadataKeyEquals(field.name, L"replaygain_track_gain"))
+                            metadata_.replay_gain_db = MetadataNumber(field.value);
+                        else if (MetadataKeyEquals(field.name, L"replaygain_track_peak"))
+                            metadata_.replay_peak = MetadataNumber(field.value);
+                        metadata_.entries.emplace_back(std::move(field.name), std::move(field.value));
+                    }
+                    metadata_.thumbnail = std::move(info.cover);
+                    metadata_.thumbnail_interface = true;
+                }
+            }
+            result_ = S_OK; error_.clear(); return true;
+        };
+        if (manager_) {
+            if (attempt(std::make_unique<LegacyPluginSource>(*manager_, comm_), false)) return true;
+            if (IsTerminalAudioOpenError(result_)) return false;
+        }
+        if (!archive && (hint == L".wav" || hint == L".wave" || hint == L".aif" ||
+            hint == L".aiff" || hint == L".aifc" || hint == L".au" || hint == L".snd")) {
+            if (attempt(std::make_unique<PcmFileSource>(), false)) return true;
+            if (IsTerminalAudioOpenError(result_)) return false;
+        }
+        const auto system_source = [&]() -> std::unique_ptr<DecodedAudioSource> {
+            if (platform::HasMediaFoundation()) return std::make_unique<MediaFoundationSource>(comm_);
+            return CreateLegacyWindowsSource(comm_);
+        };
+        const bool mpeg = hint == L".mp3" || hint == L".mp2" || hint == L".mp1" ||
+                          hint == L".mpa" || hint == L".mp3pro";
+        if (mpeg) {
+            if (attempt(WrapMp3ProSource(system_source()), true)) return true;
+            if (IsTerminalAudioOpenError(result_)) return false;
+        }
+        // The original final factory has an empty extension restriction.
+        // Its graph can recognize MP3 renamed to FLAC/WAV without guessing a
+        // FLAC/Ogg signature that the recovered host never tested.
+        if (!archive) {
+            if (attempt(CreateDirectShowSource(), true)) return true;
+            if (IsTerminalAudioOpenError(result_)) return false;
+        }
+        // Retain the reconstruction's modern codecs after the recovered path.
+        return !mpeg && attempt(system_source(), true);
+    }
+    bool Read(size_t count, std::vector<std::byte>& out, bool& end) override {
+        return source_ && source_->Read(count, out, end);
+    }
+    bool Seek(std::chrono::milliseconds position) override {
+        return source_ && source_->Seek(position);
+    }
+    void SetPaused(bool paused) override { if (source_) source_->SetPaused(paused); }
+    bool CanOverlapPlayback() const override { return source_ && source_->CanOverlapPlayback(); }
+    HRESULT WriteLyrics(std::wstring_view text) override { return source_ ? source_->WriteLyrics(text) : E_NOINTERFACE; }
+    const WAVEFORMATEX& OutputFormat() const override {
+        static const WAVEFORMATEX empty{}; return source_ ? source_->OutputFormat() : empty;
+    }
+    AudioFormat DisplayFormat() const override { return source_ ? source_->DisplayFormat() : AudioFormat{}; }
+    std::chrono::milliseconds Duration() const override { return source_ ? source_->Duration() : std::chrono::milliseconds{}; }
+    std::wstring Error() const override { return source_ ? source_->Error() : error_; }
+    HRESULT ErrorResult() const override { return source_ ? source_->ErrorResult() : result_; }
+    AudioMetadata Metadata() const override {
+        return source_ && !metadata_override_ ? source_->Metadata() : metadata_;
+    }
+private:
+    const plugins::PluginManager* manager_{}; HMODULE comm_{};
+    std::unique_ptr<DecodedAudioSource> source_;
+    AudioMetadata metadata_;
+    bool metadata_override_{};
+    std::wstring error_; HRESULT result_{E_FAIL};
+};
+
 std::unique_ptr<DecodedAudioSource> MakeBaseSource(
     const std::filesystem::path& path,
     const plugins::PluginManager* plugin_manager, HMODULE ttpcomm) {
@@ -1143,21 +1238,7 @@ std::unique_ptr<DecodedAudioSource> MakeBaseSource(
         return std::make_unique<MediaFoundationSource>(ttpcomm);
     const auto extension = LowerExtension(path);
     if (extension == L".cda") return std::make_unique<CdaSource>();
-    // FUN_004CBC1F walks registered creators before every built-in fallback.
-    if (plugin_manager && plugin_manager->HasReaderForPath(path))
-        return std::make_unique<LegacyPluginSource>(*plugin_manager, ttpcomm);
-    ArchiveMemberPath archive_member;
-    if (ParseArchiveMemberPath(path.native(), archive_member))
-        return platform::HasMediaFoundation() ? std::unique_ptr<DecodedAudioSource>(
-            std::make_unique<MediaFoundationSource>(ttpcomm)) : CreateLegacyWindowsSource(ttpcomm);
-    if (extension == L".aif" || extension == L".aifc" ||
-        extension == L".aiff" || extension == L".au" || extension == L".snd")
-        return std::make_unique<PcmFileSource>();
-    if (!platform::HasMediaFoundation() && extension == L".wav")
-        return std::make_unique<PcmFileSource>();
-    if (!platform::HasMediaFoundation())
-        return WrapMp3ProSource(CreateLegacyWindowsSource(ttpcomm));
-    return WrapMp3ProSource(std::make_unique<MediaFoundationSource>(ttpcomm));
+    return std::make_unique<RecoveredFileSource>(plugin_manager, ttpcomm);
 }
 
 class CueSegmentSource final : public DecodedAudioSource {

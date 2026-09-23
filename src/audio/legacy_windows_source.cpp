@@ -132,8 +132,10 @@ public:
     }
     std::chrono::milliseconds Duration() const override { return duration_; }
     std::wstring Error() const override { return error_; }
+    HRESULT ErrorResult() const override { return error_result_; }
 private:
     bool Fail(const wchar_t* operation, HRESULT result) {
+        error_result_ = result;
         error_ = std::wstring(operation) + L" (HRESULT " + std::to_wstring(result) + L")";
         return false;
     }
@@ -147,6 +149,7 @@ private:
     size_t pending_offset_{};
     bool ended_{};
     std::wstring error_;
+    HRESULT error_result_{E_FAIL};
 };
 } // namespace
 

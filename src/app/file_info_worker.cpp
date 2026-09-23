@@ -6,6 +6,7 @@
 
 #include "ttplayer/audio/archive_member.h"
 #include "ttplayer/audio/builtin_file_info.h"
+#include "ttplayer/audio/format_probe.h"
 #include "ttplayer/audio/midi_player.h"
 #include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/plugins/plugin_manager.h"
@@ -139,21 +140,23 @@ void PopulateBuiltinResult(
 }
 
 bool IsDirectBuiltinPath(const std::filesystem::path& path) {
-    return ttplayer::audio::IsMidiPath(path) ||
-           _wcsicmp(path.extension().c_str(), L".mp3") == 0 ||
-           _wcsicmp(path.extension().c_str(), L".wav") == 0 ||
-           _wcsicmp(path.extension().c_str(), L".wave") == 0;
+    if (ttplayer::audio::IsMidiPath(path)) return true;
+    std::wstring hint;
+    if (FAILED(ttplayer::audio::ProbeAudioFormatHint(path, hint))) return false;
+    return hint == L".mp3" || hint == L".mp2" || hint == L".mp1" ||
+           hint == L".mpa" || hint == L".mp3pro" || hint == L".wav" || hint == L".wave";
 }
 
 HRESULT TryBuiltinRead(const std::filesystem::path& path,
                        const ttplayer::ui::detail::FileInfoProbeMp3Policy& policy,
-                       ttplayer::ui::detail::FileInfoProbeReadResult& result) {
+                       ttplayer::ui::detail::FileInfoProbeReadResult& result,
+                       bool allow_system_fallback = true) {
     ttplayer::audio::ArchiveMemberPath archive;
     if (ttplayer::audio::ParseArchiveMemberPath(path.native(), archive))
         return E_NOINTERFACE;
     ttplayer::audio::BuiltinFileInfo builtin;
     const HRESULT status = ttplayer::audio::ReadBuiltinFileInfo(
-        path, ConvertPolicy(policy), builtin);
+        path, ConvertPolicy(policy), builtin, allow_system_fallback);
     if (SUCCEEDED(status)) PopulateBuiltinResult(std::move(builtin), result);
     return status;
 }
@@ -207,7 +210,7 @@ int ReadFileInfo(const std::filesystem::path& addin_directory,
     ttplayer::plugins::PluginManager manager;
     bool completed{};
     if (IsDirectBuiltinPath(logical_path)) {
-        result.status = TryBuiltinRead(logical_path, request.mp3, result);
+        result.status = TryBuiltinRead(logical_path, request.mp3, result, false);
         completed = SUCCEEDED(result.status);
     }
     const HRESULT loaded = completed ? S_OK : manager.Load(addin_directory);
@@ -309,12 +312,12 @@ ttplayer::ui::detail::FileInfoProbeReadResult ReadPlaylistMetadata(
     if (result.status == E_FAIL) {
         bool completed{};
         if (IsDirectBuiltinPath(decoder_path)) {
-            result.status = TryBuiltinRead(decoder_path, policy, result);
+            result.status = TryBuiltinRead(decoder_path, policy, result, false);
             completed = SUCCEEDED(result.status);
         }
         const HRESULT loaded = completed ? S_OK : context.Load();
         if (!completed && SUCCEEDED(loaded)) {
-            if (manager.HasReaderForPath(decoder_path)) {
+            {
                 HRESULT opened{};
                 auto reader = OpenReader(manager, decoder_path, ttpcomm,
                                          &opened);
@@ -432,8 +435,9 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
 
     ttplayer::plugins::PluginManager manager;
     bool completed{};
-    if (_wcsicmp(logical_path.extension().c_str(), L".mp3") == 0 &&
-        !ttplayer::audio::ParseArchiveMemberPath(logical_path.native(), archive)) {
+    ttplayer::audio::BuiltinFileInfo mpeg;
+    if (SUCCEEDED(ttplayer::audio::ReadBuiltinMpegFileInfo(
+            logical_path, ConvertPolicy(request.mp3), mpeg))) {
         std::vector<ttplayer::audio::BuiltinTagWriteField> fields;
         fields.reserve(request.fields.size());
         for (const auto& field : request.fields)

@@ -62,6 +62,11 @@ HRESULT CreateStandardContent(IStream* stream, DWORD write_type,
 // Shell metadata fallbacks are also read-only, without tag-write capability.
 [[nodiscard]] HRESULT ReadBuiltinFileInfo(
     const std::filesystem::path& path, const Mp3TagPolicy& policy,
+    BuiltinFileInfo& result, bool allow_system_fallback = true) noexcept;
+
+// Requires consecutive MPEG frames, regardless of the filename suffix.
+[[nodiscard]] HRESULT ReadBuiltinMpegFileInfo(
+    const std::filesystem::path& path, const Mp3TagPolicy& policy,
     BuiltinFileInfo& result) noexcept;
 
 [[nodiscard]] BuiltinTagWriteResult WriteBuiltinFileInfo(
