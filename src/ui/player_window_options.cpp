@@ -76,6 +76,7 @@ constexpr int kOptionsNavigation = 0xe910;
 constexpr int kOptionsHeader = 0xe911;
 constexpr int kOptionsRelated = 0xe912;
 constexpr int kOptionsDiscordLyrics = 0xe913;
+constexpr int kOptionsExtensionCorrection = 0xe92a;
 constexpr int kOptionsLanguage = 0xe914;
 constexpr int kOptionsLanguageLabel = 0xe916;
 constexpr int kOptionsLanguageNotice = 0xe917;
@@ -4334,12 +4335,15 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             place(discord, {13, 122, 267, 132}, shutdown_time);
             const HWND lyrics = add(WC_BUTTONW, i18n::Literal(L"向 Discord 发送歌词"),
                 kOptionsDiscordLyrics, WS_TABSTOP | BS_AUTOCHECKBOX, {13, 135, 267, 145}, discord);
+            const HWND extension = add(WC_BUTTONW, i18n::Literal(L"识别到错误后缀时提示更改"),
+                kOptionsExtensionCorrection, WS_TABSTOP | BS_AUTOCHECKBOX,
+                {13, 148, 267, 158}, lyrics);
             if (language_available) {
                 const HWND label = add(WC_STATICW, i18n::Literal(L"界面语言"), kOptionsLanguageLabel,
-                    0, {13, 152, 83, 164}, lyrics);
+                    0, {13, 165, 83, 177}, extension);
                 const HWND languages = add(WC_COMBOBOXW, L"", kOptionsLanguage,
                     WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
-                    {85, 148, 197, 268}, label);
+                    {85, 161, 197, 281}, label);
                 std::vector<std::wstring> choices{L"auto", L"source"};
                 const auto available = i18n::Languages(PlayerRuntimeDirectory());
                 for (const auto& locale : available)
@@ -4365,7 +4369,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                     if (locale == selected) SendMessageW(languages, CB_SETCURSEL, item, 0);
                 }
                 add(WC_STATICW, i18n::Literal(L"界面语言将在下次启动播放器时生效。"),
-                    kOptionsLanguageNotice, 0, {13, 164, 267, 182}, languages);
+                    kOptionsLanguageNotice, 0, {13, 177, 267, 195}, languages);
             }
         }
         SetChecked(dialog, 2088, value.startup_minimize);
@@ -4377,6 +4381,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetChecked(dialog, 2189, value.scroll_title);
         SetChecked(dialog, 2188, value.send_title_to_msn);
         SetChecked(dialog, kOptionsDiscordLyrics, value.discord_sync_lyrics);
+        SetChecked(dialog, kOptionsExtensionCorrection, value.prompt_extension_correction);
         EnableWindow(GetDlgItem(dialog, kOptionsDiscordLyrics),
                      value.send_title_to_msn);
         SetChecked(dialog, 1075, value.fade_windows);
@@ -5208,6 +5213,8 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         value.send_title_to_msn = IsChecked(dialog, 2188);
         if (GetDlgItem(dialog, kOptionsDiscordLyrics))
             value.discord_sync_lyrics = IsChecked(dialog, kOptionsDiscordLyrics);
+        if (GetDlgItem(dialog, kOptionsExtensionCorrection))
+            value.prompt_extension_correction = IsChecked(dialog, kOptionsExtensionCorrection);
         if (GetDlgItem(dialog, kOptionsLanguage))
             CommitOptionsControl(dialog, template_id, kOptionsLanguage);
         value.fade_windows = IsChecked(dialog, 1075);
@@ -5506,6 +5513,10 @@ bool PlayerWindow::CommitOptionsControl(
         case 2188: value.send_title_to_msn = IsChecked(dialog, 2188); break;
         case kOptionsDiscordLyrics:
             value.discord_sync_lyrics = IsChecked(dialog, kOptionsDiscordLyrics);
+            break;
+        case kOptionsExtensionCorrection:
+            value.prompt_extension_correction = IsChecked(dialog, kOptionsExtensionCorrection);
+            if (!value.prompt_extension_correction) extension_corrections_.clear();
             break;
         case kOptionsLanguage: {
             const LRESULT selected = SendDlgItemMessageW(dialog, kOptionsLanguage, CB_GETCURSEL, 0, 0);

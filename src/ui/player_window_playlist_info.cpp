@@ -410,6 +410,7 @@ LRESULT PlayerWindow::ApplyPlaylistInfoResult(LPARAM value) {
 }
 
 void PlayerWindow::ShutdownPlaylistInfoLoading() {
+    extension_corrections_.clear();
     playlist_info_pending_.clear(); playlist_info_queued_keys_.clear();
     playlist_info_checked_.clear(); playlist_info_index_.reset();
     if (playlist_info_receiver_) {

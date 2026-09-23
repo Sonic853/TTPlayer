@@ -69,6 +69,20 @@ BEGIN
 END
 
 // TTPlayer.exe loads this exact group-icon identifier in FUN_0045FAD8 before
+IDD_EXTENSION_CORRECTION DIALOGEX 0, 0, 344, 217
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_CONTROLPARENT
+CAPTION "更改文件后缀"
+FONT 9, "宋体"
+BEGIN
+    EDITTEXT IDC_EXTENSION_DETAILS, 10, 10, 324, 153, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL
+    LTEXT "仅更改文件名，不转换音频。取消后仍可按实际格式播放。", -1, 10, 170, 324, 14
+    PUSHBUTTON "更改后缀", IDOK, 109, 193, 70, 16
+    PUSHBUTTON "加编号", IDC_EXTENSION_NUMBER, 186, 193, 70, 16
+    DEFPUSHBUTTON "取消", IDCANCEL, 263, 193, 70, 16
+END
+
+// TTPlayer.exe loads this exact group-icon identifier in FUN_0045FAD8 before
 // associating the resulting 16x16 HICON with command 0xE140.
 128 ICON "assets/TTPlayer.ico"
 // 5.7.9 COptionsAsso fallback icon indices 1 and 2 (00491213).

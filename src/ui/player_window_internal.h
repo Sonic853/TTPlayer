@@ -74,6 +74,7 @@ constexpr UINT kUiRefreshIntervalMs = 250;
 // its WM_NULL path at 00481759; a private message keeps the rebuilt decoder
 // work off that thread while preserving the one-item-at-a-time transaction.
 constexpr UINT kMsgPlaylistInfoReady = WM_APP + 0x313;
+constexpr UINT kMsgExtensionCorrection = WM_APP + 0x316;
 // A directory walk never calls back into PlayerWindow.  Its immutable result
 // is handed to the UI thread with this message and discarded when a newer
 // refresh generation has superseded it.

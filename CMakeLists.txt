@@ -75,6 +75,7 @@ add_library(ttplayer_core
   src/audio/cue_sheet.cpp
   src/audio/directshow_source.cpp
   src/audio/file_encoder.cpp
+  src/audio/extension_correction.cpp
   src/audio/format_probe.cpp
   src/audio/kernel_streaming_sink.cpp
   src/audio/legacy_windows_source.cpp
@@ -118,6 +119,7 @@ add_library(ttplayer_core
   src/ui/taskbar_preview.cpp
   src/ui/player_window_equalizer.cpp
   src/ui/player_window_file_intake.cpp
+  src/ui/player_window_extension_correction.cpp
   src/ui/output_devices.cpp
   src/ui/modern_file_dialog.cpp
   src/ui/player_control_packet.cpp
@@ -283,6 +285,14 @@ endif()
 # Standalone development/test front ends only. The shipped player embeds all
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
+if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/audio/extension_correction_tests.cpp")
+  add_executable(extension_correction_tests tests/audio/extension_correction_tests.cpp)
+  target_compile_definitions(extension_correction_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(extension_correction_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  target_link_libraries(extension_correction_tests PRIVATE ttplayer_core)
+  add_test(NAME extension_correction_tests COMMAND extension_correction_tests)
+endif()
+
 if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/audio/extension_mismatch_tests.cpp")
   add_executable(extension_mismatch_tests tests/audio/extension_mismatch_tests.cpp src/app/exports.cpp)
   target_compile_definitions(extension_mismatch_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

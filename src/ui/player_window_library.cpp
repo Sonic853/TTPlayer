@@ -1187,12 +1187,38 @@ bool PlayerWindow::CommitMediaLibraryTracks(
 }
 
 bool PlayerWindow::UpdateMediaLibraryTrackPath(
-    const playlist::Track& source, const std::filesystem::path& target) {
+    const playlist::Track& source, const std::filesystem::path& target,
+    bool replace_target_metadata) {
     if (!media_library_ || target.empty()) return false;
     auto& state = *media_library_;
     auto updated = source;
     updated.path = target;
     bool changed{};
+
+    // Explicitly replacing a file invalidates its old tags in every snapshot.
+    const auto replace_metadata = [&](playlist::Track& track) {
+        if (!replace_target_metadata || _wcsicmp(track.path.c_str(), target.c_str()) != 0)
+            return false;
+        const auto subtrack = track.subtrack;
+        const auto rating = track.rating;
+        track = source;
+        track.path = target;
+        track.subtrack = subtrack;
+        track.rating = rating;
+        return true;
+    };
+    for (auto& item : state.items) {
+        if (replace_metadata(item.track)) {
+            state.RecordEdit(item.track);
+            changed = true;
+        }
+    }
+    for (auto* tracks : {&state.result_tracks, &state.persisted_tracks, &state.pending_tracks})
+        for (auto& track : *tracks) changed |= replace_metadata(track);
+    for (size_t row = 0; row < media_library_playback_.Tracks().size(); ++row) {
+        auto track = media_library_playback_.Tracks()[row];
+        if (replace_metadata(track)) changed |= media_library_playback_.SetTrack(row, std::move(track));
+    }
 
     for (auto& item : state.items) {
         if (_wcsicmp(item.track.path.c_str(), source.path.c_str()) != 0)

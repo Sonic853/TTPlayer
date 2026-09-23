@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ttplayer/audio/audio_engine.h"
+#include "ttplayer/audio/extension_correction.h"
 #include "ttplayer/integrations/discord_presence.h"
 #include "ttplayer/lyrics/lrc_parser.h"
 #include "ttplayer/lyrics/association.h"
@@ -487,7 +488,8 @@ private:
         bool start_if_idle);
     [[nodiscard]] bool UpdateMediaLibraryTrackPath(
         const playlist::Track& source,
-        const std::filesystem::path& target);
+        const std::filesystem::path& target,
+        bool replace_target_metadata = false);
     [[nodiscard]] std::optional<size_t> VisiblePlaylistPlayingRow() const;
     bool UpdateMediaLibraryTrackFromProperties(
         size_t index, const playlist::Track& updated);
@@ -723,6 +725,9 @@ private:
     [[nodiscard]] std::filesystem::path CurrentSkinProfilePath() const;
     void PersistWindowState();
     void RefreshPlaybackUi();
+    void CheckExtensionCorrection(const std::filesystem::path& path, int subtrack);
+    void QueueExtensionCorrection(audio::ExtensionCorrection correction);
+    void PromptExtensionCorrection();
     void UpdateDiscordPresence();
     void RebuildSkinInfoItems(bool include_audio_details);
     void ResetSkinInfoScroll();
@@ -1163,6 +1168,9 @@ private:
     ULONGLONG playlist_info_poll_tick_{};
     std::shared_ptr<PlaylistInfoReceiver> playlist_info_receiver_;
     bool playlist_info_working_{};
+    std::deque<audio::ExtensionCorrection> extension_corrections_;
+    std::set<std::wstring> extension_corrections_seen_;
+    bool extension_correction_open_{};
     std::shared_ptr<std::atomic_bool> playlist_metadata_working_;
     std::shared_ptr<std::atomic_bool> playlist_metadata_cancel_;
     int playlist_scrollbar_drag_anchor_y_{};

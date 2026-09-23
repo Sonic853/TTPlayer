@@ -29,6 +29,7 @@ struct GeneralSettings {
     bool send_title_to_msn{true};
     // Opt-in current timed LRC line in Rich Presence; subordinate to the master switch.
     bool discord_sync_lyrics{false};
+    bool prompt_extension_correction{true};
     // Discord requires every Rich Presence producer to use an application
     // registered in its developer portal.  This is a public identifier, not
     // a credential; private builds may replace it only in TTPlayerRebuild.xml.

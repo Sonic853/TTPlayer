@@ -2571,6 +2571,10 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
     static const UINT taskbar_button_created = RegisterWindowMessageW(L"TaskbarButtonCreated");
     if (message == kMsgPlaylistInfoReady)
         return ApplyPlaylistInfoResult(lparam);
+    if (message == kMsgExtensionCorrection) {
+        PromptExtensionCorrection();
+        return 0;
+    }
     if (message == kMsgMediaLibraryReady)
         return ApplyMediaLibraryIndex(lparam);
     if (message == kMsgMediaLibraryChanged)
@@ -3175,6 +3179,9 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             if (skin_catalog_result_stale_) StartSkinMenuCatalogLoad();
             PollMediaLibraryWorkers();
             PollPlaylistInfo();
+            if (!extension_corrections_.empty() && !extension_correction_open_ &&
+                IsWindowEnabled(window_))
+                PostMessageW(window_, kMsgExtensionCorrection, 0, 0);
             PollRandomNavigation();
             PollLocalLyricSearch();
             PollOnlineLyricSearch();
@@ -6541,6 +6548,7 @@ bool PlayerWindow::PlayCurrent() {
     playback_was_active_ = true;
     RefreshPlaybackUi();
     ShowPlaybackOpenTip();
+    CheckExtensionCorrection(requested_track.path, requested_track.subtrack);
     return true;
 }
 

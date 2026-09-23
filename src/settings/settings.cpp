@@ -914,6 +914,8 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         const auto discord_switch=Attribute(n,L"SendTitleToDiscord");
         s.general.discord_sync_lyrics=IntAttr(
             n,L"DiscordSyncLyrics",s.general.discord_sync_lyrics ? 1 : 0)!=0;
+        s.general.prompt_extension_correction=IntAttr(
+            n,L"PromptExtensionCorrection",s.general.prompt_extension_correction ? 1 : 0)!=0;
         s.general.send_title_to_msn=discord_switch.vt==VT_EMPTY
             ? IntAttr(n,L"SendTitleToMSN",
                       s.general.send_title_to_msn ? 1 : 0)!=0
@@ -1705,6 +1707,8 @@ void SaveWindowState(const std::filesystem::path& path,
                      settings.general.send_title_to_msn ? 1 : 0);
         SetAttribute(element,L"DiscordSyncLyrics",
                      settings.general.discord_sync_lyrics ? 1 : 0);
+        SetAttribute(element,L"PromptExtensionCorrection",
+                     settings.general.prompt_extension_correction ? 1 : 0);
         // Retain the legacy attribute while old TTPlayer builds may still be
         // pointed at this file.  New builds always prefer the Discord name.
         SetAttribute(element,L"SendTitleToMSN",
