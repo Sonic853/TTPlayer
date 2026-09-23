@@ -6375,7 +6375,12 @@ void PlayerWindow::PopulateOptionsSkinPage(HWND dialog) {
         auto label = entry.embedded_default
             ? ResourceText(0x81a6) : entry.DisplayName();
         if (label.empty()) label = entry.package_name;
-        const LRESULT row = SendMessageW(list, LB_ADDSTRING, 0,
+        // The resource list has LBS_SORT. Provider catalogs already pin their
+        // default package first; append explicitly so the control cannot sort
+        // punctuation/numeric skin names ahead of it. Keep native ordering.
+        const LRESULT row = SendMessageW(list,
+            provider ? LB_INSERTSTRING : LB_ADDSTRING,
+            provider ? static_cast<WPARAM>(-1) : 0,
             reinterpret_cast<LPARAM>(label.c_str()));
         if (row != LB_ERR && row != LB_ERRSPACE)
             SendMessageW(list, LB_SETITEMDATA, row, index);
