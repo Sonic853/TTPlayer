@@ -154,7 +154,10 @@ typedef struct TtpSkinWindows {
 typedef struct TtpSkinInfo {
     uint32_t size;
     wchar_t name[128], author[128];
+    // Optional v1 tail; missing metadata is empty (never a filename fallback).
+    wchar_t email[256], website[512];
 } TtpSkinInfo;
+#define TTP_SKIN_INFO_V1_SIZE offsetof(TtpSkinInfo, email)
 
 typedef struct TtpSkinLayout {
     uint32_t size;
@@ -209,6 +212,13 @@ typedef struct TtpSkinPlugin {
     // Lets the host fit lyrics using content_state bounds without native
     // fallback skin margins. Read-only; size is in physical pixels.
     BOOL (WINAPI *content_minimum)(void*, HWND, SIZE*);
+    // Optional reserved virtual filename in skin_directory. The host lists
+    // it without a disk file and calls probe/create with that path normally.
+    // Its label comes from probe. It cannot be imported or deleted.
+    const wchar_t* default_package;
+    // Optional HTTP(S) download page for this provider's Options tab.
+    // Null/empty uses the host's default "download more skins" link.
+    const wchar_t* skin_download_url;
 } TtpSkinPlugin;
 #define TTP_SKIN_PLUGIN_V1_SIZE offsetof(TtpSkinPlugin, skin_directory)
 #define TTP_SKIN_PLUGIN_DECLARATION_SIZE offsetof(TtpSkinPlugin, layout)

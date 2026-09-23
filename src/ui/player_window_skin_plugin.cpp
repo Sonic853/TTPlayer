@@ -128,7 +128,7 @@ bool PlayerWindow::InstallPluginSkin(const std::filesystem::path& path) {
     TtpSkinInfo info{};
     const auto provider=std::find_if(skin_plugins_.begin(),skin_plugins_.end(),
         [&](const auto& module) {return module->Supports(path) && module->Probe(path,info);});
-    if(provider==skin_plugins_.end()) return false;
+    if(provider==skin_plugins_.end() || (*provider)->IsDefaultPackage(path)) return false;
     const auto directory=(*provider)->Directory(PlayerRuntimeDirectory()/L"Skin");
     std::error_code error;
     std::filesystem::create_directories(directory, error);

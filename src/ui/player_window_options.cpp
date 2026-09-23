@@ -242,7 +242,7 @@ std::optional<size_t> SelectedOutputDeviceEntry(HWND dialog,
 
 constexpr UINT kLinkFirst = 3000;
 constexpr wchar_t kSkinDownloadTarget[] =
-    L"http://ttplayer.qianqian.com/skin.htm";
+    L"https://www.qianqian.plus/skin.html";
 
 int TemplateIndex(UINT template_id) {
     const auto found = std::find(kOptionTemplates.begin(),
@@ -4876,6 +4876,12 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         InstallButtonBitmap(dialog, 1039, resources, 1039);
         for (const int control : {1066, 1067, 2109})
             MakeOptionsHyperlink(dialog, control);
+        // Metadata is literal text: '&' in authors and URL query strings
+        // must not be consumed as a dialog accelerator marker.
+        for (const int control : {1005, 1066, 1067}) {
+            const HWND field=GetDlgItem(dialog,control);
+            if(field) SetWindowLongPtrW(field,GWL_STYLE,GetWindowLongPtrW(field,GWL_STYLE)|SS_NOPREFIX);
+        }
         InitializeOptionsSkinTabs(dialog);
         PopulateOptionsSkinPage(dialog);
         break;
@@ -6314,6 +6320,16 @@ void PlayerWindow::InitializeOptionsSkinTabs(HWND dialog) {
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
+std::wstring PlayerWindow::OptionsSkinDownloadTarget(HWND dialog) const {
+    const HWND tab=GetDlgItem(dialog,kOptionsSkinKindTab);
+    const int selection=tab?TabCtrl_GetCurSel(tab):0;
+    if(selection>0 && static_cast<size_t>(selection)<=skin_plugins_.size()) {
+        const auto& target=skin_plugins_[static_cast<size_t>(selection-1)]->DownloadUrl();
+        if(!target.empty()) return target;
+    }
+    return kSkinDownloadTarget;
+}
+
 void PlayerWindow::PopulateOptionsSkinPage(HWND dialog) {
     if (!dialog || !IsWindow(dialog)) return;
     const HWND list = GetDlgItem(dialog, 1064);
@@ -6357,7 +6373,7 @@ void PlayerWindow::PopulateOptionsSkinPage(HWND dialog) {
     for (size_t index = 0; index < options_skin_entries_.size(); ++index) {
         auto& entry = options_skin_entries_[index];
         auto label = entry.embedded_default
-            ? ResourceText(0x81a6) : entry.metadata.name;
+            ? ResourceText(0x81a6) : entry.DisplayName();
         if (label.empty()) label = entry.package_name;
         const LRESULT row = SendMessageW(list, LB_ADDSTRING, 0,
             reinterpret_cast<LPARAM>(label.c_str()));
@@ -6395,7 +6411,7 @@ void PlayerWindow::UpdateOptionsSkinDetails(HWND dialog) {
     SetDlgItemTextW(dialog, 1067, email.c_str());
     SetDlgItemTextW(dialog, 2001,
         entry ? entry->package_name.c_str() : L"");
-    EnableWindow(GetDlgItem(dialog, 1039), entry && !entry->embedded_default);
+    EnableWindow(GetDlgItem(dialog, 1039), entry && !entry->embedded_default && !entry->ProviderDefault());
     EnableWindow(GetDlgItem(dialog, 1098), entry != nullptr);
 
     if (options_skin_preview_) DeleteObject(options_skin_preview_);
@@ -7332,11 +7348,11 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 if (data != LB_ERR && data >= 0 &&
                     static_cast<size_t>(data) < options_skin_entries_.size()) {
                     const auto& entry = options_skin_entries_[static_cast<size_t>(data)];
-                    if (!entry.embedded_default) {
+                    if (!entry.embedded_default && !entry.ProviderDefault()) {
                         wchar_t prompt[512]{};
                         const auto format = ResourceText(33191);
                         swprintf_s(prompt, format.c_str(),
-                                   entry.metadata.name.c_str());
+                                   entry.DisplayName().c_str());
                         if (MessageBoxW(dialog, prompt, ResourceText(0x80).c_str(),
                                         MB_YESNO | MB_ICONQUESTION) == IDYES) {
                             DeleteFileW(entry.path.c_str());
@@ -7350,8 +7366,9 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 return TRUE;
             }
             if (control == 2109 && notification == STN_CLICKED) {
-                ShellExecuteW(dialog, L"open", kSkinDownloadTarget, nullptr,
-                              nullptr, SW_SHOWNORMAL);
+                const auto target=OptionsSkinDownloadTarget(dialog);
+                if(!target.empty()) ShellExecuteW(dialog, L"open", target.c_str(), nullptr,
+                                                nullptr, SW_SHOWNORMAL);
                 return TRUE;
             }
             if ((control == 1066 || control == 1067) &&

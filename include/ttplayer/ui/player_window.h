@@ -156,6 +156,13 @@ private:
         bool embedded_default{};
         bool external{};
         std::shared_ptr<skin::SkinPluginModule> provider;
+        bool ProviderDefault() const {
+            return external && provider && provider->IsDefaultPackage(path);
+        }
+        std::wstring DisplayName() const {
+            if(!metadata.name.empty()) return metadata.name;
+            return external?path.filename().wstring():package_name;
+        }
     };
 
     struct AssociationOptionNode {
@@ -321,6 +328,7 @@ private:
     void PopulateOptionsSkinPage(HWND dialog);
     void InitializeOptionsSkinTabs(HWND dialog);
     void UpdateOptionsSkinDetails(HWND dialog);
+    std::wstring OptionsSkinDownloadTarget(HWND dialog) const;
     void StartOptionsDspScan(HWND dialog,
                              const std::filesystem::path& folder);
     void PollOptionsDspScan(HWND dialog);

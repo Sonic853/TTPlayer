@@ -17,12 +17,17 @@ public:
     std::filesystem::path Directory(const std::filesystem::path& skin_root) const { return skin_root/directory_; }
     bool Supports(const std::filesystem::path& path) const;
     bool OwnsInstalledPackage(const std::filesystem::path& skin_root,const std::filesystem::path& path) const;
+    const std::filesystem::path& DefaultPackageName() const noexcept { return default_package_; }
+    const std::wstring& DownloadUrl() const noexcept { return download_url_; }
+    bool IsDefaultPackage(const std::filesystem::path& path) const;
 private:
     SkinPluginModule(HMODULE module,const TtpSkinPlugin& api);
     HMODULE module_{};
     TtpSkinPlugin api_{};
     std::wstring name_;
+    std::wstring download_url_;
     std::filesystem::path directory_;
+    std::filesystem::path default_package_;
     std::vector<std::wstring> extensions_;
 };
 class SkinPluginInstance {

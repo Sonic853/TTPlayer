@@ -3456,6 +3456,13 @@ void PlayerWindow::SaveCurrentSkinProfile() {
     CaptureWindowState();
     const auto profile = CurrentSkinProfilePath();
     if (profile.empty()) return;
+    // A provider's built-in package can be selected before its Skin directory
+    // exists. Its sidecar still needs to persist window geometry and options.
+    if(external_skin_) {
+        std::error_code error;
+        std::filesystem::create_directories(profile.parent_path(),error);
+        if(error) return;
+    }
     std::wstring plugin_state;
     TtpSkinLayout layout{};layout.size=sizeof(layout);
     const bool have_layout=external_skin_ && external_skin_->Layout(layout,false);
@@ -4607,6 +4614,16 @@ std::vector<PlayerWindow::SkinMenuEntry> PlayerWindow::LoadSkinMenuCatalog(
         {skin_directory,false},{skin_directory/L"new",false}};
     for(const auto& provider:providers) {
         const auto path=provider->Directory(skin_directory);
+        if(!provider->DefaultPackageName().empty()) {
+            TtpSkinInfo info{};
+            const auto builtin=path/provider->DefaultPackageName();
+            if(provider->Probe(builtin,info)) {
+                skin::SkinMetadata metadata;metadata.name=info.name;metadata.author=info.author;
+                metadata.email=info.email;metadata.url=info.website;
+                installed.push_back(SkinMenuEntry{0,builtin,
+                    skin::SkinPackageSelector(skin_directory,builtin),metadata,false,true,provider});
+            }
+        }
         if(std::none_of(directories.begin(),directories.end(),[&](const auto& entry) {
             return _wcsicmp(entry.first.c_str(),path.c_str())==0;
         })) directories.emplace_back(path,true);
@@ -4628,10 +4645,13 @@ std::vector<PlayerWindow::SkinMenuEntry> PlayerWindow::LoadSkinMenuCatalog(
             if (external) {
                 for (const auto& provider : providers) {
                     TtpSkinInfo info{};
-                    if (!provider->OwnsInstalledPackage(skin_directory,path) || !provider->Probe(path, info)) continue;
+                    if (!provider->OwnsInstalledPackage(skin_directory,path) || provider->IsDefaultPackage(path) ||
+                        !provider->Probe(path, info)) continue;
                     skin::SkinMetadata metadata;
                     metadata.name = info.name;
                     metadata.author = info.author;
+                    metadata.email = info.email;
+                    metadata.url = info.website;
                     installed.push_back(SkinMenuEntry{0, path,
                         skin::SkinPackageSelector(skin_directory, path), metadata, false, true, provider});
                     break;
@@ -4660,7 +4680,8 @@ std::vector<PlayerWindow::SkinMenuEntry> PlayerWindow::LoadSkinMenuCatalog(
     if (cancelled()) return {};
     std::sort(installed.begin(), installed.end(),
         [](const SkinMenuEntry& left, const SkinMenuEntry& right) {
-            const int order = CompareSkinNames(left.metadata.name, right.metadata.name);
+            if(left.ProviderDefault()!=right.ProviderDefault()) return left.ProviderDefault();
+            const int order = CompareSkinNames(left.DisplayName(), right.DisplayName());
             return order != 0 ? order < 0
                 : _wcsicmp(left.package_name.c_str(), right.package_name.c_str()) < 0;
         });
@@ -4680,7 +4701,8 @@ void PlayerWindow::StartSkinMenuCatalogLoad() {
         if (skin_catalog_future_.valid()) return;
     }
 
-    const auto skin_directory = FindRuntimePath(L"Skin");
+    auto skin_directory = FindRuntimePath(L"Skin");
+    if(skin_directory.empty()) skin_directory=PlayerRuntimeDirectory()/L"Skin";
     const HMODULE resources = ResourceModule();
     const HMODULE ttpcomm = ttpcomm_module_;
     DiscoverSkinPlugins();
@@ -4823,7 +4845,10 @@ void PlayerWindow::PopulateSkinMenu(HMENU menu) {
         const auto provider=std::find(skin_plugins_.begin(),skin_plugins_.end(),entry.provider);
         const HMENU target=entry.external
             ? plugin_menus[static_cast<size_t>(provider-skin_plugins_.begin())] : menu;
-        AppendMenuW(target, MF_STRING, entry.command, entry.metadata.name.c_str());
+        auto label=entry.DisplayName();
+        if(entry.external) for(size_t pos=0;(pos=label.find(L'&',pos))!=std::wstring::npos;pos+=2)
+            label.insert(pos,1,L'&'); // Literal provider metadata, not mnemonics.
+        AppendMenuW(target, MF_STRING, entry.command, label.c_str());
         if (!current_found && _wcsicmp(entry.package_name.c_str(),
                                       ActiveSkinSelector().c_str()) == 0) {
             CheckMenuItem(target, entry.command, MF_BYCOMMAND | MF_CHECKED);

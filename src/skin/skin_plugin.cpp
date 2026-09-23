@@ -26,7 +26,20 @@ SkinPluginModule::SkinPluginModule(HMODULE module,const TtpSkinPlugin& api):modu
         begin=end+1;
     }
     if(extensions_.empty()) throw std::invalid_argument("No plugin skin suffixes");
-
+    if(api.default_package && *api.default_package) {
+        default_package_=std::wstring(api.default_package,wcsnlen_s(api.default_package,260));
+        if(!IsRelativeSkinPath(default_package_) || default_package_.has_parent_path() ||
+           !Supports(default_package_)) throw std::invalid_argument("Invalid built-in package name");
+    }
+    if(api.skin_download_url) {
+        const auto length=wcsnlen_s(api.skin_download_url,2048);
+        if(length<2048 && ((_wcsnicmp(api.skin_download_url,L"https://",8)==0 && length>8) ||
+                          (_wcsnicmp(api.skin_download_url,L"http://",7)==0 && length>7)))
+            download_url_.assign(api.skin_download_url,length);
+    }
+}
+bool SkinPluginModule::IsDefaultPackage(const std::filesystem::path& path) const {
+    return !default_package_.empty() && _wcsicmp(path.filename().c_str(),default_package_.c_str())==0;
 }
 bool SkinPluginModule::Supports(const std::filesystem::path& path) const {
     const auto suffix=path.extension().wstring();
@@ -62,7 +75,9 @@ std::vector<std::shared_ptr<SkinPluginModule>> SkinPluginModule::Discover(const 
         if(api.size<offsetof(TtpSkinPlugin,lyric_font_height)) api.lyric_colors=nullptr;
         if(api.size<offsetof(TtpSkinPlugin,playlist_drop)) api.lyric_font_height=nullptr;
         if(api.size<offsetof(TtpSkinPlugin,content_minimum)) api.playlist_drop=nullptr;
-        if(api.size<sizeof(api)) api.content_minimum=nullptr;
+        if(api.size<offsetof(TtpSkinPlugin,default_package)) api.content_minimum=nullptr;
+        if(api.size<offsetof(TtpSkinPlugin,skin_download_url)) api.default_package=nullptr;
+        if(api.size<sizeof(api)) api.skin_download_url=nullptr;
         std::unique_ptr<SkinPluginModule> provider;
         try {provider.reset(new SkinPluginModule(module,api));}
         catch(const std::invalid_argument&) {FreeLibrary(module);continue;}
