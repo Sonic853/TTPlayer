@@ -152,9 +152,22 @@ void PlayerWindow::RemovePluginSkinNativeTips() {
     if(external_skin_->Handles(lyric_window_)) RemoveToolTipTools(lyric_window_);
 }
 BOOL WINAPI PlayerWindow::QuerySkinPluginTip(void* context,uint32_t action,int32_t value,wchar_t* text,uint32_t count) {
-    if(!context || !text || !count) return FALSE;
-    text[0]=0;
+    if(!context) return FALSE;
+    if(text && count) text[0]=0;
     try {
+        if(action==TTP_SKIN_TRACK_TIP) {
+            auto& self=*static_cast<PlayerWindow*>(context);
+            if(value<0 || !self.settings_.playlist.item_tips || !self.VisiblePlaylistTrack(static_cast<size_t>(value))) return FALSE;
+            // The provider owns row geometry; do not prune this explicit
+            // request against the hidden native list's visible range.
+            if(!self.settings_.playlist.library_mode)
+                self.RequestPlaylistTrackInfo(self.playlists_.ActiveIndex(),static_cast<size_t>(value),true,false);
+            const auto label=self.PlaylistItemTipText(static_cast<size_t>(value));
+            if(label.empty() || label.size()>=INT_MAX) return FALSE;
+            if(text && count) wcsncpy_s(text,count,label.c_str(),_TRUNCATE);
+            return static_cast<BOOL>(label.size()+1);
+        }
+        if(!text || !count) return FALSE;
         const auto& self=*static_cast<PlayerWindow*>(context);
         UINT command{};std::wstring label;
         switch(action) {

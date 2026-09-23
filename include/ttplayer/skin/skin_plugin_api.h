@@ -26,6 +26,7 @@ enum TtpSkinCommand {
     TTP_SKIN_CONTENT_FULLSCREEN, // low byte: content mode; next byte: visual type
     TTP_SKIN_CONTENT_MENU, // enqueue a provider-defined menu on the content surface
     TTP_SKIN_DRAG_SELECTION, // enqueue host OLE drag after releasing provider capture
+    TTP_SKIN_TRACK_TIP, // tip callback only; value is the visible playlist row
     TTP_SKIN_EQ_VALUE = 100 // + 0: preamp, + 1..10: frequency bands; value -12..12
 };
 
@@ -128,6 +129,8 @@ typedef struct TtpSkinHost {
     BOOL (WINAPI *visual)(void*, HDC, const RECT*, const TtpSkinVisualColors*);
     // Optional UI-thread command label, including the host's configured hotkey.
     // FALSE means the provider should use its own description. Caller owns text.
+    // TRACK_TIP instead returns the required WCHAR count including NUL, or 0
+    // to suppress. text=nullptr/count=0 queries size; no provider fallback.
     BOOL (WINAPI *tip)(void*, uint32_t, int32_t, wchar_t*, uint32_t);
     // Optional synchronous geometry change (e.g. shade/unshade). Keep the
     // source's top-left fixed and carry windows docked below its old bottom.

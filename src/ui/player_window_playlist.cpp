@@ -3620,6 +3620,14 @@ bool PlayerWindow::HandleToolTipNotification(HWND owner, LPARAM notification) {
     return true;
 }
 
+std::wstring PlayerWindow::PlaylistItemTipText(size_t row) const {
+    const auto* track=VisiblePlaylistTrack(row);
+    if(!settings_.playlist.item_tips || !track) return {};
+    return FormatPlaylistItemTip(*track,
+        ResourceText(LooksLikeUrl(track->path.wstring()) ? 0x8296 : 0x81c9),
+        ResourceText(0x8297), ResourceText(0x828e));
+}
+
 std::wstring PlayerWindow::ToolTipText(HWND owner, UINT_PTR tool) const {
     if (owner == equalizer_window_) return EqualizerToolText(tool);
     if (owner == lyric_window_) {
@@ -3630,13 +3638,7 @@ std::wstring PlayerWindow::ToolTipText(HWND owner, UINT_PTR tool) const {
     if (owner == playlist_window_) {
         if (tool >= kCmdFirstTrack && tool < kPlaylistToolFirst) {
             const size_t row = static_cast<size_t>(tool - kCmdFirstTrack);
-            const auto* visible_track = VisiblePlaylistTrack(row);
-            if (!settings_.playlist.item_tips || !visible_track) return {};
-            const auto& track = *visible_track;
-            const bool network = LooksLikeUrl(track.path.wstring());
-            return FormatPlaylistItemTip(track,
-                ResourceText(network ? 0x8296 : 0x81c9),
-                ResourceText(0x8297), ResourceText(0x828e));
+            return PlaylistItemTipText(row);
         }
         if (tool == kPlaylistToolFirst + 7) return ResourceText(8);
         if (tool >= kPlaylistToolFirst && tool < kPlaylistToolFirst + 7)
