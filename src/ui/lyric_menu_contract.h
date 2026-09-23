@@ -28,7 +28,7 @@ inline bool AdjustLyricDocument(lyrics::Lyrics& document, UINT command,
         begin = current ? *current + 1 : 0; // 0043D795: AFTER, not including current.
     }
     const auto delta = std::chrono::milliseconds(command & 1 ? -500 : 500);
-    for (size_t i = begin; i < end; ++i) document.lines[i].time += delta;
+    for (size_t i = begin; i < end; ++i) document.lines[i].Shift(delta);
     // Original signed addition does not clamp to zero or sort the lines.
     return begin < end;
 }
@@ -37,6 +37,25 @@ inline bool ConvertLyricDocument(lyrics::Lyrics& document, DWORD mapping) {
     if (document.lines.empty()) return false;
     auto converted = document.lines; // Commit only a complete conversion.
     for (auto& line : converted) {
+        if (!line.words.empty()) {
+            // Conversion may change UTF-8 byte lengths. Convert timed spans
+            // independently and rebuild their offsets along with the text.
+            lyrics::Lyrics pieces;
+            size_t cursor = 0;
+            for (const auto& word : line.words) {
+                pieces.lines.push_back({{}, line.text.substr(cursor, word.text_offset - cursor)});
+                cursor = word.text_offset;
+            }
+            pieces.lines.push_back({{}, line.text.substr(cursor)});
+            if (!ConvertLyricDocument(pieces, mapping)) return false;
+            line.text.clear();
+            for (size_t i = 0; i < line.words.size(); ++i) {
+                line.text += pieces.lines[i].text;
+                line.words[i].text_offset = line.text.size();
+            }
+            line.text += pieces.lines.back().text;
+            continue;
+        }
         const auto source = core::Utf8ToWide(line.text);
         if (source.empty()) continue;
         const LCID locale = GetThreadLocale(); // 004C1C5E
@@ -67,10 +86,15 @@ inline std::wstring SerializeLyricDocument(const lyrics::Lyrics& document, bool 
     std::vector<std::pair<std::wstring, std::wstring>> rows;
     for (const auto& line : document.lines) {
         // 0043DEC8 omits bracket-only display rows when serializing LRC.
-        if (line.text.size() >= 2 && line.text.front() == '[' && line.text.back() == ']') continue;
+        if (line.words.empty() && line.text.size() >= 2 && line.text.front() == '[' && line.text.back() == ']') continue;
         const auto ms = (line.time + document.offset).count();
         wchar_t stamp[80]{};
         swprintf_s(stamp, L"[%02lld:%02lld.%02lld]", ms / 60000, (ms % 60000) / 1000, (ms % 1000) / 10);
+        if (!line.words.empty()) {
+            rows.emplace_back(core::Utf8ToWide(lyrics::FormatLrcTimestamp(line.time + document.offset)),
+                core::Utf8ToWide(lyrics::TimedLyricText(line, document.offset)));
+            continue;
+        }
         if (compact) {
             const auto [it, inserted] = positions.emplace(line.text, rows.size());
             if (!inserted) { rows[it->second].first.insert(0, stamp); continue; }

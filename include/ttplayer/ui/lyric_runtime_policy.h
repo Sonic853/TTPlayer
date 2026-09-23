@@ -55,15 +55,7 @@ inline std::vector<std::filesystem::path> BuildLocalLyricCandidates(
 
 inline void ApplyLyricTrimSpaces(lyrics::Lyrics& lyrics, bool trim_spaces) {
     if (!trim_spaces) return;
-    for (auto& line : lyrics.lines) {
-        const auto begin = line.text.find_first_not_of(" \t\r\n");
-        if (begin == std::string::npos) {
-            line.text.clear();
-            continue;
-        }
-        const auto end = line.text.find_last_not_of(" \t\r\n");
-        line.text = line.text.substr(begin, end - begin + 1);
-    }
+    for (auto& line : lyrics.lines) line.TrimSpaces();
 }
 
 } // namespace ttplayer::ui

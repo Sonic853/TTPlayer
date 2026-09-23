@@ -36,7 +36,12 @@ function Assert-PlayerFileVersion([string]$Path, [string]$Version) {
         $file -cne $expected -or $product -cne $expected) {
         throw "EXE version does not match package version $Version."
     }
-    if ($info.CompanyName -cne 'Sonic853' -or $info.FileDescription -cne '千千静听') {
+    # The resource template owns the display name (including edition suffixes).
+    # Keep packaging validation in sync when that name is edited.
+    $template = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/app/version.rc.in') -Raw -Encoding UTF8
+    $description = [regex]::Match($template, 'VALUE\s+"FileDescription",\s*"([^"\\]+)\\0"')
+    if (-not $description.Success -or $info.CompanyName -cne 'Sonic853' -or
+        $info.FileDescription -cne $description.Groups[1].Value) {
         throw 'EXE author/company or file description is missing.'
     }
 }

@@ -7,6 +7,7 @@
 #include "modern_file_dialog.h"
 #include "lyric_association_dialog.h"
 #include "lyric_alpha_mask.h"
+#include "lyric_word_highlight.h"
 #include "lyric_menu_contract.h"
 #include "lyric_upload_window.h"
 #include "../app/resource_ids.h"
@@ -1762,9 +1763,15 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
 
         const auto draw_lyric_line = [&](size_t index, RECT line, UINT format,
                                          bool horizontal_stream,const std::wstring& text,
-                                         int row_offset=0,int total_width=0) {
+                                         int row_offset=0,int total_width=0,size_t text_offset=0) {
             if (index != current) {
                 SetTextColor(canvas, animated_line_color(index));
+                draw_text(text, line, format);
+                return;
+            }
+            if (ActiveLyricKaraokeMode() && !lyrics_.lines[index].words.empty() &&
+                !playback_line && !lyric_line_dragging_) {
+                SetTextColor(canvas, text_color);
                 draw_text(text, line, format);
                 return;
             }
@@ -1779,14 +1786,15 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
             // two clipped passes: highlighted before the playback boundary,
             // normal after it (0043FC10 at 00440426/0044080E).
             RECT highlight_clip = line;
-            if (horizontal_stream) {
+            const bool word_timed = !lyrics_.lines[current].words.empty();
+            if (horizontal_stream && !word_timed) {
                 highlight_clip.right = width / 2;
             } else {
                 SIZE measured{};
                 GetTextExtentPoint32W(canvas, text.c_str(),
                                       static_cast<int>(text.size()), &measured);
                 int text_left = line.left;
-                if (ActiveLyricTextAlign() == 1)
+                if (horizontal_stream || ActiveLyricTextAlign() == 1)
                     text_left += ((line.right - line.left) - measured.cx) / 2;
                 else if (ActiveLyricTextAlign() >= 2)
                     text_left = line.right - measured.cx;
@@ -1798,7 +1806,9 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
                 const auto span = std::max<long long>(1, (end - start).count());
                 // Wrapped rows share one timestamp and one karaoke progress.
                 // Consume the preceding rows before highlighting this row.
-                const int highlighted = static_cast<int>(std::clamp<long long>(
+                const int highlighted = word_timed
+                    ? WordHighlightPixels(canvas, lyrics_.lines[current], clock, end, text, text_offset)
+                    : static_cast<int>(std::clamp<long long>(
                     std::clamp<long long>((clock-start).count(),0,span) *
                     (total_width>0?total_width:measured.cx)/span-row_offset,0,measured.cx));
                 highlight_clip.left = text_left;
@@ -1881,7 +1891,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
                         for(const auto& row:wrapped.rows) {
                             const RECT row_bounds{0,row_top,width,row_top+row_height};
                             if(row_bounds.bottom>0 && row_bounds.top<height)
-                                draw_lyric_line(index,row_bounds,format,false,row.text,row_offset,wrapped.width);
+                                draw_lyric_line(index,row_bounds,format,false,row.text,row_offset,wrapped.width,row.text_offset);
                             row_top+=row_height;row_offset+=row.width;
                         }
                     }
@@ -2029,7 +2039,7 @@ const PlayerWindow::LyricLineLayout& PlayerWindow::LayoutLyricLine(HDC dc,size_t
              text[at]==0x200d || text[at-1]==0x200d);
     };
     const auto append=[&](size_t begin,size_t end) {
-        LyricDisplayRow row{text.substr(begin,end-begin)};SIZE size{};
+        LyricDisplayRow row{text.substr(begin,end-begin),0,begin};SIZE size{};
         if(!row.text.empty()) GetTextExtentPoint32W(dc,row.text.data(),static_cast<int>(row.text.size()),&size);
         row.width=size.cx;layout.width+=row.width;layout.rows.push_back(std::move(row));
     };
@@ -2467,18 +2477,23 @@ void PlayerWindow::FormatLyricEditorRange(LONG begin, LONG end) {
     lyric_editor_internal_change_ = true;
     LONG cursor = begin;
     while (cursor < end) {
-        const LONG open = FindLyricEditorCharacter(cursor, end, L'[');
+        const LONG square = FindLyricEditorCharacter(cursor, end, L'[');
+        const LONG angle = FindLyricEditorCharacter(cursor, end, L'<');
+        const LONG open = square < 0 ? angle : angle < 0 ? square : std::min(square, angle);
         if (open < 0) {
             apply(cursor, end, text_color);
             break;
         }
         apply(cursor, open, text_color);
-        const LONG close = FindLyricEditorCharacter(open + 1, end, L']');
+        const bool word = open == angle;
+        const LONG close = FindLyricEditorCharacter(open + 1, end, word ? L'>' : L']');
         if (close < 0) {
             apply(open, end, text_color);
             break;
         }
-        apply(open, close + 1, tag_color);
+        const bool timestamp = !word || lyrics::ParseLrcTimestamp(
+            core::WideToUtf8(LyricEditorRangeText(open + 1, close))).has_value();
+        apply(open, close + 1, timestamp ? tag_color : text_color);
         cursor = close + 1;
     }
     SendMessageW(lyric_editor_, EM_EXSETSEL, 0,
@@ -2800,6 +2815,9 @@ bool PlayerWindow::EnterLyricEditor() {
             {control_key, L'V', static_cast<WORD>(kCmdEditorPaste)},
             {control_key, L'Z', static_cast<WORD>(kCmdEditorUndo)},
             {control_key, L'Y', static_cast<WORD>(kCmdEditorRedo)},
+            {control_key, VK_F8, static_cast<WORD>(kCmdLyricEditorInsertWord)},
+            {control_key, VK_F9, static_cast<WORD>(kCmdLyricEditorReplaceWord)},
+            {control_key, VK_F10, static_cast<WORD>(kCmdLyricEditorDeleteWord)},
         };
         lyric_editor_accelerators_ = CreateAcceleratorTableW(
             accelerators, static_cast<int>(std::size(accelerators)));
@@ -3087,8 +3105,35 @@ void PlayerWindow::EditLyricTimestamp(UINT command) {
             cursor = close + 1;
         }
     }
-    ReplaceLyricEditorRange(replace_begin, replace_end,
-                            FormatEditorTimestamp(*playback_position), true);
+    const auto source = LyricEditorRangeText(line_begin, line_end);
+    const auto parsed = lyrics::ParseLrc(core::WideToUtf8(source));
+    const bool enhanced = std::any_of(parsed.lines.begin(), parsed.lines.end(),
+        [](const auto& row) { return !row.words.empty(); });
+    if (enhanced && replace_begin < replace_end) {
+        const bool rollover = lyrics::HasCentisecondRollover(core::WideToUtf8(LyricEditorText()));
+        const auto previous = lyrics::ParseLrcTimestamp(core::WideToUtf8(
+            LyricEditorRangeText(replace_begin + 1, replace_end - 1)), rollover);
+        if (previous) {
+            // Retiming a whole line preserves the timing within that line.
+            size_t cursor = source.size();
+            while (cursor > 0) {
+                const auto open = source.rfind(L'<', cursor - 1);
+                if (open == source.npos) break;
+                const auto close = source.find(L'>', open + 1);
+                if (close != source.npos) {
+                    if (const auto time = lyrics::ParseLrcTimestamp(core::WideToUtf8(
+                            std::wstring_view(source).substr(open + 1, close - open - 1)), rollover))
+                        ReplaceLyricEditorRange(line_begin + static_cast<LONG>(open),
+                            line_begin + static_cast<LONG>(close + 1),
+                            core::Utf8ToWide(lyrics::FormatLrcTimestamp(*time + *playback_position - *previous, true)), true, false);
+                }
+                cursor = open;
+            }
+        }
+    }
+    ReplaceLyricEditorRange(replace_begin, replace_end, enhanced
+        ? core::Utf8ToWide(lyrics::FormatLrcTimestamp(*playback_position))
+        : FormatEditorTimestamp(*playback_position), true);
     // Despite menu 0x804F's “修改标签后换行” check, the 5.7.9 binary never
     // reads DAT_00547B48 here: both 0044DAE2 and 0044DB11 call 00443789
     // unconditionally after a successful insert/replace.
@@ -3118,11 +3163,108 @@ void PlayerWindow::EditLyricTimestamp(UINT command) {
     SetFocus(lyric_editor_);
 }
 
+void PlayerWindow::EditLyricWordTimestamp(UINT command) {
+    if (!lyric_editor_) return;
+    const auto position = audio_->Position() - lyrics::ParseLrc(core::WideToUtf8(LyricEditorText())).offset;
+    CHARRANGE selection{};
+    SendMessageW(lyric_editor_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+    const auto line = SendMessageW(lyric_editor_, EM_EXLINEFROMCHAR, 0, selection.cpMin);
+    const LONG begin = static_cast<LONG>(SendMessageW(lyric_editor_, EM_LINEINDEX, line, 0));
+    const LONG length = static_cast<LONG>(SendMessageW(lyric_editor_, EM_LINELENGTH, selection.cpMin, 0));
+    if (begin < 0 || length < 0) return;
+    const auto source = LyricEditorRangeText(begin, begin + length);
+    size_t caret = std::min<size_t>(source.size(), std::max<LONG>(0, selection.cpMin - begin));
+    size_t tag_begin = source.npos, tag_end = source.npos;
+    for (size_t at = 0; at < source.size();) {
+        const auto open = source.find(L'<', at);
+        if (open == source.npos) break;
+        const auto close = source.find(L'>', open + 1);
+        if (close == source.npos) break;
+        if (close >= caret && lyrics::ParseLrcTimestamp(core::WideToUtf8(
+                std::wstring_view(source).substr(open + 1, close - open - 1)))) {
+            tag_begin = open; tag_end = close + 1; break;
+        }
+        at = close + 1;
+    }
+    if (command == kCmdLyricEditorDeleteWord) {
+        if (tag_begin != source.npos)
+            ReplaceLyricEditorRange(begin + static_cast<LONG>(tag_begin),
+                begin + static_cast<LONG>(tag_end), {}, true);
+        SetFocus(lyric_editor_);
+        return;
+    }
+    size_t first = caret, last = caret;
+    if (tag_begin != source.npos &&
+        (command == kCmdLyricEditorReplaceWord || tag_begin <= caret)) {
+        first = tag_begin; last = tag_end;
+    }
+    // A caret inside a line tag belongs immediately after the header.
+    size_t body = 0;
+    while (body < source.size() && source[body] == L'[') {
+        const auto close = source.find(L']', body + 1);
+        if (close == source.npos) break;
+        body = close + 1;
+    }
+    first = std::max(first, body); last = std::max(last, first);
+    if (first < source.size() && source[first] >= 0xdc00 && source[first] <= 0xdfff) {
+        ++first; last = std::max(last, first);
+    }
+    std::wstring replacement = core::Utf8ToWide(lyrics::FormatLrcTimestamp(position, true));
+    // New plain-text rows also need a line anchor to participate in playback.
+    if (body == 0) {
+        replacement = core::Utf8ToWide(lyrics::FormatLrcTimestamp(position)) +
+            source.substr(0, first) + replacement;
+        first = 0;
+    }
+    ReplaceLyricEditorRange(begin + static_cast<LONG>(first), begin + static_cast<LONG>(last), replacement, true);
+    // Advance one Unicode character (plus its combining marks and following
+    // spaces) for repeated live timing, without changing lines or deleting text.
+    size_t next = last;
+    if (next < source.size() && source[next] != L'<') {
+        ++next;
+        while (next < source.size()) {
+            WORD type{}; GetStringTypeW(CT_CTYPE3, &source[next], 1, &type);
+            if ((source[next] >= 0xdc00 && source[next] <= 0xdfff) ||
+                (type & (C3_NONSPACING | C3_DIACRITIC | C3_VOWELMARK)) ||
+                source[next] == 0x200d || source[next - 1] == 0x200d || iswspace(source[next])) ++next;
+            else break;
+        }
+    }
+    const LONG target = begin + static_cast<LONG>(first + replacement.size() + next - last);
+    SendMessageW(lyric_editor_, EM_SETSEL, target, target);
+    SetFocus(lyric_editor_);
+}
+
 void PlayerWindow::ShiftLyricEditorTimestamps(
     std::chrono::milliseconds delta) {
     if (!lyric_editor_) return;
     const LONG length = static_cast<LONG>(
         SendMessageW(lyric_editor_, WM_GETTEXTLENGTH, 0, 0));
+    const auto source = LyricEditorRangeText(0, length);
+    const auto utf8 = core::WideToUtf8(source);
+    const auto parsed = lyrics::ParseLrc(utf8);
+    if (std::any_of(parsed.lines.begin(), parsed.lines.end(), [](const auto& row) { return !row.words.empty(); })) {
+        const bool rollover = lyrics::HasCentisecondRollover(utf8);
+        struct Edit { LONG first, last; std::wstring text; };
+        std::vector<Edit> edits;
+        for (size_t at = 0; at < source.size();) {
+            const auto open = source.find_first_of(L"[<", at);
+            if (open == source.npos) break;
+            const bool word = source[open] == L'<';
+            const auto close = source.find(word ? L'>' : L']', open + 1);
+            if (close == source.npos) { at = open + 1; continue; }
+            if (const auto time = lyrics::ParseLrcTimestamp(core::WideToUtf8(
+                    std::wstring_view(source).substr(open + 1, close - open - 1)), rollover))
+                edits.push_back({static_cast<LONG>(open), static_cast<LONG>(close + 1),
+                    core::Utf8ToWide(lyrics::FormatLrcTimestamp(*time + delta, word))});
+            at = close + 1;
+        }
+        for (auto it = edits.rbegin(); it != edits.rend(); ++it)
+            ReplaceLyricEditorRange(it->first, it->last, it->text, true, false);
+        FormatLyricEditorAll();
+        SetFocus(lyric_editor_);
+        return;
+    }
     LONG cursor{};
     while (cursor < length) {
         const LONG open = FindLyricEditorCharacter(cursor, length, L'[');
@@ -3201,6 +3343,16 @@ void PlayerWindow::ReflowLyricEditor(bool expand) {
         [](const TimedText& left, const TimedText& right) {
             return left.time < right.time;
         });
+
+    if (std::any_of(parsed.lines.begin(), parsed.lines.end(), [](const auto& row) { return !row.words.empty(); })) {
+        // Absolute word times cannot be shared by merging repeated text.
+        // Serialize both clocks together, including the offset and end marker.
+        auto result = SerializeLyricDocument(parsed, !expand);
+        for (const auto& line : plain) result += line + L"\r\n";
+        SetLyricEditorText(result, true);
+        SetFocus(lyric_editor_);
+        return;
+    }
 
     std::wstring result;
     const auto append_metadata = [&result](std::wstring_view name,
@@ -3721,6 +3873,16 @@ void PlayerWindow::PrepareFullScreenLyricMenu(HMENU menu) const {
 
 void PlayerWindow::PrepareLyricEditorMenu(HMENU menu) const {
     if (!menu || !lyric_editor_) return;
+    if (!FindCommandMenu(menu, kCmdLyricEditorInsertWord)) {
+        if (const auto tags = FindCommandMenu(menu, kCmdLyricEditorNewLine)) {
+            InsertMenuW(tags, kCmdLyricEditorNewLine, MF_BYCOMMAND | MF_STRING,
+                kCmdLyricEditorInsertWord, i18n::Literal(L"插入逐字标签\tCtrl+F8"));
+            InsertMenuW(tags, kCmdLyricEditorNewLine, MF_BYCOMMAND | MF_STRING,
+                kCmdLyricEditorReplaceWord, i18n::Literal(L"替换逐字标签\tCtrl+F9"));
+            InsertMenuW(tags, kCmdLyricEditorNewLine, MF_BYCOMMAND | MF_STRING,
+                kCmdLyricEditorDeleteWord, i18n::Literal(L"删除逐字标签\tCtrl+F10"));
+        }
+    }
     CHARRANGE selection{};
     SendMessageW(lyric_editor_, EM_EXGETSEL, 0,
                  reinterpret_cast<LPARAM>(&selection));
@@ -3779,6 +3941,11 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
     case kCmdLyricEditorReplaceTag:
     case kCmdLyricEditorDeleteTag:
         EditLyricTimestamp(command);
+        return true;
+    case kCmdLyricEditorInsertWord:
+    case kCmdLyricEditorReplaceWord:
+    case kCmdLyricEditorDeleteWord:
+        EditLyricWordTimestamp(command);
         return true;
     case kCmdLyricEditorEarlier:
         ShiftLyricEditorTimestamps(std::chrono::milliseconds(-500));

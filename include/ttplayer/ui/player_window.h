@@ -564,7 +564,7 @@ private:
     void PaintLyricControl(HWND control, HDC dc, bool present_layered = true,
                            const RECT* target = nullptr, bool overlay = false) const;
     [[nodiscard]] std::wstring LyricLineText(size_t index) const;
-    struct LyricDisplayRow { std::wstring text; int width{}; };
+    struct LyricDisplayRow { std::wstring text; int width{}; size_t text_offset{}; };
     struct LyricLineLayout {
         std::string source;
         std::vector<LyricDisplayRow> rows;
@@ -623,6 +623,7 @@ private:
     void FinishLyricDocument(bool close_editor = true);
     void AutoEmbedLoadedLyrics();
     void EditLyricTimestamp(UINT command);
+    void EditLyricWordTimestamp(UINT command);
     void ShiftLyricEditorTimestamps(std::chrono::milliseconds delta);
     void ReflowLyricEditor(bool expand);
     void ConvertLyricEditorText(DWORD mapping);

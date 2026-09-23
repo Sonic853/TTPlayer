@@ -83,7 +83,7 @@ Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 | 作者（自定义 `Author` 字段） | `Sonic853` |
 | 公司（`CompanyName`） | `Sonic853` |
 | 备注（`Comments`） | `作者：Sonic853` |
-| 文件说明 | `千千静听` |
+| 文件说明 | `千千静听 社区版` |
 | 文件版本、产品版本 | Actions 最终版本，例如 `2026.09.23p12` |
 | 产品名称、内部名称 | `TTPlayerRebuild` |
 | 原始文件名 | `TTPlayerRebuild.exe` |
@@ -195,6 +195,10 @@ TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一�
 格式为 `yyyy-M-d`，不使用构建机器本地时区。该日期编入 EXE，启动播放器时
 不会变化。本地和 GitHub Actions 共用同一生成步骤；跨日增量构建会更新日期，
 同日重复构建不重复写入生成头文件，也不需要手工改源码或重新配置 CMake。
+
+## 逐字歌词
+
+逐字歌词格式、显示开关和编辑快捷键见 [逐字歌词与编辑](WORD_LYRICS.md)。
 
 ## 可选翻译 DLL
 

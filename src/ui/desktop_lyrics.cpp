@@ -6,6 +6,7 @@
 
 #include "ttplayer/core/text.h"
 #include "ttplayer/lyrics/lrc_parser.h"
+#include "lyric_word_highlight.h"
 #include "ttplayer/settings/settings.h"
 #include "ttplayer/skin/skin.h"
 #include "../app/resource_ids.h"
@@ -1959,6 +1960,22 @@ private:
                 static_cast<double>(duration), 0.0, 1.0);
     }
 
+    int PlayedPixels(size_t current, std::chrono::milliseconds position,
+                     const GlyphMask& mask) const {
+        if (!lyrics_ || current >= lyrics_->lines.size()) return 0;
+        const auto& line = lyrics_->lines[current];
+        if (line.words.empty()) return static_cast<int>(std::lround(mask.width * LineFraction(current, position)));
+        const auto end = current + 1 < lyrics_->lines.size()
+            ? lyrics_->lines[current + 1].time : line.time + std::chrono::minutes(1);
+        ScopedDc screen(nullptr);
+        if (!screen.dc || !font_) return 0;
+        const auto old = SelectObject(screen.dc, font_);
+        const int played = WordHighlightPixels(screen.dc, line, position - lyrics_->offset, end, mask.text);
+        SelectObject(screen.dc, old);
+        // BuildMask places text five pixels from the left edge.
+        return played > 0 ? played + 5 : 0;
+    }
+
     void CompositeMask(std::vector<unsigned char>& target,
                        const GlyphMask& mask, COLORREF solid,
                        const std::array<COLORREF, 3>* gradient,
@@ -2045,7 +2062,7 @@ private:
             const bool active = index == 0 &&
                 current != std::numeric_limits<size_t>::max();
             const int played_pixels = active
-                ? static_cast<int>(std::lround(mask.width * LineFraction(current, position)))
+                ? PlayedPixels(current, position, mask)
                 : 0;
             const auto viewport = CalculateDesktopLyricViewport(mask.width,
                 render_width, played_pixels, settings_->align,
