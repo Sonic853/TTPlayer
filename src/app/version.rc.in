@@ -1,0 +1,36 @@
+#include <winver.h>
+#pragma code_page(65001)
+LANGUAGE 0x04, 0x02
+1 VERSIONINFO
+FILEVERSION @PLAYER_FIXED_VERSION@
+PRODUCTVERSION @PLAYER_FIXED_VERSION@
+FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+FILEFLAGS VS_FF_DEBUG
+#else
+FILEFLAGS 0
+#endif
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE 0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "080404B0"
+    BEGIN
+      VALUE "Author", "Sonic853\0"
+      VALUE "CompanyName", "Sonic853\0"
+      VALUE "Comments", "作者：Sonic853\0"
+      VALUE "FileDescription", "千千静听 社区版\0"
+      VALUE "FileVersion", "@PLAYER_BUILD_VERSION@\0"
+      VALUE "InternalName", "TTPlayerRebuild\0"
+      VALUE "OriginalFilename", "TTPlayerRebuild.exe\0"
+      VALUE "ProductName", "TTPlayerRebuild\0"
+      VALUE "ProductVersion", "@PLAYER_BUILD_VERSION@\0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0804, 1200
+  END
+END

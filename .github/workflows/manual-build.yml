@@ -45,6 +45,8 @@ jobs:
       BUILD_CONFIGURATION: ${{ inputs.configuration }}
     outputs:
       release_date: ${{ steps.release_date.outputs.value }}
+      release_version: ${{ steps.version.outputs.version }}
+      previous_version: ${{ steps.version.outputs.previous }}
 
     steps:
       - name: Checkout
@@ -65,6 +67,54 @@ jobs:
           $releaseDate = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString(
             'yyyy.MM.dd', [Globalization.CultureInfo]::InvariantCulture)
           "value=$releaseDate" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Validate Gitee secrets
+        if: inputs.release_to_gitee
+        env:
+          GITEE_REPO: ${{ secrets.GITEE_REPO }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GITEE_REPO) -or
+              [string]::IsNullOrWhiteSpace($env:GITEE_TOKEN)) {
+            throw 'Gitee publication requires the GITEE_REPO and GITEE_TOKEN secrets.'
+          }
+
+      - name: Checkout Gitee release CLI
+        if: inputs.release_to_gitee
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: Sonic853/gitee-release-cli-rust
+          ref: 9993cd79d512e16c6586384cd83acbeaaf15a723
+          path: gitee-release-cli
+          persist-credentials: false
+          sparse-checkout: |
+            rust
+
+      - name: Build Gitee release CLI
+        if: inputs.release_to_gitee
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # This upstream revision does not include Cargo.lock. Resolve once,
+          # then keep that dependency set fixed for the executable build.
+          cargo generate-lockfile --manifest-path gitee-release-cli/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve Gitee CLI dependencies.' }
+          cargo build --release --locked --bin gitee-release-rs --manifest-path gitee-release-cli/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Gitee release CLI build failed.' }
+          $cli = (Resolve-Path -LiteralPath gitee-release-cli/target/release/gitee-release-rs.exe).Path
+          "GITEE_RELEASE_CLI=$cli" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Allocate final version before compilation
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH_RELEASE: ${{ inputs.release_a_version }}
+          PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
+          GITEE_REPO: ${{ inputs.release_to_gitee && secrets.GITEE_REPO || '' }}
+          GITEE_TOKEN: ${{ inputs.release_to_gitee && secrets.GITEE_TOKEN || '' }}
+          RELEASE_DATE: ${{ steps.release_date.outputs.value }}
+        run: |
+          ./cmake/resolve_release_version.ps1 -ReleaseDate $env:RELEASE_DATE -Repository $env:GITHUB_REPOSITORY `
+            -PublishGitHub:($env:PUBLISH_RELEASE -eq 'true') -PublishGitee:($env:PUBLISH_GITEE -eq 'true')
 
       - name: Verify VS 2026 toolchain
         run: |
@@ -94,6 +144,7 @@ jobs:
           "-DCMAKE_GENERATOR_INSTANCE=$env:TTPLAYER_VS_INSTANCE"
           -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF
           -DTTPLAYER_OPTIMIZE_SIZE=ON
+          "-DTTPLAYER_BUILD_VERSION=${{ steps.version.outputs.version }}"
 
       - name: Build
         run: cmake --build build --config "$env:BUILD_CONFIGURATION" --target ttplayer_rebuild --parallel 4
@@ -104,22 +155,27 @@ jobs:
           "-DCMAKE_GENERATOR_INSTANCE=$env:TTPLAYER_VS_INSTANCE"
           -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF -DTTPLAYER_LEGACY_WINDOWS=ON
           -DTTPLAYER_OPTIMIZE_SIZE=ON
+          "-DTTPLAYER_BUILD_VERSION=${{ steps.version.outputs.version }}"
 
       - name: Build and audit XP and Windows 7 edition
         run: cmake --build build-legacy --config Release --target ttplayer_rebuild --parallel 4
 
       - name: Prepare artifact
         env:
-          PACKAGE_VERSION: ${{ steps.release_date.outputs.value }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+          PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
         run: |
-          if ($env:PACKAGE_VERSION -notmatch '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$') {
-            throw 'Missing Beijing build date for package names.'
+          if ($env:PACKAGE_VERSION -notmatch '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(?:p[1-9][0-9]*)?$') {
+            throw 'Missing final build version for package names.'
           }
+          . ./cmake/version.ps1
           $output = Join-Path 'build' $env:BUILD_CONFIGURATION
           $executable = Join-Path $output 'TTPlayerRebuild.exe'
           if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
             throw 'The player executable was not produced.'
           }
+          Assert-PlayerFileVersion $executable $env:PACKAGE_VERSION
+          Assert-PlayerFileVersion 'build-legacy/Release/TTPlayerRebuild.exe' $env:PACKAGE_VERSION
           New-Item -ItemType Directory -Path artifact | Out-Null
           $modernName = "TTPlayerRebuild-$env:PACKAGE_VERSION.zip"
           $legacyName = "TTPlayerRebuild-XP-Win7-$env:PACKAGE_VERSION.zip"
@@ -136,6 +192,10 @@ jobs:
           $hash = (Get-FileHash -LiteralPath $modernArchive -Algorithm SHA256).Hash.ToLowerInvariant()
           $legacyHash = (Get-FileHash -LiteralPath $legacyArchive -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $modernName`n$legacyHash  $legacyName" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
+          if ($env:PUBLISH_GITEE -eq 'true') {
+            New-Item -ItemType Directory -Path artifact/cli -Force | Out-Null
+            Copy-Item -LiteralPath $env:GITEE_RELEASE_CLI -Destination artifact/cli/gitee-release-rs.exe
+          }
           [ordered]@{
             commit = $env:GITHUB_SHA
             ref = $env:GITHUB_REF
@@ -184,43 +244,9 @@ jobs:
       run:
         shell: pwsh
     env:
-      RELEASE_DATE: ${{ needs.build.outputs.release_date }}
+      RELEASE_VERSION: ${{ needs.build.outputs.release_version }}
+      PREVIOUS_VERSION: ${{ needs.build.outputs.previous_version }}
     steps:
-      - name: Validate Gitee secrets
-        if: inputs.release_to_gitee
-        env:
-          GITEE_REPO: ${{ secrets.GITEE_REPO }}
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:GITEE_REPO) -or
-              [string]::IsNullOrWhiteSpace($env:GITEE_TOKEN)) {
-            throw 'Gitee publication requires the GITEE_REPO and GITEE_TOKEN secrets.'
-          }
-
-      - name: Checkout Gitee release CLI
-        if: inputs.release_to_gitee
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: Sonic853/gitee-release-cli-rust
-          ref: 9993cd79d512e16c6586384cd83acbeaaf15a723
-          path: gitee-release-cli
-          persist-credentials: false
-          sparse-checkout: |
-            rust
-
-      - name: Build Gitee release CLI
-        if: inputs.release_to_gitee
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # This upstream revision does not include Cargo.lock. Resolve once,
-          # then keep that dependency set fixed for the executable build.
-          cargo generate-lockfile --manifest-path gitee-release-cli/Cargo.toml
-          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve Gitee CLI dependencies.' }
-          cargo build --release --locked --bin gitee-release-rs --manifest-path gitee-release-cli/Cargo.toml
-          if ($LASTEXITCODE -ne 0) { throw 'Gitee release CLI build failed.' }
-          $cli = (Resolve-Path -LiteralPath gitee-release-cli/target/release/gitee-release-rs.exe).Path
-          "GITEE_RELEASE_CLI=$cli" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
       - name: Download built player
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -230,11 +256,8 @@ jobs:
       - name: Prepare release files
         id: prepare
         env:
-          GH_TOKEN: ${{ github.token }}
           PUBLISH_RELEASE: ${{ inputs.release_a_version }}
           PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
-          GITEE_REPO: ${{ inputs.release_to_gitee && secrets.GITEE_REPO || '' }}
-          GITEE_TOKEN: ${{ inputs.release_to_gitee && secrets.GITEE_TOKEN || '' }}
           RELEASE_INSTALL_NOTES: |
             使用该程序前确保本地已安装有 [5.7.9](https://github.com/user-attachments/files/32431580/TTPlayer579.zip) 版本的千千静听（没装有？[点这里](https://github.com/user-attachments/files/32431580/TTPlayer579.zip)），请按照以下步骤安装重建版：
             1. Windows XP / Windows 7 下载并解压 TTPlayerRebuild-XP-Win7-{version}.zip；现代 Windows 下载并解压 TTPlayerRebuild-{version}.zip。
@@ -249,20 +272,12 @@ jobs:
           $publishGitHub = $env:PUBLISH_RELEASE -eq 'true'
           $publishGitee = $env:PUBLISH_GITEE -eq 'true'
           if (-not ($publishGitHub -or $publishGitee)) { throw 'No publication destination selected.' }
-          if ($publishGitee -and ([string]::IsNullOrWhiteSpace($env:GITEE_REPO) -or
-              [string]::IsNullOrWhiteSpace($env:GITEE_TOKEN) -or
-              [string]::IsNullOrWhiteSpace($env:GITEE_RELEASE_CLI))) {
-            throw 'Gitee publication requires its repository, token and built CLI.'
-          }
-          function Invoke-GiteeCli([string[]]$Arguments) {
-            # Credentials stay in the environment, never in command arguments.
-            $json = & $env:GITEE_RELEASE_CLI --json @Arguments
-            if ($LASTEXITCODE -ne 0) { throw "Gitee CLI operation failed: $($Arguments[0]) $($Arguments[1])." }
-            return (($json -join "`n") | ConvertFrom-Json)
+          if ($publishGitee -and -not (Test-Path -LiteralPath artifact/cli/gitee-release-rs.exe -PathType Leaf)) {
+            throw 'The built Gitee release CLI is missing from the artifact.'
           }
           $info = Get-Content -LiteralPath artifact/build-info.json -Raw | ConvertFrom-Json
           if ($info.commit -ne $env:GITHUB_SHA -or $info.configuration -ne 'Release' -or
-              $info.legacy_configuration -ne 'Release' -or $info.package_version -cne $env:RELEASE_DATE) {
+              $info.legacy_configuration -ne 'Release' -or $info.package_version -cne $env:RELEASE_VERSION) {
             throw 'The downloaded artifact does not match this Release build.'
           }
           $modernName = "TTPlayerRebuild-$($info.package_version).zip"
@@ -275,58 +290,14 @@ jobs:
           $actualHashes = "$hash  $modernName`n$legacyHash  $legacyName"
           if (($expectedHash -replace "`r", '') -cne $actualHashes) { throw 'Player SHA-256 verification failed.' }
 
-          function Read-VersionTag([string]$name) {
-            $match = [regex]::Match($name, '^(?<date>[0-9]{4}\.[0-9]{2}\.[0-9]{2})(?:p(?<patch>[1-9][0-9]*))?$')
-            if (-not $match.Success) { return }
-            $date = [datetime]::MinValue
-            if (-not [datetime]::TryParseExact($match.Groups['date'].Value, 'yyyy.MM.dd',
-                [Globalization.CultureInfo]::InvariantCulture,
-                [Globalization.DateTimeStyles]::None, [ref]$date)) { return }
-            $patch = 0L
-            if ($match.Groups['patch'].Success -and -not [long]::TryParse($match.Groups['patch'].Value, [ref]$patch)) {
-              throw 'Version patch number is too large.'
-            }
-            [pscustomobject]@{ Name = $name; Date = $date; Patch = $patch }
-          }
-          $base = Read-VersionTag $env:RELEASE_DATE
-          if (-not $base -or $base.Patch -ne 0) { throw 'Missing or invalid Beijing build date.' }
-          $tags = @(gh api "repos/$env:GITHUB_REPOSITORY/tags?per_page=100" --paginate --jq '.[].name')
-          if ($LASTEXITCODE -ne 0) { throw 'Could not read repository tags.' }
-          # A failed upload may leave a draft release without a tag: reserve its name too.
-          $releaseTags = @(gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --paginate --jq '.[].tag_name')
-          if ($LASTEXITCODE -ne 0) { throw 'Could not read existing releases.' }
-          $versions = @($tags | ForEach-Object { Read-VersionTag $_ })
-          $occupied = @($versions) + @($releaseTags | ForEach-Object { Read-VersionTag $_ })
-          if ($publishGitee) {
-            $giteeTags = @(Invoke-GiteeCli -Arguments @('tag', 'list', '--all', '--per-page', '100'))
-            $giteeReleases = @(Invoke-GiteeCli -Arguments @('release', 'list', '--all', '--per-page', '100'))
-            $occupied += @($giteeTags | ForEach-Object { Read-VersionTag $_.name })
-            $occupied += @($giteeReleases | ForEach-Object { Read-VersionTag $_.tag_name })
-          }
-          $sameDay = @($occupied | Where-Object { $_.Date -eq $base.Date } | Sort-Object Patch -Descending)
-          $version = $base.Name
-          if ($sameDay.Count) {
-            if ($sameDay[0].Patch -eq [long]::MaxValue) { throw 'Version patch number is exhausted.' }
-            $version += 'p' + ($sameDay[0].Patch + 1).ToString([Globalization.CultureInfo]::InvariantCulture)
-          }
-          # The final patch number is known only inside this publication slot.
-          # Renaming preserves the verified ZIP bytes; update the outer manifest.
-          $modernName = "TTPlayerRebuild-$version.zip"
-          $legacyName = "TTPlayerRebuild-XP-Win7-$version.zip"
-          if ($version -cne $info.package_version) {
-            Rename-Item -LiteralPath $modernArchive -NewName $modernName
-            Rename-Item -LiteralPath $legacyArchive -NewName $legacyName
-          }
-          $modernArchive = "artifact/$modernName"
-          $legacyArchive = "artifact/$legacyName"
-          "$hash  $modernName`n$legacyHash  $legacyName" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
-          # Compare real version tags, sorted by date and numeric patch, never API ordering.
-          $previous = $versions | Sort-Object Date, Patch -Descending | Select-Object -First 1
+          # Already compiled with this exact version; do not rename or patch binaries.
+          $version = $env:RELEASE_VERSION
+          $previous = $env:PREVIOUS_VERSION
           $repoUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
           # Gitee-only publication does not create a GitHub tag. Link to the
           # actual build commit so its changelog still resolves on GitHub.
           $logTarget = if ($publishGitHub) { $version } else { $env:GITHUB_SHA }
-          $logUrl = if ($previous) { "$repoUrl/compare/$($previous.Name)...$logTarget" }
+          $logUrl = if ($previous) { "$repoUrl/compare/$previous...$logTarget" }
                     else { "$repoUrl/commits/$logTarget" }
           $notes = "**完整更新日志**: $logUrl`n`n" + $env:RELEASE_INSTALL_NOTES.Replace('{version}', $version)
           Write-Output "Preparing $version; changelog: $logUrl"
@@ -336,10 +307,6 @@ jobs:
             commit = $env:GITHUB_SHA
             configuration = 'Release'
           } | ConvertTo-Json | Set-Content -LiteralPath artifact/release-info.json -Encoding utf8
-          if ($publishGitee) {
-            New-Item -ItemType Directory -Path artifact/cli -Force | Out-Null
-            Copy-Item -LiteralPath $env:GITEE_RELEASE_CLI -Destination artifact/cli/gitee-release-rs.exe
-          }
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "artifact_name=TTPlayer-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 

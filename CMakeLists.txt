@@ -32,11 +32,25 @@ if(TTPLAYER_LEGACY_WINDOWS)
 endif()
 include(cmake/wtl.cmake)
 
-# Re-evaluate at build time, not just when CMake configures. The generator
-# updates the header only if the Beijing calendar date changes, so same-day
-# incremental builds do not recompile the options window unnecessarily.
+# Re-evaluate build metadata at build time, not just when CMake configures.
+# Generators rewrite their outputs only when the date or version changes.
 find_program(TTPLAYER_POWERSHELL NAMES powershell pwsh REQUIRED)
 set(TTPLAYER_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(TTPLAYER_BUILD_VERSION "" CACHE STRING "EXE/package yyyy.MM.dd[pN] version; empty uses the current Beijing date")
+set(_player_version_args)
+if(NOT TTPLAYER_BUILD_VERSION STREQUAL "")
+  list(APPEND _player_version_args -Version "${TTPLAYER_BUILD_VERSION}")
+endif()
+add_custom_target(ttplayer_file_version
+  COMMAND "${TTPLAYER_POWERSHELL}" -NoProfile -NonInteractive -ExecutionPolicy Bypass
+          -File "${CMAKE_CURRENT_SOURCE_DIR}/cmake/write_version.ps1"
+          -Template "${CMAKE_CURRENT_SOURCE_DIR}/src/app/version.rc.in"
+          -OutputPath "${TTPLAYER_GENERATED_INCLUDE_DIR}/version.rc"
+          ${_player_version_args}
+  BYPRODUCTS "${TTPLAYER_GENERATED_INCLUDE_DIR}/version.rc"
+  COMMENT "Updating EXE author, description and version"
+  VERBATIM
+)
 add_custom_target(ttplayer_build_date
   COMMAND "${TTPLAYER_POWERSHELL}" -NoProfile -NonInteractive -ExecutionPolicy Bypass
           -File "${CMAKE_CURRENT_SOURCE_DIR}/cmake/write_build_date.ps1"
@@ -167,7 +181,9 @@ add_executable(ttplayer_rebuild WIN32
   src/app/runtime.cpp
   src/app/single_instance.cpp
   src/app/ttplayer.manifest
+  "${TTPLAYER_GENERATED_INCLUDE_DIR}/version.rc"
 )
+add_dependencies(ttplayer_rebuild ttplayer_file_version)
 set_target_properties(ttplayer_rebuild PROPERTIES
   OUTPUT_NAME "TTPlayerRebuild" PDB_NAME "TTPlayerRebuild")
 target_compile_definitions(ttplayer_rebuild PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

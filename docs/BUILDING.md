@@ -30,8 +30,9 @@ flowchart LR
   P --> E[Gitee Release]
 ```
 
-`Prepare Release` 统一分配版本号、校验和重命名附件、生成说明；勾选 Gitee 时
-在此构建一次 CLI。准备结果通过同一份 Artifact 交给两个发布任务。
+`Build player` 在编译前分配最终版本号，再写入两种 EXE 并打包；勾选 Gitee 时
+在此构建一次 CLI，用于查询已有版本并随 Artifact 传递。
+`Prepare Release` 校验构建版本及附件、生成说明，通过同一份 Artifact 交给两个发布任务。
 `GitHub Release`、`Gitee Release` 分别按对应勾选项运行，同时勾选时并行发布，
 各自显示成功或失败状态；其中一个发布失败不会阻止另一个发布任务。
 准备任务失败时，两边都不会开始发布。
@@ -41,8 +42,9 @@ flowchart LR
 3. 选择分支及配置：`Release`（默认）、`RelWithDebInfo` 或 `Debug`。
 4. 构建完成后，从该次运行的 **Artifacts** 下载
    `TTPlayer-Windows-x86-配置-运行编号`，产物保留 14 天。
-   其中包含 `TTPlayerRebuild-yyyy.MM.dd.zip` 和
-   `TTPlayerRebuild-XP-Win7-yyyy.MM.dd.zip`，日期取构建开始时的北京时间。
+   其中包含 `TTPlayerRebuild-版本号.zip` 和
+   `TTPlayerRebuild-XP-Win7-版本号.zip`，日期取构建开始时的北京时间；
+   勾选发布时，名称包含最终分配的 `pN` 补丁号。
 
 如需发布，选择 `Release` 配置并勾选对应平台，不需要输入版本号。
 在构建任务开始时记录北京时间（UTC+08:00）的日期，版本号和 Release 标题使用
@@ -50,7 +52,7 @@ flowchart LR
 最大补丁号加一：`2026.09.05` → `2026.09.05p1` → `2026.09.05p2`，不复用中间空号。
 草稿 Release 也占用版本号。勾选发布的工作流共用并发锁，锁覆盖构建、准备及两个
 发布任务，避免准备结束后另一次运行分配到相同版本号。只构建的运行保持独立。
-准备任务在锁内重新分页读取全部
+构建任务在编译前、并发锁内分页读取全部
 GitHub tag/Release；勾选 Gitee 时还会分页读取 Gitee tag/Release，把两边已有
 版本一起计入占用范围。两个平台同时发布时使用同一个新版本号和相同附件。
 新标签始终指向本次构建提交，不移动旧标签、不覆盖已有 Release。
@@ -58,8 +60,8 @@ Debug / RelWithDebInfo 仍可只构建，不用于发布；每次工作流也会
 Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 `TTPlayerRebuild-XP-Win7-版本号.zip` 与包含两个 ZIP 校验值的 `SHA256SUMS.txt`。
 例如发布 `2026.09.05p1` 时，两个附件分别为 `TTPlayerRebuild-2026.09.05p1.zip`、
-`TTPlayerRebuild-XP-Win7-2026.09.05p1.zip`。发布步骤在分配最终版本号后重命名 ZIP，
-同步更新校验文件和正文下载说明；原 Actions 构建产物仍保留构建日期名称。
+`TTPlayerRebuild-XP-Win7-2026.09.05p1.zip`。EXE 文件版本、产品版本、ZIP 名称、
+校验清单及正文下载说明均使用此版本；Actions 构建产物与 Release 附件保持一致。
 两种 ZIP 解压后的程序名均为 `TTPlayerRebuild.exe`。
 **XP / Win7 请使用名称中带 XP-Win7 的包**；详见 [兼容版说明](LEGACY_WINDOWS.md)。
 普通版在 Windows 10／11 上支持 [SMTC 系统媒体控件](SMTC.md)，可显示曲目信息和封面并控制播放。
@@ -71,6 +73,44 @@ Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 只发布 Gitee 时，GitHub 更新日志链接的终点使用本次提交 SHA，因为该操作
 不会在 GitHub 上创建同名 tag。
 正文安装说明明确区分现代版与旧系统版，不自动追加 GitHub 生成的说明。
+
+### EXE 文件属性
+
+普通版及 XP／Win7 版的 `TTPlayerRebuild.exe` 均包含 Windows `VERSIONINFO` 资源：
+
+| 字段 | 内容 |
+| --- | --- |
+| 作者（自定义 `Author` 字段） | `Sonic853` |
+| 公司（`CompanyName`） | `Sonic853` |
+| 备注（`Comments`） | `作者：Sonic853` |
+| 文件说明 | `千千静听` |
+| 文件版本、产品版本 | Actions 最终版本，例如 `2026.09.23p12` |
+| 产品名称、内部名称 | `TTPlayerRebuild` |
+| 原始文件名 | `TTPlayerRebuild.exe` |
+
+资源管理器对 EXE 通常显示公司、备注等标准版本字段，未必显示自定义作者字段。
+固定数值版本使用四个 16 位无符号整数：上述例子对应 `2026.9.23.12`；
+无补丁号时第四段为 `0`，补丁号最大为 `65535`。字符串版本保留日期补零及 `pN`。
+字段格式参见 [Microsoft VERSIONINFO 文档](https://learn.microsoft.com/en-us/windows/win32/menurc/versioninfo-resource)。
+
+Actions 在编译前将版本传入 `TTPLAYER_BUILD_VERSION`，打包前核对两种 EXE 的
+字符串版本、数值版本、作者公司和文件说明。构建与发布之间不再修改版本或重命名 ZIP。
+只构建、不发布时，版本使用北京时间日期，不查询远程版本。
+
+本地默认使用每次构建时的北京时间日期；也可指定与 Actions 相同格式的版本：
+
+```powershell
+cmake -S . -B build "-DTTPLAYER_BUILD_VERSION=2026.09.23p12"
+cmake --build build --config Release --target ttplayer_rebuild --parallel 4
+# 清除固定版本，恢复按北京时间自动生成。
+cmake -S . -B build "-DTTPLAYER_BUILD_VERSION="
+```
+
+生成脚本验证真实日期及数值范围；版本未变化时不重复写入资源，避免无意义的重新链接。
+该资源只编入播放器 EXE，不增加运行时依赖，也不改变“选项 → 关于”的构建日期格式。
+本地验证脚本 `tests/cmake/test_file_version.ps1` 检查生成规则及两种实际 EXE 的作者和版本；
+`tests/cmake/test_manual_release.ps1` 覆盖编译前版本分配、同日补丁号、实际打包和模拟发布。
+测试仅在本地运行，Actions 继续使用 `BUILD_TESTING=OFF`。
 
 ### Gitee 发布
 
