@@ -119,6 +119,8 @@ private:
     void ShowSkinPluginContentMenu(bool keyboard);
     void HandleSkinPluginContentMenuCommand(UINT, TtpSkinContent);
     HWND plugin_content_drag_window_{};
+    HWND plugin_content_window_{};
+    HWND LyricEditorParent() const;
     POINT plugin_content_menu_point_{};
     bool plugin_content_menu_point_valid_{};
     void HandleSkinPluginCommand(uint32_t command, int32_t value);

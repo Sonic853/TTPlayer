@@ -2008,7 +2008,7 @@ std::wstring PlayerWindow::LyricLineText(size_t index) const {
 }
 
 int PlayerWindow::LyricLayoutWidth() const {
-    TtpSkinContent content{sizeof(content),lyric_window_};
+    TtpSkinContent content{sizeof(content),plugin_content_drag_window_?plugin_content_drag_window_:lyric_window_};
     if(!fullscreen_lyric_detached_ && external_skin_ && external_skin_->ContentState(content))
         return std::max(1L,content.bounds.right-content.bounds.left);
     RECT bounds{};
@@ -2626,6 +2626,17 @@ void PlayerWindow::ReplaceLyricEditorRange(LONG begin, LONG end,
     InvalidateRect(lyric_editor_, nullptr, TRUE);
 }
 
+HWND PlayerWindow::LyricEditorParent() const {
+    TtpSkinContent requested{sizeof(requested),plugin_content_window_};
+    if(plugin_content_window_ && external_skin_ && external_skin_->ContentState(requested) && !IsRectEmpty(&requested.bounds))return plugin_content_window_;
+    if(lyric_editor_ && IsWindow(lyric_editor_)) {
+        const HWND parent=GetParent(lyric_editor_);
+        TtpSkinContent current{sizeof(current),parent};
+        if(parent==lyric_window_ || (external_skin_ && external_skin_->ContentState(current)))return parent;
+    }
+    return lyric_window_;
+}
+
 bool PlayerWindow::EnterLyricEditor() {
     CompleteSkinWindowFadeForReplacement();
     if (!IsWindow(window_) || close_after_skin_window_fade_) return false;
@@ -2634,10 +2645,12 @@ bool PlayerWindow::EnterLyricEditor() {
     if (fullscreen_mode_ != 0) LeaveFullScreen();
     if (!lyric_window_ || !lyric_control_) return false;
 
+    const HWND editor_parent=LyricEditorParent();
+
     // Main-menu editing must expose the editor even when a provider's video
     // window was showing only a visualization. Keep combined mode intact.
-    if(external_skin_ && external_skin_->Handles(lyric_window_)) {
-        TtpSkinContent content{sizeof(content),lyric_window_};
+    if(external_skin_ && external_skin_->Handles(editor_parent)) {
+        TtpSkinContent content{sizeof(content),editor_parent};
         if(external_skin_->ContentState(content) && content.mode==TTP_SKIN_CONTENT_VISUAL) {
             content.mode=TTP_SKIN_CONTENT_LYRICS;
             external_skin_->ContentState(content,true);
@@ -2669,7 +2682,7 @@ bool PlayerWindow::EnterLyricEditor() {
         const wchar_t* toolbar_name = toolbar_class.lpfnWndProc
             ? kLyricEditorToolbarClass : TOOLBARCLASSNAMEW;
         lyric_editor_toolbar_ = CreateWindowExW(0, toolbar_name, nullptr,
-            static_cast<DWORD>(0x46018944UL), 0, 0, 0, 0, lyric_window_,
+            static_cast<DWORD>(0x46018944UL), 0, 0, 0, 0, editor_parent,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLyricEditorToolbarId)),
             instance_, nullptr);
         if (lyric_editor_toolbar_) {
@@ -2739,7 +2752,7 @@ bool PlayerWindow::EnterLyricEditor() {
 
     if (!lyric_editor_) {
         lyric_editor_ = CreateWindowExW(0, L"RichEdit20W", nullptr,
-            static_cast<DWORD>(0x563081C4UL), 0, 0, 0, 0, lyric_window_,
+            static_cast<DWORD>(0x563081C4UL), 0, 0, 0, 0, editor_parent,
             nullptr, instance_, nullptr);
         if (!lyric_editor_) return false;
         SetWindowSubclass(lyric_editor_, LyricEditorProc, 0x4c594544,
@@ -2801,11 +2814,11 @@ bool PlayerWindow::EnterLyricEditor() {
     // The main menu can enter editing while Lyrics Show is closed. Original
     // 0044CB58 -> 00446EB4 -> main 0x7D64 opens that hidden surface. Complete
     // our asynchronous show fade before assigning the editor's keyboard focus.
-    if (!IsWindowVisible(lyric_window_) && !desktop_lyrics_.Visible()) {
+    if (editor_parent==lyric_window_ && !IsWindowVisible(lyric_window_) && !desktop_lyrics_.Visible()) {
         ToggleLyricWindow();
         CompleteSkinWindowFadeForReplacement();
     }
-    SetActiveWindow(lyric_window_);
+    SetActiveWindow(editor_parent);
     SetFocus(lyric_editor_);
     if (!lyric_editor_accelerators_) {
         constexpr BYTE control_key = FVIRTKEY | FCONTROL;
@@ -2827,16 +2840,20 @@ bool PlayerWindow::EnterLyricEditor() {
 
 void PlayerWindow::LayoutLyricEditor(const RECT* content_bounds) {
     if (!lyric_editor_ && !lyric_editor_toolbar_) return;
+    const HWND editor_parent=LyricEditorParent();
+    for(HWND child:{lyric_editor_,lyric_editor_toolbar_})
+        if(child && GetParent(child)!=editor_parent)SetParent(child,editor_parent);
     RECT bounds = LyricTextBounds();
     if (settings_.lyric.transparent && settings_.lyric.transparent_skin) {
-        GetClientRect(lyric_window_, &bounds);
+        GetClientRect(editor_parent, &bounds);
     }
-    TtpSkinContent content{sizeof(content),lyric_window_};
+    TtpSkinContent content{sizeof(content),editor_parent};
     if(!content_bounds && external_skin_ && external_skin_->ContentState(content)) {
         RECT visual{};bool overlay{};
         SkinPluginContentRects(content.bounds,content.mode,content.visual_type,visual,bounds,overlay);
     }
     if(content_bounds) bounds=*content_bounds;
+    for(HWND child:{lyric_editor_,lyric_editor_toolbar_})if(child)ShowWindow(child,IsRectEmpty(&bounds)?SW_HIDE:SW_SHOWNOACTIVATE);
     const int width = std::max<LONG>(0, bounds.right - bounds.left);
     const int height = std::max<LONG>(0, bounds.bottom - bounds.top);
     const int toolbar_height = std::min(24, height);

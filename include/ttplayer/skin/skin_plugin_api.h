@@ -77,7 +77,11 @@ typedef struct TtpSkinSpectrumFrame {
     uint32_t size, type, playback, count;
     uint64_t generation, revision;
     int16_t magnitudes[256];
+    // Optional tail: signed native PCM for provider-owned oscilloscopes.
+    uint32_t sample_count;
+    int16_t samples_left[512], samples_right[512];
 } TtpSkinSpectrumFrame;
+#define TTP_SKIN_SPECTRUM_V1_SIZE ((uint32_t)offsetof(TtpSkinSpectrumFrame, sample_count))
 
 enum TtpSkinContentMode {
     TTP_SKIN_CONTENT_LYRICS = 1, TTP_SKIN_CONTENT_VISUAL, TTP_SKIN_CONTENT_COMBINED

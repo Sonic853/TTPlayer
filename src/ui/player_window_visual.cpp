@@ -722,6 +722,8 @@ public:
             std::copy_n(samples.right.begin(), kAnalysisSamples,
                         analysis_work_.begin() + kAnalysisSamples);
         }
+        std::copy_n(samples.left.begin(),kAnalysisSamples,skin_pcm_left_.begin());
+        std::copy_n(samples.right.begin(),kAnalysisSamples,skin_pcm_right_.begin());
         switch (settings_.type) {
         case 1: UpdateDream(samples); break;
         case 2: UpdateSpectrum(samples); break;
@@ -778,6 +780,11 @@ public:
         frame.generation=spectrum_generation_;frame.revision=spectrum_revision_;
         frame.count=settings_.type==2 && have_dynamic_frame_?256:0;
         if(frame.count) std::copy_n(analysis_work_.begin()+kAnalysisSamples*2,frame.count,frame.magnitudes);
+        frame.sample_count=settings_.type==3 && have_dynamic_frame_?kAnalysisSamples:0;
+        if(frame.sample_count) {
+            std::copy(skin_pcm_left_.begin(),skin_pcm_left_.end(),frame.samples_left);
+            std::copy(skin_pcm_right_.begin(),skin_pcm_right_.end(),frame.samples_right);
+        }
     }
 
     void PaintBackgroundOnly(HDC dc, const RECT& bounds) {
@@ -1425,6 +1432,7 @@ private:
     mutable std::recursive_mutex mutex_;
     // CVisualCtrl+0x94c: one persistent 0xC00-byte analysis work block.
     std::array<int16_t, kAnalysisSamples * 3> analysis_work_{};
+    std::array<int16_t,kAnalysisSamples> skin_pcm_left_{},skin_pcm_right_{};
     std::vector<uint32_t> background_pixels_;
     // FUN_00456A11 updates four packed signed 16-bit values per column:
     // bar, fall counter, peak and previous peak.  Keeping integral state is
@@ -1723,14 +1731,16 @@ void PlayerWindow::UpdateVisualFrame() {
 }
 
 BOOL WINAPI PlayerWindow::QuerySkinPluginSpectrum(void* context,TtpSkinSpectrumFrame* frame) {
-    if(!context || !frame || frame->size<sizeof(*frame)) return FALSE;
+    if(!context || !frame || frame->size<TTP_SKIN_SPECTRUM_V1_SIZE) return FALSE;
     try {
         auto& self=*static_cast<PlayerWindow*>(context);
         if(!self.visual_runtime_) return FALSE;
-        *frame={};frame->size=sizeof(*frame);
-        self.visual_runtime_->SpectrumFrame(*frame);
-        frame->playback=static_cast<uint32_t>(self.audio_->State());
-        if(frame->playback!=2 && frame->playback!=3) frame->count=0;
+        const auto capacity=frame->size;
+        TtpSkinSpectrumFrame next{};next.size=std::min<uint32_t>(capacity,sizeof(next));
+        self.visual_runtime_->SpectrumFrame(next);
+        next.playback=static_cast<uint32_t>(self.audio_->State());
+        if(next.playback!=2 && next.playback!=3) next.count=next.sample_count=0;
+        std::memcpy(frame,&next,next.size);
         return TRUE;
     } catch(...) {return FALSE;}
 }
