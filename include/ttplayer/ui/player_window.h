@@ -186,7 +186,7 @@ private:
         GUID identifier{};
         bool has_identifier{};
         bool details_resolved{};
-        int backend{}; // 0 waveOut, 1 DirectSound, 2 KS, 3 ASIO
+        int backend{}; // 0 waveOut, 1 DirectSound, 2 KS, 3 ASIO, 4/5 WASAPI shared/exclusive
         UINT wave_device_id{WAVE_MAPPER};
     };
 

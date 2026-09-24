@@ -127,7 +127,9 @@ struct PlaybackOptions {
     // CSettings::Device/@DeviceType is the textual form of the original
     // 16-byte output key.  A zero-tail key uses Data1.low as waveOut id + 1
     // and Data1.high as the backend discriminator (0 waveOut, 2 KS, 3 ASIO);
-    // a non-zero tail denotes DirectSound.  Empty keeps the reconstruction's
+    // a non-zero tail denotes DirectSound. WASAPI uses a separate
+    // wasapi:shared:/wasapi:exclusive: prefix plus an opaque endpoint ID.
+    // Empty keeps the reconstruction's
     // backwards-compatible WAVE_MAPPER default.
     std::wstring device_type;
     bool hardware_buffer{true};
@@ -274,7 +276,7 @@ public:
 private:
     friend struct ttplayer::testing::ProgressSeekAccess;
     friend struct ttplayer::testing::MidiPlaybackAccess;
-    enum class Backend { none, wave_out, direct_sound, kernel_streaming, asio, midi };
+    enum class Backend { none, wave_out, direct_sound, kernel_streaming, asio, midi, wasapi };
     enum class FadeCompletion { none, pause, seek, seek_resume, stop };
     struct SeekRequest {
         int64_t position_ms{-1};

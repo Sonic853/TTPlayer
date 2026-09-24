@@ -2,19 +2,24 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <guiddef.h>
 
 namespace ttplayer::audio {
 
 enum class OutputBackend { wave_out = 0, direct_sound = 1, kernel_streaming = 2,
-                           asio = 3, unknown = -1 };
+                           asio = 3, wasapi_shared = 4, wasapi_exclusive = 5,
+                           unknown = -1 };
 
 struct OutputDeviceKey {
     OutputBackend backend{OutputBackend::unknown};
     GUID identifier{};
     std::uint16_t ordinal{};
     bool default_direct_sound{};
+    // Rebuild extension: persist the opaque MMDevice ID, never a list ordinal.
+    // Empty selects the current default multimedia render endpoint.
+    std::wstring endpoint_id;
 };
 
 // FUN_004918B1 / FUN_004918FE: Data1.high selects the backend only when

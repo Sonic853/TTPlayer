@@ -18,6 +18,7 @@
 #include "ttplayer/audio/winamp_dsp.h"
 #include "ttplayer/plugins/plugin_manager.h"
 #include "../ui/output_devices.h"
+#include "ttplayer/audio/wasapi_sink.h"
 
 #include <algorithm>
 #include <array>
@@ -1998,6 +1999,8 @@ std::wstring BackendName(LegacyOutputBackend backend) {
     case LegacyOutputBackend::direct_sound: return L"DirectSound";
     case LegacyOutputBackend::kernel_streaming: return L"Kernel Streaming";
     case LegacyOutputBackend::asio: return L"ASIO";
+    case LegacyOutputBackend::wasapi_shared: return L"WASAPI shared";
+    case LegacyOutputBackend::wasapi_exclusive: return L"WASAPI exclusive";
     case LegacyOutputBackend::unknown: return L"unknown legacy";
     }
     return L"unknown legacy";
@@ -2025,7 +2028,9 @@ WaveOutSelection ResolveWaveOutSelection(const PlaybackOptions& options) {
         return result;
     }
     if (key->backend == OutputBackend::kernel_streaming ||
-        key->backend == OutputBackend::asio) return result;
+        key->backend == OutputBackend::asio ||
+        key->backend == OutputBackend::wasapi_shared ||
+        key->backend == OutputBackend::wasapi_exclusive) return result;
 
     result.error = BackendName(result.requested_backend) +
         L" output cannot be opened because its private TTPlayer ABI has not "
@@ -2212,7 +2217,10 @@ bool AudioEngine::TryReapStopped() noexcept {
 }
 
 bool AudioEngine::BeginWaveOutTrackChange() {
-    if (backend_.load() != Backend::wave_out) return false;
+    // WASAPI closes the outgoing endpoint after its fade too, so exclusive
+    // mode never tries opening a second stream on its own occupied device.
+    if (backend_.load() != Backend::wave_out &&
+        backend_.load() != Backend::wasapi) return false;
     return BeginStopFade();
 }
 
@@ -2805,6 +2813,21 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     if (buffer_bytes == 0) buffer_bytes = wave_format.nBlockAlign;
 
     std::unique_ptr<KernelStreamingSink> ks_sink;
+    std::unique_ptr<WasapiSink> wasapi_sink;
+    if (output.requested_backend == LegacyOutputBackend::wasapi_shared ||
+        output.requested_backend == LegacyOutputBackend::wasapi_exclusive) {
+        const auto key = ParseOutputDeviceKey(options.device_type);
+        wasapi_sink = std::make_unique<WasapiSink>();
+        if (!wasapi_sink->OpenDevice(key->endpoint_id,
+                output.requested_backend == LegacyOutputBackend::wasapi_exclusive,
+                wave_format, options.output_buffer_ms)) {
+            if (!stop_requested_) SetError(wasapi_sink->Error(), wasapi_sink->ErrorResult());
+            return;
+        }
+        RecordDiagnostic(BackendName(output.requested_backend) + L": " +
+            std::to_wstring(wasapi_sink->DeviceFormat().nSamplesPerSec) + L" Hz / " +
+            std::to_wstring(wasapi_sink->DeviceFormat().wBitsPerSample) + L" bit");
+    }
     if (output.requested_backend == LegacyOutputBackend::kernel_streaming) {
         const auto catalog = ui::detail::EnumerateKernelStreamingOutputDevices();
         const auto selected = ui::detail::ResolveLegacyNativeOutputDevice(options.device_type, catalog);
@@ -2854,7 +2877,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     }
     HWAVEOUT opened_device{};
     UINT output_device = output.device_id;
-    if (!ks_sink && !asio_sink && output_device != WAVE_MAPPER) {
+    if (!ks_sink && !asio_sink && !wasapi_sink && output_device != WAVE_MAPPER) {
         WAVEOUTCAPSW capabilities{};
         const MMRESULT capabilities_result = waveOutGetDevCapsW(
             output_device, &capabilities, sizeof(capabilities));
@@ -2868,7 +2891,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             return;
         }
     }
-    MMRESULT open_result = (ks_sink || asio_sink) ? MMSYSERR_NOERROR : waveOutOpen(
+    MMRESULT open_result = (ks_sink || asio_sink || wasapi_sink) ? MMSYSERR_NOERROR : waveOutOpen(
         &opened_device, output_device, &wave_format,
         reinterpret_cast<DWORD_PTR>(&WaveOutCallback),
         reinterpret_cast<DWORD_PTR>(completion), CALLBACK_FUNCTION);
@@ -2878,11 +2901,22 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             SetError(WaveOutErrorMessage(L"waveOutOpen", open_result));
         return;
     }
+    // Original 004E2585 stores the pre-playback stereo gain at output+0x0C,
+    // before any player volume, balance or opening fade reaches the handle.
+    // Some drivers/Core Audio sessions share this gain with other outputs.
+    // Keep the snapshot local to this successfully opened handle, never in
+    // the player settings or a later successor's mutable state.
+    DWORD saved_wave_volume = 0xffffffff;
+    if (opened_device && waveOutGetVolume(opened_device, &saved_wave_volume) !=
+                             MMSYSERR_NOERROR) {
+        saved_wave_volume = 0xffffffff; // 004E2585's original fallback.
+        RecordDiagnostic(L"waveOutGetVolume failed; using the original full-volume restore fallback");
+    }
     {
         std::scoped_lock lock(mutex_);
         device_ = opened_device;
         completion_event_ = completion;
-        backend_ = asio_sink ? Backend::asio :
+        backend_ = wasapi_sink ? Backend::wasapi : asio_sink ? Backend::asio :
                    ks_sink ? Backend::kernel_streaming : Backend::wave_out;
         ApplyVolumeLocked();
     }
@@ -2957,7 +2991,13 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         output.header = {};
         output.header.lpData = reinterpret_cast<LPSTR>(output.data.data());
         output.header.dwBufferLength = static_cast<DWORD>(written);
-        if (ks_sink || asio_sink) {
+        if (wasapi_sink) {
+            if (!wasapi_sink->Submit(std::span<const std::byte>(output.data.data(), written))) {
+                if (!stop_requested_) SetError(wasapi_sink->Error(), wasapi_sink->ErrorResult());
+                return false;
+            }
+            output.header.dwFlags = WHDR_PREPARED;
+        } else if (ks_sink || asio_sink) {
             float left{1.0F}, right{1.0F};
             if (ks_sink) {
                 std::scoped_lock lock(mutex_);
@@ -3065,7 +3105,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             usable = false;
         }
         if (usable) usable = PublishOpened(
-            asio_sink ? Backend::asio :
+            wasapi_sink ? Backend::wasapi : asio_sink ? Backend::asio :
             ks_sink ? Backend::kernel_streaming : Backend::wave_out,
             source->DisplayFormat(), source->Duration());
         if (usable) replay_gain_commit.MarkPlaybackAccepted();
@@ -3084,7 +3124,11 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         const int64_t requested = request.position_ms;
         if (requested >= 0) {
             const auto previous_state = state_.load();
-            if (ks_sink) {
+            if (wasapi_sink) {
+                if (!wasapi_sink->Reset()) {
+                    SetError(wasapi_sink->Error(), wasapi_sink->ErrorResult()); break;
+                }
+            } else if (ks_sink) {
                 if (!ks_sink->Reset()) { SetError(ks_sink->Error()); break; }
             } else if (asio_sink) {
                 if (!asio_sink->Reset()) { SetError(asio_sink->Error()); break; }
@@ -3097,7 +3141,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                     waveOutPause(opened_device);
             }
             for (auto& buffer : buffers) {
-                if (!ks_sink && !asio_sink &&
+                if (!ks_sink && !asio_sink && !wasapi_sink &&
                     (buffer.header.dwFlags & WHDR_PREPARED))
                     waveOutUnprepareHeader(opened_device, &buffer.header,
                                            sizeof(buffer.header));
@@ -3135,7 +3179,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 if (!asio_sink->SetPaused(previous_state == PlaybackState::paused)) {
                     SetError(asio_sink->Error()); break;
                 }
-            } else if (previous_state == PlaybackState::paused)
+            } else if (!wasapi_sink && previous_state == PlaybackState::paused)
                 waveOutPause(opened_device);
             else if (usable && queued != 0)
                 publish_at(0, true);
@@ -3146,7 +3190,28 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             (asio_sink && !asio_sink->SetPaused(state_.load() == PlaybackState::paused))) {
             SetError(ks_sink ? ks_sink->Error() : asio_sink->Error()); break;
         }
+        if (wasapi_sink) {
+            float left{}, right{};
+            bool paused{};
+            {
+                std::scoped_lock lock(mutex_);
+                paused = state_.load() == PlaybackState::paused &&
+                    !(fade_pending_ && fade_completion_ == FadeCompletion::pause);
+                left = right = std::clamp(volume_ * transition_gain_ * track_gain_, 0.0F, 1.0F);
+                if (balance_ > 0) left *= (100 - balance_) / 100.0F;
+                else if (balance_ < 0) right *= (100 + balance_) / 100.0F;
+            }
+            if (!wasapi_sink->SetPaused(paused) || !wasapi_sink->Pump(left, right)) {
+                SetError(wasapi_sink->Error(), wasapi_sink->ErrorResult()); break;
+            }
+        }
         for (auto& buffer : buffers) {
+            if (wasapi_sink && buffer.queued && wasapi_sink->PositionSourceBytes() >=
+                    buffer.stream_byte_offset + buffer.header.dwBufferLength)
+                buffer.header.dwFlags |= WHDR_DONE;
+            if (wasapi_sink && !wasapi_sink->Error().empty()) {
+                SetError(wasapi_sink->Error(), wasapi_sink->ErrorResult()); usable = false; break;
+            }
             if (ks_sink && buffer.queued && ks_sink->IsComplete(
                     static_cast<size_t>(&buffer - buffers.data())))
                 buffer.header.dwFlags |= WHDR_DONE;
@@ -3157,7 +3222,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 SetError(ks_sink->Error()); usable = false; break;
             }
             if (!buffer.queued || (buffer.header.dwFlags & WHDR_DONE) == 0) continue;
-            if (!ks_sink && !asio_sink)
+            if (!ks_sink && !asio_sink && !wasapi_sink)
                 waveOutUnprepareHeader(opened_device, &buffer.header, sizeof(buffer.header));
             buffer.header = {};
             buffer.queued = false;
@@ -3170,12 +3235,13 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
 
         MMTIME position{};
         position.wType = TIME_BYTES;
-        const std::uint64_t native_position = ks_sink ? ks_sink->PositionSourceBytes() :
+        const std::uint64_t native_position = wasapi_sink ? wasapi_sink->PositionSourceBytes() :
+            ks_sink ? ks_sink->PositionSourceBytes() :
             asio_sink ? asio_sink->ConsumedSourceBytes() : 0;
-        if (ks_sink || asio_sink || waveOutGetPosition(opened_device, &position, sizeof(position)) == MMSYSERR_NOERROR) {
+        if (ks_sink || asio_sink || wasapi_sink || waveOutGetPosition(opened_device, &position, sizeof(position)) == MMSYSERR_NOERROR) {
             int64_t relative{};
             uint64_t played_bytes{};
-            if (ks_sink || asio_sink) {
+            if (ks_sink || asio_sink || wasapi_sink) {
                 played_bytes = native_position;
                 relative = static_cast<int64_t>(native_position * 1000 / wave_format.nAvgBytesPerSec);
             } else if (position.wType == TIME_BYTES) {
@@ -3208,15 +3274,16 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             const HANDLE events[]{completion, asio_sink->ActivityEvent()};
             WaitForMultipleObjects(2, events, FALSE, 20);
         } else {
-            WaitForSingleObject(completion, 20);
+            WaitForSingleObject(completion, wasapi_sink ? 5 : 20);
         }
     }
 
-    if (asio_sink) asio_sink->Close();
+    if (wasapi_sink) wasapi_sink->Close();
+    else if (asio_sink) asio_sink->Close();
     else if (ks_sink) ks_sink->Close();
     else waveOutReset(opened_device);
     for (auto& buffer : buffers) {
-        if (!ks_sink && !asio_sink && (buffer.header.dwFlags & WHDR_PREPARED))
+        if (!ks_sink && !asio_sink && !wasapi_sink && (buffer.header.dwFlags & WHDR_PREPARED))
             waveOutUnprepareHeader(opened_device, &buffer.header, sizeof(buffer.header));
     }
     {
@@ -3227,7 +3294,16 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     }
     // Revoke shared handles before closing them. Fade/volume/cancellation
     // commands also hold mutex_ and must never call a just-closed handle.
-    if (!ks_sink && !asio_sink) waveOutClose(opened_device);
+    if (opened_device) {
+        // 004E2471 restores the saved gain before releasing its output. The
+        // rebuild first resets/unprepares the queue and revokes device_ under
+        // mutex_: restoring while queued PCM is audible can produce a burst,
+        // and a late fade/SetVolume must not overwrite the restored value.
+        const MMRESULT restored = waveOutSetVolume(opened_device, saved_wave_volume);
+        if (restored != MMSYSERR_NOERROR)
+            RecordDiagnostic(WaveOutErrorMessage(L"Restoring waveOut volume", restored));
+        waveOutClose(opened_device);
+    }
     CloseHandle(completion);
     ClearVisualization();
     if (natural_replay_gain_end)
@@ -3404,7 +3480,8 @@ void AudioEngine::Pause() {
     if ((options_.sound_fade_mode & 0x02) != 0 &&
         options_.fade_duration[1] > 0 &&
         (backend_.load() == Backend::wave_out ||
-         backend_.load() == Backend::direct_sound)) {
+         backend_.load() == Backend::direct_sound ||
+         backend_.load() == Backend::wasapi)) {
         // local_38 == 6 / FadeDuration[1] at 004AC7F0..004AC845.
         state_ = PlaybackState::paused;
         QueueFadeLocked(
@@ -3418,7 +3495,8 @@ void AudioEngine::Pause() {
     else if (backend_.load() == Backend::direct_sound && direct_sound_buffer_)
         success = SUCCEEDED(direct_sound_buffer_->Stop());
     else if (backend_.load() == Backend::kernel_streaming ||
-             backend_.load() == Backend::asio)
+             backend_.load() == Backend::asio ||
+             backend_.load() == Backend::wasapi)
         success = true; // The owning worker performs the native pin transition.
     else if (backend_.load() == Backend::midi)
         success = true; // The owner thread applies IMediaControl::Pause.
@@ -3437,7 +3515,8 @@ void AudioEngine::Resume() {
     else if (backend_.load() == Backend::direct_sound && direct_sound_buffer_)
         success = SUCCEEDED(direct_sound_buffer_->Play(0, 0, DSBPLAY_LOOPING));
     else if (backend_.load() == Backend::kernel_streaming ||
-             backend_.load() == Backend::asio)
+             backend_.load() == Backend::asio ||
+             backend_.load() == Backend::wasapi)
         success = true;
     else if (backend_.load() == Backend::midi)
         success = true; // The owner thread applies IMediaControl::Run.
@@ -3447,7 +3526,8 @@ void AudioEngine::Resume() {
             options_.fade_duration[
                 RecoveredFadeInDurationIndex(false)] > 0 &&
             (backend_.load() == Backend::wave_out ||
-             backend_.load() == Backend::direct_sound)) {
+             backend_.load() == Backend::direct_sound ||
+             backend_.load() == Backend::wasapi)) {
             transition_gain_ = 0.0F;
             // 004AC605 state=1 with the seek-transition flag clear reads
             // CSound+0xB4, FadeDuration[0].  FadeDuration[2] belongs only to
@@ -3522,7 +3602,8 @@ void AudioEngine::SeekImpl(std::chrono::milliseconds position,
         if (state_.load() != PlaybackState::playing &&
             state_.load() != PlaybackState::paused) return;
         const bool supported = backend_.load() == Backend::wave_out ||
-                               backend_.load() == Backend::direct_sound;
+                               backend_.load() == Backend::direct_sound ||
+                               backend_.load() == Backend::wasapi;
         if (ShouldBeginRecoveredSeekFade(
                 allow_fade, options_.sound_fade_mode,
                 options_.fade_duration[RecoveredFadeInDurationIndex(true)],
@@ -3620,7 +3701,8 @@ void AudioEngine::StopWithFade() {
 bool AudioEngine::BeginStopFade(bool detach_dsp) {
     std::unique_lock lock(mutex_);
     const bool supported = backend_.load() == Backend::wave_out ||
-                           backend_.load() == Backend::direct_sound;
+                           backend_.load() == Backend::direct_sound ||
+                           backend_.load() == Backend::wasapi;
     if (ShouldBeginRecoveredStopFade(
             options_.sound_fade_mode, options_.fade_duration[3],
             state_.load(), supported)) {
@@ -3738,6 +3820,10 @@ void AudioEngine::FadeWorker(std::stop_token stop_token) {
                 else if (backend_.load() == Backend::direct_sound &&
                          direct_sound_buffer_)
                     success = SUCCEEDED(direct_sound_buffer_->Stop());
+                else if (backend_.load() == Backend::wasapi) {
+                    success = true; // Native Stop remains on the audio owner.
+                    if (completion_event_) SetEvent(completion_event_);
+                }
                 if (!success) {
                     state_ = PlaybackState::playing;
                     transition_gain_ = 1.0F;
@@ -3793,6 +3879,10 @@ void AudioEngine::UpdateTrackFade(int64_t position_ms) {
 }
 
 void AudioEngine::ApplyVolumeLocked() {
+    if (backend_.load() == Backend::wasapi) {
+        if (completion_event_) SetEvent(completion_event_);
+        return;
+    }
     if (backend_.load() == Backend::midi) {
         if (completion_event_) SetEvent(completion_event_);
         return;

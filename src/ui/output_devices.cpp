@@ -2,6 +2,7 @@
 #include "output_devices.h"
 #include "ttplayer/audio/asio_sink.h"
 #include "ttplayer/audio/native_output_contract.h"
+#include "ttplayer/audio/wasapi_sink.h"
 
 #include <algorithm>
 #include <array>
@@ -907,6 +908,20 @@ std::vector<LegacyOutputDevice> EnumerateLegacyOutputDevices() {
     };
     append(EnumerateKernelStreamingOutputDevices());
     append(EnumerateAsioOutputDevices());
+    for (const auto& endpoint : audio::EnumerateWasapiEndpoints()) {
+        for (const bool exclusive : {false, true}) {
+            LegacyOutputDevice entry;
+            entry.backend = exclusive ? 5 : 4;
+            entry.key = std::wstring(exclusive ? L"wasapi:exclusive:" : L"wasapi:shared:") +
+                (endpoint.id.empty() ? L"default" : endpoint.id);
+            entry.name = std::wstring(exclusive ? L"WASAPI (独占) - " : L"WASAPI (共享) - ") + endpoint.name;
+            entry.module = endpoint.id;
+            entry.details = {exclusive ? L"独占" : L"共享", endpoint.mix_format,
+                endpoint.id.empty() ? L"系统默认多媒体设备" : L"固定设备",
+                L"Windows 7 或更高版本"};
+            result.push_back(std::move(entry));
+        }
+    }
     return result;
 }
 
@@ -969,7 +984,7 @@ ReadLegacyOutputDeviceProbe(const std::filesystem::path& input) {
                ReadProbeBytes(file, &has_class_id, sizeof(has_class_id)) &&
                ReadProbeBytes(file, &device.class_id,
                               sizeof(device.class_id)) &&
-               backend >= 0 && backend <= 3 && has_class_id <= 1 &&
+               backend >= 0 && backend <= 5 && has_class_id <= 1 &&
                ReadProbeString(file, device.key) &&
                ReadProbeString(file, device.name) &&
                ReadProbeString(file, device.module);
@@ -988,6 +1003,11 @@ ReadLegacyOutputDeviceProbe(const std::filesystem::path& input) {
     // Do not publish a KS/ASIO row whose persisted identity cannot resolve
     // back to precisely that descriptor (including duplicate-key failures).
     for (const auto& device : devices) {
+        if (device.backend == 4 || device.backend == 5) {
+            const auto key = audio::ParseOutputDeviceKey(device.key);
+            if (!key || static_cast<int>(key->backend) != device.backend ||
+                key->endpoint_id != device.module) return std::nullopt;
+        }
         if ((device.backend == 2 || device.backend == 3) &&
             !ResolveLegacyNativeOutputDevice(device.key, devices).device)
             return std::nullopt;

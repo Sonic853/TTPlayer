@@ -10,6 +10,19 @@ namespace ttplayer::audio {
 
 std::optional<OutputDeviceKey> ParseOutputDeviceKey(std::wstring_view text) {
     OutputDeviceKey result;
+    if (text.starts_with(L"wasapi:")) {
+        constexpr std::wstring_view shared = L"wasapi:shared:";
+        constexpr std::wstring_view exclusive = L"wasapi:exclusive:";
+        const bool is_shared = text.starts_with(shared);
+        if (!is_shared && !text.starts_with(exclusive)) return std::nullopt;
+        const auto id = text.substr(is_shared ? shared.size() : exclusive.size());
+        if (id.empty() || id.size() > 4096 ||
+            id.find(L'\0') != std::wstring_view::npos) return std::nullopt;
+        result.backend = is_shared ? OutputBackend::wasapi_shared
+                                   : OutputBackend::wasapi_exclusive;
+        if (id != L"default") result.endpoint_id = id;
+        return result;
+    }
     if (text.empty()) {
         result.backend = OutputBackend::wave_out;
         return result;

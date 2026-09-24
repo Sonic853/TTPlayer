@@ -207,6 +207,8 @@ std::wstring DeviceKeyString(DWORD data1) {
 }
 
 int DeviceBackendFromKey(std::wstring_view text, UINT& wave_device_id) {
+    if (text.starts_with(L"wasapi:shared:")) return 4;
+    if (text.starts_with(L"wasapi:exclusive:")) return 5;
     GUID key{};
     const std::wstring terminated(text);
     if (terminated.empty() ||
@@ -4766,7 +4768,8 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                 return _wcsicmp(entry.key.c_str(),
                                 settings_.device.device_type.c_str()) == 0;
             });
-        if (!complete_catalog && !configured_present) {
+        if ((!complete_catalog || settings_.device.device_type.starts_with(L"wasapi:")) &&
+            !configured_present) {
             // The isolated full scan failed after settings had selected a
             // KS/ASIO (or now-unplugged DirectSound) key.  Keep that choice
             // visible and inert rather than silently rewriting it to row 0
@@ -4794,6 +4797,15 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             fallback.details_resolved = true;
             options_device_entries_.push_back(std::move(fallback));
         }
+        // Group each output backend while preserving its device order. Include
+        // retained unavailable selections so a shared WASAPI device cannot
+        // appear after the exclusive group. Selection is restored by key below.
+        std::stable_sort(options_device_entries_.begin(),
+                         options_device_entries_.end(),
+                         [](const DeviceOptionEntry& left,
+                            const DeviceOptionEntry& right) {
+            return left.backend < right.backend;
+        });
         const HWND devices = GetDlgItem(dialog, 1059);
         if (devices) {
             SendMessageW(devices, CB_RESETCONTENT, 0, 0);
@@ -4820,8 +4832,8 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                 item.mask = CBEIF_TEXT | CBEIF_LPARAM;
                 if (options_device_images_) {
                     item.mask |= CBEIF_IMAGE | CBEIF_SELECTEDIMAGE;
-                    item.iImage = entry.backend;
-                    item.iSelectedImage = entry.backend;
+                    item.iImage = entry.backend >= 4 ? 1 : entry.backend;
+                    item.iSelectedImage = item.iImage;
                 }
                 item.iItem = static_cast<int>(index);
                 item.pszText = entry.name.data();
@@ -6221,10 +6233,17 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
     for (size_t index = 0; index < 4; ++index)
         labels[index + 1] = ResourceListItem(
             ResourceModule(), detail_resource, index);
+    if (entry.backend >= 4) {
+        labels[1] = L"输出模式";
+        labels[2] = L"系统混音格式";
+        labels[3] = L"设备选择";
+        labels[4] = L"系统要求";
+    }
     std::array<std::wstring, 5> values;
     values[0] = entry.backend == 0 ? L"WaveOut"
         : entry.backend == 1 ? L"DirectSound"
-        : entry.backend == 2 ? L"Kernel Streaming" : L"ASIO";
+        : entry.backend == 2 ? L"Kernel Streaming"
+        : entry.backend == 3 ? L"ASIO" : L"WASAPI";
     const auto yes_no = [this](bool value) {
         return ResourceText(value ? 6 : 7);
     };
@@ -6271,7 +6290,7 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
         LVITEMW item{};
         item.mask = LVIF_IMAGE;
         item.iItem = 0;
-        item.iImage = entry.backend;
+        item.iImage = entry.backend >= 4 ? 1 : entry.backend;
         ListView_SetItem(details, &item);
     }
 }

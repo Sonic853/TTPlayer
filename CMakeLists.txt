@@ -82,6 +82,7 @@ add_library(ttplayer_core
   src/audio/midi_player.cpp
   src/audio/mp3pro_source.cpp
   src/audio/native_output_contract.cpp
+  src/audio/wasapi_sink.cpp
   src/audio/pcm_output_transform.cpp
   src/audio/replay_gain_scanner.cpp
   src/audio/winamp_dsp.cpp
@@ -589,9 +590,12 @@ set_property(TARGET ttplayer_dsp_probe PROPERTY MSVC_RUNTIME_LIBRARY MultiThread
 # a same-bitness helper which the modeless Options window can time out safely.
 add_executable(ttplayer_output_device_probe EXCLUDE_FROM_ALL
   tools/output_device_probe.cpp
+  src/core/text.cpp
+  src/i18n/i18n.cpp
   src/app/output_device_worker.cpp
   src/audio/asio_sink.cpp
   src/audio/native_output_contract.cpp
+  src/audio/wasapi_sink.cpp
   src/ui/output_devices.cpp
 )
 target_include_directories(ttplayer_output_device_probe PRIVATE src/ui include)
@@ -789,6 +793,19 @@ target_link_libraries(ttpcomm_compatibility_tests PRIVATE ttplayer_core ttpcomm_
 add_dependencies(ttpcomm_compatibility_tests ttpcomm_mock_revision ttpcomm_mock_no_version)
 
 add_executable(native_output_contract_tests tests/native_output_contract_tests.cpp)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/audio/wasapi_playback_tests.cpp")
+  add_executable(wasapi_playback_tests tests/audio/wasapi_playback_tests.cpp)
+  target_include_directories(wasapi_playback_tests PRIVATE src/ui)
+  target_compile_definitions(wasapi_playback_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(wasapi_playback_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  target_link_libraries(wasapi_playback_tests PRIVATE ttplayer_core)
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/audio/output_switch_volume_tests.cpp")
+  add_executable(output_switch_volume_tests tests/audio/output_switch_volume_tests.cpp)
+  target_compile_definitions(output_switch_volume_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(output_switch_volume_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  target_link_libraries(output_switch_volume_tests PRIVATE ttplayer_core)
+endif()
 target_include_directories(native_output_contract_tests PRIVATE src/ui)
 target_compile_definitions(native_output_contract_tests PRIVATE
   UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

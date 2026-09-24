@@ -21,7 +21,7 @@ namespace ttplayer::ui::detail {
 // backend numbering so bitmap 0x167 and the 16-byte persisted keys remain
 // compatible with FUN_004991F1.
 struct LegacyOutputDevice {
-    int backend{}; // 0 waveOut, 1 DirectSound, 2 KS, 3 ASIO
+    int backend{}; // 0 waveOut, 1 DirectSound, 2 KS, 3 ASIO, 4/5 WASAPI shared/exclusive
     unsigned int wave_device_id{static_cast<unsigned int>(-1)};
     std::wstring key;
     std::wstring name;
