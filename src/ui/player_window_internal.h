@@ -509,5 +509,6 @@ bool WriteEqualizerProfileFile(const std::filesystem::path& path,
 // bottom "Custom..." item.
 bool ShowLegacyPresetColor(
     HWND owner, HWND button, HMODULE resources, COLORREF initial,
-    std::function<void(COLORREF)> on_selected);
+    std::function<void(COLORREF)> on_selected,
+    std::optional<RECT> popup_anchor = std::nullopt);
 } // namespace ttplayer::ui::detail

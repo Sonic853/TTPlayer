@@ -1868,39 +1868,126 @@ std::optional<COLORREF> RunLegacyCustomColorDialog(HWND owner,
         ? std::optional<COLORREF>{chooser.rgbResult} : std::nullopt;
 }
 
-void FillGradientStops(HDC dc, RECT bounds, int count,
-                       const std::array<COLORREF, 3>& colors) {
-    count = std::clamp(count, 1, static_cast<int>(colors.size()));
-    if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) return;
-    if (count == 1) {
-        const HBRUSH brush = CreateSolidBrush(colors[0]);
-        FillRect(dc, &bounds, brush);
-        DeleteObject(brush);
-        return;
+// 00494DC6 / 004B2B2E: the colour editor uses a fixed 48-pixel bold
+// YouYuan sample, rasterized at 3x size, on white. It does not inherit the
+// desktop font, transparency, shadow or outline settings.
+class LyricSampleSurface {
+public:
+    LyricSampleSurface(HDC reference, int width, int height)
+        : dc(CreateCompatibleDC(reference)) {
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        bitmap = CreateDIBSection(reference, &info, DIB_RGB_COLORS,
+                                  reinterpret_cast<void**>(&pixels), nullptr, 0);
+        if (dc && bitmap) previous = SelectObject(dc, bitmap);
     }
-    for (int segment = 0; segment + 1 < count; ++segment) {
-        RECT part = bounds;
-        part.top = bounds.top + MulDiv(bounds.bottom - bounds.top,
-                                       segment, count - 1);
-        part.bottom = bounds.top + MulDiv(bounds.bottom - bounds.top,
-                                          segment + 1, count - 1);
-        TRIVERTEX vertices[2]{};
-        vertices[0].x = part.left;
-        vertices[0].y = part.top;
-        vertices[0].Red = static_cast<COLOR16>(GetRValue(colors[segment]) << 8);
-        vertices[0].Green = static_cast<COLOR16>(GetGValue(colors[segment]) << 8);
-        vertices[0].Blue = static_cast<COLOR16>(GetBValue(colors[segment]) << 8);
-        vertices[0].Alpha = 0xff00;
-        vertices[1].x = part.right;
-        vertices[1].y = part.bottom;
-        vertices[1].Red = static_cast<COLOR16>(GetRValue(colors[segment + 1]) << 8);
-        vertices[1].Green = static_cast<COLOR16>(GetGValue(colors[segment + 1]) << 8);
-        vertices[1].Blue = static_cast<COLOR16>(GetBValue(colors[segment + 1]) << 8);
-        vertices[1].Alpha = 0xff00;
-        GRADIENT_RECT gradient{0, 1};
-        GradientFill(dc, vertices, 2, &gradient, 1,
-                     GRADIENT_FILL_RECT_V);
+    ~LyricSampleSurface() {
+        if (previous) SelectObject(dc, previous);
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
     }
+    LyricSampleSurface(const LyricSampleSurface&) = delete;
+    LyricSampleSurface& operator=(const LyricSampleSurface&) = delete;
+    explicit operator bool() const { return dc && bitmap && pixels; }
+    HDC dc{};
+    HBITMAP bitmap{};
+    HGDIOBJ previous{};
+    std::uint32_t* pixels{};
+};
+
+COLORREF LyricSampleColor(const std::array<COLORREF, 3>& colors,
+                         int count, int y, int height) {
+    count = std::clamp(count, 1, 3);
+    if (count == 1) return colors[0];
+    // 004B258D includes both endpoints in each segment. Its DIB is bottom-up;
+    // this surface is top-down, so colour 0 is the top of the sample.
+    const int length = height / (count - 1);
+    const int segment = std::min(y / std::max(1, length), count - 2);
+    const int position = y - segment * length;
+    const int extent = segment == count - 2 ? height - segment * length : length;
+    const auto mix = [=](int first, int last) {
+        return first + (last - first) * position / std::max(1, extent - 1);
+    };
+    return RGB(mix(GetRValue(colors[segment]), GetRValue(colors[segment + 1])),
+               mix(GetGValue(colors[segment]), GetGValue(colors[segment + 1])),
+               mix(GetBValue(colors[segment]), GetBValue(colors[segment + 1])));
+}
+
+void DrawLyricColorSample(const DRAWITEMSTRUCT& item, HMODULE resources,
+                         int count, const std::array<COLORREF, 3>& colors,
+                         int played_count = 0,
+                         const std::array<COLORREF, 3>& played = {}) {
+    FillRect(item.hDC, &item.rcItem,
+             reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+    auto text = i18n::ResourceText(resources, 0x86);
+    if (text.empty()) text = L"尽听精彩";
+    LOGFONTW descriptor{};
+    descriptor.lfHeight = -144;
+    descriptor.lfWeight = FW_BOLD;
+    descriptor.lfCharSet = DEFAULT_CHARSET;
+    lstrcpynW(descriptor.lfFaceName, L"幼圆", LF_FACESIZE);
+    const HFONT font = CreateFontIndirectW(&descriptor);
+    if (!font) return;
+    const HGDIOBJ old_font = SelectObject(item.hDC, font);
+    RECT measured{};
+    DrawTextW(item.hDC, text.c_str(), -1, &measured,
+              DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(item.hDC, old_font);
+    const int source_width = measured.right + 24;
+    const int source_height = measured.bottom + 6;
+    const int width = source_width / 3 + 2;
+    const int height = source_height / 3 + 2;
+    LyricSampleSurface source(item.hDC, source_width, source_height);
+    LyricSampleSurface sample(item.hDC, width, height);
+    if (source && sample) {
+        std::fill_n(source.pixels, source_width * source_height, 0u);
+        std::fill_n(sample.pixels, width * height, 0u);
+        const HGDIOBJ previous = SelectObject(source.dc, font);
+        SetBkMode(source.dc, TRANSPARENT);
+        SetTextColor(source.dc, RGB(255,255,255));
+        RECT bounds{0, 0, source_width, source_height};
+        DrawTextW(source.dc, text.c_str(), -1, &bounds,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(source.dc, previous);
+        SetStretchBltMode(sample.dc, HALFTONE);
+        SetBrushOrgEx(sample.dc, 0, 0, nullptr);
+        StretchBlt(sample.dc, 1, 1, width - 2, height - 2, source.dc,
+                    0, 0, source_width, source_height, SRCCOPY);
+        GdiFlush();
+        // 00495AEE: preset preview is a single lyric, with the played colour
+        // covering the first 4/7 of its width, not two separate text rows.
+        const int split = played_count ? MulDiv(width, 4, 7) : 0;
+        for (int y = 0; y < height; ++y) {
+            const COLORREF normal = LyricSampleColor(colors, count, y, height);
+            const COLORREF active = played_count
+                ? LyricSampleColor(played, played_count, y, height) : normal;
+            for (int x = 0; x < width; ++x) {
+                auto& pixel = sample.pixels[y * width + x];
+                const unsigned alpha = pixel & 0xff;
+                const COLORREF color = x < split ? active : normal;
+                const auto blend = [=](unsigned channel) {
+                    return (channel * alpha + 255 * (255 - alpha)) / 255;
+                };
+                pixel = (blend(GetRValue(color)) << 16) |
+                        (blend(GetGValue(color)) << 8) | blend(GetBValue(color));
+            }
+        }
+        BitBlt(item.hDC,
+                item.rcItem.left + (item.rcItem.right - item.rcItem.left - width) / 2,
+                item.rcItem.top + (item.rcItem.bottom - item.rcItem.top - height) / 2,
+                width, height, sample.dc, 0, 0, SRCCOPY);
+    }
+    DeleteObject(font);
+}
+
+void MakeLyricColorPreview(HWND dialog) {
+    const HWND preview = GetDlgItem(dialog, 1068);
+    const LONG_PTR style = GetWindowLongPtrW(preview, GWL_STYLE);
+    SetWindowLongPtrW(preview, GWL_STYLE, (style & ~SS_TYPEMASK) | SS_OWNERDRAW);
 }
 
 void DrawGradientButton(const DRAWITEMSTRUCT& item, int count,
@@ -1912,20 +1999,53 @@ struct GradientProfileDialogContext {
     HMODULE resources{};
     int count{3};
     std::array<COLORREF, 3> colors{};
+    HWND list{};
+    int drag_from{-1};
 };
 
 void RefreshGradientProfileDialog(HWND dialog,
-                                  const GradientProfileDialogContext& value) {
-    SendDlgItemMessageW(dialog, 2263, CB_SETCURSEL,
-                        std::clamp(value.count, 1, 3) - 1, 0);
-    for (int index = 0; index < 3; ++index) {
-        const HWND button = GetDlgItem(dialog, 2264 + index);
-        EnableWindow(button, index < value.count);
-        InvalidateRect(button, nullptr, TRUE);
-    }
-    for (int index = 3; index < 5; ++index)
-        ShowWindow(GetDlgItem(dialog, 2264 + index), SW_HIDE);
+                                   const GradientProfileDialogContext& value) {
+    ListView_SetItemCount(value.list, value.count);
+    EnableWindow(GetDlgItem(dialog, 2264), value.count < 3);
+    EnableWindow(GetDlgItem(dialog, 2265), value.count > 1);
+    InvalidateRect(value.list, nullptr, TRUE);
     InvalidateRect(GetDlgItem(dialog, 1068), nullptr, TRUE);
+}
+
+void SelectGradientColor(HWND list, int index) {
+    ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_SetItemState(list, index, LVIS_SELECTED | LVIS_FOCUSED,
+                          LVIS_SELECTED | LVIS_FOCUSED);
+    SetFocus(list);
+    InvalidateRect(list, nullptr, TRUE);
+}
+
+LRESULT CALLBACK GradientColorListProc(HWND list, UINT message,
+    WPARAM wparam, LPARAM lparam, UINT_PTR subclass, DWORD_PTR data) {
+    auto* value = reinterpret_cast<GradientProfileDialogContext*>(data);
+    if (message == WM_LBUTTONUP && value->drag_from >= 0) {
+        const int from = value->drag_from;
+        value->drag_from = -1;
+        if (GetCapture() == list) ReleaseCapture();
+        LVHITTESTINFO hit{};
+        hit.pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        const int to = ListView_HitTest(list, &hit);
+        if (from < value->count && to >= 0 && to < value->count) {
+            // 00495439 exchanges source and destination, rather than rotating
+            // every intervening stop as a generic drag-list implementation does.
+            std::swap(value->colors[from], value->colors[to]);
+            SelectGradientColor(list, to);
+            RefreshGradientProfileDialog(GetParent(list), *value);
+        }
+        return 0;
+    }
+    if (message == WM_CAPTURECHANGED || message == WM_CANCELMODE)
+        value->drag_from = -1;
+    if (message == WM_SETFOCUS || message == WM_KILLFOCUS)
+        InvalidateRect(list, nullptr, TRUE);
+    if (message == WM_NCDESTROY)
+        RemoveWindowSubclass(list, GradientColorListProc, subclass);
+    return DefSubclassProc(list, message, wparam, lparam);
 }
 
 INT_PTR CALLBACK GradientProfileDialogProc(
@@ -1937,15 +2057,33 @@ INT_PTR CALLBACK GradientProfileDialogProc(
         SetWindowLongPtrW(dialog, DWLP_USER,
                           reinterpret_cast<LONG_PTR>(value));
         if (!value) return FALSE;
-        const HWND count = GetDlgItem(dialog, 2263);
-        SendMessageW(count, CB_RESETCONTENT, 0, 0);
-        for (int index = 1; index <= 3; ++index) {
-            const auto text = std::to_wstring(index);
-            SendMessageW(count, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(text.c_str()));
-        }
-        for (int index = 0; index < 3; ++index)
-            MakeColorButton(dialog, 2264 + index);
+        // 00495009: 2263 is a static placeholder, not a count combo box.
+        const HWND placeholder = GetDlgItem(dialog, 2263);
+        RECT bounds{};
+        GetWindowRect(placeholder, &bounds);
+        MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&bounds), 2);
+        ShowWindow(placeholder, SW_HIDE);
+        value->list = CreateWindowExW(0, WC_LISTVIEWW, L"Colrs", 0x50015405,
+            bounds.left, bounds.top, bounds.right - bounds.left,
+            bounds.bottom - bounds.top, dialog, reinterpret_cast<HMENU>(0x2800),
+            GetModuleHandleW(nullptr), nullptr);
+        if (!value->list) { EndDialog(dialog, IDCANCEL); return TRUE; }
+        SendMessageW(value->list, WM_SETFONT,
+                      SendMessageW(dialog, WM_GETFONT, 0, 0), FALSE);
+        SetWindowPos(value->list, placeholder, 0, 0, 0, 0,
+                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        ListView_SetExtendedListViewStyle(value->list, 0x4420);
+        ListView_SetBkColor(value->list, RGB(255,255,255));
+        LVCOLUMNW column{};
+        column.mask = LVCF_WIDTH | LVCF_TEXT;
+        column.cx = bounds.right - bounds.left;
+        column.pszText = const_cast<wchar_t*>(L"color");
+        ListView_InsertColumn(value->list, 0, &column);
+        SetWindowSubclass(value->list, GradientColorListProc, 1,
+                           reinterpret_cast<DWORD_PTR>(value));
+        MakeLyricColorPreview(dialog);
+        InstallButtonBitmap(dialog, IDOK, value->resources, 1);
+        InstallButtonBitmap(dialog, IDCANCEL, value->resources, 2);
         RefreshGradientProfileDialog(dialog, *value);
         return TRUE;
     }
@@ -1954,24 +2092,45 @@ INT_PTR CALLBACK GradientProfileDialogProc(
     case WM_COMMAND: {
         const UINT control = LOWORD(wparam);
         const UINT notification = HIWORD(wparam);
-        if (control == 2263 && notification == CBN_SELCHANGE) {
-            value->count = std::clamp(static_cast<int>(
-                SendDlgItemMessageW(dialog, 2263, CB_GETCURSEL, 0, 0)) + 1,
-                1, 3);
-            RefreshGradientProfileDialog(dialog, *value);
-            return TRUE;
-        }
-        if (control >= 2264 && control <= 2266 &&
-            notification == BN_CLICKED) {
-            const size_t index = static_cast<size_t>(control - 2264);
+        const int selected = ListView_GetNextItem(value->list, -1, LVNI_SELECTED);
+        if ((control == 2264 || control == 2266) && notification == BN_CLICKED) {
+            const int index = control == 2264 ? value->count : selected;
+            if (index < 0 || index >= 3 ||
+                (control == 2266 && index >= value->count)) return TRUE;
+            RECT anchor{};
+            GetWindowRect(value->list, &anchor);
+            anchor.bottom = anchor.top + (index + 1) * 25;
+            anchor.top = anchor.bottom - 25;
             ShowLegacyPresetColor(
-                dialog, GetDlgItem(dialog, static_cast<int>(control)),
-                value->resources, value->colors[index],
+                dialog, value->list, value->resources,
+                control == 2264 ? RGB(0,0,0) : value->colors[index],
                 [dialog, value, index](COLORREF selected) {
-                if (!IsWindow(dialog)) return;
+                if (!IsWindow(dialog) || GetWindowLongPtrW(dialog, DWLP_USER) !=
+                    reinterpret_cast<LONG_PTR>(value) || index > value->count) return;
+                if (index == value->count) ++value->count;
                 value->colors[index] = selected;
                 RefreshGradientProfileDialog(dialog, *value);
-            });
+                SelectGradientColor(value->list, index);
+            }, anchor);
+            return TRUE;
+        }
+        if (control >= 2265 && control <= 2268 && notification == BN_CLICKED) {
+            if (selected < 0 || selected >= value->count) return TRUE;
+            int next = selected;
+            if (control == 2265 && value->count > 1) {
+                for (int i = selected; i + 1 < value->count; ++i)
+                    value->colors[i] = value->colors[i + 1];
+                --value->count;
+                next = std::min(selected, value->count - 1);
+            } else if (control == 2267 && selected > 0) {
+                next = selected - 1;
+                std::swap(value->colors[selected], value->colors[next]);
+            } else if (control == 2268 && selected + 1 < value->count) {
+                next = selected + 1;
+                std::swap(value->colors[selected], value->colors[next]);
+            }
+            RefreshGradientProfileDialog(dialog, *value);
+            SelectGradientColor(value->list, next);
             return TRUE;
         }
         if (control == IDOK) {
@@ -1984,25 +2143,73 @@ INT_PTR CALLBACK GradientProfileDialogProc(
         }
         break;
     }
+    case WM_MEASUREITEM: {
+        auto* item = reinterpret_cast<MEASUREITEMSTRUCT*>(lparam);
+        if (item && item->CtlID == 0x2800) {
+            item->itemHeight = 25; // 0048F87B / 00495107, physical pixels.
+            return TRUE;
+        }
+        break;
+    }
+    case WM_NOTIFY: {
+        const auto* header = reinterpret_cast<const NMHDR*>(lparam);
+        if (!header || header->hwndFrom != value->list) break;
+        if (header->code == LVN_ITEMACTIVATE) {
+            SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(2266, BN_CLICKED), 0);
+            return TRUE;
+        }
+        if (header->code == LVN_BEGINDRAG) {
+            value->drag_from = reinterpret_cast<const NMLISTVIEW*>(lparam)->iItem;
+            SetCapture(value->list);
+            return TRUE;
+        }
+        if (header->code == LVN_GETDISPINFOW) {
+            auto* info = reinterpret_cast<NMLVDISPINFOW*>(lparam);
+            const int index = info->item.iItem;
+            if ((info->item.mask & LVIF_TEXT) && index >= 0 && index < value->count) {
+                wchar_t text[48]{};
+                const auto color = value->colors[index];
+                swprintf_s(text, L"RGB(%d, %d, %d)",
+                            GetRValue(color), GetGValue(color), GetBValue(color));
+                lstrcpynW(info->item.pszText, text, info->item.cchTextMax);
+            }
+            return TRUE;
+        }
+        break;
+    }
     case WM_DRAWITEM: {
         const auto* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
         if (!item) break;
-        if (item->CtlID >= 2264 && item->CtlID <= 2266) {
-            DrawColorButton(*item,
-                value->colors[static_cast<size_t>(item->CtlID - 2264)]);
+        if (item->CtlID == 0x2800 && item->itemID < static_cast<UINT>(value->count)) {
+            FillRect(item->hDC, &item->rcItem,
+                      reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+            RECT swatch = item->rcItem;
+            InflateRect(&swatch, -3, -2);
+            const COLORREF color = value->colors[item->itemID];
+            const HBRUSH brush = CreateSolidBrush(color);
+            FillRect(item->hDC, &swatch, brush);
+            DeleteObject(brush);
+            if ((item->itemState & ODS_SELECTED) && GetFocus() == value->list) {
+                InflateRect(&swatch, 1, 1);
+                const HBRUSH frame = CreateSolidBrush(color ^ RGB(128,128,128));
+                FrameRect(item->hDC, &swatch, frame);
+                DeleteObject(frame);
+            }
             return TRUE;
         }
         if (item->CtlID == 1068) {
-            RECT bounds = item->rcItem;
-            FillGradientStops(item->hDC, bounds, value->count, value->colors);
-            FrameRect(item->hDC, &bounds,
-                      reinterpret_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
+            DrawLyricColorSample(*item, value->resources, value->count, value->colors);
             return TRUE;
         }
         break;
     }
     case WM_CLOSE:
         EndDialog(dialog, 2);
+        return TRUE;
+    case WM_DESTROY:
+        if (g_legacy_color_popup && GetWindow(g_legacy_color_popup, GW_OWNER) == dialog)
+            SendMessageW(g_legacy_color_popup, WM_CLOSE, 0, 0);
+        SetWindowLongPtrW(dialog, DWLP_USER, 0);
         return TRUE;
     default:
         break;
@@ -2029,30 +2236,13 @@ struct DesktopProfileDialogContext {
 };
 
 void DrawDesktopProfileSample(const DRAWITEMSTRUCT& item,
-                              const DesktopProfileDialogContext& context) {
-    RECT bounds = item.rcItem;
-    FillRect(item.hDC, &bounds, GetSysColorBrush(COLOR_WINDOW));
-    FrameRect(item.hDC, &bounds,
-              reinterpret_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
-    InflateRect(&bounds, -5, -4);
-    RECT first = bounds;
-    first.bottom = first.top + (first.bottom - first.top) / 2;
-    RECT second = bounds;
-    second.top = first.bottom;
-    const int saved = SaveDC(item.hDC);
-    SetBkMode(item.hDC, TRANSPARENT);
-    SetTextColor(item.hDC, context.working.background_colors[0]);
-    DrawTextW(item.hDC, L"TTPlayer", -1, &first,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    SetTextColor(item.hDC, context.working.played_colors[0]);
-    DrawTextW(item.hDC, L"TTPlayer", -1, &second,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    RestoreDC(item.hDC, saved);
+                               const DesktopProfileDialogContext& context) {
+    DrawLyricColorSample(item, context.resources,
+        context.working.background_count, context.working.background_colors,
+        context.working.played_count, context.working.played_colors);
 }
 
-void RefreshDesktopProfileDialog(HWND dialog,
-                                 const DesktopProfileDialogContext& value) {
-    SetDlgItemTextW(dialog, 1005, value.working.name.c_str());
+void RefreshDesktopProfileDialog(HWND dialog) {
     InvalidateRect(GetDlgItem(dialog, 1155), nullptr, TRUE);
     InvalidateRect(GetDlgItem(dialog, 1156), nullptr, TRUE);
     InvalidateRect(GetDlgItem(dialog, 1068), nullptr, TRUE);
@@ -2068,10 +2258,13 @@ INT_PTR CALLBACK DesktopProfileDialogProc(
                           reinterpret_cast<LONG_PTR>(value));
         if (!value) return FALSE;
         SendDlgItemMessageW(dialog, 1005, EM_SETLIMITTEXT, 12, 0);
+        SetDlgItemTextW(dialog, 1005, value->working.name.c_str());
+        MakeLyricColorPreview(dialog);
         MakeColorButton(dialog, 1155);
         MakeColorButton(dialog, 1156);
         InstallButtonBitmap(dialog, 2094, value->resources, 1098);
-        RefreshDesktopProfileDialog(dialog, *value);
+        InstallButtonBitmap(dialog, IDCANCEL, value->resources, 2);
+        RefreshDesktopProfileDialog(dialog);
         return TRUE;
     }
     if (!value) return FALSE;
@@ -2088,12 +2281,13 @@ INT_PTR CALLBACK DesktopProfileDialogProc(
                 ? value->working.background_colors
                 : value->working.played_colors;
             if (EditGradientProfile(dialog, value->resources, count, colors))
-                RefreshDesktopProfileDialog(dialog, *value);
+                RefreshDesktopProfileDialog(dialog);
             return TRUE;
         }
         if (control == 3 && notification == BN_CLICKED) {
             value->working = value->defaults;
-            RefreshDesktopProfileDialog(dialog, *value);
+            SetDlgItemTextW(dialog, 1005, value->working.name.c_str());
+            RefreshDesktopProfileDialog(dialog);
             return TRUE;
         }
         if (control == 2094 || control == IDOK) {
@@ -2814,7 +3008,8 @@ HBITMAP detail::RenderSkinPreview(const skin::LegacySkin& source,
 
 bool detail::ShowLegacyPresetColor(
     HWND owner, HWND button, HMODULE resources, COLORREF initial,
-    std::function<void(COLORREF)> on_selected) {
+    std::function<void(COLORREF)> on_selected,
+    std::optional<RECT> popup_anchor) {
     const HINSTANCE instance = GetModuleHandleW(nullptr);
     if (!owner || !IsWindow(owner) || !on_selected) return false;
     if (!instance || !EnsureLegacyColorPopupClass(instance)) {
@@ -2844,7 +3039,9 @@ bool detail::ShowLegacyPresetColor(
             std::distance(kLegacyPresetColors.begin(), match));
 
     RECT anchor{};
-    if (!button || !GetWindowRect(button, &anchor)) {
+    if (popup_anchor) {
+        anchor = *popup_anchor;
+    } else if (!button || !GetWindowRect(button, &anchor)) {
         POINT cursor{};
         GetCursorPos(&cursor);
         anchor = {cursor.x, cursor.y, cursor.x, cursor.y};
