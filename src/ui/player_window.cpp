@@ -3387,6 +3387,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         return 0;
     case WM_DESTROY:
         CancelWaveTrackChange();
+        if (playlist_find_progress_ && IsWindow(playlist_find_progress_))
+            EndDialog(playlist_find_progress_, IDCANCEL);
         if (playlist_find_dialog_ && IsWindow(playlist_find_dialog_))
             EndDialog(playlist_find_dialog_, IDCANCEL);
         CloseOnlineLyricSearch();

@@ -5,6 +5,7 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
+#include "file_info_probe_client.h"
 
 #include "ttplayer/core/text.h"
 #include "ttplayer/ui/dialog_history_policy.h"
@@ -26,9 +27,11 @@
 #include <cstdlib>
 #include <cwchar>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <objidl.h>
 #include <oleidl.h>
@@ -37,6 +40,7 @@
 #include <shobjidl.h>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 #include <windowsx.h>
@@ -4482,7 +4486,7 @@ void PlayerWindow::PreparePlaylistMenu(HMENU menu) const {
     EnableCommand(menu, kPlaylistSelectInvert, has_tracks);
     EnableCommand(menu, kPlaylistFind, has_tracks);
     EnableCommand(menu, kPlaylistFindNext,
-        has_tracks && (playlist_find_text_[0] != L'\0' || (!playlist_find_quick_ &&
+        has_tracks && (!playlist_find_text_.empty() || (!playlist_find_quick_ &&
             (!playlist_find_artist_.empty() || !playlist_find_album_.empty()))));
     EnableCommand(menu, kPlaylistQuickFind, has_tracks);
     EnableCommand(menu, kPlaylistDeleteList, playlists_.Size() > 1);
@@ -4787,65 +4791,307 @@ void PlayerWindow::ClearActivePlaylist() {
     RefreshPlaylist();
 }
 
-bool PlayerWindow::FindNextPlaylistTrack(DWORD flags, bool all) {
-    const std::wstring_view title(playlist_find_text_);
-    const bool empty = title.empty() && (playlist_find_quick_ ||
-        (playlist_find_artist_.empty() && playlist_find_album_.empty()));
-    const size_t count = VisiblePlaylistTrackCount();
-    if (empty || count == 0) return false; // 0047AFDA
-    const auto matches = [flags](std::wstring_view value, std::wstring_view needle) {
-        if (needle.empty()) return false;
-        if (flags & FR_MATCHCASE)
-            return flags & FR_WHOLEWORD ? value == needle : value.find(needle) != value.npos;
-        if (flags & FR_WHOLEWORD)
-            return value.size() == needle.size() &&
-                _wcsnicmp(value.data(), needle.data(), value.size()) == 0;
-        return PlaylistWideContains(value, needle);
-    };
-    const bool forward = (flags & FR_DOWN) != 0;
-    size_t start = forward ? 0 : count - 1;
-    if (!all && playlist_selection_ && *playlist_selection_ < count)
-        start = forward ? (*playlist_selection_ + 1) % count
-                        : (*playlist_selection_ + count - 1) % count;
-    std::set<size_t> selected;
-    for (size_t offset = 0; offset < count; ++offset) {
-        const size_t row = all ? offset : forward ? (start + offset) % count
-                                                    : (start + count - offset) % count;
-        const auto* track = VisiblePlaylistTrack(row);
-        if (!track) continue;
-        // 004826AD combines the populated fields with OR, not AND.
-        bool match = matches(FormatPlaylistTitle(*track, settings_.playlist,
-                                 ResourceText(0x81c8)).text, title) ||
-                     matches(PlaylistUtf8Field(track->title), title);
-        if (!playlist_find_quick_)
-            match = match || matches(PlaylistUtf8Field(track->artist), playlist_find_artist_) ||
-                matches(PlaylistUtf8Field(track->album), playlist_find_album_) ||
-                matches(PlaylistMetadataValue(*track, "Artist"), playlist_find_artist_) ||
-                matches(PlaylistMetadataValue(*track, "Album"), playlist_find_album_);
-        if (!match) continue;
-        if (!all) { SelectPlaylistRow(row); return true; }
-        selected.insert(row);
+namespace {
+struct PlaylistFindQuery {
+    std::wstring title, artist, album;
+    DWORD flags{};
+    bool quick{};
+    bool Matches(const playlist::Track& track, const std::wstring& display) const {
+        const auto matches = [&](std::wstring_view value, std::wstring_view needle) {
+            if (needle.empty()) return false;
+            if (flags & FR_MATCHCASE)
+                return flags & FR_WHOLEWORD ? value == needle : value.find(needle) != value.npos;
+            if (flags & FR_WHOLEWORD)
+                return value.size() == needle.size() &&
+                    _wcsnicmp(value.data(), needle.data(), value.size()) == 0;
+            return PlaylistWideContains(value, needle);
+        };
+        // 004826AD: displayed title OR Title, then Artist OR Album. These
+        // metadata keys were verified at 0048272E/0048278A/004827D7.
+        return matches(display, title) || matches(PlaylistUtf8Field(track.title), title) ||
+            matches(PlaylistMetadataValue(track, "Title"), title) || (!quick && (
+            matches(PlaylistUtf8Field(track.artist), artist) ||
+            matches(PlaylistMetadataValue(track, "Artist"), artist) ||
+            matches(PlaylistUtf8Field(track.album), album) ||
+            matches(PlaylistMetadataValue(track, "Album"), album)));
     }
-    if (all) {
-        playlist_selected_rows_ = std::move(selected);
-        playlist_selection_ = playlist_selected_rows_.empty() ? std::nullopt
-            : std::optional<size_t>{*playlist_selected_rows_.rbegin()};
-        playlist_selection_anchor_ = playlist_selection_;
-        if (playlist_selection_) EnsurePlaylistSelectionVisible();
-        if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
-        return !playlist_selected_rows_.empty();
+};
+
+struct PlaylistFindProgress {
+    struct Row { size_t index; bool match; std::optional<playlist::Track> refreshed; };
+    using Rows = std::vector<Row>;
+    HWND* window{};
+    std::wstring caption, cancel_text;
+    size_t count{};
+    std::function<void(PlaylistFindProgress&, std::stop_token)> search;
+    std::function<bool(const Rows&)> apply;
+    std::mutex mutex;
+    Rows pending;
+    std::wstring current;
+    size_t position{};
+    bool done{}, failed{}, cancelled{};
+    std::jthread worker;
+
+    void Publish(size_t row, bool match, const std::wstring& title, size_t scanned,
+                 std::optional<playlist::Track> refreshed = {}) {
+        std::scoped_lock lock(mutex);
+        pending.push_back({row, match, std::move(refreshed)});
+        current = title;
+        position = scanned;
     }
-    if (!playlist_find_quick_) {
-        static bool showing_not_found{};
-        if (!showing_not_found) {
-            showing_not_found = true;
-            // 0x8198 is the progress caption, NOT the no-match message.
-            MessageBoxW(playlist_find_dialog_ ? playlist_find_dialog_ : playlist_window_,
-                ResourceText(0x8193).c_str(), ResourceText(0x80).c_str(), MB_OK | MB_ICONINFORMATION);
-            showing_not_found = false;
+    static INT_PTR CALLBACK DialogProc(HWND dialog, UINT message, WPARAM wp, LPARAM lp) {
+        auto* state = reinterpret_cast<PlaylistFindProgress*>(GetWindowLongPtrW(dialog, DWLP_USER));
+        if (message == WM_INITDIALOG) {
+            state = reinterpret_cast<PlaylistFindProgress*>(lp);
+            SetWindowLongPtrW(dialog, DWLP_USER, lp);
+            *state->window = dialog;
+            SetWindowTextW(dialog, state->caption.c_str());
+            RECT client{}; GetClientRect(dialog, &client);
+            // 0042CCAD's controls and margins, in pixels within the original
+            // 240x65 dialog-unit, 9pt SimSun progress template.
+            const auto add = [&](LPCWSTR type, LPCWSTR text, DWORD style,
+                                 int id, int x, int y, int w, int h) {
+                HWND child = CreateWindowExW(0, type, text, WS_CHILD | WS_VISIBLE | style,
+                    x,y,w,h,dialog,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                    GetModuleHandleW(nullptr),nullptr);
+                SendMessageW(child, WM_SETFONT, SendMessageW(dialog, WM_GETFONT,0,0), TRUE);
+            };
+            add(WC_STATICW,L"",SS_LEFT,1001,10,10,client.right-20,26);
+            add(PROGRESS_CLASSW,L"",PBS_SMOOTH,1000,10,42,client.right-20,16);
+            add(WC_BUTTONW,state->cancel_text.c_str(),WS_TABSTOP|BS_DEFPUSHBUTTON,
+                IDCANCEL,client.right/2-40,client.bottom-32,80,22);
+            SendDlgItemMessageW(dialog,1000,PBM_SETRANGE32,0,
+                static_cast<LPARAM>(std::min<size_t>(state->count,INT_MAX)));
+            // Defer startup until the native modal manager has initialized.
+            PostMessageW(dialog, WM_APP+73,0,0);
+            return TRUE;
         }
+        if (!state) return FALSE;
+        if (message == WM_APP+73) {
+            if (state->cancelled) { EndDialog(dialog,IDCANCEL); return TRUE; }
+            try {
+                state->worker = std::jthread([state](std::stop_token stop) {
+                    try { state->search(*state,stop); }
+                    catch (...) { std::scoped_lock lock(state->mutex); state->failed=true; }
+                    std::scoped_lock lock(state->mutex); state->done=true;
+                });
+                if (!SetTimer(dialog,1,25,nullptr)) {
+                    state->worker.request_stop(); EndDialog(dialog,IDCANCEL);
+                }
+            } catch (...) { state->failed=true; EndDialog(dialog,IDCANCEL); }
+            return TRUE;
+        }
+        if (message == WM_TIMER && wp == 1) {
+            Rows rows; std::wstring current; size_t position{}; bool done{};
+            {
+                std::scoped_lock lock(state->mutex);
+                rows.swap(state->pending); current=state->current;
+                position=state->position; done=state->done;
+            }
+            if (!state->apply(rows)) {
+                state->cancelled=true; state->worker.request_stop();
+            }
+            SetDlgItemTextW(dialog,1001,current.c_str());
+            SendDlgItemMessageW(dialog,1000,PBM_SETPOS,
+                static_cast<WPARAM>(std::min<size_t>(position,INT_MAX)),0);
+            if (done) EndDialog(dialog,state->cancelled ? IDCANCEL : IDOK);
+            return TRUE;
+        }
+        if (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wp)==IDCANCEL)) {
+            state->cancelled=true;
+            state->worker.request_stop();
+            EnableWindow(GetDlgItem(dialog,IDCANCEL),FALSE);
+            return TRUE;
+        }
+        if (message == WM_NCDESTROY) {
+            KillTimer(dialog,1);
+            state->worker.request_stop();
+            if (*state->window == dialog) *state->window=nullptr;
+            SetWindowLongPtrW(dialog,DWLP_USER,0);
+        }
+        return FALSE;
     }
-    return false;
+    INT_PTR Run(HWND owner) {
+        std::vector<WORD> buffer(sizeof(DLGTEMPLATE)/sizeof(WORD),0);
+        buffer.insert(buffer.end(), {0,0,0,9,L'宋',L'体',0});
+        auto* layout = reinterpret_cast<DLGTEMPLATE*>(buffer.data());
+        layout->style=0x90c808c0; layout->cx=240; layout->cy=65;
+        const auto result = DialogBoxIndirectParamW(GetModuleHandleW(nullptr),layout,
+            owner,DialogProc,reinterpret_cast<LPARAM>(this));
+        worker.request_stop();
+        if (worker.joinable()) worker.join();
+        return result;
+    }
+};
+
+std::wstring PlaylistFindControlText(HWND dialog, int id) {
+    const HWND control=GetDlgItem(dialog,id);
+    std::wstring text(static_cast<size_t>(GetWindowTextLengthW(control))+1,L'\0');
+    text.resize(GetWindowTextW(control,text.data(),static_cast<int>(text.size())));
+    return text;
+}
+} // namespace
+
+bool PlayerWindow::FindNextPlaylistTrack(DWORD flags, bool all) {
+    if (playlist_find_running_) return false;
+    const PlaylistFindQuery query{playlist_find_text_,playlist_find_artist_,
+                                  playlist_find_album_,flags,playlist_find_quick_};
+    const size_t count=VisiblePlaylistTrackCount();
+    if (count==0 || (query.title.empty() && (query.quick ||
+        (query.artist.empty() && query.album.empty())))) return false; // 0047AFDA: no-op.
+    // 00486138 always selects all in quick mode, including the menu's F3.
+    all = all || query.quick;
+    const bool forward=(flags & FR_DOWN)!=0;
+    // 0048298F uses LVNI_SELECTED (2), not LVNI_FOCUSED (1).
+    const auto first=playlist_selected_rows_.empty() ? std::optional<size_t>{}
+        : std::optional<size_t>{*playlist_selected_rows_.begin()};
+    const size_t start=first && *first<count
+        ? (forward ? (*first+1)%count : (*first+count-1)%count)
+        : (forward ? 0 : count-1);
+    const auto unknown=ResourceText(0x81c8);
+    bool found{};
+    const auto apply = [&](const PlaylistFindProgress::Rows& rows) {
+        for (const auto& result : rows) {
+            const auto row=result.index;
+            const bool match=result.match;
+            if (match) {
+                if (!all) playlist_selected_rows_.clear();
+                playlist_selected_rows_.insert(row);
+                playlist_selection_=row; // LVM_SETITEMSTATE(state=3,mask=0xB).
+                found=true;
+                if (!all) EnsurePlaylistSelectionVisible();
+            } else {
+                playlist_selected_rows_.erase(row);
+                if (playlist_selection_==row) playlist_selection_.reset();
+            }
+        }
+        // A programmatic LVM_SETITEMSTATE does not move the Shift anchor.
+        if (!settings_.playlist.library_mode)
+            RememberPlaylistRow(playlists_.ActiveIndex(),playlist_selection_);
+        if (playlist_window_) InvalidateRect(playlist_window_,nullptr,FALSE);
+    };
+    if (query.quick) {
+        PlaylistFindProgress::Rows rows; rows.reserve(count);
+        for (size_t row=0;row<count;++row)
+            if (const auto* track=VisiblePlaylistTrack(row))
+                rows.push_back({row,query.Matches(*track,
+                    FormatPlaylistTitle(*track,settings_.playlist,unknown).text),{}});
+        apply(rows);
+        // 0048614D/0048615E ensures the FIRST selected row, while the last
+        // match keeps the single focus caret. Do not scroll to the caret.
+        if (!playlist_selected_rows_.empty()) {
+            const auto first_match=*playlist_selected_rows_.begin();
+            if (playlist_track_control_)
+                SendMessageW(playlist_track_control_,LVM_ENSUREVISIBLE,first_match,FALSE);
+            else {
+                const auto caret=playlist_selection_;
+                playlist_selection_=first_match; EnsurePlaylistSelectionVisible();
+                playlist_selection_=caret;
+            }
+        }
+        return found;
+    }
+
+    const bool library=settings_.playlist.library_mode;
+    const auto slot=playlists_.ActiveSlot();
+    const auto revision=ActivePlaylist().OrderRevision();
+    std::vector<playlist::Track> snapshot;
+    snapshot.reserve(count);
+    for (size_t row=0;row<count;++row) {
+        const auto* track=VisiblePlaylistTrack(row);
+        if (!track) return false;
+        snapshot.push_back(*track);
+    }
+    // The worker owns value snapshots; no model pointers or HWNDs cross into
+    // it. The UI applies batches only while this row mapping remains valid.
+    const auto same_view = [&] {
+        if (library!=settings_.playlist.library_mode || VisiblePlaylistTrackCount()!=count)
+            return false;
+        if (!library) return playlists_.ActiveSlot()==slot && ActivePlaylist().OrderRevision()==revision;
+        for (size_t row=0;row<count;++row) {
+            const auto* track=VisiblePlaylistTrack(row);
+            if (!track || track->path!=snapshot[row].path || track->subtrack!=snapshot[row].subtrack)
+                return false;
+        }
+        return true;
+    };
+    PlaylistFindProgress progress;
+    progress.window=&playlist_find_progress_;
+    progress.caption=ResourceText(0x8198);
+    progress.cancel_text=i18n::Literal(L"终止");
+    progress.count=count;
+    progress.apply=[&](const auto& rows) {
+        if (!same_view()) return false;
+        if (!library) for (const auto& result : rows) {
+            // Preserve a concurrent tag/rating edit or the normal info
+            // reader's newer result; never overwrite it from our snapshot.
+            if (result.refreshed && ActivePlaylist().Tracks()[result.index]==snapshot[result.index] &&
+                ActivePlaylist().SetTrack(result.index,*result.refreshed))
+                playlists_.MarkDirty();
+        }
+        apply(rows); return true;
+    };
+    const auto display_settings=settings_.playlist;
+    std::wstring executable(32768,L'\0');
+    executable.resize(GetModuleFileNameW(nullptr,executable.data(),static_cast<DWORD>(executable.size())));
+    const auto runtime=std::filesystem::path(executable).parent_path();
+    FileInfoProbeMp3Policy mp3;
+    mp3.read_priority=static_cast<std::uint32_t>(settings_.general.mp3_read_tag_priority);
+    progress.search=[&,display_settings,runtime,mp3](auto& state,std::stop_token stop) {
+        const HRESULT com=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+        struct ComExit { HRESULT status; ~ComExit() { if (SUCCEEDED(status)) CoUninitialize(); } } com_exit{com};
+        PlaylistInfoProbeSession reader;
+        for (size_t offset=0;offset<count && !stop.stop_requested();++offset) {
+            const size_t row=all ? offset : forward ? (start+offset)%count : (start+count-offset)%count;
+            auto track=snapshot[row];
+            bool refreshed{};
+            {
+                const auto current=FormatPlaylistTitle(track,display_settings,unknown).text;
+                std::scoped_lock lock(state.mutex); state.current=current;
+            }
+            // Normal search's 004AE7FD(...,1) can refresh unread tag data.
+            // Keep quick locate cache-only and keep decoder I/O off the UI.
+            if (track.duration_ms==-2 && !LooksLikeUrl(track.path.wstring())) {
+                const DWORD attributes=GetFileAttributesW(track.path.c_str());
+                if (attributes!=INVALID_FILE_ATTRIBUTES && !(attributes&FILE_ATTRIBUTE_DIRECTORY)) {
+                    const auto probe=reader.Read(stop,{},runtime/L"AddIn",track.path,
+                        runtime/L"ttpcomm.dll",track.subtrack,15000,nullptr,mp3);
+                    if (probe && SUCCEEDED(probe->status)) {
+                        refreshed=true;
+                        track.duration_ms=static_cast<int>(std::min<DWORD>(probe->duration_ms,INT_MAX));
+                        track.media_type=core::WideToUtf8(probe->codec);
+                        track.bitrate_bps=probe->encoded_bits_per_second;
+                        track.sample_rate_hz=probe->format.nSamplesPerSec;
+                        track.channels=probe->format.nChannels;
+                        track.bits_per_sample=probe->format.wBitsPerSample;
+                        for (const auto& field:probe->metadata) {
+                            const auto key=core::WideToUtf8(field.name), value=core::WideToUtf8(field.value);
+                            if (_wcsicmp(field.name.c_str(),L"Title")==0) track.title=value;
+                            if (_wcsicmp(field.name.c_str(),L"Artist")==0) track.artist=value;
+                            if (_wcsicmp(field.name.c_str(),L"Album")==0) track.album=value;
+                            std::erase_if(track.metadata,[&](const auto& old) { return _stricmp(old.first.c_str(),key.c_str())==0; });
+                            track.metadata.emplace_back(key,value);
+                        }
+                        if (track.artist.empty()) track.artist=core::WideToUtf8(PlaylistMetadataValue(track,"Author"));
+                    }
+                }
+            }
+            if (stop.stop_requested()) break;
+            const auto display=FormatPlaylistTitle(track,display_settings,unknown).text;
+            const bool match=query.Matches(track,display);
+            state.Publish(row,match,display,offset+1,
+                refreshed ? std::optional<playlist::Track>{std::move(track)} : std::nullopt);
+            if (match && !all) break;
+        }
+    };
+    playlist_find_running_=true;
+    struct SearchExit { bool& running; ~SearchExit() { running=false; } } search_exit{playlist_find_running_};
+    const auto result=progress.Run(playlist_find_dialog_);
+    playlist_find_running_=false;
+    if (result==IDOK && !progress.failed && !found && !all && same_view())
+        MessageBoxW(playlist_find_dialog_ ? playlist_find_dialog_ : playlist_window_,
+            ResourceText(0x8193).c_str(),ResourceText(0x80).c_str(),MB_OK|MB_ICONINFORMATION);
+    return found;
 }
 
 INT_PTR CALLBACK PlayerWindow::PlaylistFindDialogProc(HWND dialog, UINT message,
@@ -4859,9 +5105,9 @@ INT_PTR CALLBACK PlayerWindow::PlaylistFindDialogProc(HWND dialog, UINT message,
         for (size_t i = 0; i < std::size(fields); ++i) {
             for (const auto& entry : self->playlist_find_history_[i])
                 SendDlgItemMessageW(dialog, fields[i], CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.c_str()));
-            SendDlgItemMessageW(dialog, fields[i], CB_LIMITTEXT, i == 0 ? 127 : 2047, 0);
+            SendDlgItemMessageW(dialog, fields[i], CB_LIMITTEXT, 0, 0);
         }
-        SetDlgItemTextW(dialog, 1009, self->playlist_find_text_);
+        SetDlgItemTextW(dialog, 1009, self->playlist_find_text_.c_str());
         SetDlgItemTextW(dialog, 1021, self->playlist_find_artist_.c_str());
         SetDlgItemTextW(dialog, 1025, self->playlist_find_album_.c_str());
         CheckDlgButton(dialog, 1103, self->playlist_find_.Flags & FR_MATCHCASE ? BST_CHECKED : BST_UNCHECKED);
@@ -4886,7 +5132,7 @@ INT_PTR CALLBACK PlayerWindow::PlaylistFindDialogProc(HWND dialog, UINT message,
                 FALSE, static_cast<DWORD>(GetWindowLongPtrW(dialog, GWL_EXSTYLE)));
             SetWindowPos(dialog, nullptr, 0, 0, box.right - box.left, box.bottom - box.top,
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-            if (self->playlist_find_text_[0]) PostMessageW(dialog, WM_COMMAND, MAKEWPARAM(1009, CBN_EDITCHANGE), 0);
+            if (!self->playlist_find_text_.empty()) PostMessageW(dialog, WM_COMMAND, MAKEWPARAM(1009, CBN_EDITCHANGE), 0);
         }
         SetFocus(GetDlgItem(dialog, 1009));
         return FALSE;
@@ -4904,27 +5150,34 @@ INT_PTR CALLBACK PlayerWindow::PlaylistFindDialogProc(HWND dialog, UINT message,
     }
     if (message != WM_COMMAND) return FALSE;
     const auto control = LOWORD(wp);
+    if (self->playlist_find_quick_ && control == 1009 && HIWORD(wp) == CBN_SELCHANGE) {
+        // The combo updates its edit text after notifying the parent. Read
+        // the accepted history item after that update, like typed input.
+        PostMessageW(dialog,WM_COMMAND,MAKEWPARAM(1009,CBN_EDITCHANGE),0);
+        return TRUE;
+    }
     const bool live = self->playlist_find_quick_ && control == 1009 && HIWORD(wp) == CBN_EDITCHANGE;
     if (!live && control != 1002 && control != 1107 && control != IDOK) return FALSE;
-    GetDlgItemTextW(dialog, 1009, self->playlist_find_text_, static_cast<int>(std::size(self->playlist_find_text_)));
+    if (self->playlist_find_running_) return TRUE;
+    self->playlist_find_text_ = PlaylistFindControlText(dialog,1009);
     if (!self->playlist_find_quick_) {
-        wchar_t text[2048]{};
-        GetDlgItemTextW(dialog, 1021, text, static_cast<int>(std::size(text))); self->playlist_find_artist_ = text;
-        GetDlgItemTextW(dialog, 1025, text, static_cast<int>(std::size(text))); self->playlist_find_album_ = text;
+        self->playlist_find_artist_ = PlaylistFindControlText(dialog,1021);
+        self->playlist_find_album_ = PlaylistFindControlText(dialog,1025);
         self->playlist_find_.Flags = (IsDlgButtonChecked(dialog, 1102) ? 0 : FR_DOWN) |
             (IsDlgButtonChecked(dialog, 1103) ? FR_MATCHCASE : 0) |
             (IsDlgButtonChecked(dialog, 1104) ? FR_WHOLEWORD : 0);
     }
     if (!live) for (size_t i = 0; i < (self->playlist_find_quick_ ? 1U : 3U); ++i) {
-        wchar_t text[2048]{}; GetDlgItemTextW(dialog, fields[i], text, static_cast<int>(std::size(text)));
-        if (!text[0]) continue;
+        const auto text=PlaylistFindControlText(dialog,fields[i]);
+        if (text.empty()) continue;
         auto& history = self->playlist_find_history_[i];
-        std::erase(history, std::wstring(text)); history.insert(history.begin(), text);
-        const LRESULT old = SendDlgItemMessageW(dialog, fields[i], CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(text));
+        std::erase_if(history,[&](const auto& entry) { return _wcsicmp(entry.c_str(),text.c_str())==0; });
+        history.insert(history.begin(), text);
+        const LRESULT old = SendDlgItemMessageW(dialog, fields[i], CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(text.c_str()));
         if (old != CB_ERR) SendDlgItemMessageW(dialog, fields[i], CB_DELETESTRING, old, 0);
-        SendDlgItemMessageW(dialog, fields[i], CB_INSERTSTRING, 0, reinterpret_cast<LPARAM>(text));
+        SendDlgItemMessageW(dialog, fields[i], CB_INSERTSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
         if (!GetWindowTextLengthW(GetDlgItem(dialog, fields[i])))
-            SetDlgItemTextW(dialog, fields[i], text);
+            SetDlgItemTextW(dialog, fields[i], text.c_str());
     }
     self->FindNextPlaylistTrack(self->playlist_find_.Flags, live || control == 1107);
     if (self->playlist_find_quick_ && !live) {
@@ -4935,6 +5188,7 @@ INT_PTR CALLBACK PlayerWindow::PlaylistFindDialogProc(HWND dialog, UINT message,
 }
 
 void PlayerWindow::ShowPlaylistFindDialog(bool quick) {
+    if (playlist_find_running_) return;
     if (playlist_find_dialog_ && IsWindow(playlist_find_dialog_))
         EndDialog(playlist_find_dialog_, IDCANCEL);
     playlist_find_quick_ = quick;
@@ -6130,14 +6384,10 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
         return true;
     }
     if (command == kPlaylistFindNext) {
-        if (playlist_find_dialog_ && IsWindow(playlist_find_dialog_)) {
-            PostMessageW(playlist_find_dialog_, WM_COMMAND, IDOK, 0);
-        } else if (playlist_find_text_[0] != L'\0' || (!playlist_find_quick_ &&
-                   (!playlist_find_artist_.empty() || !playlist_find_album_.empty()))) {
-            static_cast<void>(FindNextPlaylistTrack(playlist_find_.Flags));
-        } else {
-            ShowPlaylistFindDialog(playlist_find_quick_);
-        }
+        // 004860E5 repeats the last submitted criteria. In quick mode this
+        // reselects all matches; it must not click the dialog's default
+        // button and close it, or reopen an empty search dialog.
+        static_cast<void>(FindNextPlaylistTrack(playlist_find_.Flags));
         return true;
     }
     if (command >= kPlaylistModeSingle && command <= kPlaylistModeShuffle) {

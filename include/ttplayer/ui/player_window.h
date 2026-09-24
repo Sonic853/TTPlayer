@@ -1191,8 +1191,10 @@ private:
     DWORD playlist_list_type_tick_{};
     DWORD playlist_track_type_tick_{};
     FINDREPLACEW playlist_find_{};
-    wchar_t playlist_find_text_[128]{};
+    std::wstring playlist_find_text_;
     HWND playlist_find_dialog_{};
+    HWND playlist_find_progress_{};
+    bool playlist_find_running_{};
     bool playlist_find_quick_{};
     std::wstring playlist_find_artist_, playlist_find_album_;
     std::array<std::vector<std::wstring>, 3> playlist_find_history_;

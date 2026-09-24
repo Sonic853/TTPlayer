@@ -1019,7 +1019,12 @@ void DrawOptionsHeaderContent(const DRAWITEMSTRUCT& item) {
     LOGFONTW font{};
     const auto original = reinterpret_cast<HFONT>(SendMessageW(item.hwndItem,WM_GETFONT,0,0));
     if (original) GetObjectW(original,sizeof(font),&font);
-    font.lfHeight = 14; // 004A3209 overrides only height; keeps face/weight.
+    // 004A3209 uses a 14px cell in the navigation font. On Chinese XP that
+    // resolves to SimSun with no internal leading; modern property sheets
+    // supply Microsoft YaHei UI, whose 14px cell leaves only a 9px em.
+    // Pin the banner to XP's face so its text keeps the same size on every OS.
+    font.lfHeight = 14;
+    wcscpy_s(font.lfFaceName, L"SimSun");
     const auto created = CreateFontIndirectW(&font);
     if (created) SelectObject(item.hDC,created);
     wchar_t caption[1024]{}; GetWindowTextW(item.hwndItem,caption,1024);
