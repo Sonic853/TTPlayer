@@ -3199,6 +3199,15 @@ bool PlayerWindow::RoutePlaylistMouseWheel(const MSG& message) const {
 }
 
 bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
+    // Alt+F4 is an explicit exit, even in close-button-to-tray mode. Handle
+    // the queued key before a skin provider or DefWindowProc turns it into
+    // an indistinguishable WM_CLOSE. Owned dialogs keep their own Alt+F4.
+    if (message.message == WM_SYSKEYDOWN && message.wParam == VK_F4 &&
+        (message.lParam & (1L << 29)) != 0 && window_ && IsWindowEnabled(window_) &&
+        (message.hwnd == window_ || IsChild(window_, message.hwnd))) {
+        PostMessageW(window_, WM_COMMAND, kCmdExit, 0);
+        return true;
+    }
     if (external_skin_ && external_skin_->Translate(message)) return true;
     if (RoutePlaylistMouseWheel(message)) return true;
     if (TranslateLyricUploadMessage(message)) return true;

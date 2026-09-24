@@ -77,6 +77,8 @@ constexpr int kOptionsHeader = 0xe911;
 constexpr int kOptionsRelated = 0xe912;
 constexpr int kOptionsDiscordLyrics = 0xe913;
 constexpr int kOptionsExtensionCorrection = 0xe92a;
+constexpr int kOptionsMinimizeToTrayLabel = 0xe92b;
+constexpr int kOptionsMinimizeToTray = 0xe92c;
 constexpr int kOptionsLanguage = 0xe914;
 constexpr int kOptionsLanguageLabel = 0xe916;
 constexpr int kOptionsLanguageNotice = 0xe917;
@@ -4340,12 +4342,17 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             const HWND extension = add(WC_BUTTONW, i18n::Literal(L"识别到错误后缀时提示更改"),
                 kOptionsExtensionCorrection, WS_TABSTOP | BS_AUTOCHECKBOX,
                 {13, 148, 267, 158}, lyrics);
+            const HWND tray_label = add(WC_STATICW, i18n::Literal(L"最小化到系统栏"),
+                kOptionsMinimizeToTrayLabel, 0, {13, 165, 83, 177}, extension);
+            const HWND tray_mode = add(WC_COMBOBOXW, L"", kOptionsMinimizeToTray,
+                WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+                {85, 161, 197, 225}, tray_label);
             if (language_available) {
                 const HWND label = add(WC_STATICW, i18n::Literal(L"界面语言"), kOptionsLanguageLabel,
-                    0, {13, 165, 83, 177}, extension);
+                    0, {13, 184, 83, 196}, tray_mode);
                 const HWND languages = add(WC_COMBOBOXW, L"", kOptionsLanguage,
                     WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
-                    {85, 161, 197, 281}, label);
+                    {85, 180, 197, 300}, label);
                 std::vector<std::wstring> choices{L"auto", L"source"};
                 const auto available = i18n::Languages(PlayerRuntimeDirectory());
                 for (const auto& locale : available)
@@ -4371,11 +4378,14 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                     if (locale == selected) SendMessageW(languages, CB_SETCURSEL, item, 0);
                 }
                 add(WC_STATICW, i18n::Literal(L"界面语言将在下次启动播放器时生效。"),
-                    kOptionsLanguageNotice, 0, {13, 177, 267, 195}, languages);
+                    kOptionsLanguageNotice, 0, {13, 196, 267, 208}, languages);
             }
         }
         SetChecked(dialog, 2088, value.startup_minimize);
         SetChecked(dialog, 2085, value.tray_icon);
+        PopulateTextCombo(dialog, kOptionsMinimizeToTray,
+            {i18n::Text(L"无"), i18n::Text(L"点击最小化"), i18n::Text(L"点击关闭")},
+            std::clamp(value.minimize_to_tray, 0, 2));
         SetChecked(dialog, 2127, value.show_hotkey_in_tips);
         SetChecked(dialog, 2086, value.tips_on_open);
         SetChecked(dialog, 1079, value.menu_tips);
@@ -5217,6 +5227,8 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         auto& value = settings_.general;
         value.startup_minimize = IsChecked(dialog, 2088);
         value.tray_icon = IsChecked(dialog, 2085);
+        if (GetDlgItem(dialog, kOptionsMinimizeToTray))
+            value.minimize_to_tray = std::clamp(ComboSelection(dialog, kOptionsMinimizeToTray), 0, 2);
         value.show_hotkey_in_tips = IsChecked(dialog, 2127);
         value.tips_on_open = IsChecked(dialog, 2086);
         value.menu_tips = IsChecked(dialog, 1079);
@@ -5517,6 +5529,9 @@ bool PlayerWindow::CommitOptionsControl(
         switch (control) {
         case 2088: value.startup_minimize = IsChecked(dialog, 2088); break;
         case 2085: value.tray_icon = IsChecked(dialog, 2085); break;
+        case kOptionsMinimizeToTray:
+            value.minimize_to_tray = std::clamp(ComboSelection(dialog, kOptionsMinimizeToTray), 0, 2);
+            break;
         case 2127: value.show_hotkey_in_tips = IsChecked(dialog, 2127); break;
         case 2086: value.tips_on_open = IsChecked(dialog, 2086); break;
         case 1079: value.menu_tips = IsChecked(dialog, 1079); break;

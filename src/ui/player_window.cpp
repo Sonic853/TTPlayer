@@ -1428,7 +1428,7 @@ std::wstring PlayerWindow::ResourceText(UINT identifier) const {
 
 void PlayerWindow::UpdateTrayIcon() {
     if (!window_) return;
-    if (!settings_.general.tray_icon) {
+    if (!settings_.general.tray_icon && !minimized_to_tray_) {
         RemoveTrayIcon();
         return;
     }
@@ -1453,7 +1453,9 @@ void PlayerWindow::UpdateTrayIcon() {
     wcsncpy_s(icon.szTip, tip.c_str(), _TRUNCATE);
 
     const DWORD operation = tray_icon_added_ ? NIM_MODIFY : NIM_ADD;
-    if (Shell_NotifyIconW(operation, &icon)) tray_icon_added_ = true;
+    tray_icon_added_ = Shell_NotifyIconW(operation, &icon) != FALSE;
+    if (!tray_icon_added_ && operation == NIM_MODIFY)
+        tray_icon_added_ = Shell_NotifyIconW(NIM_ADD, &icon) != FALSE;
 }
 
 void PlayerWindow::RemoveTrayIcon() {
@@ -1464,6 +1466,89 @@ void PlayerWindow::RemoveTrayIcon() {
     icon.uID = kTrayIconIdentifier;
     Shell_NotifyIconW(NIM_DELETE, &icon);
     tray_icon_added_ = false;
+}
+
+bool PlayerWindow::MinimizeToTray() {
+    if (!window_ || !IsWindow(window_) || close_after_skin_window_fade_)
+        return false;
+    CompleteSkinWindowFadeForReplacement();
+    LeaveFullScreen();
+    // Always provide a way back, even when the persistent tray icon is off.
+    // Explorer restarts also republish this temporary icon via UpdateTrayIcon.
+    minimized_to_tray_ = true;
+    UpdateTrayIcon();
+    if (!tray_icon_added_) {
+        minimized_to_tray_ = false;
+        return false;
+    }
+    // Minimize first so Windows preserves/restores the visible owned windows.
+    // Hiding afterwards removes the main window's taskbar button.
+    if (!IsIconic(window_)) ShowWindow(window_, SW_MINIMIZE);
+    ShowWindow(window_, SW_HIDE);
+    return true;
+}
+
+void PlayerWindow::RestoreMainWindow() {
+    if (fullscreen_mode_ != 0) SetFullScreenMode(0);
+    // 0046FE1E/004A39EF first reveal a hidden iconic window, then restore it.
+    if (!IsWindowVisible(window_)) ShowWindow(window_, SW_SHOWNA);
+    if (IsIconic(window_)) SendMessageW(window_, WM_SYSCOMMAND, SC_RESTORE, 0);
+    BringWindowToTop(window_);
+    SetForegroundWindow(window_);
+}
+
+void PlayerWindow::HandleTrayCallback(WPARAM icon, LPARAM event) {
+    if (close_after_skin_window_fade_) return;
+    // Our registration retains the original (XP-compatible) callback format.
+    // Also decode the packed version-4 form instead of mistaking its cursor
+    // coordinates for an icon ID when a shell integration uses that format.
+    const bool packed = HIWORD(event) == kTrayIconIdentifier;
+    if (!packed && icon != kTrayIconIdentifier) return;
+    const UINT notification = packed ? LOWORD(event) : static_cast<UINT>(event);
+    switch (notification) {
+    case WM_MOUSEMOVE:
+        tray_hover_active_ = tray_app_active_;
+        break;
+    case WM_LBUTTONDOWN:
+        // Explorer takes activation during the click; retain the state seen
+        // on hover until release, as in 004689AA + 0046FE1E.
+        if (tray_hover_active_) tray_app_active_ = true;
+        tray_left_pressed_ = true;
+        break;
+    case WM_LBUTTONUP:
+        if (!tray_left_pressed_) break;
+        tray_left_pressed_ = false;
+        tray_hover_active_ = false;
+        if (IsIconic(window_) || !IsWindowVisible(window_)) RestoreMainWindow();
+        else if (tray_app_active_)
+            PostMessageW(window_, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+        else RestoreMainWindow();
+        break;
+    case NIN_KEYSELECT:
+        tray_left_pressed_ = false;
+        RestoreMainWindow();
+        break;
+    case WM_RBUTTONUP:
+    case WM_CONTEXTMENU: {
+        tray_left_pressed_ = false;
+        POINT point{};
+        if (packed && notification == WM_CONTEXTMENU) {
+            point = {GET_X_LPARAM(icon), GET_Y_LPARAM(icon)};
+            if (point.x == -1 && point.y == -1) GetCursorPos(&point);
+        } else GetCursorPos(&point);
+        // Use the very same menu, owner-draw records and dynamic submenus as
+        // the main window. Do not reveal an iconic/hidden window to show it.
+        SetForegroundWindow(window_);
+        SendMessageW(window_, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(window_),
+            MAKELPARAM(static_cast<short>(point.x), static_cast<short>(point.y)));
+        PostMessageW(window_, WM_NULL, 0, 0); // 0046FE1E: allow outside dismissal.
+        break;
+    }
+    default:
+        // Original 0046FE1E ignores double-click, middle-button and wheel
+        // notifications; their first left down/up pair already acts once.
+        break;
+    }
 }
 
 void PlayerWindow::ShowPlaybackOpenTip() {
@@ -2675,6 +2760,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         }
         return 0;
     case WM_ACTIVATEAPP:
+        if (!tray_left_pressed_) tray_app_active_ = wparam != FALSE;
         // Multi-monitor extension: unlike FUN_004657DF, switching to another
         // application does not tear down fullscreen. Escape/menu still exit.
         return 0;
@@ -2716,24 +2802,12 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         }
         break;
     case kTrayCallbackMessage:
-        if (wparam != kTrayIconIdentifier) break;
-        if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) {
-            POINT point{};
-            GetCursorPos(&point);
-            SetForegroundWindow(window_);
-            SendMessageW(window_, WM_CONTEXTMENU,
-                reinterpret_cast<WPARAM>(window_),
-                MAKELPARAM(static_cast<short>(point.x),
-                           static_cast<short>(point.y)));
-            return 0;
-        }
-        if (lparam == WM_LBUTTONDBLCLK) {
-            ShowWindow(window_, SW_RESTORE);
-            SetForegroundWindow(window_);
-            return 0;
-        }
-        break;
+        HandleTrayCallback(wparam, lparam);
+        return 0;
     case WM_SYSCOMMAND:
+        if ((wparam & 0xfff0U) == SC_MINIMIZE &&
+            settings_.general.minimize_to_tray == 1 && MinimizeToTray())
+            return 0;
         if ((wparam & 0xfff0U) == SC_RESTORE && fullscreen_mode_ != 0) {
             SetFullScreenMode(0);
             return 0;
@@ -2743,6 +2817,13 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         if (!skin_) reinterpret_cast<MINMAXINFO*>(lparam)->ptMinTrackSize = {760, 440};
         return 0;
     case WM_SIZE:
+        if (wparam == SIZE_MINIMIZED && settings_.general.minimize_to_tray == 1 &&
+            !minimized_to_tray_)
+            static_cast<void>(MinimizeToTray());
+        if (wparam != SIZE_MINIMIZED && minimized_to_tray_) {
+            minimized_to_tray_ = false;
+            UpdateTrayIcon();
+        }
         // Keep the normal child geometry for off-screen Peek rendering.
         if (wparam != SIZE_MINIMIZED)
             LayoutControls(static_cast<int>(LOWORD(lparam)), static_cast<int>(HIWORD(lparam)));
@@ -3093,7 +3174,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                     data->dwData);
             }
         }
-        ShowWindow(window_, SW_SHOW);
+        ShowWindow(window_, IsIconic(window_) ? SW_RESTORE : SW_SHOW);
         SetForegroundWindow(window_);
         return TRUE;
     }
@@ -3236,6 +3317,12 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
     case WM_CLOSE:
         if (close_after_skin_window_fade_) return 0;
         if (lyric_save_in_progress_) return 0;
+        // Explicit Exit (also routed from Alt+F4) uses a private nonzero
+        // wParam; caption/skin close keeps zero and may hide without stopping.
+        if (wparam == 0 && settings_.general.minimize_to_tray == 2) {
+            if (!MinimizeToTray()) ShowWindow(window_, SW_MINIMIZE);
+            return 0;
+        }
         CancelWaveTrackChange();
         FinishLyricDocument();
         ClearAudioError();
@@ -4007,7 +4094,7 @@ void PlayerWindow::InvokeSkinAction(std::wstring_view action) {
         }
     }
     else if (action == L"exit") PostMessageW(window_, WM_CLOSE, 0, 0);
-    else if (action == L"minimize") ShowWindow(window_, SW_MINIMIZE);
+    else if (action == L"minimize") SendMessageW(window_, WM_SYSCOMMAND, SC_MINIMIZE, 0);
     else if (action == L"minimode") ToggleMiniMode();
     else if (action == L"prev") SelectRelative(false);
     else if (action == L"next") SelectRelative(true);
@@ -5408,8 +5495,13 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
     case kCmdSkinOptions: ShowOptions(12); break;
     case kCmdMiniMode: ToggleMiniMode(); break;
     case kCmdRearrangeWindows: RearrangeWindows(); break;
-    case kCmdMinimize: ShowWindow(window_, SW_MINIMIZE); break;
-    case kCmdExit: PostMessageW(window_, WM_CLOSE, 0, 0); break;
+    case kCmdMinimize: SendMessageW(window_, WM_SYSCOMMAND, SC_MINIMIZE, 0); break;
+    case kCmdToggleMainWindow:
+        if (fullscreen_mode_ != 0) SetFullScreenMode(0);
+        if (IsIconic(window_) || !IsWindowVisible(window_)) RestoreMainWindow();
+        else SendMessageW(window_, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+        break;
+    case kCmdExit: PostMessageW(window_, WM_CLOSE, 1, 0); break;
     default: return false;
     }
     RefreshPlaybackUi();
@@ -6138,6 +6230,7 @@ void PlayerWindow::UpdateMainWindowCaption() {
     window_caption_source_ = std::move(source);
     window_caption_scrolling_ = scrolling;
     SetWindowTextW(window_, window_caption_source_.c_str());
+    UpdateTrayIcon(); // 0045CA57 updates the unscrolled tray tooltip as well.
 }
 
 void PlayerWindow::RotateMainWindowCaption() {

@@ -897,6 +897,9 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         s.general.startup_minimize=IntAttr(
             n,L"StartupMinimize",s.general.startup_minimize ? 1 : 0)!=0;
         s.general.tray_icon=IntAttr(n,L"TrayIcon",s.general.tray_icon ? 1 : 0)!=0;
+        const int minimize_to_tray=IntAttr(n,L"MinimizeToTray",s.general.minimize_to_tray);
+        s.general.minimize_to_tray=minimize_to_tray>=0 && minimize_to_tray<=2
+            ? minimize_to_tray : 1;
         s.general.fade_windows=IntAttr(
             n,L"Fade_Windows",s.general.fade_windows ? 1 : 0)!=0;
         s.general.show_hotkey_in_tips=IntAttr(
@@ -1694,6 +1697,7 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"StartupMinimize",
                      settings.general.startup_minimize ? 1 : 0);
         SetAttribute(element,L"TrayIcon",settings.general.tray_icon ? 1 : 0);
+        SetAttribute(element,L"MinimizeToTray",settings.general.minimize_to_tray);
         SetAttribute(element,L"Fade_Windows",settings.general.fade_windows ? 1 : 0);
         SetAttribute(element,L"ShowHotKeyInTips",
                      settings.general.show_hotkey_in_tips ? 1 : 0);

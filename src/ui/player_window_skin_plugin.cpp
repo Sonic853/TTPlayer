@@ -557,7 +557,7 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     case TTP_SKIN_NEXT: SelectRelative(true);break;
     case TTP_SKIN_OPEN: ChooseFiles();break;
     case TTP_SKIN_CLOSE: PostMessageW(window_,WM_CLOSE,0,0);break;
-    case TTP_SKIN_MINIMIZE: ShowWindow(window_,SW_MINIMIZE);break;
+    case TTP_SKIN_MINIMIZE: SendMessageW(window_,WM_SYSCOMMAND,SC_MINIMIZE,0);break;
     case TTP_SKIN_PLAYLIST: TogglePlaylistWindow();break;
     case TTP_SKIN_MEDIA_LIBRARY:
         if(!settings_.playlist.library_mode)SetMediaLibraryMode(true);

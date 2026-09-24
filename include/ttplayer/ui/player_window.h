@@ -305,6 +305,9 @@ private:
     void ApplyOptionsChangeMask(UINT mask, LPARAM source_control);
     void ReloadApplicationIcons();
     void UpdateTrayIcon();
+    bool MinimizeToTray();
+    void HandleTrayCallback(WPARAM icon, LPARAM event);
+    void RestoreMainWindow();
     [[nodiscard]] TaskbarPlaybackState TaskbarState() const;
     [[nodiscard]] TaskbarPlaybackLabels TaskbarLabels() const;
     void UpdateTaskbarPlayback();
@@ -878,6 +881,10 @@ private:
     HICON window_icon_small_{};
     HICON window_icon_big_{};
     bool tray_icon_added_{};
+    bool minimized_to_tray_{};
+    bool tray_app_active_{};
+    bool tray_hover_active_{};
+    bool tray_left_pressed_{};
     TaskbarPlaybackControls taskbar_playback_;
     TaskbarPreview taskbar_preview_;
 #if !defined(TTPLAYER_LEGACY_WINDOWS)

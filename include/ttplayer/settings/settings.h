@@ -16,6 +16,7 @@ struct GeneralSettings {
     std::wstring language{L"auto"};
     bool startup_minimize{};
     bool tray_icon{true};
+    int minimize_to_tray{1}; // 0 none, 1 minimize (including taskbar), 2 close button
     bool fade_windows{true};
     bool show_hotkey_in_tips{true};
     bool tips_on_open{};
