@@ -1053,6 +1053,7 @@ std::string Win32ErrorText(DWORD error) {
 bool IsSoundAddInName(const std::filesystem::path& path) {
     const auto name = path.filename().wstring();
     return _wcsicmp(name.c_str(), L"ttp_i18n.dll") != 0 &&
+           _wcsicmp(name.c_str(), L"ttp_https.dll") != 0 &&
            name.size() > 8 && _wcsnicmp(name.c_str(), L"ttp_", 4) == 0 &&
            _wcsicmp(path.extension().c_str(), L".dll") == 0;
 }

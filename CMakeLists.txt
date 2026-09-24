@@ -95,6 +95,7 @@ add_library(ttplayer_core
   src/lyrics/online_search.cpp
   src/lyrics/service_catalog.cpp
   src/lyrics/lyric_http.cpp
+  src/lyrics/https_provider.cpp
   src/playlist/playlist.cpp
   src/playlist/playback_order.cpp
   src/playlist/playlist_store.cpp
@@ -194,6 +195,18 @@ set_target_properties(ttplayer_rebuild PROPERTIES
 target_compile_definitions(ttplayer_rebuild PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(ttplayer_rebuild PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_rebuild PRIVATE ttplayer_core ttpcomm_api comctl32 comdlg32 shell32)
+
+# The TLS DLL is built independently. This option only stages a prebuilt DLL.
+set(TTPLAYER_HTTPS_DLL "" CACHE FILEPATH "Prebuilt ttp_https.dll to stage in the player's AddIn directory")
+if(TTPLAYER_HTTPS_DLL)
+  if(NOT EXISTS "${TTPLAYER_HTTPS_DLL}" OR IS_DIRECTORY "${TTPLAYER_HTTPS_DLL}")
+    message(FATAL_ERROR "TTPLAYER_HTTPS_DLL must name an independently built ttp_https.dll")
+  endif()
+  add_custom_command(TARGET ttplayer_rebuild POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:ttplayer_rebuild>/AddIn"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${TTPLAYER_HTTPS_DLL}"
+      "$<TARGET_FILE_DIR:ttplayer_rebuild>/AddIn/ttp_https.dll" VERBATIM)
+endif()
 
 # The player and translation provider are built and distributed independently.
 # An already-built DLL is only needed for optional integration tests.
@@ -505,6 +518,7 @@ target_compile_options(lyric_service_catalog_tests PRIVATE /W4 /permissive- /EHs
 target_link_libraries(lyric_service_catalog_tests PRIVATE ttplayer_core)
 add_test(NAME lyric_service_catalog_tests COMMAND lyric_service_catalog_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(lyric_service_catalog_tests PROPERTIES TIMEOUT 60)
+
 
 add_executable(window_topmost_tests tests/ui/window_topmost_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)

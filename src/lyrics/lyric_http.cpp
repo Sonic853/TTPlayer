@@ -1,6 +1,7 @@
 #include "ttplayer/lyrics/lyric_http.h"
 #include "ttplayer/lyrics/service_catalog.h"
 #include "service_xml.h"
+#include "https_provider.h"
 #include <algorithm>
 #include <bit>
 #include <charconv>
@@ -50,6 +51,13 @@ struct Response { std::string body; std::wstring title, url; };
 Response Fetch(const std::wstring& address, const settings::NetworkSettings& network,
                const std::function<bool()>& canceled) {
     if (!ValidServiceUrl(address)) throw std::runtime_error("Invalid HTTP/HTTPS URL");
+    if (_wcsnicmp(address.c_str(), L"https://", 8) == 0) {
+        if (auto result = FetchHttpsProvider(address, network, canceled)) {
+            return {std::move(result->body),
+                DecodeHeader(core::Utf8ToWide(result->title_header)),
+                DecodeHeader(core::Utf8ToWide(result->url_header))};
+        }
+    }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(65);
     const auto guard = [&] {
         if (canceled && canceled()) throw std::runtime_error("Canceled");
