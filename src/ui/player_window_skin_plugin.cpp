@@ -71,7 +71,13 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
             settings_.lyric.background_color=colors.background;
         }
         const auto font_height=next->LyricFontHeight();
-        if(font_height && font_height>=-4096 && font_height<=4096) {
+        LOGFONTW default_font{};
+        if(next->LyricFont(default_font) && default_font.lfHeight &&
+            default_font.lfHeight>=-4096 && default_font.lfHeight<=4096) {
+            default_font.lfFaceName[LF_FACESIZE-1]=0;
+            settings_.lyric.font=default_font;
+            settings_.lyric.font_valid=true;
+        } else if(font_height && font_height>=-4096 && font_height<=4096) {
             if(!settings_.lyric.font_valid) settings_.lyric.font=skin_->Lyric().font;
             settings_.lyric.font.lfHeight=font_height;
             settings_.lyric.font.lfWidth=0;

@@ -54,6 +54,9 @@ public:
     int32_t LyricFontHeight() const noexcept {
         return module_->Api().lyric_font_height?module_->Api().lyric_font_height(instance_):0;
     }
+    bool LyricFont(LOGFONTW& font) const noexcept {
+        return module_->Api().lyric_font && module_->Api().lyric_font(instance_,&font);
+    }
     bool PlaylistDrop(TtpSkinPlaylistDrop& drop) const noexcept {
         return module_->Api().playlist_drop && module_->Api().playlist_drop(instance_,&drop);
     }

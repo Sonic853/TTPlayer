@@ -237,6 +237,10 @@ typedef struct TtpSkinPlugin {
     // S_FALSE is successful partial compatibility; message lists skipped features.
     // Caller owns message (WCHAR count, including terminator); may be null.
     HRESULT (WINAPI *check)(const wchar_t*, wchar_t* message, uint32_t count);
+    // Optional complete default font for window lyrics, queried before attach.
+    // Includes face/weight/charset so equal pixel heights have equal metrics.
+    // Host overlays saved lyric customizations after applying this default.
+    BOOL (WINAPI *lyric_font)(void*, LOGFONTW*);
 } TtpSkinPlugin;
 #define TTP_SKIN_PLUGIN_V1_SIZE offsetof(TtpSkinPlugin, skin_directory)
 #define TTP_SKIN_PLUGIN_DECLARATION_SIZE offsetof(TtpSkinPlugin, layout)
