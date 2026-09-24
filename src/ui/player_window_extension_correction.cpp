@@ -45,7 +45,7 @@ INT_PTR CALLBACK CorrectionDialog(HWND dialog,UINT message,WPARAM wparam,LPARAM 
         return FALSE;
     }
     if (message==WM_COMMAND && (LOWORD(wparam)==IDOK || LOWORD(wparam)==IDCANCEL ||
-        LOWORD(wparam)==IDC_EXTENSION_NUMBER)) {
+        LOWORD(wparam)==IDC_EXTENSION_NUMBER || LOWORD(wparam)==IDC_EXTENSION_DISABLE_PROMPT)) {
         EndDialog(dialog,LOWORD(wparam)); return TRUE;
     }
     if (message==WM_CLOSE) { EndDialog(dialog,IDCANCEL); return TRUE; }
@@ -109,16 +109,26 @@ void PlayerWindow::PromptExtensionCorrection() {
     };
     auto destination=audio::ReadMediaFileStamp(correction.target);
     auto prompt=make_prompt(destination);
-    auto choice=ShowWtlModalDialog(instance_,MAKEINTRESOURCEW(IDD_EXTENSION_CORRECTION),
-        window_,CorrectionDialog,reinterpret_cast<LPARAM>(&prompt));
+    const auto show_prompt=[&] {
+        const auto choice=ShowWtlModalDialog(instance_,MAKEINTRESOURCEW(IDD_EXTENSION_CORRECTION),
+            window_,CorrectionDialog,reinterpret_cast<LPARAM>(&prompt));
+        if (choice==IDC_EXTENSION_DISABLE_PROMPT) {
+            settings_.general.prompt_extension_correction=false;
+            extension_corrections_.clear();
+            // Use the same persistence path as the options window's Save.
+            // This choice cancels the current rename without restarting audio.
+            settings::SaveWindowState(settings_.source_path,settings_);
+        }
+        return choice;
+    };
+    auto choice=show_prompt();
     if (choice!=IDOK && choice!=IDC_EXTENSION_NUMBER) return;
     // A destination may have appeared while the first confirmation was open.
     if (!destination) {
         destination=audio::ReadMediaFileStamp(correction.target);
         if (destination) {
             prompt=make_prompt(destination);
-            choice=ShowWtlModalDialog(instance_,MAKEINTRESOURCEW(IDD_EXTENSION_CORRECTION),
-                window_,CorrectionDialog,reinterpret_cast<LPARAM>(&prompt));
+            choice=show_prompt();
             if (choice!=IDOK && choice!=IDC_EXTENSION_NUMBER) return;
         }
     }

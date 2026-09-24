@@ -553,14 +553,16 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
         if(settings_.playlist.enable_drag_drop && value>=0)
             ReorderSelectedPlaylistRows(static_cast<size_t>(value),command==TTP_SKIN_COPY_SELECTION);
         break;
-    case TTP_SKIN_DRAG_SELECTION:
-        if(settings_.playlist.enable_drag_drop && IsWindowVisible(playlist_window_) &&
-           external_skin_->Handles(playlist_window_) && (GetKeyState(VK_LBUTTON)&0x8000)) {
+    case TTP_SKIN_DRAG_SELECTION: {
+        const HWND source=value==1?window_:playlist_window_;
+        if(settings_.playlist.enable_drag_drop && IsWindowVisible(source) &&
+           external_skin_->Handles(source) && (GetKeyState(VK_LBUTTON)&0x8000)) {
             GetCursorPos(&playlist_track_drag_origin_);
             ScreenToClient(playlist_window_,&playlist_track_drag_origin_);
             BeginPlaylistOleDrag();
         }
         break;
+    }
     case TTP_SKIN_DELETE_SELECTED: DeleteSelectedPlaylistRows();break;
     case TTP_SKIN_SELECT_ALL: HandlePlaylistCommand(kPlaylistSelectAll);break;
     case TTP_SKIN_LIST_TOOLBAR: {

@@ -25,7 +25,7 @@ enum TtpSkinCommand {
     TTP_SKIN_MOVE_SELECTION, TTP_SKIN_COPY_SELECTION, // insertion row; current native selection
     TTP_SKIN_CONTENT_FULLSCREEN, // low byte: content mode; next byte: visual type
     TTP_SKIN_CONTENT_MENU, // enqueue a provider-defined menu on the content surface
-    TTP_SKIN_DRAG_SELECTION, // enqueue host OLE drag after releasing provider capture
+    TTP_SKIN_DRAG_SELECTION, // enqueue OLE drag after releasing capture; value 1: embedded main-window playlist, 0: playlist window
     TTP_SKIN_TRACK_TIP, // tip callback only; value is the visible playlist row
     TTP_SKIN_EQ_VALUE = 100 // + 0: preamp, + 1..10: frequency bands; value -12..12
 };

@@ -1946,6 +1946,12 @@ HRESULT PluginManager::Load(const std::filesystem::path& directory) {
             continue;
         }
 
+        // MAKI is a provider dependency, not a sound AddIn. The skin DLL owns
+        // its ABI check and lifetime; do not report a missing sound factory.
+        if (GetProcAddress(module, "ttpGetMakiVM")) {
+            FreeLibrary(module);
+            continue;
+        }
         // Skin providers share AddIn discovery but use a separate versioned ABI.
         // Their module/instance lifetime is owned by the UI skin manager.
         if (const auto skin_factory = reinterpret_cast<TtpGetSkinPlugin>(

@@ -661,7 +661,7 @@ public:
             if (point_accepted_) {
                 selected = surface_ == FileDropSurface::playlist
                     ? incoming : DROPEFFECT_LINK;
-                if (surface_ == FileDropSurface::playlist && owner_.external_skin_ &&
+                if (surface_ != FileDropSurface::lyric && owner_.external_skin_ &&
                     owner_.external_skin_->Provider()->Api().playlist_drop)
                     selected = owner_.FileDropEffect(surface_, point, incoming);
             }
@@ -810,11 +810,11 @@ DWORD PlayerWindow::FileDropEffect(FileDropSurface surface, POINTL point,
     // Main 00468B09 leaves DragOver's source mask untouched.  Lyric's simple
     // target reports LINK on both Enter and Over.  CPlayListWnd alone runs
     // the region/hit-test path below and ORs LINK into the incoming mask.
-    if (surface == FileDropSurface::player) return source_effect;
     if (surface == FileDropSurface::lyric) return DROPEFFECT_LINK;
-    if (external_skin_ && playlist_window_) {
-        TtpSkinPlaylistDrop drop{sizeof(drop),playlist_window_,{point.x,point.y},TTP_SKIN_DROP_PREVIEW,-1};
-        ScreenToClient(playlist_window_,&drop.point);
+    const HWND provider_window=surface==FileDropSurface::player?window_:playlist_window_;
+    if (external_skin_ && provider_window) {
+        TtpSkinPlaylistDrop drop{sizeof(drop),provider_window,{point.x,point.y},TTP_SKIN_DROP_PREVIEW,-1};
+        ScreenToClient(provider_window,&drop.point);
         if (external_skin_->PlaylistDrop(drop)) {
             playlist_list_hover_.reset();
             playlist_external_dragging_=drop.insertion>=0;
@@ -823,6 +823,7 @@ DWORD PlayerWindow::FileDropEffect(FileDropSurface surface, POINTL point,
             return drop.insertion>=0?source_effect|DROPEFFECT_LINK:DROPEFFECT_NONE;
         }
     }
+    if (surface == FileDropSurface::player) return source_effect;
     if (!playlist_window_ || !playlist_list_control_ ||
         !playlist_track_control_ || !skin_ || !skin_->Playlist().valid)
         return DROPEFFECT_NONE;
@@ -868,8 +869,8 @@ DWORD PlayerWindow::FileDropEffect(FileDropSurface surface, POINTL point,
 }
 
 void PlayerWindow::ClearPlaylistDropCue() noexcept {
-    if (external_skin_ && playlist_window_) {
-        TtpSkinPlaylistDrop drop{sizeof(drop),playlist_window_,{},TTP_SKIN_DROP_LEAVE,-1};
+    for(HWND provider_window:{window_,playlist_window_}) if (external_skin_ && provider_window) {
+        TtpSkinPlaylistDrop drop{sizeof(drop),provider_window,{},TTP_SKIN_DROP_LEAVE,-1};
         external_skin_->PlaylistDrop(drop);
     }
     const bool changed = playlist_track_drop_row_.has_value() ||
@@ -1456,6 +1457,17 @@ void PlayerWindow::HandleDroppedFiles(FileDropSurface surface, IDataObject* data
                                       DWORD, POINTL point, DWORD* effect) {
     const DWORD incoming_effect = effect ? *effect : DROPEFFECT_NONE;
     if (effect) *effect = DROPEFFECT_NONE;
+    HWND provider_window=playlist_window_;
+    if(surface==FileDropSurface::player && external_skin_) {
+        TtpSkinPlaylistDrop hit{sizeof(hit),window_,{point.x,point.y},TTP_SKIN_DROP_QUERY,-1};
+        ScreenToClient(window_,&hit.point);
+        if(external_skin_->PlaylistDrop(hit)) {
+            if(hit.insertion<0) return;
+            // An embedded provider playlist uses playlist insertion semantics,
+            // including empty-data handling; never clear/open the whole list.
+            surface=FileDropSurface::playlist;provider_window=window_;
+        }
+    }
     auto paths = ExtractDropPaths(data);
     if (paths.empty()) {
         // 0045A8BE clears the active list even when a data object which passed
@@ -1534,8 +1546,8 @@ void PlayerWindow::HandleDroppedFiles(FileDropSurface surface, IDataObject* data
 
     if (!playlist_window_ || !skin_ || !skin_->Playlist().valid) return;
     const POINT screen{point.x, point.y};
-    TtpSkinPlaylistDrop drop{sizeof(drop),playlist_window_,screen,TTP_SKIN_DROP_QUERY,-1};
-    ScreenToClient(playlist_window_,&drop.point);
+    TtpSkinPlaylistDrop drop{sizeof(drop),provider_window,screen,TTP_SKIN_DROP_QUERY,-1};
+    ScreenToClient(provider_window,&drop.point);
     const bool provider_drop=external_skin_ && external_skin_->PlaylistDrop(drop);
     if (provider_drop && drop.insertion<0) return;
     RECT list_bounds{};
@@ -1562,7 +1574,7 @@ void PlayerWindow::HandleDroppedFiles(FileDropSurface surface, IDataObject* data
                                           insertion, false,
                                           ImportPlayback::none);
         if (imported || consumed_playlist) {
-            const HWND focus=provider_drop?playlist_window_:playlist_track_control_;
+            const HWND focus=provider_drop?provider_window:playlist_track_control_;
             if (focus) SetFocus(focus);
             if (effect) *effect = DROPEFFECT_LINK;
         }
