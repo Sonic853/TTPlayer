@@ -31,9 +31,16 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
         if(!module->OwnsInstalledPackage(PlayerRuntimeDirectory()/L"Skin",path) || !module->Probe(path,info)) continue;
         const TtpSkinHost host{sizeof(TtpSkinHost),TTP_SKIN_ABI,this,
             QuerySkinPluginState,QuerySkinPluginTrack,PostSkinPluginCommand,HandleSkinPluginDrag,
-            QuerySkinPluginSelection,PaintSkinPluginVisual,QuerySkinPluginTip,ResizeSkinPluginWindow,QuerySkinPluginSpectrum,PaintSkinPluginContent,HandleSkinPluginContentInput};
+            QuerySkinPluginSelection,PaintSkinPluginVisual,QuerySkinPluginTip,ResizeSkinPluginWindow,QuerySkinPluginSpectrum,PaintSkinPluginContent,HandleSkinPluginContentInput,QuerySkinPluginOption};
         auto next=skin::SkinPluginInstance::Create(module,path,&host);
-        if(!next) return false;
+        if(!next) {
+            if(window_) {
+                auto reason=module->Diagnostic(path);
+                const auto text=i18n::Literal(L"当前插件尚不能使用此皮肤。")+std::wstring(L"\r\n\r\n")+path.filename().wstring()+L"\r\n"+reason;
+                MessageBoxW(window_,text.c_str(),module->Name().c_str(),MB_OK|MB_ICONINFORMATION);
+            }
+            return false;
+        }
         // The native fallback supplies lyrics and application dialogs. Format
         // parsing, classic drawing and input remain entirely in the provider.
         if(!skin_ || !skin_->Valid()) {
@@ -155,9 +162,17 @@ BOOL WINAPI PlayerWindow::QuerySkinPluginTip(void* context,uint32_t action,int32
     if(!context) return FALSE;
     if(text && count) text[0]=0;
     try {
+        if(action==TTP_SKIN_CURRENT_SOURCE) {
+            const auto& self=*static_cast<PlayerWindow*>(context);
+            if(self.playlists_.Empty() && !self.media_library_playback_active_)return FALSE;
+            const auto* track=self.PlaybackTrackForUi();if(!track)return FALSE;
+            const auto source=track->path.wstring();if(source.size()>=INT_MAX)return FALSE;
+            if(text && count)wcsncpy_s(text,count,source.c_str(),_TRUNCATE);
+            return static_cast<BOOL>(source.size()+1);
+        }
         if(action==TTP_SKIN_TRACK_TIP) {
             auto& self=*static_cast<PlayerWindow*>(context);
-            if(value<0 || !self.settings_.playlist.item_tips || !self.VisiblePlaylistTrack(static_cast<size_t>(value))) return FALSE;
+            if(self.playlists_.Empty() || value<0 || !self.settings_.playlist.item_tips || !self.VisiblePlaylistTrack(static_cast<size_t>(value))) return FALSE;
             // The provider owns row geometry; do not prune this explicit
             // request against the hidden native list's visible range.
             if(!self.settings_.playlist.library_mode)
@@ -211,27 +226,39 @@ BOOL WINAPI PlayerWindow::QuerySkinPluginState(void* context,TtpSkinState* state
     const auto format=self.audio_->Format();
     state->channels=static_cast<int>(format.channels);state->sample_rate=static_cast<int>(format.sample_rate);
     state->bitrate=0;
-    if(const auto* track=self.PlaybackTrackForUi()) state->bitrate=static_cast<int>(track->bitrate_bps);
+    // Providers may query while LoadStartupSkin runs, before WM_CREATE loads
+    // PlaylistStore. Active() has no empty-store sentinel. Return the same
+    // stopped/empty state as a newly created player without dereferencing it.
+    const auto* track=(!self.playlists_.Empty() || self.media_library_playback_active_)
+        ? self.PlaybackTrackForUi() : nullptr;
+    if(track) state->bitrate=static_cast<int>(track->bitrate_bps);
     state->playlist_visible=IsWindowVisible(self.playlist_window_)!=FALSE;
     state->equalizer_visible=IsWindowVisible(self.equalizer_window_)!=FALSE;
     state->eq_enabled=self.settings_.equalizer.profile!=-2;
     state->elapsed=self.settings_.player.show_elapsed_time;
     std::copy(self.settings_.equalizer.current.begin(),self.settings_.equalizer.current.end(),state->eq);
-    state->track_count=static_cast<uint32_t>(std::min<size_t>(self.VisiblePlaylistTrackCount(),INT_MAX));
-    const auto row=self.VisiblePlaylistPlayingRow();
+    state->track_count=self.playlists_.Empty()?0:
+        static_cast<uint32_t>(std::min<size_t>(self.VisiblePlaylistTrackCount(),INT_MAX));
+    const auto row=self.playlists_.Empty()?std::optional<size_t>{}:self.VisiblePlaylistPlayingRow();
     state->playing_row=row?static_cast<int32_t>(*row):-1;
     auto title=self.display_title_;
     if(!self.playback_error_text_.empty()) title=self.playback_error_text_;
-    else if(const auto* track=self.PlaybackTrackForUi()) title=self.PlaylistDisplayText(*track);
+    else if(track) title=self.PlaylistDisplayText(*track);
     if(title.empty()) title=self.DefaultPlayerTitle();
     wcsncpy_s(state->title,title.c_str(),_TRUNCATE);
     return TRUE;
     } catch(...) { return FALSE; }
 }
+int32_t WINAPI PlayerWindow::QuerySkinPluginOption(void* context,uint32_t command) {
+    if(!context || command!=TTP_SKIN_CROSSFADE)return -1;
+    const auto& self=*static_cast<PlayerWindow*>(context);
+    return (self.settings_.playback.sound_fade_mode&0x10)!=0;
+}
 BOOL WINAPI PlayerWindow::QuerySkinPluginTrack(void* context,uint32_t index,TtpSkinTrack* output) {
     if(!context || !output || output->size<sizeof(*output)) return FALSE;
     try {
     const auto& self=*static_cast<PlayerWindow*>(context);
+    if(self.playlists_.Empty()) return FALSE;
     const auto* track=self.VisiblePlaylistTrack(index);if(!track) return FALSE;
     output->duration_ms=track->duration_ms;
     wcsncpy_s(output->title,self.PlaylistDisplayText(*track).c_str(),_TRUNCATE);
@@ -241,6 +268,7 @@ BOOL WINAPI PlayerWindow::QuerySkinPluginTrack(void* context,uint32_t index,TtpS
 uint32_t WINAPI PlayerWindow::QuerySkinPluginSelection(void* context,uint32_t row) {
     if(!context) return 0;
     const auto& self=*static_cast<PlayerWindow*>(context);
+    if(self.playlists_.Empty()) return 0;
     if(row>=self.VisiblePlaylistTrackCount()) return 0;
     return (self.playlist_selected_rows_.contains(row)?1u:0u) |
            (self.playlist_selection_ && *self.playlist_selection_==row?2u:0u);
@@ -511,6 +539,10 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     case TTP_SKIN_CLOSE: PostMessageW(window_,WM_CLOSE,0,0);break;
     case TTP_SKIN_MINIMIZE: ShowWindow(window_,SW_MINIMIZE);break;
     case TTP_SKIN_PLAYLIST: TogglePlaylistWindow();break;
+    case TTP_SKIN_MEDIA_LIBRARY:
+        if(!settings_.playlist.library_mode)SetMediaLibraryMode(true);
+        if(!settings_.player.playlist_visible)TogglePlaylistWindow();
+        break;
     case TTP_SKIN_EQUALIZER: ToggleEqualizerWindow();break;
     case TTP_SKIN_LYRICS: ToggleLyricWindow();break;
     case TTP_SKIN_CONTENT_FULLSCREEN:
@@ -534,6 +566,10 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
         if(audio_->Duration().count()>0) audio_->SeekWithoutFade(std::chrono::milliseconds(audio_->Duration().count()*std::clamp(value,0,10000)/10000));
         break;
     case TTP_SKIN_MODE: SetPlaybackMode(value);break;
+    case TTP_SKIN_CROSSFADE:
+        if(value)settings_.playback.sound_fade_mode|=0x10;
+        else settings_.playback.sound_fade_mode&=~0x10;
+        ApplyOptionsRuntime(251);break;
     case TTP_SKIN_PLAY_ROW:
         if(value>=0 && static_cast<size_t>(value)<VisiblePlaylistTrackCount()) SelectNavigationTrack(static_cast<size_t>(value));
         break;

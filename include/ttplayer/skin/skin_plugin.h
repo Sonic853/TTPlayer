@@ -12,6 +12,7 @@ public:
     SkinPluginModule& operator=(const SkinPluginModule&) = delete;
     static std::vector<std::shared_ptr<SkinPluginModule>> Discover(const std::filesystem::path& directory);
     bool Probe(const std::filesystem::path& path,TtpSkinInfo& info) const;
+    std::wstring Diagnostic(const std::filesystem::path& path) const;
     const TtpSkinPlugin& Api() const noexcept { return api_; }
     const std::wstring& Name() const noexcept { return name_; }
     std::filesystem::path Directory(const std::filesystem::path& skin_root) const { return skin_root/directory_; }

@@ -27,6 +27,9 @@ enum TtpSkinCommand {
     TTP_SKIN_CONTENT_MENU, // enqueue a provider-defined menu on the content surface
     TTP_SKIN_DRAG_SELECTION, // enqueue OLE drag after releasing capture; value 1: embedded main-window playlist, 0: playlist window
     TTP_SKIN_TRACK_TIP, // tip callback only; value is the visible playlist row
+    TTP_SKIN_CROSSFADE, // value: 0/1; native transition between tracks
+    TTP_SKIN_CURRENT_SOURCE, // tip callback query only: current media path/URL, value ignored
+    TTP_SKIN_MEDIA_LIBRARY, // show the native playlist window in library mode
     TTP_SKIN_EQ_VALUE = 100 // + 0: preamp, + 1..10: frequency bands; value -12..12
 };
 
@@ -144,6 +147,9 @@ typedef struct TtpSkinHost {
     // Coordinates remain those of window; capture belongs to that HWND.
     // Never open modal UI or unload the provider in this callback.
     BOOL (WINAPI *content_input)(void*, const TtpSkinContent*, const MSG*, LRESULT*);
+    // Optional query for boolean command settings (currently CROSSFADE).
+    // -1 means unavailable. Does not modify settings or create UI.
+    int32_t (WINAPI *option)(void*, uint32_t command);
 } TtpSkinHost;
 #define TTP_SKIN_HOST_V1_SIZE offsetof(TtpSkinHost, drag)
 
@@ -222,6 +228,11 @@ typedef struct TtpSkinPlugin {
     // Optional HTTP(S) download page for this provider's Options tab.
     // Null/empty uses the host's default "download more skins" link.
     const wchar_t* skin_download_url;
+    // Optional full compatibility check. Probe identifies a valid package;
+    // this call explains why creating it is unsupported. Reentrant, no UI.
+    // S_FALSE is successful partial compatibility; message lists skipped features.
+    // Caller owns message (WCHAR count, including terminator); may be null.
+    HRESULT (WINAPI *check)(const wchar_t*, wchar_t* message, uint32_t count);
 } TtpSkinPlugin;
 #define TTP_SKIN_PLUGIN_V1_SIZE offsetof(TtpSkinPlugin, skin_directory)
 #define TTP_SKIN_PLUGIN_DECLARATION_SIZE offsetof(TtpSkinPlugin, layout)

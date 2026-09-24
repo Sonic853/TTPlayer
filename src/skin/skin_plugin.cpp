@@ -77,7 +77,8 @@ std::vector<std::shared_ptr<SkinPluginModule>> SkinPluginModule::Discover(const 
         if(api.size<offsetof(TtpSkinPlugin,content_minimum)) api.playlist_drop=nullptr;
         if(api.size<offsetof(TtpSkinPlugin,default_package)) api.content_minimum=nullptr;
         if(api.size<offsetof(TtpSkinPlugin,skin_download_url)) api.default_package=nullptr;
-        if(api.size<sizeof(api)) api.skin_download_url=nullptr;
+        if(api.size<offsetof(TtpSkinPlugin,check)) api.skin_download_url=nullptr;
+        if(api.size<sizeof(api)) api.check=nullptr;
         std::unique_ptr<SkinPluginModule> provider;
         try {provider.reset(new SkinPluginModule(module,api));}
         catch(const std::invalid_argument&) {FreeLibrary(module);continue;}
@@ -88,6 +89,11 @@ std::vector<std::shared_ptr<SkinPluginModule>> SkinPluginModule::Discover(const 
 }
 bool SkinPluginModule::Probe(const std::filesystem::path& path,TtpSkinInfo& info) const {
     info={};info.size=sizeof(info);return SUCCEEDED(api_.probe(path.c_str(),&info));
+}
+std::wstring SkinPluginModule::Diagnostic(const std::filesystem::path& path) const {
+    wchar_t message[2048]{};
+    if(api_.check) static_cast<void>(api_.check(path.c_str(),message,static_cast<uint32_t>(std::size(message))));
+    message[std::size(message)-1]=0;return message;
 }
 std::unique_ptr<SkinPluginInstance> SkinPluginInstance::Create(std::shared_ptr<SkinPluginModule> module,
     const std::filesystem::path& path,const TtpSkinHost* host) {

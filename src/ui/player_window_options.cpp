@@ -6412,6 +6412,7 @@ void PlayerWindow::PopulateOptionsSkinPage(HWND dialog) {
 }
 
 void PlayerWindow::UpdateOptionsSkinDetails(HWND dialog) {
+    options_skin_preview_error_.clear();
     const HWND list = GetDlgItem(dialog, 1064);
     const LRESULT row = list ? SendMessageW(list, LB_GETCURSEL, 0, 0) : LB_ERR;
     const LRESULT data = row == LB_ERR ? LB_ERR
@@ -6442,6 +6443,11 @@ void PlayerWindow::UpdateOptionsSkinDetails(HWND dialog) {
                 if(entry->provider) {
                     auto preview=skin::SkinPluginInstance::Create(entry->provider,entry->path,nullptr);
                     if(preview) options_skin_preview_=preview->Preview();
+                    if(!preview) {
+                        options_skin_preview_error_=i18n::Literal(L"当前插件尚不能使用此皮肤。")+std::wstring(L"\r\n\r\n")+
+                            entry->provider->Diagnostic(entry->path);
+                        EnableWindow(GetDlgItem(dialog,1098),FALSE);
+                    }
                 }
                 InvalidateRect(GetDlgItem(dialog, 1068), nullptr, TRUE);
                 return;
@@ -6580,6 +6586,14 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         const auto* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
         if (item && template_id == 261 && item->CtlID == 1068) {
             FillRect(item->hDC, &item->rcItem, GetSysColorBrush(COLOR_WINDOW));
+            if (!options_skin_preview_ && !options_skin_preview_error_.empty()) {
+                RECT text=item->rcItem;InflateRect(&text,-8,-8);
+                const int saved=SaveDC(item->hDC);SetBkMode(item->hDC,TRANSPARENT);
+                SetTextColor(item->hDC,GetSysColor(COLOR_WINDOWTEXT));
+                if(const auto font=reinterpret_cast<HFONT>(SendMessageW(dialog,WM_GETFONT,0,0)))SelectObject(item->hDC,font);
+                DrawTextW(item->hDC,options_skin_preview_error_.c_str(),-1,&text,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX|DT_EDITCONTROL);
+                if(saved)RestoreDC(item->hDC,saved);
+            }
             if (options_skin_preview_) {
                 BITMAP bitmap{};
                 if (GetObjectW(options_skin_preview_, sizeof(bitmap), &bitmap) &&

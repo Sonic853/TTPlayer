@@ -102,6 +102,7 @@ private:
     [[nodiscard]] const std::wstring& ActiveSkinSelector() const;
     bool InstallPluginSkin(const std::filesystem::path& path);
     static BOOL WINAPI QuerySkinPluginState(void*, TtpSkinState*);
+    static int32_t WINAPI QuerySkinPluginOption(void*, uint32_t);
     static BOOL WINAPI QuerySkinPluginTrack(void*, uint32_t, TtpSkinTrack*);
     static uint32_t WINAPI QuerySkinPluginSelection(void*, uint32_t);
     static BOOL WINAPI PaintSkinPluginVisual(void*, HDC, const RECT*, const TtpSkinVisualColors*);
@@ -827,6 +828,7 @@ private:
     bool options_resetting_{};
     std::vector<SkinMenuEntry> options_skin_entries_;
     HBITMAP options_skin_preview_{};
+    std::wstring options_skin_preview_error_;
     COLORREF options_skin_preview_transparent_{CLR_INVALID};
     std::vector<std::filesystem::path> options_dsp_paths_;
     HANDLE options_dsp_scan_process_{};
