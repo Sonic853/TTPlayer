@@ -956,11 +956,12 @@ void PlayerWindow::CaptureActiveLyricWindowState() {
     ActiveLyricVisible() = IsWindowVisible(lyric_window_) != FALSE;
 }
 
-void PlayerWindow::ApplyActiveLyricWindowState() {
+void PlayerWindow::ApplyActiveLyricWindowState(bool apply_visibility) {
     if (!lyric_window_ || !skin_ || !skin_->Lyric().valid) return;
     if(external_skin_ && external_skin_->Handles(lyric_window_)) {
         RebuildLyricFont(false);UpdateLyricScrollTimer();
-        ShowWindow(lyric_window_,ActiveLyricVisible()?SW_SHOWNOACTIVATE:SW_HIDE);
+        if (apply_visibility)
+            ShowWindow(lyric_window_,ActiveLyricVisible()?SW_SHOWNOACTIVATE:SW_HIDE);
         ApplySkinWindowTopMost();InvalidateRect(lyric_window_,nullptr,FALSE);return;
     }
     // 00464B6C swaps the active lyric object before installing its settings.
@@ -1011,8 +1012,9 @@ void PlayerWindow::ApplyActiveLyricWindowState() {
     RebuildLyricFont(false);
     UpdateLyricWindowRegion();
     UpdateLyricToolRects();
-    ShowWindow(lyric_window_, ActiveLyricVisible()
-        ? SW_SHOWNOACTIVATE : SW_HIDE);
+    if (apply_visibility)
+        ShowWindow(lyric_window_, ActiveLyricVisible()
+            ? SW_SHOWNOACTIVATE : SW_HIDE);
     ApplySkinWindowTopMost();
     RedrawWindow(lyric_window_, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN |
@@ -1119,6 +1121,9 @@ void PlayerWindow::EnterDesktopLyricMode() {
 
 void PlayerWindow::LeaveDesktopLyricMode() {
     if (!desktop_lyric_mode_) return;
+    // Resolve a pending 00464B6C mode change before selecting its lyric state.
+    CompleteSkinWindowFadeForReplacement();
+    if (close_after_skin_window_fade_) return;
     desktop_lyrics_.CaptureBounds();
     desktop_lyrics_.Show(false);
     // FUN_0044D48D releases a locked desktop strip before returning to the
@@ -1128,10 +1133,12 @@ void PlayerWindow::LeaveDesktopLyricMode() {
         desktop_lyrics_.ApplySettings();
     }
     desktop_lyric_mode_ = false;
-    if (lyric_window_ && ActiveLyricVisible()) {
-        ShowWindow(lyric_window_, SW_SHOWNOACTIVATE);
-        BringWindowToTop(lyric_window_);
-    }
+    // 0044D48D explicitly enables LyricVisible or LyricVisible2. Rebind the
+    // retained HWND to the mode selected by 00464B6C before 0044E2FB shows it:
+    // desktop mode may have skipped its geometry, region, font and timer swap.
+    ActiveLyricVisible() = true;
+    ApplyActiveLyricWindowState(false);
+    SetSkinWindowVisible(lyric_window_, true);
     if (window_) InvalidateRect(window_, nullptr, FALSE);
 }
 
@@ -4167,6 +4174,10 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
         EnterDesktopLyricMode();
         return true;
     case kCmdDesktopLyricReturn:
+        // A desktop toolbar/menu command must also reveal an iconic or
+        // tray-hidden player before showing its owned window-mode lyrics.
+        if (window_ && (IsIconic(window_) || !IsWindowVisible(window_)))
+            RestoreMainWindow();
         LeaveDesktopLyricMode();
         return true;
     case kCmdDesktopLyricLock:

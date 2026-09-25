@@ -175,7 +175,10 @@
 - [随机播放索引](RANDOM_PLAYBACK_ROUNDS.md)
 - [歌曲信息加载优化](PLAYLIST_INFO_LOADING_OPTIMIZATION.md)
 
-## 8. 最终发行文件
+## 8. 合并构建完成时的发行文件（历史记录）
+
+后续桌面歌词修复已更新同目录发行文件，最新文件信息见
+[桌面歌词窗口恢复修复](DESKTOP_LYRICS_WINDOW_MODE_RECOVERY.md)。以下大小及哈希记录合并构建完成时的版本。
 
 输出目录：`D:\Projects\Backup\TTPlayer\rebuild\build\Release`。
 

@@ -569,7 +569,7 @@ private:
     [[nodiscard]] COLORREF ActiveLyricBackgroundColor() const noexcept;
     void UpdateLyricScrollTimer();
     void CaptureActiveLyricWindowState();
-    void ApplyActiveLyricWindowState();
+    void ApplyActiveLyricWindowState(bool apply_visibility = true);
     void PaintLyricWindow(HDC dc) const;
     void PaintLyricControl(HWND control, HDC dc, bool present_layered = true,
                            const RECT* target = nullptr, bool overlay = false) const;

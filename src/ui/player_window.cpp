@@ -2885,6 +2885,14 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             minimized_to_tray_ = false;
             UpdateTrayIcon();
         }
+        // 0046162B posts WM_COMMAND(0x7D64, -2) after minimizing. User32
+        // first hides owned lyric surfaces; re-show the requested desktop
+        // mode only after that native minimize/owner notification sequence.
+        // Also settle native owner restoration: it can re-show PaintWnd
+        // after the user explicitly hid lyrics while the player was iconic.
+        if ((wparam == SIZE_MINIMIZED || wparam == SIZE_RESTORED) &&
+            desktop_lyric_mode_ && !close_after_skin_window_fade_)
+            PostMessageW(window_, WM_COMMAND, kCmdShowLyrics, static_cast<LPARAM>(-2));
         // Keep the normal child geometry for off-screen Peek rendering.
         if (wparam != SIZE_MINIMIZED)
             LayoutControls(static_cast<int>(LOWORD(lparam)), static_cast<int>(HIWORD(lparam)));
@@ -3167,6 +3175,14 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
     case WM_COMMAND:
         if (HIWORD(wparam) == THBN_CLICKED) {
             HandleTaskbarPlaybackClick(wparam);
+            return 0;
+        }
+        if (LOWORD(wparam) == kCmdShowLyrics && lparam == static_cast<LPARAM>(-2)) {
+            // 004A3ACF -> 0044A8DC: -2 means show without activation, not
+            // toggle. Recheck current intent in case a queued command outlives
+            // a user hide, a switch to window mode, or the start of shutdown.
+            if (desktop_lyric_mode_ && !close_after_skin_window_fade_)
+                desktop_lyrics_.Show(ActiveLyricVisible());
             return 0;
         }
         switch (LOWORD(wparam)) {
