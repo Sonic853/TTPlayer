@@ -3181,8 +3181,15 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             // 004A3ACF -> 0044A8DC: -2 means show without activation, not
             // toggle. Recheck current intent in case a queued command outlives
             // a user hide, a switch to window mode, or the start of shutdown.
-            if (desktop_lyric_mode_ && !close_after_skin_window_fade_)
+            if (desktop_lyric_mode_ && !close_after_skin_window_fade_) {
+                // Restore the whole active mode, not only its desktop surfaces:
+                // User32 or a skin may have re-shown the owned LyricWnd using
+                // the visibility remembered before the player was minimized.
+                // Hide it first because it owns the desktop lyric surfaces.
+                if (lyric_window_ && IsWindowVisible(lyric_window_))
+                    ShowWindow(lyric_window_, SW_HIDE);
                 desktop_lyrics_.Show(ActiveLyricVisible());
+            }
             return 0;
         }
         switch (LOWORD(wparam)) {

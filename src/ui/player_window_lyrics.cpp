@@ -625,6 +625,15 @@ LRESULT PlayerWindow::HandleLyricMessage(UINT message, WPARAM wparam,
         return 0;
     }
     switch (message) {
+    case WM_SHOWWINDOW:
+        // 0044C2E7 masks window lyrics when the active mode is desktop.
+        // User32 remembers this owned popup across main-window minimization,
+        // even if EnterDesktopLyricMode hid it while it was already hidden.
+        // Veto only the automatic owner restore; explicit window-mode return
+        // still goes through ShowWindow/0044E2FB and its configured fade.
+        if (wparam && lparam == SW_PARENTOPENING && desktop_lyric_mode_)
+            return 0;
+        break;
     case WM_ACTIVATE:
         RaiseSkinOwnerOnActivation(lyric_window_, wparam, lparam);
         break;
