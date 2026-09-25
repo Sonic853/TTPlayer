@@ -135,12 +135,18 @@ jobs:
 
       # This repository is the local rebuild/ directory. Private reverse/
       # inputs, tests, runtime DLLs and personal settings are not in the checkout.
+      - name: Probe anonymous updater access
+        env:
+          GITEE_TOKEN_UPDATER: ${{ secrets.GITEE_TOKEN_UPDATER }}
+        run: python cmake/prepare_update_access.py --output build/update_access.h
+
       - name: Configure
         run: >-
           cmake -S . -B build -G "Visual Studio 18 2026" -A Win32
           "-DCMAKE_GENERATOR_INSTANCE=$env:TTPLAYER_VS_INSTANCE"
           -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF
           -DTTPLAYER_OPTIMIZE_SIZE=ON
+          "-DTTPLAYER_UPDATE_ACCESS_FILE=$env:GITHUB_WORKSPACE/build/update_access.h"
           "-DTTPLAYER_BUILD_VERSION=${{ steps.version.outputs.version }}"
 
       - name: Build and audit universal player
@@ -239,7 +245,7 @@ jobs:
             2. 打开开始菜单。
             3. 打开所有程序——千千静听——右键千千静听程序图标。
             4. 在菜单选择“打开文件位置”
-            5. 复制 TTPlayerRebuild.exe 到与 TTPlayer.exe 同一路径。
+            5. 复制 TTPlayerRebuild.exe 和 TTPUpdater.exe 到与 TTPlayer.exe 同一路径。
             6. 启动 TTPlayerRebuild.exe
             7. 享受重建版千千静听。
         run: |

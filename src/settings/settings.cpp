@@ -935,6 +935,8 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
             n,L"TitleSlideInterval",s.general.title_slide_interval);
         s.general.check_update_days=IntAttr(
             n,L"CheckUpdateDays",s.general.check_update_days);
+        s.general.update_source=IntAttr(n,L"UpdateSource",0)==1 ? 1 : 0;
+        s.general.last_notified_update=StringAttr(n,L"LastNotifiedUpdate");
         s.general.last_message_version=IntAttr(
             n,L"LastMessageVer",s.general.last_message_version);
         s.general.last_checked_day=IntAttr(
@@ -1723,6 +1725,8 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"TitleSlideInterval",
                      settings.general.title_slide_interval);
         SetAttribute(element,L"CheckUpdateDays",settings.general.check_update_days);
+        SetAttribute(element,L"UpdateSource",settings.general.update_source);
+        SetAttribute(element,L"LastNotifiedUpdate",settings.general.last_notified_update);
         SetAttribute(element,L"LastMessageVer",settings.general.last_message_version);
         SetAttribute(element,L"LastCheckedDay",settings.general.last_checked_day);
         SetAttribute(element,L"AutoShutDown",

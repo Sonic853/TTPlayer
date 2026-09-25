@@ -303,6 +303,14 @@ private:
     void ApplyOptionsChangeMask(UINT mask, LPARAM source_control);
     void ReloadApplicationIcons();
     void UpdateTrayIcon();
+    void CheckForUpdates(bool manual);
+    void PollUpdateCheck();
+    void CancelUpdateCheck();
+    void OpenUpdater();
+    struct UpdateCheckState;
+    std::shared_ptr<UpdateCheckState> update_check_;
+    HWND update_notice_{};
+    ULONGLONG update_retry_tick_{};
     bool MinimizeToTray();
     void HandleTrayCallback(WPARAM icon, LPARAM event);
     void RestoreMainWindow();

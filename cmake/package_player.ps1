@@ -5,6 +5,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $output = Join-Path $BuildDirectory 'Release'
 $executable = Join-Path $output 'TTPlayerRebuild.exe'
+$updater = Join-Path $output 'TTPUpdater.exe'
 $report = Join-Path $output 'legacy-imports.json'
 if (-not (Test-Path -LiteralPath $executable) -or -not (Test-Path -LiteralPath $report)) {
     throw 'Build and audit the universal Release player before packaging.'
@@ -22,9 +23,22 @@ if ($hash -cne $audit.sha256) { throw 'The EXE changed after the import audit; r
 $package = Join-Path $BuildDirectory ('player-package-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $package | Out-Null
 Copy-Item -LiteralPath $executable -Destination $package
-"$hash  TTPlayerRebuild.exe" | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
+$updaterAudit = Get-Content -LiteralPath (Join-Path $output 'updater-imports.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$updaterHash = (Get-FileHash -LiteralPath $updater -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($updaterAudit.sha256 -cne $updaterHash -or $updaterAudit.minimum_subsystem -ne '5.01' -or
+    $updaterAudit.architecture -ne 'x86' -or
+    $updaterAudit.inventories -notcontains '5.1.2600.txt' -or $updaterAudit.inventories -notcontains '6.1.7600.txt') {
+    throw 'Build and audit TTPUpdater.exe before packaging.'
+}
+if ((Get-Item -LiteralPath $executable).VersionInfo.FileVersion -cne
+    (Get-Item -LiteralPath $updater).VersionInfo.FileVersion) {
+    throw 'Player and updater versions must match.'
+}
+Copy-Item -LiteralPath $updater -Destination $package
+"$hash  TTPlayerRebuild.exe`n$updaterHash  TTPUpdater.exe" | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
 $parent = Split-Path ([IO.Path]::GetFullPath($Destination)) -Parent
 New-Item -ItemType Directory -Force -Path $parent | Out-Null
 Compress-Archive -LiteralPath (Join-Path $package 'TTPlayerRebuild.exe'),
+    (Join-Path $package 'TTPUpdater.exe'),
     (Join-Path $package 'SHA256SUMS.txt') -DestinationPath $Destination -Force
 Write-Output "Universal package: $Destination"

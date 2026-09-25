@@ -274,6 +274,8 @@ if(TTPLAYER_XP_RUNTIME_CONFIGURED)
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_legacy_imports.py")
 endif()
 
+include(cmake/updater.cmake)
+
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
   set(TTPLAYER_LAME_ARCH x64)
 else()

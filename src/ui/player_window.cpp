@@ -1426,6 +1426,7 @@ PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(se
 }
 
 PlayerWindow::~PlayerWindow() {
+    CancelUpdateCheck();
     external_skin_.reset();
     system_media_controls_.Reset();
     CancelLocalLyricSearch();
@@ -3189,6 +3190,10 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         ShowOptions(static_cast<int>(lparam), static_cast<UINT>(wparam));
         return 0;
     }
+    case WM_APP + 0x351:
+        if (lyric_save_in_progress_ || close_after_skin_window_fade_) return 0;
+        PostMessageW(window_, WM_CLOSE, 1, 0); // Explicit exit bypasses close-to-tray.
+        return 1;
     case kMsgApplyOptions:
         ApplyOptionsChangeMask(static_cast<UINT>(wparam), lparam);
         return 0;
@@ -3396,6 +3401,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             // procedure.
             if (skin_catalog_result_stale_) StartSkinMenuCatalogLoad();
             PollMediaLibraryWorkers();
+            PollUpdateCheck();
             PollPlaylistInfo();
             if (!extension_corrections_.empty() && !extension_correction_open_ &&
                 IsWindowEnabled(window_))

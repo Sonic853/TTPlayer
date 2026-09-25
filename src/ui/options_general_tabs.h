@@ -8,6 +8,7 @@
 #include <vector>
 #include <windows.h>
 #include <commctrl.h>
+#include "update_controls.h"
 
 namespace ttplayer::ui::detail {
 
@@ -103,7 +104,8 @@ public:
             const int id = GetDlgCtrlID(control);
             // New Discord/language controls belong to Options, regardless of
             // their Y position. Resource controls retain their original groups.
-            const int group = id >= 0xe900 ? 0 : rect.top >= groups.bottom ? 2 :
+            const int group = id >= kUpdateSourceLabel && id <= kUpdateStatus ? 2 :
+                id >= 0xe900 ? 0 : rect.top >= groups.bottom ? 2 :
                 rect.top >= groups.top ? 1 : 0;
             const auto style = GetWindowLongPtrW(control, GWL_STYLE);
             wchar_t klass[32]{};

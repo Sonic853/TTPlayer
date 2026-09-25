@@ -16,14 +16,17 @@
 10. 独立保存重建版配置：使用 TTPlayerRebuild.xml 保存设置，首次运行时可导入原版配置而不覆盖原文件；歌词关联记录也独立保存，方便与原版并存。
 11. 新增全屏下的 专辑封面 显示：在全屏模式下可选择显示专辑封面，该功能曾经在 8.x 版本中存在。
 12. 普通版新增 [SMTC 系统媒体控件](docs/SMTC.md)：在 Windows 10／11 的系统媒体面板显示曲目信息、专辑封面和进度，支持播放、暂停、停止、上一首、下一首及进度跳转。
-13. 增加对逐字歌词的支持 #1
+13. 增加对逐字歌词的支持 [#1](https://github.com/Sonic853/TTPlayer/issues/1)
 14. 增加 Winamp 经典皮肤的支持 [TTPlayerWaskin](https://github.com/Sonic853/TTPlayerWaskin)
+15. 增加 AAC 编码的额外拓展 [TTPlayerAAC](https://github.com/Sonic853/TTPlayerAAC)
+16. 增加多语言支持 [TTPlayerI18n](https://github.com/Sonic853/TTPlayerI18n)
+17. 新增 [GitHub / Gitee 软件更新](docs/RELEASE_UPDATE_IMPLEMENTATION.md)：默认使用 Gitee，自动检查默认关闭；支持独立更新器下载、校验、备份及替换程序。
 
 ## 构建
 
-**Windows XP / Windows 7 用户请使用 `TTPlayerRebuild-XP-Win7.zip` 中的 EXE。**
-默认现代版由新版 MSVC 构建，不适用于这些系统。旧系统版的构建、安装和功能范围见
-[XP / Win7 兼容版说明](docs/LEGACY_WINDOWS.md)。Actions 会同时提供两个版本。
+**当前 Release 为统一 x86 构建，支持 Windows XP SP3、Windows 7 至 Windows 11。**
+Actions 输出 `TTPlayerRebuild-版本号.zip`，不再拆分现代版与旧系统版。兼容构建与功能范围见
+[XP / Win7 兼容说明](docs/LEGACY_WINDOWS.md)。
 
 需要安装 Visual Studio 2026 的“使用 C++ 的桌面开发”组件和 CMake 4.2+。当前项目必须使用 Win32/x86，不能选择 x64。
 
@@ -38,14 +41,15 @@ cmake --build build --config Release --target ttplayer_rebuild --parallel 4
 
 ```
 build/Release/TTPlayerRebuild.exe
+build/Release/TTPUpdater.exe
 ```
 
-这组命令只构建播放器，不构建测试、不复制原版运行资源。运行时，将 EXE 放到包含 ```ttpcomm.dll```、```ttpres.dll```、```AddIn```、```Skin``` 的原播放器目录。
+这组命令构建播放器与更新器，不构建测试、不复制原版运行资源。运行时，将两个 EXE 放到包含 ```ttpcomm.dll```、```ttpres.dll```、```AddIn```、```Skin``` 的原播放器目录。
 
 更多详细信息请参考 [README](README.md)
 
 ## TODO List:
 
-- [ ] 鼠标在控件上的样式
+- [x] 鼠标在控件上的样式
 - [ ] 音乐窗（非优先计划，目前需要先完善本地功能）
 - [ ] 高 DPI 支持（目前受限于图片皮肤）

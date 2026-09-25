@@ -2,6 +2,7 @@
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/wtl_runtime.h"
+#include "ttplayer/ui/plain_blue_link.h"
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
@@ -4621,6 +4622,38 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             value.check_update_days < 0 ? 0 :
             value.check_update_days <= 1 ? 1 :
             value.check_update_days <= 7 ? 2 : 3);
+        if (!GetDlgItem(dialog, kUpdateSource)) {
+            auto add_update = [&](const wchar_t* klass, const wchar_t* text, int id, DWORD style, RECT rect) {
+                MapDialogRect(dialog, &rect);
+                const auto control = CreateWindowExW(0, klass, text, WS_CHILD | WS_VISIBLE | style,
+                    rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, dialog,
+                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
+                SendMessageW(control, WM_SETFONT, SendMessageW(dialog, WM_GETFONT, 0, 0), FALSE);
+            };
+            add_update(WC_STATICW, i18n::Literal(L"更新源"), kUpdateSourceLabel, 0, {13,216,75,228});
+            add_update(WC_COMBOBOXW, L"", kUpdateSource, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, {85,212,197,272});
+            add_update(WC_STATICW, L"GitHub 发布页", kUpdateGitHub, SS_NOTIFY | WS_TABSTOP, {13,240,100,254});
+            add_update(WC_STATICW, L"Gitee 发布页", kUpdateGitee, SS_NOTIFY | WS_TABSTOP, {115,240,200,254});
+            PlainBlueLink::Attach(GetDlgItem(dialog,kUpdateGitHub),L"https://github.com/Sonic853/TTPlayer/releases");
+            PlainBlueLink::Attach(GetDlgItem(dialog,kUpdateGitee),L"https://gitee.com/Sonic853/TTPlayer/releases");
+            add_update(WC_BUTTONW, i18n::Literal(L"打开更新器"), kUpdateOpen, BS_PUSHBUTTON | WS_TABSTOP, {212,189,266,203});
+            add_update(WC_STATICW, L"", kUpdateStatus, 0, {13,264,267,293});
+            // Keep both actions on the check-period row, with identical size
+            // and baseline at every dialog font/DPI used by the resource DLL.
+            RECT check{}, period{}, dropdown{};
+            const HWND check_button=GetDlgItem(dialog,2197),period_combo=GetDlgItem(dialog,1047);
+            GetWindowRect(check_button,&check);MapWindowPoints(nullptr,dialog,reinterpret_cast<POINT*>(&check),2);
+            GetWindowRect(period_combo,&period);MapWindowPoints(nullptr,dialog,reinterpret_cast<POINT*>(&period),2);
+            RECT check_x{152,0,206,0},open_x{212,0,266,0},period_x{92,0,142,0};
+            MapDialogRect(dialog,&check_x);MapDialogRect(dialog,&open_x);MapDialogRect(dialog,&period_x);
+            const int button_width=check_x.right-check_x.left,button_height=check.bottom-check.top;
+            SetWindowPos(check_button,nullptr,check_x.left,check.top,button_width,button_height,SWP_NOZORDER|SWP_NOACTIVATE);
+            SetWindowPos(GetDlgItem(dialog,kUpdateOpen),nullptr,open_x.left,check.top,button_width,button_height,SWP_NOZORDER|SWP_NOACTIVATE);
+            SendMessageW(period_combo,CB_GETDROPPEDCONTROLRECT,0,reinterpret_cast<LPARAM>(&dropdown));
+            SetWindowPos(period_combo,nullptr,period_x.left,period.top,period_x.right-period_x.left,
+                std::max(period.bottom-period.top,dropdown.bottom-dropdown.top),SWP_NOZORDER|SWP_NOACTIVATE);
+        }
+        PopulateTextCombo(dialog, kUpdateSource, {L"Gitee", L"GitHub"}, value.update_source == 1 ? 1 : 0);
         SetSpinRange(dialog, 1078, 1, 100);
         SetSpinRange(dialog, 1044, 1, 100);
         EnableWindow(GetDlgItem(dialog, 1077), IsChecked(dialog, 1076));
@@ -5461,6 +5494,7 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         constexpr std::array<int, 4> days{-1,1,7,30};
         value.check_update_days = days[static_cast<size_t>(std::clamp(
             ComboSelection(dialog, 1047), 0, 3))];
+        value.update_source = ComboSelection(dialog, kUpdateSource) == 1 ? 1 : 0;
         break;
     }
     case 251: {
@@ -5784,6 +5818,9 @@ bool PlayerWindow::CommitOptionsControl(
             value.default_list_on_command = IsChecked(dialog, 2137);
             break;
         case 2138: value.default_list = GetText(dialog, 2138); break;
+        case kUpdateSource:
+            value.update_source = ComboSelection(dialog, kUpdateSource) == 1 ? 1 : 0;
+            break;
         case 1047: {
             const LRESULT selected = SendDlgItemMessageW(
                 dialog, 1047, CB_GETCURSEL, 0, 0);
@@ -6966,7 +7003,10 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
             else if (control == 2182)
                 EnableWindow(GetDlgItem(dialog, 2183), IsChecked(dialog, 2182));
             else if (control == 2197 && notification == BN_CLICKED) {
-                SendMessageW(window_, WM_TIMER, 13, 0);
+                CheckForUpdates(true);
+                return TRUE;
+            } else if (control == kUpdateOpen && notification == BN_CLICKED) {
+                OpenUpdater();
                 return TRUE;
             }
         }

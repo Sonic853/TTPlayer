@@ -40,7 +40,9 @@ struct GeneralSettings {
     // these packed integers (for example 0x1000a and 0x10005).
     int snap_windows{65546};
     int title_slide_interval{65541};
-    int check_update_days{7};
+    int check_update_days{-1};
+    int update_source{0}; // 0 Gitee (default), 1 GitHub
+    std::wstring last_notified_update;
     int last_message_version{131336193};
     int last_checked_day{};
     bool auto_shutdown{};
