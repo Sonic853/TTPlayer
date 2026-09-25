@@ -152,6 +152,12 @@ jobs:
       - name: Build and audit universal player
         run: cmake --build build --config "$env:BUILD_CONFIGURATION" --target ttplayer_rebuild --parallel 4
 
+      - name: Download and verify latest HTTPS component
+        run: >-
+          python cmake/download_https_component.py --output "build/$env:BUILD_CONFIGURATION"
+          --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt
+          --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/6.1.7600.txt
+
       - name: Prepare artifact
         env:
           PACKAGE_VERSION: ${{ steps.version.outputs.version }}
@@ -191,8 +197,9 @@ jobs:
             vc_ltl = '5.3.1'
             wtl = '10.01'
             release_size_optimization = $true
+            https_component = Get-Content -LiteralPath (Join-Path $output 'https-component.json') -Raw | ConvertFrom-Json
             run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-          } | ConvertTo-Json | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
+          } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
 
       - name: Upload player
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -245,7 +252,7 @@ jobs:
             2. 打开开始菜单。
             3. 打开所有程序——千千静听——右键千千静听程序图标。
             4. 在菜单选择“打开文件位置”
-            5. 复制 TTPlayerRebuild.exe 和 TTPUpdater.exe 到与 TTPlayer.exe 同一路径。
+            5. 复制 TTPlayerRebuild.exe、TTPUpdater.exe 和 AddIn 文件夹到与 TTPlayer.exe 同一路径，合并 AddIn 文件夹。
             6. 启动 TTPlayerRebuild.exe
             7. 享受重建版千千静听。
         run: |

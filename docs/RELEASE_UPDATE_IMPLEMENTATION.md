@@ -16,10 +16,13 @@
 ```text
 TTPlayerRebuild.exe
 TTPUpdater.exe
+AddIn/ttp_https.dll
 SHA256SUMS.txt
 ```
 
-两个 EXE 必须一起复制到原播放器目录。发行包仍依赖原播放器的运行资源；它不是全新安装所需的完整资源包。旧设计文档中的现代版 / XP 版双包划分已不适用于当前构建。
+两个 EXE 必须一起复制到原播放器目录，并合并包内的 `AddIn` 文件夹。发行包仍依赖原播放器的运行资源；它不是全新安装所需的完整资源包。旧设计文档中的现代版 / XP 版双包划分已不适用于当前构建。
+
+Actions 调用 `cmake/download_https_component.py`，从 [TTPlayerHttps 最新正式版](https://github.com/Sonic853/TTPlayerHttps/releases/latest) 下载精确匹配标签的 `ttp_https-版本号.zip`，校验 GitHub 提供的 ZIP SHA-256、包内 DLL 摘要及 XP / Win7 静态导入后，暂存到构建输出的 `AddIn` 目录。下载或校验失败即停止打包，不复用旧 DLL。组件自己的版本号独立于播放器，所选标签、下载地址和摘要记录在 Action 的 `build-info.json` 中；测试代码不会入包。
 
 ## 检查和通知
 
@@ -65,7 +68,7 @@ faa08ab6e4e760ff5f82c728a13e980b60b5bfe42f4026f582274c47ab367c58
 
 1. 更新器把自身复制到独立临时目录运行，以便更新安装目录内的 `TTPUpdater.exe`。同一安装目录只允许一个更新器工作。
 2. 创建独立下载目录，下载外层校验文件及 ZIP，验证长度和 ZIP SHA-256。
-3. 只解压固定白名单文件，拒绝路径越界、重复条目、重叠数据、加密 ZIP、截断、CRC 错误和超限数据。再验证包内 EXE 的 SHA-256、产品文件名、x86 架构及版本。XP 额外检查 PE 子系统版本。
+3. 只解压固定白名单文件，拒绝路径越界、重复条目、重叠数据、加密 ZIP、截断、CRC 错误和超限数据。再验证包内 EXE 的 SHA-256、产品文件名、x86 架构及版本。XP 额外检查 PE 子系统版本。包内可附带 `AddIn/ttp_https.dll`，校验 SHA-256 后丢弃暂存 DLL，不安装或替换本机 HTTPS 组件；未包含组件的历史包仍可更新。
 4. 在关闭播放器前检查安装目录写入权限。只对该目录的播放器发送正常退出请求并等待真实进程结束；不会强制结束进程。歌词保存中或窗口正在退出时可拒绝请求。
 5. 在目标卷暂存并校验文件，使用 `ReplaceFileW` 替换播放器，旧文件保存为 `TTPlayerRebuild.exe.bak`。下一次成功更新时 `.bak` 保存更新前的那个版本。
 6. 若包内含更新器则暂存后替换，并保留 `TTPUpdater.exe.bak`；历史仅含播放器的包也可以解析。创建新版进程立即失败时恢复旧 EXE；后续启动异常会保留 `.bak` 并报告。下载与解压目录在本次尝试结束时清理。
@@ -85,7 +88,8 @@ HTTPS 与双层摘要用于传输和文件一致性验证；本版未增加独�
 - XP、Win7 通过新组件匿名下载两个来源的实际发行 ZIP，并验证 SHA-256。
 - Win7、Windows 11 无组件时通过 WinHTTP 匿名下载两个来源的实际发行 ZIP。
 - XP、Win7 在隔离目录使用本地 HTTPS 接口夹具完成更新器 UI 的下载、代理参数传递、旧进程正常退出、替换、备份、自身替换及新进程启动。该测试没有发布测试版本或修改用户的实际安装目录。
+- 随包 HTTPS 组件：实际下载并验证 `TTPlayerHttps/2026.09.25`，本地回归覆盖 ZIP / DLL 摘要错误和异常路径；正式打包脚本输出的四文件 ZIP 已通过更新器解包校验。XP、Win7 完整更新测试再次通过，并确认包内附带不同 DLL 时，安装目录中原 DLL 的 SHA-256 不变。
 - XP 缺失 HTTPS 组件的提示、XP / Win7 旧式通知、选项页与更新器截图检查。
-- 播放器和更新器均通过 XP / Win7 静态导入审计。发行包由明确的三个文件组成，不使用整个构建目录的通配符。
+- 播放器、更新器及附带的 HTTPS 组件均通过 XP / Win7 静态导入审计。发行包由明确的四个文件组成，不使用整个构建目录的通配符。
 
 源码入口：`src/update/`、`src/updater/`、`src/ui/player_window_update.cpp`、`src/ui/update_notice.cpp`。ZIP 解压使用固定的 zlib 1.3.2，构建时校验下载摘要，许可证保留于 `docs/licenses/zlib-LICENSE.txt`。

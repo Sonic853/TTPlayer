@@ -35,10 +35,28 @@ if ((Get-Item -LiteralPath $executable).VersionInfo.FileVersion -cne
     throw 'Player and updater versions must match.'
 }
 Copy-Item -LiteralPath $updater -Destination $package
-"$hash  TTPlayerRebuild.exe`n$updaterHash  TTPUpdater.exe" | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
+$https = Join-Path $output 'AddIn/ttp_https.dll'
+$component = Get-Content -LiteralPath (Join-Path $output 'https-component.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$httpsHash = (Get-FileHash -LiteralPath $https -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($component.repository -cne 'https://github.com/Sonic853/TTPlayerHttps' -or
+    $component.sha256 -cne $httpsHash -or
+    $component.inventories -notcontains '5.1.2600.txt' -or $component.inventories -notcontains '6.1.7600.txt') {
+    throw 'Download and verify the HTTPS release component before packaging.'
+}
+New-Item -ItemType Directory -Path (Join-Path $package 'AddIn') | Out-Null
+Copy-Item -LiteralPath $https -Destination (Join-Path $package 'AddIn/ttp_https.dll')
+"$hash  TTPlayerRebuild.exe`n$updaterHash  TTPUpdater.exe`n$httpsHash  AddIn/ttp_https.dll" | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
 $parent = Split-Path ([IO.Path]::GetFullPath($Destination)) -Parent
 New-Item -ItemType Directory -Force -Path $parent | Out-Null
-Compress-Archive -LiteralPath (Join-Path $package 'TTPlayerRebuild.exe'),
-    (Join-Path $package 'TTPUpdater.exe'),
-    (Join-Path $package 'SHA256SUMS.txt') -DestinationPath $Destination -Force
+# Explicit names preserve AddIn/ without directory entries or unrelated files.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$temporary = $Destination + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+$zip = [IO.Compression.ZipFile]::Open($temporary, [IO.Compression.ZipArchiveMode]::Create)
+try {
+    foreach ($name in @('TTPlayerRebuild.exe', 'TTPUpdater.exe', 'AddIn/ttp_https.dll', 'SHA256SUMS.txt')) {
+        [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, (Join-Path $package $name), $name,
+            [IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    }
+} finally { $zip.Dispose() }
+Move-Item -LiteralPath $temporary -Destination $Destination -Force
 Write-Output "Universal package: $Destination"

@@ -28,6 +28,8 @@
 Actions 输出 `TTPlayerRebuild-版本号.zip`，不再拆分现代版与旧系统版。兼容构建与功能范围见
 [XP / Win7 兼容说明](docs/LEGACY_WINDOWS.md)。
 
+Actions 会从 [TTPlayerHttps 最新正式版](https://github.com/Sonic853/TTPlayerHttps/releases/latest) 下载 HTTPS 组件，校验 ZIP、DLL 的 SHA-256 和 XP / Win7 导入兼容性，随包提供 `AddIn/ttp_https.dll`。手动安装时合并 `AddIn` 文件夹；自动更新器保留本机已有 HTTPS 组件。
+
 需要安装 Visual Studio 2026 的“使用 C++ 的桌面开发”组件和 CMake 4.2+。当前项目必须使用 Win32/x86，不能选择 x64。
 
 在项目中打开终端，执行以下命令进行构建：

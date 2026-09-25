@@ -68,7 +68,7 @@ void ExtractPackage(const std::filesystem::path& zip,const std::filesystem::path
     size_t end=bytes.size()-22;const size_t minimum=bytes.size()>65557 ? bytes.size()-65557 : 0;
     for(;;) {if(u32(end)==0x06054b50 && end+22+u16(end+20)==bytes.size()) break;if(end==minimum) throw std::runtime_error("ZIP directory not found");--end;}
     const auto count=u16(end+10);const size_t directory=u32(end+16),directory_size=u32(end+12);
-    if(u16(end+4) || u16(end+6) || u16(end+8)!=count || count<2 || count>3 || directory>end || directory_size!=end-directory)
+    if(u16(end+4) || u16(end+6) || u16(end+8)!=count || count<2 || count>4 || directory>end || directory_size!=end-directory)
         throw std::runtime_error("Unsupported update ZIP directory");
     std::map<std::string,std::vector<unsigned char>> files;
     std::vector<std::pair<size_t,size_t>> ranges;
@@ -80,7 +80,7 @@ void ExtractPackage(const std::filesystem::path& zip,const std::filesystem::path
         if(cursor+46+name_size+extra+comment>end || size>64*1024*1024 || total>64*1024*1024-size ||
             (flags&~0x0808U) || (method!=0 && method!=8) || u16(cursor+34)) throw std::runtime_error("Unsupported update ZIP entry");
         const std::string name(reinterpret_cast<const char*>(bytes.data()+cursor+46),name_size);
-        if((name!="TTPlayerRebuild.exe" && name!="TTPUpdater.exe" && name!="SHA256SUMS.txt") || files.contains(name))
+        if((name!="TTPlayerRebuild.exe" && name!="TTPUpdater.exe" && name!="AddIn/ttp_https.dll" && name!="SHA256SUMS.txt") || files.contains(name))
             throw std::runtime_error("Unexpected or duplicate update ZIP path");
         if(name=="SHA256SUMS.txt" && size>65536) throw std::runtime_error("Excessive checksum file");
         if(local>=directory || u32(local)!=0x04034b50 || u16(local+6)!=flags || u16(local+8)!=method || u16(local+26)!=name_size)
@@ -108,8 +108,13 @@ void ExtractPackage(const std::filesystem::path& zip,const std::filesystem::path
     std::filesystem::create_directories(staging);
     for(const auto& [name,content]:files) {
         if(name=="SHA256SUMS.txt") continue;
-        const auto path=staging/name;Write(path,content);
-        if(Sha256(path)!=ExpectedHash(sums,name)) throw std::runtime_error("Executable checksum mismatch");
+        const auto path=staging/name;
+        if(name=="AddIn/ttp_https.dll") std::filesystem::create_directory(staging/L"AddIn");
+        Write(path,content);
+        if(Sha256(path)!=ExpectedHash(sums,name)) throw std::runtime_error("Package file checksum mismatch");
+        // Bundled only for manual installation. Validate it, then discard it;
+        // automatic updates must preserve the user's installed HTTPS component.
+        if(name=="AddIn/ttp_https.dll") std::filesystem::remove(path);
     }
 }
 std::filesystem::path PreparePackage(Http& http,const Release& release,const std::filesystem::path& staging,const Cancel& cancel,const Progress& progress) {

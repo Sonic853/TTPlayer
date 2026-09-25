@@ -51,8 +51,8 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 std::optional<Release> Check(Http& http, Source source, const Cancel& canceled = {});
-// Only expected player/updater payloads are extracted. Configurations and DLLs
-// never enter the installation transaction.
+// Only player/updater payloads are installed. An optional bundled HTTPS DLL is
+// checksum-verified and discarded; installed DLLs and settings remain unchanged.
 std::filesystem::path PreparePackage(Http& http, const Release& release,
     const std::filesystem::path& staging, const Cancel& canceled, const Progress& progress);
 void ExtractPackage(const std::filesystem::path& zip, const std::filesystem::path& staging);
