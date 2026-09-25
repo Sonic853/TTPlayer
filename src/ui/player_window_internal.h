@@ -163,6 +163,7 @@ constexpr UINT kCmdPlayCd = 32008;
 constexpr UINT kCmdPlayUrl = 32009;
 constexpr UINT kCmdVolumeUp = 32010;
 constexpr UINT kCmdVolumeDown = 32011;
+constexpr UINT kCmdVolumeInput = 0xb670; // Rebuild-only manual volume entry.
 // The main-window File information command.  FUN_00464A94 maps this to the
 // playlist/library property-sheet command 0x7EF6 after leaving full screen.
 constexpr UINT kCmdFileProperties = 0x7d67;

@@ -3167,7 +3167,7 @@ void PlayerWindow::AddToolTipTool(HWND owner, UINT_PTR identifier,
     }
 }
 
-bool PlayerWindow::RoutePlaylistMouseWheel(const MSG& message) const {
+bool PlayerWindow::RoutePlayerMouseWheel(const MSG& message) const {
     if (message.message != WM_MOUSEWHEEL || !message.hwnd || GetCapture() ||
         GetWindowThreadProcessId(message.hwnd, nullptr) != GetCurrentThreadId()) return false;
     // A disabled owner means a modal operation is in progress. Auxiliary
@@ -3191,6 +3191,11 @@ bool PlayerWindow::RoutePlaylistMouseWheel(const MSG& message) const {
             target = settings_.playlist.library_mode ? playlist_tree_control_ : playlist_list_control_;
         else if (PtInRect(&metrics.tracks, point) || PtInRect(&metrics.scrollbar, point))
             target = playlist_track_control_;
+    } else if (within(window_)) {
+        // XP/Win7 address wheel input to the focused control. Over the main
+        // player (including visual/volume children), use its volume handler.
+        // The fallback playlist above keeps its own scrolling semantics.
+        target = window_;
     }
     if (!target || target == message.hwnd || !IsWindowVisible(target)) return false;
     for (HWND owner = target; owner; owner = GetParent(owner))
@@ -3213,7 +3218,7 @@ bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
         return true;
     }
     if (external_skin_ && external_skin_->Translate(message)) return true;
-    if (RoutePlaylistMouseWheel(message)) return true;
+    if (RoutePlayerMouseWheel(message)) return true;
     if (TranslateLyricUploadMessage(message)) return true;
     auto* queued = const_cast<MSG*>(&message);
     if (lyric_service_editor_ && IsWindow(lyric_service_editor_) && IsWindowEnabled(lyric_service_editor_) &&

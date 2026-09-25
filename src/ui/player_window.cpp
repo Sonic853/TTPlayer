@@ -7,6 +7,7 @@
 #include "ttplayer/ui/wtl_runtime.h"
 #include "project_links.h"
 #include "lyric_upload_window.h"
+#include "../app/resource_ids.h"
 
 #include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/core/text.h"
@@ -1238,6 +1239,71 @@ bool WriteEqualizerProfileFile(const std::filesystem::path& path,
     return output.good();
 }
 
+struct VolumeInputDialogState {
+    int volume{};
+};
+
+std::optional<int> ReadVolumeInput(HWND dialog) {
+    wchar_t text[32]{};
+    const int length = GetDlgItemTextW(dialog, IDC_VOLUME_VALUE, text, 32);
+    if (length == 0) return std::nullopt;
+    int volume{};
+    for (int i = 0; i < length; ++i) {
+        if (text[i] < L'0' || text[i] > L'9') return std::nullopt;
+        volume = volume * 10 + text[i] - L'0';
+        if (volume > 100) return std::nullopt;
+    }
+    return volume;
+}
+
+void UpdateVolumeInput(HWND dialog) {
+    const bool valid = ReadVolumeInput(dialog).has_value();
+    EnableWindow(GetDlgItem(dialog, IDOK), valid);
+}
+
+INT_PTR CALLBACK VolumeInputDialogProc(HWND dialog, UINT message,
+                                      WPARAM wparam, LPARAM lparam) {
+    auto* state = reinterpret_cast<VolumeInputDialogState*>(
+        GetWindowLongPtrW(dialog, DWLP_USER));
+    if (message == WM_INITDIALOG) {
+        state = reinterpret_cast<VolumeInputDialogState*>(lparam);
+        SetWindowLongPtrW(dialog, DWLP_USER, lparam);
+        if (!state) return FALSE;
+        SendDlgItemMessageW(dialog, IDC_VOLUME_VALUE, EM_SETLIMITTEXT, 16, 0);
+        SetDlgItemInt(dialog, IDC_VOLUME_VALUE, state->volume, FALSE);
+        UpdateVolumeInput(dialog);
+        SendDlgItemMessageW(dialog, IDC_VOLUME_VALUE, EM_SETSEL, 0, -1);
+        SetFocus(GetDlgItem(dialog, IDC_VOLUME_VALUE));
+        return FALSE;
+    }
+    if (!state) return FALSE;
+    if (message == WM_COMMAND) {
+        if (LOWORD(wparam) == IDC_VOLUME_VALUE && HIWORD(wparam) == EN_CHANGE) {
+            UpdateVolumeInput(dialog);
+            return TRUE;
+        }
+        if (LOWORD(wparam) == IDOK) {
+            if (const auto volume = ReadVolumeInput(dialog)) {
+                state->volume = *volume;
+                EndDialog(dialog, IDOK);
+            } else {
+                UpdateVolumeInput(dialog);
+                SetFocus(GetDlgItem(dialog, IDC_VOLUME_VALUE));
+            }
+            return TRUE;
+        }
+        if (LOWORD(wparam) == IDCANCEL) {
+            EndDialog(dialog, IDCANCEL);
+            return TRUE;
+        }
+    }
+    if (message == WM_CLOSE) {
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 struct AutoShutdownDialogState {
     HMODULE resources{};
     int seconds{15};
@@ -1331,7 +1397,6 @@ PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(se
     if (settings_.equalizer.profile_last < -1 ||
         settings_.equalizer.profile_last >= static_cast<int>(std::size(kEqualizerPresets)))
         settings_.equalizer.profile_last = -1;
-    volume_before_mute_ = std::max(1, settings_.player.volume);
     audio_->Configure({settings_.playback.file_buffer,
                       settings_.device.buffer_duration,
                       settings_.device.output_bits,
@@ -3071,11 +3136,16 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         SetBkColor(dc, kPanel);
         return reinterpret_cast<LRESULT>(panel_brush_);
     }
+    case WM_MOUSEWHEEL:
+        // 00460D1D divides each signed delta by 40 (towards zero), without
+        // accumulating remainders. A standard 120-unit wheel notch is 3%.
+        SetPlaybackVolume(settings_.player.volume + GET_WHEEL_DELTA_WPARAM(wparam) / 40);
+        return 0;
+    case WM_VSCROLL:
     case WM_HSCROLL:
         if (reinterpret_cast<HWND>(lparam) == volume_) {
             const int value = static_cast<int>(SendMessageW(volume_, TBM_GETPOS, 0, 0));
-            audio_->SetVolume(static_cast<float>(value) / 100.0F);
-            settings_.player.volume = value;
+            SetPlaybackVolume(value);
         }
         return 0;
     case kMsgShowOptionsControl: {
@@ -5178,6 +5248,12 @@ void PlayerWindow::PrepareContextMenu(HMENU menu) {
     CheckCommand(menu, kCmdFullscreenLyrics, fullscreen_mode_ == 1);
     CheckCommand(menu, kCmdFullscreenVisual, fullscreen_mode_ == 2);
     CheckCommand(menu, kCmdFullscreenAll, fullscreen_mode_ == 3);
+    if (const HMENU volume = FindCommandMenu(menu, kCmdMute);
+        volume && !FindCommandMenu(volume, kCmdVolumeInput)) {
+        const auto label = i18n::ResourceText(GetModuleHandleW(nullptr), IDS_VOLUME_MANUAL);
+        InsertMenuW(volume, kCmdMute, MF_BYCOMMAND | MF_STRING,
+                     kCmdVolumeInput, label.c_str());
+    }
     CheckCommand(menu, kCmdMute, settings_.player.mute);
     CheckCommand(menu, kCmdOpaqueWhenActive, settings_.player.opaque_when_active);
     BOOL system_shadow{};
@@ -5427,15 +5503,12 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
         ClearLyrics();
         break;
     case kCmdVolumeUp:
-        settings_.player.volume = std::min(100, settings_.player.volume + 5);
-        settings_.player.mute = false;
-        audio_->SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
+        SetPlaybackVolume(settings_.player.volume + 5);
         break;
     case kCmdVolumeDown:
-        settings_.player.volume = std::max(0, settings_.player.volume - 5);
-        settings_.player.mute = false;
-        audio_->SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
+        SetPlaybackVolume(settings_.player.volume - 5);
         break;
+    case kCmdVolumeInput: ShowVolumeInput(); break;
     case kCmdMute: ToggleMute(); break;
     case kCmdOpaqueWhenActive:
         settings_.player.opaque_when_active = !settings_.player.opaque_when_active;
@@ -6035,13 +6108,26 @@ void PlayerWindow::ApplySkinProfileWindowState() {
 
 void PlayerWindow::ToggleMute() {
     settings_.player.mute = !settings_.player.mute;
-    if (settings_.player.mute) {
-        if (settings_.player.volume > 0) volume_before_mute_ = settings_.player.volume;
-        audio_->SetVolume(0.0F);
-    } else {
-        if (settings_.player.volume == 0) settings_.player.volume = volume_before_mute_;
-        audio_->SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
-    }
+    // 0046534B restores the current slider value, including zero. Muting
+    // does not create a second remembered volume that can become stale.
+    SetPlaybackVolume(settings_.player.volume);
+}
+
+void PlayerWindow::SetPlaybackVolume(int volume) {
+    settings_.player.volume = std::clamp(volume, 0, 100);
+    // 00460AB1 keeps mute independent of changes to the stored volume.
+    audio_->SetVolume(settings_.player.mute ? 0.0F :
+        static_cast<float>(settings_.player.volume) / 100.0F);
+    if (volume_) SendMessageW(volume_, TBM_SETPOS, TRUE, settings_.player.volume);
+    if (window_) InvalidateRect(window_, nullptr, FALSE);
+}
+
+void PlayerWindow::ShowVolumeInput() {
+    if (!window_ || !IsWindowEnabled(window_)) return;
+    VolumeInputDialogState state{settings_.player.volume};
+    if (ShowWtlModalDialog(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_VOLUME_INPUT),
+            window_, VolumeInputDialogProc, reinterpret_cast<LPARAM>(&state)) == IDOK)
+        SetPlaybackVolume(state.volume);
 }
 
 void PlayerWindow::SetSkinVolumeFromPoint(POINT point) {
@@ -6063,9 +6149,7 @@ void PlayerWindow::SetSkinVolumeFromPoint(POINT point) {
         const int position = point.x - volume->bounds.left - 1 - thumb / 2;
         settings_.player.volume = std::clamp(MulDiv(position, 100, span), 0, 100);
     }
-    audio_->SetVolume(static_cast<float>(settings_.player.volume) / 100.0F);
-    settings_.player.mute = false;
-    InvalidateRect(window_, &volume->bounds, FALSE);
+    SetPlaybackVolume(settings_.player.volume);
 }
 
 void PlayerWindow::SetSkinProgressFromPoint(POINT point) {

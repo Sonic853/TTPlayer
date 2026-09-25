@@ -424,6 +424,8 @@ private:
     void UpdateAutoShutdownTimer();
     void ShowAutoShutdownDialog();
     void ToggleMute();
+    void SetPlaybackVolume(int volume);
+    void ShowVolumeInput();
     void SetSkinVolumeFromPoint(POINT point);
     void SetSkinProgressFromPoint(POINT point);
     void DrawButton(const DRAWITEMSTRUCT& item) const;
@@ -518,7 +520,7 @@ private:
     void UpdatePlaylistToolRects();
     void UpdatePlaylistItemTipRects();
     [[nodiscard]] std::wstring PlaylistItemTipText(size_t row) const;
-    [[nodiscard]] bool RoutePlaylistMouseWheel(const MSG& message) const;
+    [[nodiscard]] bool RoutePlayerMouseWheel(const MSG& message) const;
     void QueuePlaylistInfoRange(size_t playlist_index, size_t first,
                                 size_t count, bool priority = false, bool visible_only = false);
     void RequestPlaylistTrackInfo(size_t playlist_index, size_t row,
@@ -1026,7 +1028,6 @@ private:
     bool context_menu_open_{};
     HWND main_context_menu_origin_{};
     bool window_state_saved_{};
-    int volume_before_mute_{100};
     int transparency_percent_{};
     BYTE skin_window_alpha_{255};
     BYTE rendered_skin_window_alpha_{255};
