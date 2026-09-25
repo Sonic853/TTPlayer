@@ -610,13 +610,7 @@ void PlayerWindow::SetEqualizerTrackingStatus(int slider, bool tracking) {
         // temporary string is empty.
         if (text.empty()) return;
     }
-    equalizer_tracking_status_ = std::move(text);
-    const auto displayed = PlaybackStatusText();
-    if (status_) SetWindowTextW(status_, displayed.c_str());
-    if (window_) {
-        if (const auto* status = FindActiveSkinElement(L"status"))
-            InvalidateRect(window_, &status->bounds, FALSE);
-    }
+    SetSliderStatus(std::move(text));
 }
 
 RECT PlayerWindow::EqualizerElementBounds(const skin::SkinElement& element) const {

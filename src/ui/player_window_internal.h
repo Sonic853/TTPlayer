@@ -128,6 +128,8 @@ constexpr UINT kSkinWindowFadeIntervalMs = 5;
 constexpr UINT_PTR kCloseAudioFadeTimer = 0x218;
 constexpr UINT kCloseAudioFadeIntervalMs = 10;
 constexpr UINT_PTR kWaveTrackChangeTimer = 0x219;
+constexpr UINT_PTR kVolumeStatusTimer = 0x21a;
+constexpr UINT kVolumeStatusDurationMs = 2000;
 constexpr UINT kWaveTrackChangeIntervalMs = 10;
 constexpr UINT kInfoAnimationIntervalMs = 40;
 // CPlayerWnd overwrites CScrollingStatic's constructor default (3) with

@@ -425,6 +425,9 @@ private:
     void ShowAutoShutdownDialog();
     void ToggleMute();
     void SetPlaybackVolume(int volume);
+    void AdjustPlaybackVolume(int delta);
+    void SetVolumeTrackingStatus(bool tracking);
+    void SetSliderStatus(std::wstring text);
     void ShowVolumeInput();
     void SetSkinVolumeFromPoint(POINT point);
     void SetSkinProgressFromPoint(POINT point);
@@ -989,7 +992,9 @@ private:
     std::wstring playback_error_text_;
     ULONGLONG playback_error_started_tick_{};
     std::wstring display_artist_;
-    std::wstring equalizer_tracking_status_;
+    std::wstring slider_status_text_;
+    audio::PlaybackState slider_status_state_{audio::PlaybackState::stopped};
+    ULONGLONG volume_status_deadline_{};
     std::wstring window_caption_source_;
     bool window_caption_scrolling_{};
     std::vector<std::wstring> info_items_;

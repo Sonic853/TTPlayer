@@ -2996,6 +2996,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                     UpdateDiscordPresence();
                 }
             }
+            if (action == L"volume" || action == L"progress")
+                SetSliderStatus({}); // 00452295 -> 00460AB1: SB_THUMBPOSITION
             EndSkinMouseCapture();
             if (!action.empty() && action == released && action != L"volume" && action != L"progress") {
                 InvokeSkinAction(action);
@@ -3017,6 +3019,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         break;
     case WM_CAPTURECHANGED:
         if (skin_) {
+            if (pressed_skin_element_ == L"volume" || pressed_skin_element_ == L"progress")
+                SetSliderStatus({});
             progress_tracking_position_.reset();
             dragging_skin_background_ = false;
             skin_drag_window_ = nullptr;
@@ -3029,6 +3033,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         break;
     case WM_CANCELMODE:
         if (skin_) {
+            if (pressed_skin_element_ == L"volume" || pressed_skin_element_ == L"progress")
+                SetSliderStatus({});
             pressed_skin_element_.clear();
             EndSkinMouseCapture();
             InvalidateRect(window_, nullptr, FALSE);
@@ -3139,13 +3145,18 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
     case WM_MOUSEWHEEL:
         // 00460D1D divides each signed delta by 40 (towards zero), without
         // accumulating remainders. A standard 120-unit wheel notch is 3%.
-        SetPlaybackVolume(settings_.player.volume + GET_WHEEL_DELTA_WPARAM(wparam) / 40);
+        AdjustPlaybackVolume(GET_WHEEL_DELTA_WPARAM(wparam) / 40);
         return 0;
     case WM_VSCROLL:
     case WM_HSCROLL:
-        if (reinterpret_cast<HWND>(lparam) == volume_) {
+        if (volume_ && reinterpret_cast<HWND>(lparam) == volume_) {
             const int value = static_cast<int>(SendMessageW(volume_, TBM_GETPOS, 0, 0));
             SetPlaybackVolume(value);
+            // The fallback common control emits TB_ENDTRACK after releasing
+            // its thumb/key. Unlike the original skin's synthetic wheel
+            // SB_ENDSCROLL, this notification finishes a real interaction.
+            SetVolumeTrackingStatus(LOWORD(wparam) != TB_THUMBPOSITION &&
+                                    LOWORD(wparam) != TB_ENDTRACK);
         }
         return 0;
     case kMsgShowOptionsControl: {
@@ -3284,6 +3295,15 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             PollWaveTrackChange();
         } else if (wparam == kSkinMenuToolTipTimer) {
             ShowQueuedSkinMenuToolTip();
+        } else if (wparam == kVolumeStatusTimer) {
+            // A queued notification from an earlier adjustment must not erase
+            // a newer message, EQ feedback, or a thumb still being dragged.
+            if (!volume_status_deadline_ || GetTickCount64() < volume_status_deadline_)
+                return 0;
+            const HWND captured = GetCapture();
+            if ((window_ && captured == window_ && pressed_skin_element_ == L"volume") ||
+                (volume_ && captured == volume_)) return 0;
+            SetSliderStatus({});
         } else if (wparam == kPlaybackErrorTimer) {
             // A timer message queued before a retry must not expire the new notice.
             if (!playback_error_text_.empty() && GetTickCount64() -
@@ -3291,6 +3311,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             KillTimer(window_, kPlaybackErrorTimer);
             if (!playback_error_text_.empty() && !playback_source_open_) {
                 playback_error_text_.clear();
+                SetSliderStatus({});
                 // FUN_0046010E restores DAT_00547500 and clears the status.
                 display_title_ = DefaultPlayerTitle();
                 RebuildSkinInfoItems(false);
@@ -4057,8 +4078,9 @@ bool PlayerWindow::IsSkinElementChecked(std::wstring_view name) const noexcept {
 }
 
 std::wstring PlayerWindow::PlaybackStatusText() const {
-    if (!equalizer_tracking_status_.empty())
-        return equalizer_tracking_status_;
+    // Paint can precede the next UI tick after the audio worker changes state.
+    if (!slider_status_text_.empty() && slider_status_state_ == audio_->State())
+        return slider_status_text_;
     if (!playback_error_text_.empty()) return ResourceText(0x8285);
     switch (audio_->State()) {
     case audio::PlaybackState::playing: return ResourceText(0x81b9);
@@ -5503,10 +5525,10 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
         ClearLyrics();
         break;
     case kCmdVolumeUp:
-        SetPlaybackVolume(settings_.player.volume + 5);
+        AdjustPlaybackVolume(5);
         break;
     case kCmdVolumeDown:
-        SetPlaybackVolume(settings_.player.volume - 5);
+        AdjustPlaybackVolume(-5);
         break;
     case kCmdVolumeInput: ShowVolumeInput(); break;
     case kCmdMute: ToggleMute(); break;
@@ -6122,18 +6144,62 @@ void PlayerWindow::SetPlaybackVolume(int volume) {
     if (window_) InvalidateRect(window_, nullptr, FALSE);
 }
 
+void PlayerWindow::AdjustPlaybackVolume(int delta) {
+    // 00428DCD refuses programmatic changes while SkinSlider +0x3C is
+    // tracking. 00460AB1 then reads the unchanged slider back into settings.
+    const HWND captured = GetCapture();
+    const bool tracking = (window_ && captured == window_ &&
+                           pressed_skin_element_ == L"volume") ||
+                          (volume_ && captured == volume_);
+    if (!tracking) SetPlaybackVolume(settings_.player.volume + delta);
+    // 00460D1D / 004654D7 / 00465524 always send SB_ENDSCROLL, even when
+    // clamped or delta / 40 is zero. They still display the current volume.
+    SetVolumeTrackingStatus(true);
+}
+
+void PlayerWindow::SetVolumeTrackingStatus(bool tracking) {
+    std::wstring text;
+    if (tracking) {
+        const auto format = ResourceText(0x81bc);
+        wchar_t buffer[128]{};
+        swprintf_s(buffer, format.c_str(), settings_.player.volume);
+        text = buffer;
+        if (text.empty()) return;
+    }
+    SetSliderStatus(std::move(text));
+    // User-requested extension: the original had no dedicated volume timeout.
+    if (tracking && window_) {
+        volume_status_deadline_ = GetTickCount64() + kVolumeStatusDurationMs;
+        SetTimer(window_, kVolumeStatusTimer, kVolumeStatusDurationMs, nullptr);
+    }
+}
+
+void PlayerWindow::SetSliderStatus(std::wstring text) {
+    if (window_) KillTimer(window_, kVolumeStatusTimer);
+    volume_status_deadline_ = 0;
+    slider_status_text_ = std::move(text);
+    slider_status_state_ = audio_->State();
+    const auto displayed = PlaybackStatusText();
+    if (status_) SetWindowTextW(status_, displayed.c_str());
+    if (window_) {
+        if (const auto* status = FindActiveSkinElement(L"status"))
+            InvalidateRect(window_, &status->bounds, FALSE);
+    }
+}
+
 void PlayerWindow::ShowVolumeInput() {
     if (!window_ || !IsWindowEnabled(window_)) return;
     VolumeInputDialogState state{settings_.player.volume};
     if (ShowWtlModalDialog(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_VOLUME_INPUT),
             window_, VolumeInputDialogProc, reinterpret_cast<LPARAM>(&state)) == IDOK)
-        SetPlaybackVolume(state.volume);
+        AdjustPlaybackVolume(state.volume - settings_.player.volume);
 }
 
 void PlayerWindow::SetSkinVolumeFromPoint(POINT point) {
     if (!skin_) return;
     const auto* volume = FindActiveSkinElement(L"volume");
     if (!volume) return;
+    const int before = settings_.player.volume;
     if (volume->vertical) {
         const int height = volume->bounds.bottom - volume->bounds.top;
         const int thumb = volume->thumb_image ? volume->thumb_size.cy : 0;
@@ -6150,6 +6216,8 @@ void PlayerWindow::SetSkinVolumeFromPoint(POINT point) {
         settings_.player.volume = std::clamp(MulDiv(position, 100, span), 0, 100);
     }
     SetPlaybackVolume(settings_.player.volume);
+    // SkinSlider sends SB_THUMBTRACK only when the value actually changes.
+    if (settings_.player.volume != before) SetVolumeTrackingStatus(true);
 }
 
 void PlayerWindow::SetSkinProgressFromPoint(POINT point) {
@@ -6229,6 +6297,10 @@ void PlayerWindow::RefreshPlaylist() {
 }
 
 void PlayerWindow::RefreshPlaybackUi() {
+    // The original keeps wheel feedback until a slider commit or a playback
+    // status update (0045BF4B / 0045C0C6 / 0045C198 / 00461F87). The extra
+    // volume timeout is handled separately; repainting must not restart it.
+    if (slider_status_state_ != audio_->State()) SetSliderStatus({});
     if (window_) {
         if (const HWND previous = GetDlgItem(window_, kPrevious))
             EnableWindow(previous, NavigationEnabled(false));
@@ -6598,6 +6670,7 @@ bool PlayerWindow::PlayCurrent() {
     // The decoder request may replace the object which backs opened_track_.
     // Keep a stable value while the engine and metadata paths run.
     const playlist::Track requested_track = *requested;
+    SetSliderStatus({}); // Opening/replaying also resets status when state stays playing.
     // 00461E35 clears stop-fade bit 3 when replaying the playing row. Retain
     // row identity too: two separate rows may name the same file/subtrack.
     const auto* opened = OpenedTrack();
@@ -7048,6 +7121,7 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
 
 void PlayerWindow::Stop() {
     if (lyric_save_in_progress_) return;
+    SetSliderStatus({});
     CancelWaveTrackChange();
     FinishLyricDocument(false);
     random_navigation_requests_.clear();
@@ -7095,6 +7169,7 @@ void PlayerWindow::ClearAudioError() {
     }
     const bool had_error = !playback_error_text_.empty();
     playback_error_text_.clear();
+    if (had_error) SetSliderStatus({});
     pending_failed_advance_ = false;
     if (had_error) {
         RebuildSkinInfoItems(false);
@@ -7104,6 +7179,7 @@ void PlayerWindow::ClearAudioError() {
 }
 
 void PlayerWindow::ShowAudioError(const std::filesystem::path& path) {
+    SetSliderStatus({});
     ClearAudioError();
     // FUN_0045AD86 writes the localized reason into CScrollingStatic and
     // stops all three animation timers; it does not open a message box.
