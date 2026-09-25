@@ -117,6 +117,12 @@ void PlayerWindow::RearrangeWindows() {
     UpdateVisualWindowLayout();
     // Update both the active mode cache and persisted rectangles, including
     // the hidden lyric surface while desktop lyrics are visible.
+    // This explicit reset just positioned that HWND for the active mode;
+    // ordinary desktop-mode snapshots intentionally ignore its stale bounds.
+    if (desktop_lyric_mode_ && lyric_window_) {
+        RECT bounds{};
+        if (GetWindowRect(lyric_window_, &bounds)) ActiveLyricWindowBounds() = bounds;
+    }
     CaptureWindowState();
     for (const HWND target : RegisteredDragWindows())
         RedrawWindow(target, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);

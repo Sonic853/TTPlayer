@@ -1113,9 +1113,19 @@ bool PlayerWindow::CreateDesktopLyrics() {
 }
 
 void PlayerWindow::EnterDesktopLyricMode() {
+    // Settle an in-flight 00464B6C switch before associating the live HWND
+    // with the normal or mini rectangle that is about to be remembered.
+    CompleteSkinWindowFadeForReplacement();
+    if (close_after_skin_window_fade_) return;
     if (!lyric_window_ && !CreateLyricWindow()) return;
     if (!CreateDesktopLyrics()) return;
     if (lyric_editor_) LeaveLyricEditor(true);
+
+    // 0044D48D/0044E2FB re-show the retained LyricWnd at its existing bounds.
+    // Our return also rebinds its normal/mini layout, so remember the last
+    // actual move/resize before hiding it. Desktop-mode drags/rebinds update
+    // geometry explicitly; repeated entry must not capture false visibility.
+    if (!desktop_lyric_mode_) CaptureActiveLyricWindowState();
 
     // CLyricWnd::FUN_0044E2FB is dispatched before CDeskLrcCtrl is shown.
     // Showing in this order is significant: DeskLrcCtrl is owned by the now
@@ -1144,7 +1154,7 @@ void PlayerWindow::LeaveDesktopLyricMode() {
     desktop_lyric_mode_ = false;
     // 0044D48D explicitly enables LyricVisible or LyricVisible2. Rebind the
     // retained HWND to the mode selected by 00464B6C before 0044E2FB shows it:
-    // desktop mode may have skipped its geometry, region, font and timer swap.
+    // install the current geometry, region, font and timer before showing it.
     ActiveLyricVisible() = true;
     ApplyActiveLyricWindowState(false);
     SetSkinWindowVisible(lyric_window_, true);

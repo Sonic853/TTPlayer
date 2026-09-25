@@ -59,6 +59,8 @@ Windows 11 主机、XP SP3 和 Win7 SP1 虚拟机均已通过四套真实皮肤�
 
 ### 发行与兼容性核对（2026-09-25）
 
+> 本节记录曲目信息修复完成时的历史产物；后续位置恢复修复的发行记录见[桌面歌词恢复文档第 7 节](DESKTOP_LYRICS_WINDOW_MODE_RECOVERY.md)。
+
 - `out/unified-distribution` 在 `BUILD_TESTING=OFF` 下完成统一 Release 构建，保留现有 VC-LTL／YY-Thunks 方案。
 - 静态导入审计通过：x86、最低子系统 5.01、19 个 DLL、659 个导入，覆盖 XP／Win7 导入清单。
 - 最终发行 EXE 在 Windows 11、XP SP3、Win7 SP1 上执行 `--smoke-test` 均成功退出。

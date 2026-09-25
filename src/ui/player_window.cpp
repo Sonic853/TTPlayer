@@ -3641,8 +3641,10 @@ void PlayerWindow::CaptureWindowState() {
     }
     const bool desktop_lyric_visible =
         desktop_lyric_mode_ && desktop_lyrics_.Visible();
-    CaptureActiveLyricWindowState();
+    // Desktop mode keeps window-lyric visibility separate from its hidden
+    // HWND. Explicit moves/rebinds update that mode's rectangle themselves.
     if (desktop_lyric_mode_) ActiveLyricVisible() = desktop_lyric_visible;
+    else CaptureActiveLyricWindowState();
     desktop_lyrics_.CaptureBounds();
     RECT playlist_bounds = settings_.player.playlist_window;
     bool playlist_visible = settings_.player.playlist_visible;
@@ -4543,6 +4545,15 @@ void PlayerWindow::ContinueSkinBackgroundDrag(HWND source, POINT point) {
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
+    // 004708B4 moves attached windows even while window lyrics are hidden.
+    // Returning through ApplyActiveLyricWindowState must use that new real
+    // rectangle, without capturing the hidden HWND's false visibility.
+    if (desktop_lyric_mode_ &&
+        std::find(moving_windows.begin(), moving_windows.end(), lyric_window_) !=
+            moving_windows.end()) {
+        RECT bounds{};
+        if (GetWindowRect(lyric_window_, &bounds)) ActiveLyricWindowBounds() = bounds;
+    }
 }
 
 void PlayerWindow::EndSkinMouseCapture() {
@@ -4661,6 +4672,10 @@ void PlayerWindow::ToggleMiniMode() {
     ShowWindow(window_, SW_SHOW);
     if (lyric_window_) {
         if (desktop_lyric_mode_) {
+            // 00464B6C also installs the target mode's lyric rectangle while
+            // desktop lyrics are active. The retained hidden HWND must be
+            // at that position before it joins an attached drag group.
+            ApplyActiveLyricWindowState(false);
             ShowWindow(lyric_window_, SW_HIDE);
             ActiveLyricVisible() = desktop_lyric_visible;
             desktop_lyrics_.Show(desktop_lyric_visible);
