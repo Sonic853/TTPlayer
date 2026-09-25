@@ -168,6 +168,12 @@ BOOL WINAPI PlayerWindow::QuerySkinPluginTip(void* context,uint32_t action,int32
     if(!context) return FALSE;
     if(text && count) text[0]=0;
     try {
+        if(action==TTP_SKIN_STATUS_TEXT) {
+            const auto& self=*static_cast<PlayerWindow*>(context);
+            if(self.slider_status_text_.empty() || self.slider_status_state_!=self.audio_->State())return FALSE;
+            if(text && count)wcsncpy_s(text,count,self.slider_status_text_.c_str(),_TRUNCATE);
+            return static_cast<BOOL>(self.slider_status_text_.size()+1);
+        }
         if(action==TTP_SKIN_CURRENT_SOURCE) {
             const auto& self=*static_cast<PlayerWindow*>(context);
             if(self.playlists_.Empty() && !self.media_library_playback_active_)return FALSE;
@@ -227,7 +233,7 @@ BOOL WINAPI PlayerWindow::QuerySkinPluginState(void* context,TtpSkinState* state
     const auto& self=*static_cast<PlayerWindow*>(context);
     state->playback=static_cast<int>(self.audio_->State());
     state->position_ms=self.audio_->Position().count();state->duration_ms=self.audio_->Duration().count();
-    state->volume=self.settings_.player.mute?0:self.settings_.player.volume;
+    state->volume=self.settings_.player.volume;
     state->balance=self.settings_.player.balance;state->mode=self.settings_.player.play_mode;
     const auto format=self.audio_->Format();
     state->channels=static_cast<int>(format.channels);state->sample_rate=static_cast<int>(format.sample_rate);
@@ -256,7 +262,9 @@ BOOL WINAPI PlayerWindow::QuerySkinPluginState(void* context,TtpSkinState* state
     } catch(...) { return FALSE; }
 }
 int32_t WINAPI PlayerWindow::QuerySkinPluginOption(void* context,uint32_t command) {
-    if(!context || command!=TTP_SKIN_CROSSFADE)return -1;
+    if(!context)return -1;
+    if(command==TTP_SKIN_VOLUME_DELTA)return 1;
+    if(command!=TTP_SKIN_CROSSFADE)return -1;
     const auto& self=*static_cast<PlayerWindow*>(context);
     return (self.settings_.playback.sound_fade_mode&0x10)!=0;
 }
@@ -576,8 +584,11 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     case TTP_SKIN_MENU: {POINT p{};GetCursorPos(&p);ShowContextMenu(p);break;}
     case TTP_SKIN_OPTIONS: ShowOptions();break;
     case TTP_SKIN_VOLUME:
-        settings_.player.volume=std::clamp(value,0,100);settings_.player.mute=false;
-        audio_->SetVolume(float(settings_.player.volume)/100.0F);break;
+        {const int previous=settings_.player.volume;SetPlaybackVolume(value);
+         if(previous!=settings_.player.volume)SetVolumeTrackingStatus(true);}
+        break;
+    case TTP_SKIN_VOLUME_DELTA: AdjustPlaybackVolume(std::clamp(value,-100,100));break;
+    case TTP_SKIN_VOLUME_END: SetVolumeTrackingStatus(false);break;
     case TTP_SKIN_BALANCE:
         settings_.player.balance=std::clamp(value,-100,100);audio_->SetBalance(settings_.player.balance);break;
     case TTP_SKIN_SEEK:

@@ -2866,7 +2866,10 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         HandleTrayCallback(wparam, lparam);
         return 0;
     case WM_SYSCOMMAND:
-        if ((wparam & 0xfff0U) == SC_MINIMIZE &&
+        // Fullscreen entry minimizes its owner after publishing the new mode.
+        // Sending that internal transition through MinimizeToTray would call
+        // LeaveFullScreen and cancel entry before the surfaces are detached.
+        if ((wparam & 0xfff0U) == SC_MINIMIZE && fullscreen_mode_ == 0 &&
             settings_.general.minimize_to_tray == 1 && MinimizeToTray())
             return 0;
         if ((wparam & 0xfff0U) == SC_RESTORE && fullscreen_mode_ != 0) {
@@ -2878,8 +2881,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         if (!skin_) reinterpret_cast<MINMAXINFO*>(lparam)->ptMinTrackSize = {760, 440};
         return 0;
     case WM_SIZE:
-        if (wparam == SIZE_MINIMIZED && settings_.general.minimize_to_tray == 1 &&
-            !minimized_to_tray_)
+        if (wparam == SIZE_MINIMIZED && fullscreen_mode_ == 0 &&
+            settings_.general.minimize_to_tray == 1 && !minimized_to_tray_)
             static_cast<void>(MinimizeToTray());
         if (wparam != SIZE_MINIMIZED && minimized_to_tray_) {
             minimized_to_tray_ = false;
@@ -2930,9 +2933,9 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             // (SkinIcon), and 00451CEF/00452518 (SkinSlider) all use
             // IDC_HAND. These controls are painted into our main HWND.
             const auto hit = HitTestSkin(point);
-            // LEDTimerCtrl toggles elapsed/remaining time, but unlike the
-            // skin button/slider classes it retains the default arrow.
-            if (!hit.empty() && hit != L"led") {
+            // LEDTimerCtrl and the scroll-info text retain the default arrow,
+            // unlike the skin button/slider classes.
+            if (!hit.empty() && hit != L"led" && hit != L"info") {
                 SetCursor(LoadCursorW(nullptr, IDC_HAND));
                 return TRUE;
             }
@@ -2977,7 +2980,9 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                 BeginSkinBackgroundDrag(window_, point);
             } else {
                 dragging_skin_background_ = false;
-                SetCapture(window_);
+                // 004347EE: the original info child neither captures the
+                // mouse nor starts a parent drag on WM_LBUTTONDOWN.
+                if (pressed_skin_element_ != L"info") SetCapture(window_);
                 if (pressed_skin_element_ == L"volume") SetSkinVolumeFromPoint(point);
                 else if (pressed_skin_element_ == L"progress") SetSkinProgressFromPoint(point);
                 InvalidateRect(window_, nullptr, FALSE);
@@ -2990,6 +2995,12 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             const auto released = HitTestSkin(point);
             const auto action = std::exchange(pressed_skin_element_, {});
+            // 004096AE -> 00409AC8 advances on the info child's release,
+            // including a release without a preceding press in that child.
+            // A captured button/slider or background drag still owns its up.
+            const bool info_release = released == L"info" &&
+                (action.empty() || action == L"info") &&
+                !dragging_skin_background_ && GetCapture() != window_;
             if (action == L"progress" && GetCapture() == window_) {
                 // 00460AB1 commits only SB_THUMBPOSITION (4), not the
                 // intermediate tracking notifications. Use the release point
@@ -3003,7 +3014,10 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             if (action == L"volume" || action == L"progress")
                 SetSliderStatus({}); // 00452295 -> 00460AB1: SB_THUMBPOSITION
             EndSkinMouseCapture();
-            if (!action.empty() && action == released && action != L"volume" && action != L"progress") {
+            if (info_release) {
+                InvokeSkinAction(L"info");
+            } else if (!action.empty() && action == released && action != L"info" &&
+                       action != L"volume" && action != L"progress") {
                 InvokeSkinAction(action);
             }
             InvalidateRect(window_, nullptr, FALSE);
@@ -3013,10 +3027,16 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
     case WM_LBUTTONDBLCLK:
         if (skin_) {
             // 00460CF5 checks only for a parsed mini_window, then dispatches
-            // command 0x7DD4. Real skin buttons are child HWNDs, so a physical
-            // double-click over one never reaches this main-window branch.
+            // command 0x7DD4. Original skin controls have their own HWNDs and
+            // must not fall through to the main background double-click.
             const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-            if (HitTestSkin(point).empty() && skin_->SupportsMiniMode())
+            const auto hit = HitTestSkin(point);
+            if (hit == L"info") {
+                EndSkinMouseCapture();
+                // 0040FA41 sends the text control's STN_DBLCLK notification.
+                SendMessageW(window_, WM_COMMAND,
+                             MAKEWPARAM(kInfoControlId, STN_DBLCLK), 0);
+            } else if (hit.empty() && skin_->SupportsMiniMode())
                 ToggleMiniMode();
             return 0;
         }
@@ -3232,6 +3252,12 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                         false, PlaylistSelectionTrigger::item_activated);
             }
             return 0;
+        case kInfoControlId:
+            // 004582D0 -> 00464B54 uses the common file-properties route,
+            // preserving its playing-track / playlist-focus selection rules.
+            if (HIWORD(wparam) == STN_DBLCLK)
+                SendMessageW(window_, WM_COMMAND, kCmdFileProperties, 0);
+            return 0;
         case kVisualControlId:
             // FUN_00457FAA sends control 0x7DDC with notification 1 only
             // when the Type-4 missing-cover text was hit. Every other
@@ -3321,7 +3347,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                 return 0;
             const HWND captured = GetCapture();
             if ((window_ && captured == window_ && pressed_skin_element_ == L"volume") ||
-                (volume_ && captured == volume_)) return 0;
+                (volume_ && captured == volume_) ||
+                (external_skin_ && external_skin_->VolumeTracking())) return 0;
             SetSliderStatus({});
         } else if (wparam == kPlaybackErrorTimer) {
             // A timer message queued before a retry must not expire the new notice.
@@ -4171,7 +4198,9 @@ std::wstring PlayerWindow::HitTestSkin(POINT point) const {
                         playback == audio::PlaybackState::playing;
     const auto& elements = ActiveSkinElements();
     for (auto item = elements.rbegin(); item != elements.rend(); ++item) {
-        if (!IsSkinButton(item->name)) continue;
+        // Scroll-info is an interactive text child in the original, not a
+        // button or draggable background. Use this mode's parsed skin bounds.
+        if (!IsSkinButton(item->name) && item->name != L"info") continue;
         if (!IsPlayModeSkinVisible(item->name, settings_.player.play_mode)) continue;
         if (item->name == L"play" && active) continue;
         if (item->name == L"pause" && !active) continue;
@@ -4193,6 +4222,15 @@ std::wstring PlayerWindow::HitTestSkin(POINT point) const {
 
 void PlayerWindow::InvokeSkinAction(std::wstring_view action) {
     if (IsSuppressedSkinControl(action)) return;
+    if (action == L"info") {
+        // 00409AC8 switches immediately, even with automatic cycling disabled;
+        // 004092FC then resets the offsets and restarts this item's timers.
+        if (!info_items_.empty()) {
+            info_item_index_ = (info_item_index_ + 1) % info_items_.size();
+            StartSkinInfoItem();
+        }
+        return;
+    }
     if (action == L"icon") {
         // The legacy icon child uses command 0x7DD8.  FUN_00464FBF anchors the
         // complete main popup at the skin icon rectangle's left/bottom edge;
@@ -5517,9 +5555,12 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
                 focus == playlist_track_control_ || focus == playlist_view_ ||
                     (focus == playlist_window_ && external_skin_ &&
                      external_skin_->Handles(playlist_window_)));
-            if (target == FileInfoCommandTarget::current_playback && playback)
+            if (target == FileInfoCommandTarget::current_playback && playback) {
                 ShowPlaylistProperties(playback);
-            else
+                // 00464A94 rebuilds CScrollingStatic after closing properties,
+                // including when its retained CPlayItem is stopped.
+                RefreshTrackInformation();
+            } else
                 HandlePlaylistCommand(kPlaylistProperties);
         }
         break;
@@ -6167,7 +6208,8 @@ void PlayerWindow::AdjustPlaybackVolume(int delta) {
     const HWND captured = GetCapture();
     const bool tracking = (window_ && captured == window_ &&
                            pressed_skin_element_ == L"volume") ||
-                          (volume_ && captured == volume_);
+                          (volume_ && captured == volume_) ||
+                          (external_skin_ && external_skin_->VolumeTracking());
     if (!tracking) SetPlaybackVolume(settings_.player.volume + delta);
     // 00460D1D / 004654D7 / 00465524 always send SB_ENDSCROLL, even when
     // clamped or delta / 40 is zero. They still display the current volume.
@@ -6423,7 +6465,21 @@ void PlayerWindow::RotateMainWindowCaption() {
     SetWindowTextW(window_, current.c_str());
 }
 
-void PlayerWindow::RebuildSkinInfoItems(bool include_audio_details) {
+void PlayerWindow::RefreshTrackInformation() {
+    const auto* track = PlaybackTrackForUi();
+    if (!track || !playback_error_text_.empty()) return;
+    display_title_ = HasPlaybackTrack()
+        ? std::to_wstring(*current_ + 1) + L"." + DisplayName(*track)
+        : DisplayName(*track);
+    display_artist_ = ArtistName(*track, ResourceText(0x8ca5));
+    if (title_) SetWindowTextW(title_, display_title_.c_str());
+    if (artist_) SetWindowTextW(artist_, display_artist_.c_str());
+    RebuildSkinInfoItems(true);
+    ResetSkinInfoScroll();
+    RefreshPlaybackUi();
+}
+
+void PlayerWindow::RebuildSkinInfoItems(bool include_track_details) {
     info_items_.clear();
     if (!playback_error_text_.empty()) {
         info_items_.push_back(playback_error_text_);
@@ -6431,7 +6487,7 @@ void PlayerWindow::RebuildSkinInfoItems(bool include_audio_details) {
     }
     info_items_.push_back(display_title_);
     const auto* playback_track = PlaybackTrackForUi();
-    if (!include_audio_details || !playback_track) return;
+    if (!include_track_details || !playback_track) return;
 
     // FUN_0045CA57 adds the primary display title first, expands resource
     // 0x81CA, then appends each non-empty line in resource order:
@@ -6446,9 +6502,30 @@ void PlayerWindow::RebuildSkinInfoItems(bool include_audio_details) {
     catch (const std::exception&) {}
     try { if (!track.album.empty()) album = core::Utf8ToWide(track.album); }
     catch (const std::exception&) {}
-    const auto format = FormatAudioDescription(audio_->Format());
-    const auto duration = audio_->Duration().count() > 0
-        ? FormatInfoDuration(audio_->Duration()) : std::wstring{};
+    // 0045AD86 calls 0045CA57 before its optional start-playback branch;
+    // 00465169/0045C0C6 retain that CPlayItem after Stop. Its information is
+    // available without playing or opening an output device.
+    audio::AudioFormat info_format{};
+    info_format.sample_rate = track.sample_rate_hz;
+    info_format.bytes_per_second = track.bitrate_bps / 8;
+    try {
+        info_format.codec_name = core::Utf8ToWide(
+            track.media_type.substr(0, track.media_type.find('|')));
+    } catch (const std::exception&) {}
+    auto info_duration = std::chrono::milliseconds(std::max(0, track.duration_ms));
+    // Selection/restoration can precede the next decoder open. Never borrow
+    // the previous file's format or another CUE subtrack's duration.
+    if (playback_source_open_ && opened_track_ &&
+        opened_track_->subtrack == track.subtrack &&
+        _wcsicmp(opened_track_->path.c_str(), track.path.c_str()) == 0) {
+        const auto live_format = audio_->Format();
+        if (!live_format.codec_name.empty() || live_format.sample_rate != 0)
+            info_format = live_format;
+        if (audio_->Duration().count() > 0) info_duration = audio_->Duration();
+    }
+    const auto format = FormatAudioDescription(info_format);
+    const auto duration = info_duration.count() > 0
+        ? FormatInfoDuration(info_duration) : std::wstring{};
     auto resource_template = ResourceText(0x81ca);
     size_t begin = 0;
     while (begin <= resource_template.size()) {
@@ -6914,12 +6991,17 @@ void PlayerWindow::SelectTrackFrom(size_t playlist_index, size_t index,
     // FUN_0045CA57 prefixes the current one-based playlist index before it
     // writes the scrolling info control (for example "1.Track title").
     display_title_ = std::to_wstring(index + 1) + L"." + name;
-    RebuildSkinInfoItems(false);
+    RebuildSkinInfoItems(true);
     ResetSkinInfoScroll();
     display_artist_ = artist;
     associated_lyric_path_.clear();
     ClearLyrics();
-    if (!start_playback) LoadCurrentLyrics();
+    if (!start_playback) {
+        LoadCurrentLyrics();
+        // Reuse the existing asynchronous reader for an uncached restored
+        // item, including one outside the visible list. Honour ReadInfo mode.
+        RequestPlaylistTrackInfo(playlist_index, index, true, false);
+    }
     if (title_) SetWindowTextW(title_, display_title_.c_str());
     if (artist_) SetWindowTextW(artist_, artist.c_str());
     if (skin_) InvalidateRect(window_, nullptr, FALSE);

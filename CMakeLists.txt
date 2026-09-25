@@ -924,7 +924,7 @@ target_link_libraries(taskbar_playback_tests PRIVATE ttplayer_core)
 
 add_executable(skin_rebind_tests tests/ui/skin_rebind_tests.cpp)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/waskin/host_tests.cpp")
-  add_executable(waskin_host_tests tests/waskin/host_tests.cpp)
+  add_executable(waskin_host_tests tests/waskin/host_tests.cpp src/app/resources.rc)
   target_compile_definitions(waskin_host_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_compile_options(waskin_host_tests PRIVATE /W4 /EHsc /utf-8)
   target_link_libraries(waskin_host_tests PRIVATE ttplayer_core)

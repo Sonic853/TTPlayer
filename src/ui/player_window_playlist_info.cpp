@@ -401,6 +401,11 @@ LRESULT PlayerWindow::ApplyPlaylistInfoResult(LPARAM value) {
                     if (*index == playlists_.ActiveIndex()) InvalidatePlaylistInfoRows(changed_rows);
                     if (playlist_item_tooltip_ && IsWindow(playlist_item_tooltip_))
                         SendMessageW(playlist_item_tooltip_, TTM_UPDATE, 0, 0);
+                    if (!media_library_playback_active_ &&
+                        playing_playlist_index_ == index && current_ &&
+                        std::find(changed_rows.begin(), changed_rows.end(),
+                                  *current_) != changed_rows.end())
+                        RefreshTrackInformation();
                 }
             }
         }

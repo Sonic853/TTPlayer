@@ -188,6 +188,7 @@ constexpr UINT kMsgShowOptionsControl = 0x7f4;
 constexpr UINT kCmdMiniMode = 0x7dd4;
 constexpr UINT kCmdRearrangeWindows = 0x7dd6;
 constexpr UINT kCmdShowElapsedTime = 0x7ddd;
+constexpr int kInfoControlId = 0x7dd9;
 constexpr int kVisualControlId = 0x7ddc;
 constexpr UINT kCmdVisualNone = 0x8085;
 constexpr UINT kCmdVisualDream = 0x8086;

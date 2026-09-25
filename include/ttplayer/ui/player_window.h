@@ -736,7 +736,8 @@ private:
     void QueueExtensionCorrection(audio::ExtensionCorrection correction);
     void PromptExtensionCorrection();
     void UpdateDiscordPresence();
-    void RebuildSkinInfoItems(bool include_audio_details);
+    void RefreshTrackInformation();
+    void RebuildSkinInfoItems(bool include_track_details);
     void ResetSkinInfoScroll();
     void AdvanceSkinInfoScroll(UINT_PTR timer);
     void StartSkinInfoItem();

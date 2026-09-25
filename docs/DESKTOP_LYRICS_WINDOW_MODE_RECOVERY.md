@@ -71,6 +71,8 @@ Win10 本轮未单独运行，不能把 Windows 11 结果当作 Win10 实测。
 
 ## 5. 更新后的发行文件
 
+> 本节哈希记录桌面歌词修复完成时的历史产物；同名发行文件现已更新为[主窗口曲目信息点击修复版](MAIN_INFO_MOUSE_BEHAVIOR_RESTORATION.md)，最新哈希见该文档。
+
 输出目录：`D:\Projects\Backup\TTPlayer\rebuild\build\Release`。
 
 | 文件 | 字节数 |

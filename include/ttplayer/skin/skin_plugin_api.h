@@ -30,6 +30,9 @@ enum TtpSkinCommand {
     TTP_SKIN_CROSSFADE, // value: 0/1; native transition between tracks
     TTP_SKIN_CURRENT_SOURCE, // tip callback query only: current media path/URL, value ignored
     TTP_SKIN_MEDIA_LIBRARY, // show the native playlist window in library mode
+    TTP_SKIN_VOLUME_DELTA, // signed relative adjustment; option query >=1 advertises support
+    TTP_SKIN_VOLUME_END, // finish/cancel a provider volume gesture
+    TTP_SKIN_STATUS_TEXT, // tip query only: temporary native slider feedback, or empty
     TTP_SKIN_EQ_VALUE = 100 // + 0: preamp, + 1..10: frequency bands; value -12..12
 };
 
@@ -241,6 +244,12 @@ typedef struct TtpSkinPlugin {
     // Includes face/weight/charset so equal pixel heights have equal metrics.
     // Host overlays saved lyric customizations after applying this default.
     BOOL (WINAPI *lyric_font)(void*, LOGFONTW*);
+    // Optional UI-thread input state. No commands or modal UI in this query.
+    BOOL (WINAPI *volume_tracking)(void*);
+    // Optional native selection/search reveal. Preserve selection and window
+    // visibility; scroll to row and synchronize the host's caret (-1 = none).
+    // Quick find reveals its first match while retaining its last-match caret.
+    BOOL (WINAPI *playlist_reveal)(void*, uint32_t row, int32_t caret);
 } TtpSkinPlugin;
 #define TTP_SKIN_PLUGIN_V1_SIZE offsetof(TtpSkinPlugin, skin_directory)
 #define TTP_SKIN_PLUGIN_DECLARATION_SIZE offsetof(TtpSkinPlugin, layout)

@@ -1731,6 +1731,9 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
             return TRUE;
         }
         if (tracks && static_cast<size_t>(wparam) < VisiblePlaylistTrackCount()) {
+            if(external_skin_)
+                static_cast<void>(external_skin_->PlaylistReveal(static_cast<uint32_t>(wparam),
+                    playlist_selection_?static_cast<int32_t>(*playlist_selection_):-1));
             RECT client{};
             GetClientRect(control, &client);
             constexpr size_t row_height = 16;
@@ -3846,6 +3849,8 @@ void PlayerWindow::RestorePlaylistRowSelection() {
 
 void PlayerWindow::EnsurePlaylistSelectionVisible() {
     if (!playlist_selection_ || !skin_) return;
+    if(external_skin_ && *playlist_selection_<=INT32_MAX)
+        static_cast<void>(external_skin_->PlaylistReveal(static_cast<uint32_t>(*playlist_selection_),static_cast<int32_t>(*playlist_selection_)));
     RECT client{};
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),

@@ -2333,7 +2333,7 @@ void PlayerWindow::SelectMediaLibraryPlaybackTrack(size_t index,
     const auto& track = media_library_playback_.Tracks()[index];
     display_title_ = std::to_wstring(index + 1) + L"." + DisplayName(track);
     display_artist_ = ArtistName(track, ResourceText(0x8ca5));
-    RebuildSkinInfoItems(false);
+    RebuildSkinInfoItems(true);
     ResetSkinInfoScroll();
     associated_lyric_path_.clear();
     LoadCurrentLyrics();
