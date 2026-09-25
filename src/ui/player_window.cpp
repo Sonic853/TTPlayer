@@ -1600,11 +1600,13 @@ void PlayerWindow::HandleTrayCallback(WPARAM icon, LPARAM event) {
             point = {GET_X_LPARAM(icon), GET_Y_LPARAM(icon)};
             if (point.x == -1 && point.y == -1) GetCursorPos(&point);
         } else GetCursorPos(&point);
-        // Use the very same menu, owner-draw records and dynamic submenus as
-        // the main window. Do not reveal an iconic/hidden window to show it.
-        SetForegroundWindow(window_);
-        SendMessageW(window_, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(window_),
-            MAKELPARAM(static_cast<short>(point.x), static_cast<short>(point.y)));
+        // The shell requests the host menu, independently of skin hit-testing.
+        // Sending WM_CONTEXTMENU back through the HWND lets a skin subclass
+        // swallow it (WSZ) or route it to embedded lyric content (WAL).
+        // Use the shared menu directly, retaining its commands and styling
+        // without revealing an iconic/hidden player.
+        if (fullscreen_mode_ != 0) SetFullScreenMode(0);
+        ShowContextMenu(point);
         PostMessageW(window_, WM_NULL, 0, 0); // 0046FE1E: allow outside dismissal.
         break;
     }
