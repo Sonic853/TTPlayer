@@ -22,9 +22,7 @@
 #include "ttplayer/ui/shell_send_to.h"
 #include "ttplayer/ui/taskbar_playback.h"
 #include "ttplayer/ui/taskbar_preview.h"
-#if !defined(TTPLAYER_LEGACY_WINDOWS)
 #include "ttplayer/ui/system_media_controls.h"
-#endif
 
 #include <array>
 #include <atomic>
@@ -312,9 +310,7 @@ private:
     [[nodiscard]] TaskbarPlaybackLabels TaskbarLabels() const;
     void UpdateTaskbarPlayback();
     void HandleTaskbarPlaybackClick(WPARAM wparam);
-#if !defined(TTPLAYER_LEGACY_WINDOWS)
     void HandleSystemMediaCommand(SystemMediaControls::Command command, int64_t position_ms);
-#endif
     void RemoveTrayIcon();
     void ShowPlaybackOpenTip();
     void ClosePlaybackOpenTip();
@@ -892,9 +888,7 @@ private:
     bool tray_left_pressed_{};
     TaskbarPlaybackControls taskbar_playback_;
     TaskbarPreview taskbar_preview_;
-#if !defined(TTPLAYER_LEGACY_WINDOWS)
     SystemMediaControls system_media_controls_;
-#endif
     HWND playback_tip_window_{};
     std::wstring playback_tip_title_;
     std::wstring playback_tip_body_;

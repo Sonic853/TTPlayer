@@ -30,7 +30,7 @@ flowchart LR
   P --> E[Gitee Release]
 ```
 
-`Build player` 在编译前分配最终版本号，再写入两种 EXE 并打包；勾选 Gitee 时
+`Build player` 在编译前分配最终版本号，再写入通用 EXE 并打包；勾选 Gitee 时
 在此构建一次 CLI，用于查询已有版本并随 Artifact 传递。
 `Prepare Release` 校验构建版本及附件、生成说明，通过同一份 Artifact 交给两个发布任务。
 `GitHub Release`、`Gitee Release` 分别按对应勾选项运行，同时勾选时并行发布，
@@ -39,11 +39,10 @@ flowchart LR
 
 1. 将工作流及配套构建文件提交到远程仓库的默认分支。
 2. 打开 **Actions → Manual Windows Build → Run workflow**。
-3. 选择分支及配置：`Release`（默认）、`RelWithDebInfo` 或 `Debug`。
+3. 选择分支，配置固定为 `Release`（VC-LTL 发布运行库）。
 4. 构建完成后，从该次运行的 **Artifacts** 下载
    `TTPlayer-Windows-x86-配置-运行编号`，产物保留 14 天。
-   其中包含 `TTPlayerRebuild-版本号.zip` 和
-   `TTPlayerRebuild-XP-Win7-版本号.zip`，日期取构建开始时的北京时间；
+   其中包含通用包 `TTPlayerRebuild-版本号.zip`，日期取构建开始时的北京时间；
    勾选发布时，名称包含最终分配的 `pN` 补丁号。
 
 如需发布，选择 `Release` 配置并勾选对应平台，不需要输入版本号。
@@ -56,27 +55,24 @@ flowchart LR
 GitHub tag/Release；勾选 Gitee 时还会分页读取 Gitee tag/Release，把两边已有
 版本一起计入占用范围。两个平台同时发布时使用同一个新版本号和相同附件。
 新标签始终指向本次构建提交，不移动旧标签、不覆盖已有 Release。
-Debug / RelWithDebInfo 仍可只构建，不用于发布；每次工作流也会额外构建旧系统 Release 版。
-Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
-`TTPlayerRebuild-XP-Win7-版本号.zip` 与包含两个 ZIP 校验值的 `SHA256SUMS.txt`。
-例如发布 `2026.09.05p1` 时，两个附件分别为 `TTPlayerRebuild-2026.09.05p1.zip`、
-`TTPlayerRebuild-XP-Win7-2026.09.05p1.zip`。EXE 文件版本、产品版本、ZIP 名称、
-校验清单及正文下载说明均使用此版本；Actions 构建产物与 Release 附件保持一致。
-两种 ZIP 解压后的程序名均为 `TTPlayerRebuild.exe`。
-**XP / Win7 请使用名称中带 XP-Win7 的包**；详见 [兼容版说明](LEGACY_WINDOWS.md)。
-普通版在 Windows 10／11 上支持 [SMTC 系统媒体控件](SMTC.md)，可显示曲目信息和封面并控制播放。
-该功能使用 Windows SDK 自带的 C++/WinRT，不需要额外运行库包；XP／Win7 版不编入该模块。
+通用构建只生成 Release。Release 附件为 `TTPlayerRebuild-版本号.zip` 与记录该 ZIP
+校验值的 `SHA256SUMS.txt`，不再额外构建或分发 XP-Win7 专用包。
+例如 `2026.09.05p1` 对应 `TTPlayerRebuild-2026.09.05p1.zip`。EXE 文件版本、产品版本、
+ZIP 名称、校验清单及正文说明保持一致；包内程序名仍为 `TTPlayerRebuild.exe`。
+**XP SP3／Win7／Win10／Win11 使用同一份 EXE**，由实际系统版本与组件可用性选择功能。
+Win10／11 上保留 [SMTC 系统媒体控件](SMTC.md)，XP／Win7 在进入 WinRT 前跳过该模块。
+构建与功能矩阵见 [通用构建调整记录](UNIFIED_WINDOWS_BUILD.md)。
 完整更新日志链接自动使用仓库中最近的版本 tag 与本次新 tag 对比，例如
 `compare/2026.09.05...2026.09.05p1`。历史版本 tag 必须符合 `yyyy.MM.dd` 或
 `yyyy.MM.ddpN`，按日期和数值补丁号排序（`p10` 晚于 `p2`），不依赖 API 返回顺序。
 若还没有符合规则的历史 tag，则链接到 `commits/本次版本`，不生成无效对比链接。
 只发布 Gitee 时，GitHub 更新日志链接的终点使用本次提交 SHA，因为该操作
 不会在 GitHub 上创建同名 tag。
-正文安装说明明确区分现代版与旧系统版，不自动追加 GitHub 生成的说明。
+正文安装说明统一使用通用包，不自动追加 GitHub 生成的说明。
 
 ### EXE 文件属性
 
-普通版及 XP／Win7 版的 `TTPlayerRebuild.exe` 均包含 Windows `VERSIONINFO` 资源：
+通用版 `TTPlayerRebuild.exe` 包含 Windows `VERSIONINFO` 资源：
 
 | 字段 | 内容 |
 | --- | --- |
@@ -93,7 +89,7 @@ Release 附件为现代版 `TTPlayerRebuild-版本号.zip`、旧系统版
 无补丁号时第四段为 `0`，补丁号最大为 `65535`。字符串版本保留日期补零及 `pN`。
 字段格式参见 [Microsoft VERSIONINFO 文档](https://learn.microsoft.com/en-us/windows/win32/menurc/versioninfo-resource)。
 
-Actions 在编译前将版本传入 `TTPLAYER_BUILD_VERSION`，打包前核对两种 EXE 的
+Actions 在编译前将版本传入 `TTPLAYER_BUILD_VERSION`，打包前核对通用 EXE 的
 字符串版本、数值版本、作者公司和文件说明。构建与发布之间不再修改版本或重命名 ZIP。
 只构建、不发布时，版本使用北京时间日期，不查询远程版本。
 
@@ -108,7 +104,7 @@ cmake -S . -B build "-DTTPLAYER_BUILD_VERSION="
 
 生成脚本验证真实日期及数值范围；版本未变化时不重复写入资源，避免无意义的重新链接。
 该资源只编入播放器 EXE，不增加运行时依赖，也不改变“选项 → 关于”的构建日期格式。
-本地验证脚本 `tests/cmake/test_file_version.ps1` 检查生成规则及两种实际 EXE 的作者和版本；
+本地验证脚本 `tests/cmake/test_file_version.ps1` 检查生成规则及实际 EXE 的作者和版本；
 `tests/cmake/test_manual_release.ps1` 覆盖编译前版本分配、同日补丁号、实际打包和模拟发布。
 测试仅在本地运行，Actions 继续使用 `BUILD_TESTING=OFF`。
 
@@ -121,7 +117,7 @@ cmake -S . -B build "-DTTPLAYER_BUILD_VERSION="
 
 已配置这两个 secrets 后，运行工作流时选择 `Release`，勾选
 **Publish Release to Gitee** 即可；无需同时勾选 GitHub 发布。
-勾选任一发布选项但选择 Debug / RelWithDebInfo 时，会在构建前报错。
+工作流只接受 Release，传入其它配置会在构建前报错。
 
 目标 Gitee 仓库必须已经包含本次 GitHub 构建的提交 SHA，例如通过已有镜像同步。
 发布命令显式传入该 SHA，避免 Release 标签与二进制所用源码不一致；工作流不
@@ -133,23 +129,19 @@ cmake -S . -B build "-DTTPLAYER_BUILD_VERSION="
 构建 `gitee-release-rs`，不运行 CLI 测试。令牌通过环境变量注入，不放在命令参数中。
 
 根据 CLI 的[创建与附件接口](https://github.com/Sonic853/gitee-release-cli-rust/blob/9993cd79d512e16c6586384cd83acbeaaf15a723/docs/rust-cli.md)，
-先创建 Release，校验返回的 ID 和 tag，再使用该 ID 上传普通版 ZIP、XP / Win7
-版 ZIP、`SHA256SUMS.txt`。创建或任一上传失败都会使任务失败，不会自动删除
+先创建 Release，校验返回的 ID 和 tag，再使用该 ID 上传通用 ZIP、`SHA256SUMS.txt`。创建或任一上传失败都会使任务失败，不会自动删除
 已经成功发布的版本或覆盖旧附件。日志会记录成功创建的 Release ID，便于补传
 缺失附件；重新运行整套发布流程会分配下一个可用版本号。
 仅重跑失败的发布任务则继续使用原准备任务输出的版本及 Artifact，不重新分配版本。
 若远程 Release 已创建但附件不完整，仍需按日志中的 ID 补传，不自动覆盖已有版本。
 
 本地可手动运行 `tests/cmake/test_manual_release.ps1`，离线检查北京时间边界、同日补丁号、
-动态对比链接、安装说明和模拟发布保护逻辑，包括两个附件的 SHA-256 和 Release 配置，
+动态对比链接、安装说明和模拟发布保护逻辑，包括通用 ZIP 的 SHA-256 和 Release 配置，
 以及 GitHub / Gitee 单独发布、同时发布、Gitee 版本占用、凭据缺失和上传失败。
-同时用隔离目录实际打包、解压两个版本，检查 ZIP 内容、版本化文件名及内外校验文件。
+同时用隔离目录实际打包、解压通用版本，检查 ZIP 内容、版本化文件名及内外校验文件。
 该脚本位于测试子模块，Actions 不运行它；测试不调用远程 API，不创建标签或 Release。
-`tests/cmake/test_gitee_release_http.py --cli <gitee-release-rs.exe>` 还可在本地用实际
-CLI 连接回环 HTTP 服务，验证跨页版本号、中文正文、三个附件内容及上传失败中止。
-本次任务拆分已通过 actionlint、12 项日期 / 配置用例、36 项模拟发布用例、
-3 项实际 ZIP 打包用例及 3 项 HTTP 集成用例。集成验证在独立进程中消费准备结果，
-覆盖上传失败中止，以及 GitHub 发布失败后 Gitee 仍能成功发布；未执行线上发布。
+2026-09-25 合并构建后，本地通过 actionlint、12 项日期／配置用例、35 项模拟发布用例
+和 1 项实际 ZIP 打包用例；未执行线上发布。早期三附件 HTTP 集成记录属于合并前流程。
 
 工作流必须先存在于默认分支，手动运行入口才会显示，见
 [GitHub 手动运行工作流说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。
@@ -170,20 +162,20 @@ VS 2026 生成器要求 CMake 4.2 或更新版本，Runner 已提供相应工具
 参见 [GitHub 镜像迁移公告](https://github.com/actions/runner-images/issues/14017)
 及 [CMake VS 2026 生成器说明](https://cmake.org/cmake/help/latest/generator/Visual%20Studio%2018%202026.html)。
 
-旧系统版在 `build-legacy` 独立构建，固定使用 YY-Thunks 1.2.2 和 VC-LTL 5.3.1，
+所有版本统一在 `build` 构建，固定使用 YY-Thunks 1.2.2 和 VC-LTL 5.3.1，
 首次配置自动下载并校验 SHA-256；Python 3 检查 XP / Win7 导入表后才允许打包。
 导入报告和依赖许可保留在构建目录。构建时不改动系统 DLL，也无需安装旧 Visual Studio。
 
 修改工作流后，请提交并在 **Run workflow** 中选择含修复的分支发起新运行；
 直接 **Re-run jobs** 重跑旧失败记录仍使用旧提交中的工作流。
 
-普通版和兼容版 ZIP 均只包含 `TTPlayerRebuild.exe` 与 `SHA256SUMS.txt`，
-包内校验文件记录该 EXE 的 SHA-256。Actions 产物还包含两个 ZIP 的外层校验文件，
+通用 ZIP 只包含 `TTPlayerRebuild.exe` 与 `SHA256SUMS.txt`，
+包内校验文件记录该 EXE 的 SHA-256。Actions 产物还包含该 ZIP 的外层校验文件，
 以及供发布步骤核对的构建信息；PDB 保留在构建目录。
 **这不是包含原版运行依赖的安装包**：请把 `TTPlayerRebuild.exe` 放入已有
 TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一起使用。
 不会上传原版 DLL、编码器、歌曲、播放列表或 `TTPlayerRebuild.xml` 等个人配置。
-普通使用选择 Release；Debug 需要开发环境的调试运行库，不适合分发。
+主 EXE 使用系统 `msvcrt.dll`，无需另外安装现代 VC++ 运行库；原版插件仍可能需要 VC++ 2012 x86。
 
 程序从 EXE 同目录读写 `TTPlayerRebuild.xml`；仅当新文件不存在时，
 自动导入同目录旧 `TTPlayer.xml`，保留旧文件且不再向其写入。
@@ -208,7 +200,7 @@ TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一�
 
 需要国际化时，另行构建或下载 `gettext` 的翻译包，将 `ttp_i18n.dll` 放入 EXE 目录下的
 `AddIn`，将 `i18n` 放在 EXE 旁边。语言文件直接位于 `i18n/<语言>/ttplayer.po` 或 `.mo`，
-有效 MO 优先。普通版和 XP／Win7 兼容版共用该 DLL；没有它时仍使用原始资源及自建文本。
+有效 MO 优先。通用版使用该 DLL；没有它时仍使用原始资源及自建文本。
 
 “选项 → 常规”分为“选项”“命令行方式”“软件更新”三个子标签页。
 Discord 歌曲信息和歌词设置位于“选项”页的“自动关闭计算机”下方。
@@ -216,7 +208,8 @@ Discord 歌曲信息和歌词设置位于“选项”页的“自动关闭计算
 保存，重启播放器后生效。主窗口右键菜单不再提供语言选择。
 
 本地启用 `BUILD_TESTING=ON` 后，可通过 `TTPLAYER_I18N_TEST_DLL` 指定一份已经构建好的
-DLL 绝对路径，启用 `i18n_ui_tests` 以及普通版的 `i18n_startup_tests`。
+DLL 绝对路径，启用 `i18n_ui_tests`。旧的无启动导入模拟 DLL 不适合通用 EXE 的静态 TLS 约束，
+`i18n_startup_tests` 不注册；完整启动由真实 `ttpcomm.dll` 的隔离测试覆盖。
 该选项仅用于集成测试，不会构建或分发 DLL。
 
 ## WTL 10.01 / ATL
@@ -227,8 +220,8 @@ CMake 从官方发布地址下载 WTL，并固定 SHA-256 校验值。库为头�
 
 ## Release 体积优化
 
-`TTPLAYER_OPTIMIZE_SIZE` 默认开启，普通版和 XP／Win7 版共用配置；Actions 显式启用。
-它仅作用于 `Release`、`MinSizeRel`，`Debug` 和 `RelWithDebInfo` 保持原来的调试构建配置。
+`TTPLAYER_OPTIMIZE_SIZE` 默认开启，通用 Release 与 Actions 均启用。
+通用构建固定使用 Release；以下历史体积对比保留合并前的两种构建数据。
 
 - 主程序及核心库采用 `/O1` 体积优先编译，开启跨文件优化 `/GL`、链接时优化 `/LTCG` 和全局数据优化 `/Gw`。
 - 链接时使用 `/OPT:REF`、`/OPT:ICF` 清理未引用内容、合并相同内容，关闭增量链接。
@@ -317,8 +310,8 @@ ctest --test-dir build-library-tests -C Release -R '^media_library_tests$' --out
 测试使用本地 `tests/` 源码，无需原版 DLL 或音频设备，覆盖五种播放模式、随机序列前后回退、
 首尾边界、播放跟随光标、自然结束和自动切换列表。媒体库测试另验证可见树节点切换。
 分析与验证记录见 [PLAYBACK_MODES_AUDIT_AND_FIXES.md](PLAYBACK_MODES_AUDIT_AND_FIXES.md)。
-随机播放另覆盖普通版 ≤5000 首三轮后台索引、>5000 首单份随机索引循环，
-XP／Win7 版始终单份随机索引循环，以及跨轮回退、
+随机播放另覆盖Win8+ ≤5000 首三轮后台索引、>5000 首单份随机索引循环，
+XP／Win7 始终单份随机索引循环，以及跨轮回退、
 任务失效和异步切歌队列；规则见 [RANDOM_PLAYBACK_ROUNDS.md](RANDOM_PLAYBACK_ROUNDS.md)。
 
 ### 独立歌曲信息加载回归

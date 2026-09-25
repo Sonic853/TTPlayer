@@ -1,4 +1,5 @@
 #include "ttplayer/ui/system_media_controls.h"
+#include "ttplayer/platform/windows_features.h"
 #include "ttplayer/audio/audio_engine.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/playlist/playlist.h"
@@ -219,7 +220,10 @@ UINT SystemMediaControls::RequestMessage() noexcept {
 }
 
 void SystemMediaControls::SetSource(HWND window, const SystemMediaMetadata& metadata, HBITMAP cover) noexcept {
-    if (!window || !IsWindow(window) || !RequestMessage()) return;
+    // XP/Win7 never construct WinRT strings, factories or SMTC COM objects.
+    // Win10+ still probes the actual factory: stripped/N editions may lack it.
+    if (!platform::CurrentWindowsFeatures().SystemMediaControls() ||
+        !window || !IsWindow(window) || !RequestMessage()) return;
     try {
         if (!attempted_) {
             attempted_ = true;

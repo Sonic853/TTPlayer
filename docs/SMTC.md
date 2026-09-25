@@ -1,8 +1,8 @@
-# 普通版 SMTC 支持
+# 通用版 SMTC 支持
 
-普通版在 Windows 10／11 上接入系统媒体传输控件（System Media Transport Controls，SMTC）。
+通用版在 Windows 10／11 上接入系统媒体传输控件（System Media Transport Controls，SMTC）。
 歌曲成功打开后，系统媒体面板可显示当前曲目信息并控制播放；不需要额外安装组件或开启选项。
-XP／Win7 版不编译此模块，也不链接新增的 WinRT 库。
+同一 EXE 在 XP／Win7 上跳过 SMTC 初始化，不创建 WinRT 对象。
 
 ## 已实现
 
@@ -37,9 +37,11 @@ WinRT 事件可能来自后台线程。回调仅将请求写入有长度上限�
 销毁时先在锁内撤销目标 HWND，避免延迟回调访问已销毁的播放器。
 歌词保存对话框、停止淡出和退出期间不执行新的控制请求。
 
-SMTC 初始化失败不阻止播放。只有普通版链接 `runtimeobject`、`shcore`，
-兼容版通过 CMake 条件和 `TTPLAYER_LEGACY_WINDOWS` 条件编译排除该功能。
-不改变兼容版的子系统版本或现有导入检查。
+SMTC 初始化失败不阻止播放。通用构建编入本模块并链接 `runtimeobject`、`shcore`，
+由优先链接的 YY-Thunks 对象处理新 API，EXE 不产生对旧系统缺失 WinRT DLL 的启动依赖。
+`CurrentWindowsFeatures()` 使用 `RtlGetVersion` 识别实际系统；Win10 以前在入口返回。
+Win10 及以后仍需实际创建 SMTC 工厂成功才启用。子系统 5.01 和 XP／Win7 导入审计保持启用。
+2026-09-25 的通用构建变更及验证见 [合并构建记录](UNIFIED_WINDOWS_BUILD.md)。
 
 ## 本地验证
 
@@ -48,7 +50,7 @@ SMTC 初始化失败不阻止播放。只有普通版链接 `runtimeobject`、`s
 不代表在旧系统中运行 WinRT/SMTC 功能。
 
 测试源码位于本地 `tests/ui/system_media_controls_tests.cpp`。
-`BUILD_TESTING=ON` 且为普通版时才创建该测试目标；Actions 继续使用 `BUILD_TESTING=OFF`。
+`BUILD_TESTING=ON` 时创建该测试目标；Actions 继续使用 `BUILD_TESTING=OFF`。
 
 ```powershell
 cmake --build build --config Release --target system_media_controls_tests

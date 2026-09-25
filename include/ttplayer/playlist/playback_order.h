@@ -9,14 +9,11 @@ namespace ttplayer::playlist {
 
 // UI-owned cursor, with a worker that only builds immutable index arrays.
 // Modern: three rolling rounds up to 5000 tracks, otherwise one shuffled cycle.
-// The XP/Win7 distribution always uses one shuffled cycle.
+// On XP/Win7 the same binary always uses one shuffled cycle.
 class RandomPlaybackOrder {
 public:
-#if defined(TTPLAYER_LEGACY_WINDOWS)
-    static constexpr size_t kThreeRoundLimit = 0;
-#else
-    static constexpr size_t kThreeRoundLimit = 5000;
-#endif
+    // Runtime policy: the same EXE uses one cycle on XP/Win7, three on Win8+.
+    [[nodiscard]] static size_t ThreeRoundLimit() noexcept;
     enum class Request { previous, next, initialize_preview, preview_next };
     struct Selection {
         std::optional<size_t> row;

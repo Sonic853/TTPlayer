@@ -41,7 +41,7 @@ private:
 int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     namespace i18n = ttplayer::i18n;
     // Load the optional i18n provider before actively loading ttpcomm. Missing
-    // translations never prevent startup. The XP edition retains a mandatory
+    // translations never prevent startup. The universal EXE retains a mandatory
     // ttpcomm startup import for static TLS, so Windows loads that dependency
     // before this entry point; do not replace it with LoadLibrary-only loading.
     const OptionalI18nRuntime i18n_runtime;

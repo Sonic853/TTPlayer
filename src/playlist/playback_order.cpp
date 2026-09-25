@@ -1,4 +1,5 @@
 ﻿#include "ttplayer/playlist/playback_order.h"
+#include "ttplayer/platform/windows_features.h"
 
 #include <algorithm>
 #include <array>
@@ -119,7 +120,7 @@ struct RandomPlaybackOrder::State {
                 if (work.slot < 0) {
                     r[1] = BuildRound(work.count, generator, generation,
                                      work.generation, {}, {}, {}, work.anchor);
-                    if (work.count <= kThreeRoundLimit) {
+                    if (work.count <= ThreeRoundLimit()) {
                         r[0] = BuildRound(work.count, generator, generation,
                                          work.generation, {}, r[1]);
                         r[2] = BuildRound(work.count, generator, generation,
@@ -173,6 +174,10 @@ struct RandomPlaybackOrder::State {
     }
 };
 
+size_t RandomPlaybackOrder::ThreeRoundLimit() noexcept {
+    return platform::CurrentWindowsFeatures().RandomRoundLimit();
+}
+
 RandomPlaybackOrder::RandomPlaybackOrder() = default;
 RandomPlaybackOrder::~RandomPlaybackOrder() = default;
 
@@ -220,7 +225,7 @@ RandomPlaybackOrder::Selection RandomPlaybackOrder::TrySelect(
     const bool preview = request == Request::initialize_preview || request == Request::preview_next;
     auto position = s.position + (previous ? -1 : 1);
     if (position < 0 || position >= static_cast<std::int64_t>(count)) {
-        if (count > kThreeRoundLimit) {
+        if (count > ThreeRoundLimit()) {
             position = previous ? static_cast<std::int64_t>(count - 1) : 0;
         } else {
             const size_t slot = previous ? 0 : 2;

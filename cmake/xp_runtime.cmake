@@ -1,5 +1,5 @@
-# Directory-scoped XP runtime policy shared by the legacy player and the
-# optional i18n DLL. Including it in gettext must not change the modern EXE.
+# Directory-scoped XP runtime policy shared by the universal player and the
+# independently built optional i18n DLL.
 if(TTPLAYER_XP_RUNTIME_CONFIGURED)
   return()
 endif()
@@ -25,7 +25,7 @@ set(WindowsTargetPlatformMinVersion "5.1.2600.0")
 set(SupportLTL "true")
 include("${VC_LTL_Root}/config/config.cmake")
 if(NOT InternalLTLCRTVersion STREQUAL "5.1.2600.0")
-  message(FATAL_ERROR "The shared DLL and legacy player must use VC-LTL's XP runtime")
+  message(FATAL_ERROR "The shared DLL and universal player must use VC-LTL's XP runtime")
 endif()
 # The thunk object must precede Windows import libraries.
 add_link_options("${ttplayer_yy_thunks_SOURCE_DIR}/objs/x86/YY_Thunks_for_WinXP.obj")

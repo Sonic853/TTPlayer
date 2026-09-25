@@ -1,3 +1,4 @@
+#include "ttplayer/platform/windows_features.h"
 #include "file_info_probe_client.h"
 #include "playlist_info_session_protocol.h"
 #include "ttplayer/app/file_info_worker.h"
@@ -246,11 +247,8 @@ struct PlaylistInfoProbeSession::State {
     };
     std::list<Cached> cache;
     size_t cache_bytes{};
-#ifdef TTPLAYER_LEGACY_WINDOWS
-    static constexpr size_t cache_limit = 128, byte_limit = 4 * 1024 * 1024;
-#else
-    static constexpr size_t cache_limit = 512, byte_limit = 16 * 1024 * 1024;
-#endif
+    const size_t cache_limit = platform::CurrentWindowsFeatures().MetadataCacheEntries();
+    const size_t byte_limit = platform::CurrentWindowsFeatures().MetadataCacheBytes();
     ~State() { Reset(); }
     void Reset() noexcept {
         if (process && WaitForSingleObject(process.Get(), 0) == WAIT_TIMEOUT) {
@@ -388,9 +386,9 @@ std::optional<FileInfoProbeReadResult> PlaylistInfoProbeSession::Read(
         size_t memory = sizeof(State::Cached) + key.size() * sizeof(wchar_t) +
             result.codec.size() * sizeof(wchar_t) + result.metadata.size() * sizeof(FileInfoProbeMetadata);
         for (const auto& field : result.metadata) memory += (field.name.size() + field.value.size()) * sizeof(wchar_t);
-        if (memory <= State::byte_limit) {
-            while (!s.cache.empty() && (s.cache.size() >= State::cache_limit ||
-                    s.cache_bytes + memory > State::byte_limit)) {
+        if (memory <= s.byte_limit) {
+            while (!s.cache.empty() && (s.cache.size() >= s.cache_limit ||
+                    s.cache_bytes + memory > s.byte_limit)) {
                 s.cache_bytes -= s.cache.back().bytes; s.cache.pop_back();
             }
             s.cache.push_front({std::move(key), *stamp, result, memory});

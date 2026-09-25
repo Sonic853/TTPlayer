@@ -32,14 +32,12 @@ TaskbarPlaybackLabels PlayerWindow::TaskbarLabels() const {
 void PlayerWindow::UpdateTaskbarPlayback() {
     const auto buttons = TaskbarState();
     static_cast<void>(taskbar_playback_.Update(buttons, TaskbarLabels()));
-#if !defined(TTPLAYER_LEGACY_WINDOWS)
     if (!OpenedTrack()) system_media_controls_.Clear();
     else {
         auto clock = audio_->ClockSnapshot();
         if (pending_wave_track_change_) clock.state = audio::PlaybackState::opening;
         system_media_controls_.Update(clock, buttons, close_after_skin_window_fade_);
     }
-#endif
     const auto state = audio_->State();
     if (!pending_wave_track_change_ && state != audio::PlaybackState::playing &&
         state != audio::PlaybackState::paused)
@@ -60,7 +58,6 @@ void PlayerWindow::HandleTaskbarPlaybackClick(WPARAM wparam) {
     RefreshPlaybackUi();
 }
 
-#if !defined(TTPLAYER_LEGACY_WINDOWS)
 void PlayerWindow::HandleSystemMediaCommand(SystemMediaControls::Command command, int64_t position_ms) {
     // Recheck on the window thread: an input may have arrived during a decoder
     // change, stop fade, or a nested save-lyrics dialog.
@@ -97,5 +94,4 @@ void PlayerWindow::HandleSystemMediaCommand(SystemMediaControls::Command command
     }
     RefreshPlaybackUi();
 }
-#endif
 } // namespace ttplayer::ui

@@ -21,7 +21,7 @@ and [PORTABLE_FILE_PROPERTIES.md](docs/PORTABLE_FILE_PROPERTIES.md).
 
 Current milestone (0.1):
 
-- [System Media Transport Controls](docs/SMTC.md) in the modern edition on Windows 10/11:
+- [System Media Transport Controls](docs/SMTC.md) on Windows 10/11:
   track metadata, embedded artwork, playback status and timeline, with play, pause,
   stop, previous, next and seek commands routed to the existing player;
 
@@ -113,24 +113,25 @@ workflow produces an x86 player EXE without bundling original DLLs or private
 configuration. See [BUILDING.md](docs/BUILDING.md) for inputs, artifacts and clean
 checkout builds.
 
-For Windows XP SP3 / Windows 7, use the executable inside
-`TTPlayerRebuild-XP-Win7.zip`, built separately with `TTPLAYER_LEGACY_WINDOWS=ON`.
-The default modern MSVC build requires newer Windows APIs. Both editions are
-included in manual build artifacts and releases; see [legacy build details](docs/LEGACY_WINDOWS.md).
+One universal x86 Release build supports Windows XP SP3 / Windows 7 / Windows 10 / Windows 11.
+Download `TTPlayerRebuild-<version>.zip`. All builds use VC-LTL 5.3.1 and YY-Thunks 1.2.2;
+features are selected at runtime. The player EXE does not require the modern VC++ redistributable;
+original add-ins can still require their own VC++ 2012 x86 runtime.
+See [unified build changes and system feature matrix](docs/UNIFIED_WINDOWS_BUILD.md).
 
 Build the complete local recovery workspace from a Visual Studio developer shell:
 
 ```powershell
 cmake -S rebuild -B rebuild/build -A Win32
-cmake --build rebuild/build --config Debug
-ctest --test-dir rebuild/build -C Debug --output-on-failure
+cmake --build rebuild/build --config Release
+# Local tests require a separate -DBUILD_TESTING=ON configuration.
 ```
 
 Runtime files are resolved beside the executable, independently of the working
 directory. Run the reconstructed player UI:
 
 ```powershell
-.\rebuild\build\Debug\TTPlayerRebuild.exe
+.\rebuild\build\Release\TTPlayerRebuild.exe
 ```
 
 A supported audio or playlist path may also be passed directly. The program first renders the

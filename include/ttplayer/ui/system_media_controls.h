@@ -22,7 +22,7 @@ struct SystemMediaMetadata {
 [[nodiscard]] SystemMediaMetadata BuildSystemMediaMetadata(
     const playlist::Track& track, const audio::AudioMetadata& metadata);
 
-// UI-thread owner. WinRT types and imports stay out of the legacy build.
+// UI-thread owner. WinRT is optional at runtime and never initialized on XP/Win7.
 class SystemMediaControls {
 public:
     enum class Command { play, pause, stop, previous, next, seek };

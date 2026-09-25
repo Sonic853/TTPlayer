@@ -5,14 +5,12 @@ on:
   workflow_dispatch:
     inputs:
       configuration:
-        description: Build configuration
+        description: Universal build configuration
         type: choice
         required: true
         default: Release
         options:
           - Release
-          - RelWithDebInfo
-          - Debug
       release_a_version:
         description: Release a Version (GitHub)
         type: boolean
@@ -60,9 +58,8 @@ jobs:
           PUBLISH_RELEASE: ${{ inputs.release_a_version }}
           PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
         run: |
-          if (($env:PUBLISH_RELEASE -eq 'true' -or $env:PUBLISH_GITEE -eq 'true') -and
-              $env:BUILD_CONFIGURATION -ne 'Release') {
-            throw 'Publishing to GitHub or Gitee requires the Release build configuration.'
+          if ($env:BUILD_CONFIGURATION -ne 'Release') {
+            throw 'The universal player requires the Release build configuration.'
           }
           $releaseDate = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString(
             'yyyy.MM.dd', [Globalization.CultureInfo]::InvariantCulture)
@@ -146,19 +143,8 @@ jobs:
           -DTTPLAYER_OPTIMIZE_SIZE=ON
           "-DTTPLAYER_BUILD_VERSION=${{ steps.version.outputs.version }}"
 
-      - name: Build
+      - name: Build and audit universal player
         run: cmake --build build --config "$env:BUILD_CONFIGURATION" --target ttplayer_rebuild --parallel 4
-
-      - name: Configure XP and Windows 7 edition
-        run: >-
-          cmake -S . -B build-legacy -G "Visual Studio 18 2026" -A Win32
-          "-DCMAKE_GENERATOR_INSTANCE=$env:TTPLAYER_VS_INSTANCE"
-          -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF -DTTPLAYER_LEGACY_WINDOWS=ON
-          -DTTPLAYER_OPTIMIZE_SIZE=ON
-          "-DTTPLAYER_BUILD_VERSION=${{ steps.version.outputs.version }}"
-
-      - name: Build and audit XP and Windows 7 edition
-        run: cmake --build build-legacy --config Release --target ttplayer_rebuild --parallel 4
 
       - name: Prepare artifact
         env:
@@ -175,23 +161,12 @@ jobs:
             throw 'The player executable was not produced.'
           }
           Assert-PlayerFileVersion $executable $env:PACKAGE_VERSION
-          Assert-PlayerFileVersion 'build-legacy/Release/TTPlayerRebuild.exe' $env:PACKAGE_VERSION
           New-Item -ItemType Directory -Path artifact | Out-Null
-          $modernName = "TTPlayerRebuild-$env:PACKAGE_VERSION.zip"
-          $legacyName = "TTPlayerRebuild-XP-Win7-$env:PACKAGE_VERSION.zip"
-          $modernArchive = Join-Path artifact $modernName
-          $legacyArchive = Join-Path artifact $legacyName
-          $package = Join-Path build modern-package
-          New-Item -ItemType Directory -Path $package -Force | Out-Null
-          Copy-Item -LiteralPath $executable -Destination $package
-          $executableHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$executableHash  TTPlayerRebuild.exe" | Set-Content -LiteralPath (Join-Path $package SHA256SUMS.txt) -Encoding utf8
-          Compress-Archive -LiteralPath (Join-Path $package 'TTPlayerRebuild.exe'),
-            (Join-Path $package 'SHA256SUMS.txt') -DestinationPath $modernArchive
-          ./cmake/package_legacy.ps1 -BuildDirectory build-legacy -Destination $legacyArchive
-          $hash = (Get-FileHash -LiteralPath $modernArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          $legacyHash = (Get-FileHash -LiteralPath $legacyArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $modernName`n$legacyHash  $legacyName" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
+          $packageName = "TTPlayerRebuild-$env:PACKAGE_VERSION.zip"
+          $packageArchive = Join-Path artifact $packageName
+          ./cmake/package_player.ps1 -BuildDirectory build -Destination $packageArchive
+          $hash = (Get-FileHash -LiteralPath $packageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $packageName" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
           if ($env:PUBLISH_GITEE -eq 'true') {
             New-Item -ItemType Directory -Path artifact/cli -Force | Out-Null
             Copy-Item -LiteralPath $env:GITEE_RELEASE_CLI -Destination artifact/cli/gitee-release-rs.exe
@@ -203,8 +178,9 @@ jobs:
             package_version = $env:PACKAGE_VERSION
             architecture = 'x86'
             generator = 'Visual Studio 18 2026'
-            legacy_configuration = 'Release'
-            legacy_minimum_windows = 'XP SP3 / Windows 7'
+            unified = $true
+            minimum_windows = 'XP SP3'
+            supported_windows = 'XP SP3 / Windows 7 / Windows 10 / Windows 11'
             yy_thunks = '1.2.2'
             vc_ltl = '5.3.1'
             wtl = '10.01'
@@ -227,7 +203,6 @@ jobs:
           name: TTPlayer-configure-log-${{ github.run_number }}
           path: |
             build/CMakeFiles/CMakeConfigureLog.yaml
-            build-legacy/CMakeFiles/CMakeConfigureLog.yaml
           if-no-files-found: ignore
           retention-days: 7
 
@@ -260,7 +235,7 @@ jobs:
           PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
           RELEASE_INSTALL_NOTES: |
             使用该程序前确保本地已安装有 [5.7.9](https://github.com/user-attachments/files/32577432/TTPlayer579.1.zip) 版本的千千静听（没装有？[点这里](https://github.com/user-attachments/files/32577432/TTPlayer579.1.zip)），请按照以下步骤安装重建版：
-            1. Windows XP / Windows 7 下载并解压 TTPlayerRebuild-XP-Win7-{version}.zip；现代 Windows 下载并解压 TTPlayerRebuild-{version}.zip。
+            1. 下载并解压 TTPlayerRebuild-{version}.zip。
             2. 打开开始菜单。
             3. 打开所有程序——千千静听——右键千千静听程序图标。
             4. 在菜单选择“打开文件位置”
@@ -277,17 +252,14 @@ jobs:
           }
           $info = Get-Content -LiteralPath artifact/build-info.json -Raw | ConvertFrom-Json
           if ($info.commit -ne $env:GITHUB_SHA -or $info.configuration -ne 'Release' -or
-              $info.legacy_configuration -ne 'Release' -or $info.package_version -cne $env:RELEASE_VERSION) {
+              $info.unified -ne $true -or $info.package_version -cne $env:RELEASE_VERSION) {
             throw 'The downloaded artifact does not match this Release build.'
           }
-          $modernName = "TTPlayerRebuild-$($info.package_version).zip"
-          $legacyName = "TTPlayerRebuild-XP-Win7-$($info.package_version).zip"
-          $modernArchive = "artifact/$modernName"
-          $legacyArchive = "artifact/$legacyName"
-          $hash = (Get-FileHash -LiteralPath $modernArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          $legacyHash = (Get-FileHash -LiteralPath $legacyArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $packageName = "TTPlayerRebuild-$($info.package_version).zip"
+          $packageArchive = "artifact/$packageName"
+          $hash = (Get-FileHash -LiteralPath $packageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
           $expectedHash = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw).Trim()
-          $actualHashes = "$hash  $modernName`n$legacyHash  $legacyName"
+          $actualHashes = "$hash  $packageName"
           if (($expectedHash -replace "`r", '') -cne $actualHashes) { throw 'Player SHA-256 verification failed.' }
 
           # Already compiled with this exact version; do not rename or patch binaries.
@@ -350,17 +322,14 @@ jobs:
               $release.configuration -cne 'Release') {
             throw 'Prepared release does not match this build and version.'
           }
-          $modernName = "TTPlayerRebuild-$version.zip"
-          $legacyName = "TTPlayerRebuild-XP-Win7-$version.zip"
-          $modernArchive = "artifact/$modernName"
-          $legacyArchive = "artifact/$legacyName"
-          $hash = (Get-FileHash -LiteralPath $modernArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          $legacyHash = (Get-FileHash -LiteralPath $legacyArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $packageName = "TTPlayerRebuild-$version.zip"
+          $packageArchive = "artifact/$packageName"
+          $hash = (Get-FileHash -LiteralPath $packageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
           $expectedHash = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw).Trim() -replace "`r", ''
-          if ($expectedHash -cne "$hash  $modernName`n$legacyHash  $legacyName") {
+          if ($expectedHash -cne "$hash  $packageName") {
             throw 'Prepared release SHA-256 verification failed.'
           }
-          gh release create "$version" $modernArchive $legacyArchive artifact/SHA256SUMS.txt `
+          gh release create "$version" $packageArchive artifact/SHA256SUMS.txt `
             --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" `
             --title "$version" --notes-file artifact/release-notes.md
           if ($LASTEXITCODE -ne 0) { throw 'GitHub publication failed; existing releases are not overwritten.' }
@@ -399,14 +368,11 @@ jobs:
               $release.configuration -cne 'Release') {
             throw 'Prepared release does not match this build and version.'
           }
-          $modernName = "TTPlayerRebuild-$version.zip"
-          $legacyName = "TTPlayerRebuild-XP-Win7-$version.zip"
-          $modernArchive = "artifact/$modernName"
-          $legacyArchive = "artifact/$legacyName"
-          $hash = (Get-FileHash -LiteralPath $modernArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          $legacyHash = (Get-FileHash -LiteralPath $legacyArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $packageName = "TTPlayerRebuild-$version.zip"
+          $packageArchive = "artifact/$packageName"
+          $hash = (Get-FileHash -LiteralPath $packageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
           $expectedHash = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw).Trim() -replace "`r", ''
-          if ($expectedHash -cne "$hash  $modernName`n$legacyHash  $legacyName") {
+          if ($expectedHash -cne "$hash  $packageName") {
             throw 'Prepared release SHA-256 verification failed.'
           }
           if ([string]::IsNullOrWhiteSpace($env:GITEE_REPO) -or
@@ -429,8 +395,8 @@ jobs:
               $releaseId -le 0 -or $created.tag_name -cne $version) {
             throw 'Gitee returned an invalid release ID or tag; no attachments were uploaded.'
           }
-          Write-Output "Created Gitee release $version (ID $releaseId). Uploading three attachments."
-          foreach ($asset in @($modernArchive, $legacyArchive, 'artifact/SHA256SUMS.txt')) {
+          Write-Output "Created Gitee release $version (ID $releaseId). Uploading two attachments."
+          foreach ($asset in @($packageArchive, 'artifact/SHA256SUMS.txt')) {
             $null = Invoke-GiteeCli -Arguments @('asset', 'upload', '--id', [string]$releaseId, $asset, '--timeout', '600')
           }
-          Write-Output "Gitee release $version (ID $releaseId) and all three attachments published."
+          Write-Output "Gitee release $version (ID $releaseId) and both attachments published."

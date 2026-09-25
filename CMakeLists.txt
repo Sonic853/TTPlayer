@@ -4,7 +4,10 @@ project(TTPlayerRebuild VERSION 0.1.0 LANGUAGES C CXX)
 option(BUILD_TESTING "Build local, unpublished tests" OFF)
 include(CTest)
 option(TTPLAYER_STAGE_RUNTIME "Rebuild/copy local original DLLs, skins and configuration beside the EXE" ON)
-option(TTPLAYER_LEGACY_WINDOWS "Build the separate Windows XP SP3 / Windows 7 edition" OFF)
+# Retain the old cache argument as a migration alias; there is now one binary.
+if(DEFINED TTPLAYER_LEGACY_WINDOWS)
+  message(STATUS "TTPLAYER_LEGACY_WINDOWS is obsolete: all Release builds support XP and newer Windows")
+endif()
 option(TTPLAYER_OPTIMIZE_SIZE "Optimize Release player size, retaining fast audio processing" ON)
 option(TTPLAYER_BUILD_LIBRARY_TESTS "Build local media library regression tests" OFF)
 option(TTPLAYER_BUILD_NAVIGATION_TESTS "Build local playback navigation regression tests" OFF)
@@ -27,9 +30,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(TTPLAYER_LEGACY_WINDOWS)
-  include(cmake/legacy_windows.cmake)
-endif()
+include(cmake/legacy_windows.cmake)
 include(cmake/wtl.cmake)
 
 # Re-evaluate build metadata at build time, not just when CMake configures.
@@ -100,6 +101,7 @@ add_library(ttplayer_core
   src/playlist/playback_order.cpp
   src/playlist/playlist_store.cpp
   src/platform/optional_windows_api.cpp
+  src/platform/windows_features.cpp
   src/plugins/plugin_manager.cpp
   src/settings/file_association.cpp
   src/settings/settings.cpp
@@ -162,17 +164,17 @@ target_link_libraries(ttplayer_core PUBLIC
   mfplat mfreadwrite mfuuid propsys winhttp
 )
 
-if(NOT TTPLAYER_LEGACY_WINDOWS)
-  target_sources(ttplayer_core PRIVATE src/ui/system_media_controls.cpp)
-  target_link_libraries(ttplayer_core PUBLIC runtimeobject shcore)
-  if(BUILD_TESTING)
-    add_executable(system_media_controls_tests tests/ui/system_media_controls_tests.cpp)
-    target_compile_definitions(system_media_controls_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_compile_options(system_media_controls_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
-    target_link_libraries(system_media_controls_tests PRIVATE ttplayer_core)
-    add_test(NAME system_media_controls_tests COMMAND system_media_controls_tests)
-    set_tests_properties(system_media_controls_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
-  endif()
+# WinRT is compiled into the universal player. YY-Thunks resolves its entry
+# points on capable systems; SystemMediaControls checks the OS before using it.
+target_sources(ttplayer_core PRIVATE src/ui/system_media_controls.cpp)
+target_link_libraries(ttplayer_core PUBLIC runtimeobject shcore)
+if(BUILD_TESTING)
+  add_executable(system_media_controls_tests tests/ui/system_media_controls_tests.cpp)
+  target_compile_definitions(system_media_controls_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(system_media_controls_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  target_link_libraries(system_media_controls_tests PRIVATE ttplayer_core)
+  add_test(NAME system_media_controls_tests COMMAND system_media_controls_tests)
+  set_tests_properties(system_media_controls_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 endif()
 
 add_library(ttpcomm_api STATIC src/app/ttpcomm_api.c)
@@ -222,7 +224,7 @@ if(BUILD_TESTING AND TTPLAYER_I18N_TEST_DLL)
   foreach(language IN ITEMS chs cht)
     add_library(i18n_resource_mock_${language} SHARED tests/ui/i18n_mock_resources.rc)
     set_target_properties(i18n_resource_mock_${language} PROPERTIES LINKER_LANGUAGE CXX)
-    if(TTPLAYER_LEGACY_WINDOWS)
+    if(TTPLAYER_XP_RUNTIME_CONFIGURED)
       # Resource-only fixtures have no CRT entry point. Keep their XP header,
       # but do not pull executable thunk code into a /NOENTRY resource DLL.
       get_target_property(resource_link_options i18n_resource_mock_${language} LINK_OPTIONS)
@@ -237,7 +239,7 @@ if(BUILD_TESTING AND TTPLAYER_I18N_TEST_DLL)
   endforeach()
   add_test(NAME i18n_ui_tests COMMAND i18n_ui_tests "${TTPLAYER_I18N_TEST_DLL}"
     "$<TARGET_FILE:i18n_resource_mock_chs>" "$<TARGET_FILE:i18n_resource_mock_cht>")
-  if(NOT TTPLAYER_LEGACY_WINDOWS)
+  if(NOT TTPLAYER_XP_RUNTIME_CONFIGURED)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_dependencies(i18n_ui_tests ttplayer_rebuild ttpcomm_mock_no_version)
     add_test(NAME i18n_startup_tests COMMAND "${Python3_EXECUTABLE}" -X utf8
@@ -255,7 +257,7 @@ include(cmake/size_optimization.cmake)
 # emulation, faulting before WM_INITDIALOG finishes. wWinMain instead
 # enables DEP explicitly, with the system's legacy ATL compatibility.
 target_link_options(ttplayer_rebuild PRIVATE /NXCOMPAT:NO)
-if(TTPLAYER_LEGACY_WINDOWS)
+if(TTPLAYER_XP_RUNTIME_CONFIGURED)
   include(cmake/legacy_ttpcomm.cmake)
   target_link_options(ttplayer_rebuild PRIVATE /SUBSYSTEM:WINDOWS,5.01 /OSVERSION:5.1)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -312,7 +314,7 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/audio/extension_m
   target_compile_definitions(extension_mismatch_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_compile_options(extension_mismatch_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
   target_link_libraries(extension_mismatch_tests PRIVATE ttplayer_core)
-  if(TTPLAYER_LEGACY_WINDOWS)
+  if(TTPLAYER_XP_RUNTIME_CONFIGURED)
     add_dependencies(extension_mismatch_tests ttplayer_legacy_ttpcomm_import)
     target_link_libraries(extension_mismatch_tests PRIVATE "${ttpcomm_import_library}")
     target_link_options(extension_mismatch_tests PRIVATE /INCLUDE:__imp__srand48)
@@ -393,7 +395,7 @@ target_link_libraries(cover_format_tests PRIVATE ttplayer_core)
 add_test(NAME cover_format_tests COMMAND cover_format_tests
   "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/album_cover" "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(cover_format_tests PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
-if(TTPLAYER_LEGACY_WINDOWS)
+if(TTPLAYER_XP_RUNTIME_CONFIGURED)
   add_dependencies(cover_format_tests ttplayer_legacy_ttpcomm_import)
   target_link_libraries(cover_format_tests PRIVATE "${ttpcomm_import_library}")
   target_link_options(cover_format_tests PRIVATE /INCLUDE:__imp__srand48)
@@ -402,7 +404,7 @@ add_executable(cover_image_tests tests/ui/cover_image_tests.cpp)
 target_compile_definitions(cover_image_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(cover_image_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(cover_image_tests PRIVATE ttplayer_core)
-if(TTPLAYER_LEGACY_WINDOWS)
+if(TTPLAYER_XP_RUNTIME_CONFIGURED)
   add_dependencies(cover_image_tests ttplayer_legacy_ttpcomm_import)
   target_link_libraries(cover_image_tests PRIVATE "${ttpcomm_import_library}")
   target_link_options(cover_image_tests PRIVATE /INCLUDE:__imp__srand48)
@@ -434,6 +436,15 @@ target_compile_options(legacy_windows_tests PRIVATE /W4 /permissive- /EHsc /utf-
 target_link_libraries(legacy_windows_tests PRIVATE ttplayer_core)
 add_test(NAME legacy_windows_tests COMMAND legacy_windows_tests)
 set_tests_properties(legacy_windows_tests PROPERTIES TIMEOUT 45)
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/platform/windows_features_tests.cpp")
+  add_executable(windows_features_tests tests/platform/windows_features_tests.cpp)
+  target_compile_definitions(windows_features_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(windows_features_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  target_link_libraries(windows_features_tests PRIVATE ttplayer_core)
+  add_test(NAME windows_features_tests COMMAND windows_features_tests)
+  set_tests_properties(windows_features_tests PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
 
 add_executable(runtime_paths_tests tests/ui/runtime_paths_tests.cpp
   src/app/resources.rc src/app/ttplayer.manifest)
