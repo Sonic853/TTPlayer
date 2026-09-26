@@ -277,21 +277,13 @@ void RunScan(ScanDialogLifetime lifetime, std::stop_token stop) {
         PostScanRefresh(*state);
 
         audio::ReplayGainScanResult result;
-        if (state->tracks[index].subtrack != 0) {
-            result.status = audio::ReplayGainScanStatus::unsupported;
-            result.result = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-            result.diagnostic = L"CUE sub-track ReplayGain scan requires the "
-                                L"unrecovered segmented writer path";
-        } else {
-            result = audio::ScanReplayGainTrack(
-                *state->library, state->ttpcomm, state->tracks[index].path,
-                state->skip_existing, stop,
-                [state](std::uint64_t current, std::uint64_t total) {
-                    if (total) state->progress_percent.store(
-                        static_cast<unsigned>(std::min<std::uint64_t>(
-                            current * 100U / total, 100U)));
-                });
-        }
+        result = audio::ScanReplayGainTrack(
+            *state->library, state->ttpcomm, state->tracks[index].path,
+            state->skip_existing, stop,
+            [state](std::uint64_t current, std::uint64_t total) {
+                if (total) state->progress_percent.store(static_cast<unsigned>(
+                    std::min<std::uint64_t>(current * 100U / total, 100U)));
+            }, state->tracks[index].subtrack);
         {
             const std::scoped_lock lock(state->mutex);
             state->diagnostics[index] = std::move(result.diagnostic);

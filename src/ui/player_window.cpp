@@ -849,6 +849,31 @@ HRGN CreateColorKeyRegion(HBITMAP bitmap, int width, int height,
     return result;
 }
 
+void ApplySkinButtonRegion(HWND window, const skin::SkinElement& element,
+                           COLORREF transparent) {
+    if (!window) return;
+    // 00452FFF -> 0040A1DD: even when a later SetWindowPos restores a
+    // larger XML rectangle, SkinButton keeps the first frame's colour-key
+    // region. Without it a padded sibling can cover the next button.
+    const auto image = element.image.IsGdiPlus()
+        ? element.image.CoverageMask() : element.image;
+    HRGN region = CreateColorKeyRegion(image, element.image_size.cx,
+        element.image_size.cy,
+        element.image.IsGdiPlus() ? RGB(0, 0, 0) : transparent);
+    if (region) {
+        const HRGN frame = CreateRectRgn(0, 0,
+            element.image_size.cx / std::max(1, element.frames), element.image_size.cy);
+        if (frame) {
+            CombineRgn(region, region, frame, RGN_AND);
+            DeleteObject(frame);
+        } else {
+            DeleteObject(region);
+            region = nullptr;
+        }
+    }
+    if (!SetWindowRgn(window, region, FALSE) && region) DeleteObject(region);
+}
+
 HRGN CreateSkinWindowRegion(const skin::SkinBitmap& bitmap, RECT resize_rect,
                            int width, int height, bool tile, COLORREF transparent) {
     // Resize the coverage mask with exactly the same nine-patch/tile mapping
@@ -2196,6 +2221,7 @@ bool PlayerWindow::DrawPopupMenuItem(const DRAWITEMSTRUCT& item) const {
 
 bool PlayerWindow::LoadStartupSkin(HMODULE module) {
     if (window_) return false;
+    skin_resources_ = module;
     DiscoverSkinPlugins();
     // PackageName selects the native fallback; only CustomPackageName may
     // select a provider. Do not migrate retired combined configurations.
@@ -2314,6 +2340,24 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
     package.ExtractTo(cache, ttpcomm_module_);
     auto next = skin::LegacySkin::Load(cache, &settings_);
     if (!next.Valid()) return false;
+    if (!next.DesktopLyricBar().background.image) {
+        // 00449451 -> 004459CF: older packages such as PurpleMyth have no
+        // DeskLrcBar. Bind the default package's complete bar descriptor;
+        // never mix default buttons into a valid custom bar's empty slots.
+        try {
+            auto fallback_package = skin::SkinPackage::OpenResource(
+                ResourceModule(), L"<Default_Skin>", L"ZIP");
+            const auto fallback_cache = std::filesystem::temp_directory_path() /
+                L"TTPlayerRebuild" / (L"DefaultSkin-resource-" +
+                std::to_wstring(fallback_package.Fingerprint()));
+            fallback_package.ExtractTo(fallback_cache, ttpcomm_module_);
+            const auto fallback = skin::LegacySkin::Load(fallback_cache, &settings_);
+            next.ApplyDesktopLyricBarFallback(fallback);
+        } catch (const std::exception&) {
+            // A missing resource DLL must not prevent a valid external skin
+            // from loading. No fallback image can be drawn in that case.
+        }
+    }
     const HRGN region = next.CreateWindowRegion();
     RECT bounds{};
     const bool valid_region = region && GetRgnBox(region, &bounds) > NULLREGION;
@@ -2639,7 +2683,20 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
     // Visibility commands for owned windows are posted during CPlayerWnd's
     // initialization and are dispatched by the two startup PeekMessage pumps
     // only after the main HWND has been shown.  Preserve that visible order.
-    if (lyric_window_) ApplyActiveLyricWindowState();
+    if (lyric_window_) {
+        if (settings_.lyric.display_mode == 1) {
+            // 0044A91F uses the persisted DisplayMode to select which lyric
+            // surface is shown. Preserve LyricVisible/LyricVisible2 even
+            // though an explicit user command to enter desktop mode shows it.
+            const bool visible = ActiveLyricVisible();
+            ApplyActiveLyricWindowState(false);
+            EnterDesktopLyricMode();
+            if (desktop_lyric_mode_) {
+                ActiveLyricVisible() = visible;
+                desktop_lyrics_.Show(visible);
+            }
+        } else ApplyActiveLyricWindowState();
+    }
     // 00467B9B's normal order is Lyric -> Equalizer -> PlayList, leaving
     // the playlist above the equalizer when their rectangles overlap.
     if (!mini_mode_ && settings_.player.equalizer_visible && equalizer_window_)
@@ -4109,7 +4166,9 @@ bool PlayerWindow::IsSkinElementEnabled(std::wstring_view name) const {
                         state == audio::PlaybackState::playing;
     if (name == L"play") return have_track && !active;
     if (name == L"pause") return state == audio::PlaybackState::playing;
-    if (name == L"stop") return true;
+    // 0045A04E enables 0x7D02 only while a playback operation is active.
+    // Idle/failed playback must use SkinButton's disabled fourth frame.
+    if (name == L"stop") return active || state == audio::PlaybackState::paused;
     if (name == L"progress") return audio_->Duration().count() > 0 &&
                                       (state == audio::PlaybackState::playing ||
                                        state == audio::PlaybackState::paused);

@@ -447,6 +447,7 @@ void PlayerWindow::CreateEqualizerControls() {
             present ? std::max<LONG>(0, bounds.right - bounds.left) : 0,
             present ? std::max<LONG>(0, bounds.bottom - bounds.top) : 0,
             SWP_NOZORDER | SWP_NOACTIVATE);
+        if (!slider) ApplySkinButtonRegion(control, element, skin_->TransparentColor());
     };
 
     // Creation order and IDs are taken from FUN_00429AAA.  The close button

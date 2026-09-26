@@ -1,6 +1,9 @@
 #include "ttplayer/audio/replay_gain_scanner.h"
 
 #include "ttplayer/plugins/plugin_manager.h"
+#include "ttplayer/audio/audio_engine.h"
+#include "ttplayer/audio/cue_sheet.h"
+#include <system_error>
 
 #include <algorithm>
 #include <chrono>
@@ -272,7 +275,8 @@ HMODULE RetainModule(HMODULE module) noexcept {
 }
 
 bool IsTransientWriterCollision(HRESULT result) noexcept {
-    return result == HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION) ||
+    return result == HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH) ||
+           result == HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION) ||
            result == HRESULT_FROM_WIN32(ERROR_LOCK_VIOLATION) ||
            result == STG_E_SHAREVIOLATION || result == STG_E_LOCKVIOLATION;
 }
@@ -314,7 +318,7 @@ bool LegacyReplayGainAvailable(HMODULE ttpcomm) noexcept {
 ReplayGainScanResult AnalyzeReplayGainTrack(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
-    std::stop_token stop, ReplayGainProgress progress) {
+    std::stop_token stop, ReplayGainProgress progress, int subtrack) {
     if (!LegacyReplayGainAvailable(ttpcomm))
         return Error(ReplayGainScanStatus::unsupported, E_NOINTERFACE,
                      L"ttpcomm ReplayGain ordinals 100/101 are unavailable");
@@ -327,29 +331,35 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
 
     HRESULT opened{};
     std::wstring diagnostic;
-    auto reader = library.OpenReader(path, &opened, &diagnostic);
-    if (!reader)
+    const bool cue = subtrack > 0 && _wcsicmp(path.extension().c_str(), L".cue") == 0;
+    std::unique_ptr<DecodedAudioSource> segment;
+    std::unique_ptr<plugins::LegacyReaderSession> reader;
+    if (cue) {
+        segment = CreateDecodedAudioSource(path, subtrack, &library, ttpcomm);
+        if (!segment->Open(path, {})) return Error(ReplayGainScanStatus::decode_error,
+            segment->ErrorResult(), segment->Error());
+    } else reader = library.OpenReader(path, &opened, &diagnostic);
+    if (!reader && !segment)
         return Error(ReplayGainScanStatus::unsupported, opened,
                      diagnostic.empty() ? L"no decoder opened the source"
                                         : std::move(diagnostic));
-    if (skip_existing && ExistingGain(*reader)) {
+    if (skip_existing && (segment ? segment->Metadata().replay_gain_db.has_value() &&
+        segment->Metadata().replay_peak.has_value() : ExistingGain(*reader))) {
         auto result = Error(ReplayGainScanStatus::skipped, S_FALSE,
                             L"existing ReplayGain tags retained");
         return result;
     }
 
-    const WAVEFORMATEX format = reader->Format();
+    const WAVEFORMATEX format = segment ? segment->OutputFormat() : reader->Format();
     Analyzer analyzer(ttpcomm, format.nSamplesPerSec);
     if (!analyzer)
         return Error(ReplayGainScanStatus::unsupported,
                      HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED),
                      L"sample rate is not supported by ttpcomm ordinal 101");
 
-    const std::uint64_t expected_frames = format.nSamplesPerSec &&
-        reader->DurationMilliseconds()
-        ? static_cast<std::uint64_t>(reader->DurationMilliseconds()) *
-              format.nSamplesPerSec / 1000U
-        : 0;
+    const auto duration = segment ? segment->Duration().count() : reader->DurationMilliseconds();
+    const std::uint64_t expected_frames = duration > 0
+        ? static_cast<std::uint64_t>(duration) * format.nSamplesPerSec / 1000U : 0;
     std::vector<std::byte> bytes;
     std::vector<double> samples;
     std::uint64_t decoded_frames{};
@@ -358,8 +368,8 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
         if (stop.stop_requested())
             return Error(ReplayGainScanStatus::cancelled,
                          HRESULT_FROM_WIN32(ERROR_CANCELLED), L"cancelled");
-        const HRESULT read = reader->Read(
-            std::max<DWORD>(reader->SuggestedBufferBytes(), 4096U), bytes, end);
+        const HRESULT read = segment ? (segment->Read(16384, bytes, end) ? S_OK : E_FAIL)
+            : reader->Read(std::max<DWORD>(reader->SuggestedBufferBytes(), 4096U), bytes, end);
         if (FAILED(read))
             return Error(ReplayGainScanStatus::decode_error, read,
                          L"legacy reader Read failed");
@@ -403,7 +413,7 @@ ReplayGainScanResult CommitReplayGainTrack(
     const std::filesystem::path& path,
     const ReplayGainScanResult& analysis,
     ReplayGainCommitPolicy policy,
-    std::stop_token stop) {
+    std::stop_token stop, int subtrack) {
     if (analysis.status != ReplayGainScanStatus::completed)
         return analysis;
     if (stop.stop_requested()) {
@@ -448,6 +458,20 @@ ReplayGainScanResult CommitReplayGainTrack(
         cancelled.diagnostic = L"cancelled";
         return cancelled;
     }
+    if (subtrack > 0 && _wcsicmp(path.extension().c_str(), L".cue") == 0) {
+        try {
+            CueSheet::Load(path).WriteTrackMetadata(subtrack, {
+                {L"replaygain_track_gain", FormatGain(analysis.gain_db)},
+                {L"replaygain_track_peak", FormatPeak(analysis.peak)}});
+            return analysis;
+        } catch (const std::system_error& error) {
+            return Error(ReplayGainScanStatus::write_error,
+                HRESULT_FROM_WIN32(error.code().value()), L"writing CUE ReplayGain");
+        } catch (const std::exception&) {
+            return Error(ReplayGainScanStatus::write_error,
+                HRESULT_FROM_WIN32(ERROR_INVALID_DATA), L"writing CUE ReplayGain");
+        }
+    }
     HRESULT opened{};
     std::wstring diagnostic;
     auto metadata = library.OpenReaderForMetadata(path, &opened, &diagnostic);
@@ -485,13 +509,13 @@ ReplayGainScanResult CommitReplayGainTrack(
 ReplayGainScanResult ScanReplayGainTrack(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
-    std::stop_token stop, ReplayGainProgress progress) {
+    std::stop_token stop, ReplayGainProgress progress, int subtrack) {
     auto analysis = AnalyzeReplayGainTrack(
-        library, ttpcomm, path, skip_existing, stop, std::move(progress));
+        library, ttpcomm, path, skip_existing, stop, std::move(progress), subtrack);
     if (analysis.status != ReplayGainScanStatus::completed) return analysis;
     return CommitReplayGainTrack(
         library, path, analysis,
-        ReplayGainCommitPolicy::manual_scan_clear_read_only, stop);
+        ReplayGainCommitPolicy::manual_scan_clear_read_only, stop, subtrack);
 }
 
 struct PlaybackReplayGainAnalyzer::Impl {
@@ -574,11 +598,11 @@ void PlaybackReplayGainAnalyzer::Cancel() noexcept { impl_.reset(); }
 
 void QueueReplayGainCommit(
     std::shared_ptr<plugins::PluginManager> retained_library,
-    std::filesystem::path path, ReplayGainScanResult analysis) noexcept {
+    std::filesystem::path path, ReplayGainScanResult analysis, int subtrack) noexcept {
     if (!retained_library || path.empty() ||
         analysis.status != ReplayGainScanStatus::completed)
         return;
-    const auto key = CommitKey(path);
+    const auto key = CommitKey(path) + L"|" + std::to_wstring(subtrack);
     auto& registry = CommitRegistry();
     {
         const std::scoped_lock lock(registry.mutex);
@@ -587,7 +611,7 @@ void QueueReplayGainCommit(
     try {
         std::thread([
             library = std::move(retained_library), path = std::move(path),
-            analysis = std::move(analysis), key]() mutable {
+            analysis = std::move(analysis), key, subtrack]() mutable {
             const HRESULT initialized =
                 CoInitializeEx(nullptr, COINIT_MULTITHREADED);
             try {
@@ -600,7 +624,7 @@ void QueueReplayGainCommit(
                     auto committed = CommitReplayGainTrack(
                         *library, path, analysis,
                         ReplayGainCommitPolicy::
-                            live_playback_preserve_attributes);
+                            live_playback_preserve_attributes, {}, subtrack);
                     if (committed.status != ReplayGainScanStatus::write_error ||
                         !IsTransientWriterCollision(committed.result))
                         break;

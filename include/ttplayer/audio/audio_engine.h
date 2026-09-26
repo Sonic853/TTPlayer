@@ -163,6 +163,9 @@ public:
                       std::vector<std::byte>& output,
                       bool& end_of_stream) = 0;
     virtual bool Seek(std::chrono::milliseconds position) = 0;
+    // Legacy readers return their actual (possibly coarse) position through
+    // the Seek argument. Segment readers need it before discarding PCM.
+    [[nodiscard]] virtual std::optional<std::chrono::milliseconds> LastSeekPosition() const { return {}; }
     // Push decoders (the optional mp3PRO input DLL) also have a producer
     // thread. Called on the source owner thread, never directly by the UI.
     // Read may temporarily resume that producer for paused seek prefill.

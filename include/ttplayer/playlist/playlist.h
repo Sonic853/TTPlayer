@@ -30,7 +30,7 @@ struct Track {
     // CPlayItem +0x10: -2 means not read yet, -1 means reader/open failed,
     // and non-negative values are the known duration in milliseconds.
     int duration_ms{-2};
-    int subtrack{}; // One-based CUE TRACK number; zero means the whole file.
+    int subtrack{}; // One-based parsed CUE ordinal; zero means the whole file.
     std::string album;
     // CPlayItem's persisted 0x40 field.  TTPlayer accepts zero (unrated) and
     // the five values exposed by commands 32741..32745.

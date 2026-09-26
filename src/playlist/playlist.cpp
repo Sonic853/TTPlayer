@@ -3,6 +3,7 @@
 #include "ttplayer/core/text.h"
 
 #include <algorithm>
+#include <map>
 #include <array>
 #include <atomic>
 #include <cctype>
@@ -424,6 +425,32 @@ std::filesystem::path ResolveM3uTrackPath(
     return resolved.lexically_normal();
 }
 
+// Older reconstruction builds persisted literal TRACK values. Original
+// playlists have always stored ordinals. Migrate only when the cached title
+// identifies the old track, or the saved number is not a valid ordinal.
+void MigrateLegacyCueNumbers(std::vector<Track>& tracks) {
+    std::map<std::filesystem::path, std::optional<audio::CueSheet>> sheets;
+    for (auto& track : tracks) {
+        if (track.subtrack <= 0 || _wcsicmp(track.path.extension().c_str(), L".cue") != 0 ||
+            track.path.native().find(L'|') != std::wstring::npos) continue;
+        auto [cached, inserted] = sheets.try_emplace(track.path);
+        if (inserted) {
+            try { cached->second = audio::CueSheet::Load(track.path); }
+            catch (const std::exception&) {}
+        }
+        if (!cached->second) continue;
+        const auto& sheet = *cached->second;
+        const auto* ordinal = sheet.FindTrack(track.subtrack);
+        const auto* source = sheet.FindSourceTrack(track.subtrack);
+        if (!source || source == ordinal) continue;
+        const auto title = core::Utf8ToWide(track.title);
+        if (ordinal && (title.empty() || title != source->title || title == ordinal->title)) continue;
+        track.subtrack = track.track_number = source->number;
+        for (auto& [key, value] : track.metadata)
+            if (EqualsAsciiInsensitive(key, "Tracknumber")) value = std::to_string(source->number);
+    }
+}
+
 bool AppendCueTracks(std::vector<Track>& target,
                      const std::filesystem::path& cue_path) {
     try {
@@ -441,6 +468,9 @@ bool AppendCueTracks(std::vector<Track>& target,
                 cue_track.number,
                 sheet.Title().empty() ? std::string{} :
                     core::WideToUtf8(sheet.Title())});
+            target.back().track_number = cue_track.number;
+            for (const auto& [key, value] : cue_track.metadata)
+                target.back().metadata.emplace_back(core::WideToUtf8(key), core::WideToUtf8(value));
         }
         return !sheet.Tracks().empty();
     } catch (const std::exception&) {
@@ -1086,6 +1116,7 @@ void Playlist::LoadTtbl(const std::filesystem::path& path) {
                           duration, subtrack, {}, rating, 0});
         copy_audio_info(loaded.back());
     }
+    MigrateLegacyCueNumbers(loaded);
     tracks_ = std::move(loaded);
     order_revision_ = NextPlaybackOrderRevision();
     title_ = std::move(loaded_title);
@@ -1295,6 +1326,7 @@ void Playlist::LoadXml(const std::filesystem::path& path,
     if (!saw_root || !elements.empty())
         throw std::runtime_error("incomplete TTPlayer XML playlist");
 
+    MigrateLegacyCueNumbers(loaded);
     tracks_ = std::move(loaded);
     order_revision_ = NextPlaybackOrderRevision();
     title_ = std::move(loaded_title);

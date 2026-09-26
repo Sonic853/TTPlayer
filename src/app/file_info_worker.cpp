@@ -23,6 +23,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 #include <windows.h>
@@ -258,120 +259,80 @@ public:
 
 ttplayer::ui::detail::FileInfoProbeReadResult ReadPlaylistMetadata(
     PlaylistReaderContext& context, const std::filesystem::path& logical_path,
-    int subtrack, const ttplayer::ui::detail::FileInfoProbeMp3Policy& policy) {
-    ttplayer::ui::detail::FileInfoProbeReadResult result;
-    ttplayer::audio::ArchiveMemberPath archive;
-    HMODULE ttpcomm = ttplayer::audio::ParseArchiveMemberPath(logical_path.native(), archive)
-        ? context.ArchiveLibrary() : nullptr;
-    std::filesystem::path decoder_path = logical_path;
-    std::optional<std::int64_t> cue_duration;
-    std::wstring cue_title;
-    std::wstring cue_artist;
-    std::wstring cue_album;
-    int cue_track_number{};
-
-    if (subtrack > 0 &&
-        _wcsicmp(logical_path.extension().c_str(), L".cue") == 0) {
+    int subtrack, const ttplayer::ui::detail::FileInfoProbeMp3Policy& policy,
+    bool include_cover = false) {
+    using namespace ttplayer;
+    ui::detail::FileInfoProbeReadResult result;
+    if (_wcsicmp(logical_path.extension().c_str(), L".cue") == 0) {
         try {
-            ttplayer::audio::CueSheet sheet;
-            ttplayer::audio::ArchiveMemberPath member;
-            if (ttplayer::audio::ParseArchiveMemberPath(
-                    logical_path.native(), member)) {
-                sheet = ttplayer::audio::CueSheet::LoadFromMemory(
-                    ttplayer::audio::ReadArchiveMember(member, ttpcomm),
-                    logical_path);
-            } else {
-                sheet = ttplayer::audio::CueSheet::Load(logical_path);
-            }
+            audio::ArchiveMemberPath member;
+            const bool archived = audio::ParseArchiveMemberPath(logical_path.native(), member);
+            const auto sheet = archived ? audio::CueSheet::LoadFromMemory(
+                audio::ReadArchiveMember(member, context.ArchiveLibrary()), logical_path)
+                : audio::CueSheet::Load(logical_path);
             const auto* track = sheet.FindTrack(subtrack);
-            if (!track) {
+            if (!track || !track->has_index01) {
                 result.status = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-            } else {
-                decoder_path = track->audio_path;
-                cue_title = track->title;
-                cue_artist = track->performer.empty()
-                    ? sheet.Performer() : track->performer;
-                cue_album = sheet.Title();
-                cue_track_number = track->number;
-                const auto duration = track->DurationMilliseconds();
-                cue_duration = duration >= 0
-                    ? duration
-                    : -static_cast<std::int64_t>(
-                        track->start_frame * 1000U / 75U);
+                return result;
             }
+            for (const auto& candidate : sheet.AudioCandidates(*track)) {
+                result = ReadPlaylistMetadata(context, candidate, 0, policy, false);
+                if (SUCCEEDED(result.status)) break;
+            }
+            if (FAILED(result.status)) return result;
+            const auto start = static_cast<std::int64_t>(track->start_frame * 1000U / 75U);
+            if (result.duration_ms && start > result.duration_ms) {
+                result.status = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+                return result;
+            }
+            const auto duration = track->DurationMilliseconds();
+            result.duration_ms = static_cast<DWORD>(std::clamp<std::int64_t>(
+                duration >= 0 ? duration : static_cast<std::int64_t>(result.duration_ms) - start,
+                0, MAXDWORD));
+            result.metadata.clear();
+            for (const auto& [key, value] : track->metadata)
+                result.metadata.push_back({key, value});
+            result.cover.clear();
+            result.cover_writable = result.cover_maximum_bytes = 0;
+            result.capabilities &= ~4U;
+            const auto attributes = archived ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(logical_path.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_READONLY))
+                result.capabilities |= 4U;
+            return result;
         } catch (const std::exception&) {
             result.status = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+            return result;
         }
     }
-
-    // A local CUE may resolve to an archive member even when the CUE itself
-    // did not need the archive module.
-    if (!ttpcomm && ttplayer::audio::ParseArchiveMemberPath(decoder_path.native(), archive))
-        ttpcomm = context.ArchiveLibrary();
-    auto& manager = context.manager;
-    if (result.status == E_FAIL) {
-        bool completed{};
-        if (IsDirectBuiltinPath(decoder_path)) {
-            result.status = TryBuiltinRead(decoder_path, policy, result, false);
-            completed = SUCCEEDED(result.status);
-        }
-        const HRESULT loaded = completed ? S_OK : context.Load();
-        if (!completed && SUCCEEDED(loaded)) {
-            {
-                HRESULT opened{};
-                auto reader = OpenReader(manager, decoder_path, ttpcomm,
-                                         &opened);
-                if (!reader) {
-                    result.status = FAILED(opened) ? opened : E_NOINTERFACE;
-                } else {
-                    PopulateReaderResult(*reader, result, false);
-                    completed = true;
-                }
-            }
-        }
-        if (!completed) {
-            result.status = TryBuiltinRead(decoder_path, policy, result);
-            completed = SUCCEEDED(result.status);
-        }
-        if (completed) {
-                    if (cue_duration) {
-                        const auto duration = *cue_duration >= 0
-                            ? *cue_duration
-                            : std::max<std::int64_t>(0,
-                                static_cast<std::int64_t>(result.duration_ms) +
-                                    *cue_duration);
-                        result.duration_ms = static_cast<DWORD>(
-                            std::clamp<std::int64_t>(duration, 0,
-                                static_cast<std::int64_t>(MAXDWORD)));
-                    }
-                    const auto merge = [&result](std::wstring name,
-                                                 std::wstring value) {
-                        if (value.empty()) return;
-                        const auto found = std::find_if(
-                            result.metadata.begin(), result.metadata.end(),
-                            [&name](const auto& entry) {
-                                return EqualsAsciiInsensitive(
-                                    entry.name, name);
-                            });
-                        if (found != result.metadata.end()) {
-                            found->value = std::move(value);
-                        } else if (result.metadata.size() <
-                                ttplayer::ui::detail::
-                                    kFileInfoProbeMaximumFields) {
-                            result.metadata.push_back(
-                                {std::move(name), std::move(value)});
-                        }
-                    };
-                    merge(L"Title", std::move(cue_title));
-                    merge(L"Artist", std::move(cue_artist));
-                    merge(L"Album", std::move(cue_album));
-                    if (cue_track_number > 0)
-                        merge(L"Tracknumber",
-                              std::to_wstring(cue_track_number));
-                }
+    audio::ArchiveMemberPath archive;
+    const auto comm = audio::ParseArchiveMemberPath(logical_path.native(), archive)
+        ? context.ArchiveLibrary() : nullptr;
+    bool completed{};
+    if (IsDirectBuiltinPath(logical_path)) {
+        result.status = TryBuiltinRead(logical_path, policy, result, false);
+        completed = SUCCEEDED(result.status);
     }
-    result.cover.clear();
+    if (!completed && SUCCEEDED(context.Load())) {
+        HRESULT opened{};
+        if (auto reader = OpenReader(context.manager, logical_path, comm, &opened)) {
+            PopulateReaderResult(*reader, result, include_cover);
+            completed = true;
+        } else result.status = FAILED(opened) ? opened : E_NOINTERFACE;
+    }
+    if (!completed) result.status = TryBuiltinRead(logical_path, policy, result);
+    if (!include_cover) result.cover.clear();
     return result;
+}
+
+int ReadCueFileInfo(const std::filesystem::path& addin,
+    const std::filesystem::path& path, const std::filesystem::path& comm,
+    int subtrack, const std::filesystem::path& request_path,
+    const std::filesystem::path& output) {
+    ttplayer::ui::detail::FileInfoProbeReadRequest request;
+    if (!ttplayer::ui::detail::ReadFileInfoProbeReadRequest(request_path, request)) return 3;
+    PlaylistReaderContext context(addin, comm);
+    return ttplayer::ui::detail::WriteFileInfoProbeReadResult(output,
+        ReadPlaylistMetadata(context, path, subtrack, request.mp3, true)) ? 0 : 4;
 }
 
 int ReadPlaylistInfo(const std::filesystem::path& addin,
@@ -417,7 +378,7 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
                   const std::filesystem::path& logical_path,
                   const std::filesystem::path& /*ttpcomm_path*/,
                   const std::filesystem::path& request_path,
-                  const std::filesystem::path& output) {
+                  const std::filesystem::path& output, int subtrack = 0) {
     ttplayer::ui::detail::FileInfoProbeWriteRequest request;
     if (!ttplayer::ui::detail::ReadFileInfoProbeWriteRequest(
             request_path, request))
@@ -431,6 +392,35 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
         if (request.cover_action != ttplayer::ui::detail::FileInfoProbeCoverAction::unchanged)
             result.cover_status = E_ACCESSDENIED;
         return ttplayer::ui::detail::WriteFileInfoProbeWriteResult(output, result) ? 0 : 4;
+    }
+
+    if (_wcsicmp(logical_path.extension().c_str(), L".cue") == 0) {
+        using namespace ttplayer;
+        result.status = S_OK;
+        audio::CueMetadata fields;
+        result.fields.assign(request.fields.size(), S_OK);
+        for (size_t i = 0; i < request.fields.size(); ++i) {
+            const auto& field = request.fields[i];
+            const std::wstring name(field.name.begin(), field.name.end());
+            if (!audio::CueSheet::IsWritableField(name)) {
+                result.fields[i] = E_ACCESSDENIED;
+                result.status = E_ACCESSDENIED;
+            } else fields.emplace_back(name, field.value);
+        }
+        if (request.cover_action != ui::detail::FileInfoProbeCoverAction::unchanged)
+            result.status = result.cover_status = E_ACCESSDENIED;
+        try {
+            if (!fields.empty()) audio::CueSheet::Load(logical_path).WriteTrackMetadata(subtrack, fields);
+            else if (!audio::CueSheet::Load(logical_path).FindTrack(subtrack))
+                result.status = E_INVALIDARG;
+        } catch (const std::system_error& error) {
+            result.status = HRESULT_FROM_WIN32(error.code().value());
+            for (auto& status : result.fields) if (SUCCEEDED(status)) status = result.status;
+        } catch (const std::exception&) {
+            result.status = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+            for (auto& status : result.fields) if (SUCCEEDED(status)) status = result.status;
+        }
+        return ui::detail::WriteFileInfoProbeWriteResult(output, result) ? 0 : 4;
     }
 
     ttplayer::plugins::PluginManager manager;
@@ -532,6 +522,18 @@ int ttplayer::app::RunFileInfoWorker(int count, wchar_t** arguments) {
             exit_code = ReadPlaylistInfo(arguments[2], arguments[3],
                 arguments[4], static_cast<int>(subtrack), arguments[6],
                 arguments[7]);
+        }
+    } else if ((_wcsicmp(arguments[1], L"cue-read") == 0 ||
+                _wcsicmp(arguments[1], L"cue-write") == 0) && count == 8) {
+        wchar_t* end{};
+        const long subtrack = std::wcstol(arguments[5], &end, 10);
+        if (end && *end == L'\0' && subtrack > 0 && subtrack <= INT_MAX) {
+            if (_wcsicmp(arguments[1], L"cue-read") == 0)
+                exit_code = ReadCueFileInfo(arguments[2], arguments[3], arguments[4],
+                    static_cast<int>(subtrack), arguments[6], arguments[7]);
+            else
+                exit_code = WriteFileInfo(arguments[2], arguments[3], arguments[4],
+                    arguments[6], arguments[7], static_cast<int>(subtrack));
         }
     } else if (_wcsicmp(arguments[1], L"write") == 0 && count == 7) {
         exit_code = WriteFileInfo(arguments[2], arguments[3], arguments[4],

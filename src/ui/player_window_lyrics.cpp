@@ -1131,6 +1131,7 @@ void PlayerWindow::EnterDesktopLyricMode() {
     // Showing in this order is significant: DeskLrcCtrl is owned by the now
     // hidden LyricWnd, and a later owner hide would hide the desktop popup.
     desktop_lyric_mode_ = true;
+    settings_.lyric.display_mode = 1;
     ActiveLyricVisible() = true;
     ShowWindow(lyric_window_, SW_HIDE);
     desktop_lyrics_.ApplySettings();
@@ -1152,6 +1153,7 @@ void PlayerWindow::LeaveDesktopLyricMode() {
         desktop_lyrics_.ApplySettings();
     }
     desktop_lyric_mode_ = false;
+    settings_.lyric.display_mode = 0;
     // 0044D48D explicitly enables LyricVisible or LyricVisible2. Rebind the
     // retained HWND to the mode selected by 00464B6C before 0044E2FB shows it:
     // install the current geometry, region, font and timer before showing it.
@@ -1195,6 +1197,9 @@ void PlayerWindow::CreateLyricControls() {
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(0x82dc)),
             instance_, this);
 
+    ApplySkinButtonRegion(lyric_close_, skin_->Lyric().close, skin_->TransparentColor());
+    ApplySkinButtonRegion(lyric_ontop_, skin_->Lyric().ontop, skin_->TransparentColor());
+    ApplySkinButtonRegion(lyric_desklrc_, skin_->Lyric().desklrc, skin_->TransparentColor());
     LayoutLyricControls();
     RebuildLyricFont(false);
     UpdateLyricEditorStyle();
@@ -1485,9 +1490,18 @@ RECT PlayerWindow::LyricElementBounds(const skin::SkinElement& element) const {
     RECT client{};
     if (lyric_window_) GetClientRect(lyric_window_, &client);
     const SIZE native = skin_ ? skin_->Lyric().background.size : SIZE{};
-    return ResolveAlignedRect(element.bounds, element.alignment, native,
-                              client.right, client.bottom,
-                              element.name == L"title" ? element.image_size : SIZE{});
+    SIZE image_size = element.image_size;
+    if (element.frames > 1) image_size.cx /= element.frames;
+    RECT result = ResolveAlignedRect(element.bounds, element.alignment, native,
+                                     client.right, client.bottom, image_size);
+    if (element.name != L"title") {
+        // 0044919C first applies the XML child size. 004495C8 then uses
+        // 0042912E's sprite-frame size to calculate its origin, but moves
+        // with SWP_NOSIZE. PurpleMyth declares 70px boxes for 17px buttons.
+        result.right = result.left + element.bounds.right - element.bounds.left;
+        result.bottom = result.top + element.bounds.bottom - element.bounds.top;
+    }
+    return result;
 }
 
 RECT PlayerWindow::LyricTextBounds() const {

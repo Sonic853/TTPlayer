@@ -11,6 +11,7 @@
 #include "modern_file_dialog.h"
 
 #include "ttplayer/audio/archive_member.h"
+#include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/core/text.h"
 
 #include <algorithm>
@@ -345,7 +346,7 @@ FileInfoRecord ReadFileInfoRecord(
 
     const auto probe = detail::RunFileInfoReadProbe(
         stop, helper, addin_directory, record.path, ttpcomm_path, 15000,
-        nullptr, mp3_policy);
+        nullptr, mp3_policy, record.subtrack);
     if (!probe || FAILED(probe->status) || stop.stop_requested()) return record;
     record.reader_opened = true;
     audio::ArchiveMemberPath archive_member;
@@ -492,6 +493,8 @@ detail::FileInfoFields RecordFields(const FileInfoRecord& record) {
 
 void SetRecordField(FileInfoRecord& record, std::string_view name,
                     std::wstring_view value) {
+    if (record.subtrack > 0 && _wcsicmp(record.path.extension().c_str(), L".cue") == 0 &&
+        !audio::CueSheet::IsWritableField(SafeWide(name))) return;
     auto fields = RecordFields(record);
     detail::SetFileInfoField(fields, name, value);
     record.metadata.clear();
@@ -531,6 +534,14 @@ bool FileInfoDirty(const FileInfoContext& context) {
 void UpdateSheetState(FileInfoContext& context);
 void PopulatePropertiesPage(FileInfoContext& context);
 void FinishFileInfoCell(FileInfoContext& context, bool commit);
+
+bool CanEditFileInfoField(const FileInfoContext& context, std::string_view name) {
+    return std::any_of(context.drafts.begin(), context.drafts.end(), [&](const auto& record) {
+        return record.writable && (record.subtrack <= 0 ||
+            _wcsicmp(record.path.extension().c_str(), L".cue") != 0 ||
+            audio::CueSheet::IsWritableField(SafeWide(name)));
+    });
+}
 
 void RefreshFileInfoDraft(FileInfoContext& context, bool populate = true) {
     context.combined = CombineRecords(context.drafts, context.strings);
@@ -787,8 +798,8 @@ void PopulatePropertiesPage(FileInfoContext& context) {
     SetDialogText(page, 1048, context.combined.gain);
     PopulateAdvancedMetadata(context);
 
-    for (const int identifier : kTagControls)
-        EnableWindow(GetDlgItem(page, identifier), context.combined.writable);
+    for (size_t i = 0; i < kTagControls.size(); ++i)
+        EnableWindow(GetDlgItem(page, kTagControls[i]), CanEditFileInfoField(context, kTagNames[i]));
     SetAdvancedMetadataMode(context, context.advanced_mode);
     context.populating = false;
 }
@@ -857,9 +868,9 @@ void UpdateSheetState(FileInfoContext& context) {
     if (!title.empty()) SetWindowTextW(context.sheet, title.c_str());
     const bool ready = context.loaded && !context.loading && !context.saving;
     if (context.properties_page) {
-        for (const int identifier : kTagControls)
-            EnableWindow(GetDlgItem(context.properties_page, identifier),
-                         ready && context.combined.writable);
+        for (size_t i = 0; i < kTagControls.size(); ++i)
+            EnableWindow(GetDlgItem(context.properties_page, kTagControls[i]),
+                         ready && CanEditFileInfoField(context, kTagNames[i]));
         EnableWindow(GetDlgItem(context.properties_page, 2164), ready);
         EnableWindow(GetDlgItem(context.properties_page, 2160), ready && context.combined.writable);
         SendMessageW(context.toolbar, TB_ENABLEBUTTON, kFileInfoAdvanced, MAKELONG(ready, 0));
@@ -1040,7 +1051,7 @@ std::optional<detail::FileInfoProbeWriteResult> RunFileInfoWriteProbe(
     const detail::FileInfoFields& changes,
     detail::FileInfoProbeCoverAction cover_action,
     const std::vector<unsigned char>& cover,
-    const detail::FileInfoProbeMp3Policy& mp3_policy) {
+    const detail::FileInfoProbeMp3Policy& mp3_policy, int subtrack) {
     const auto request_path = detail::ProbeTemporaryFile();
     const auto output_path = detail::ProbeTemporaryFile();
     if (request_path.empty() || output_path.empty()) {
@@ -1059,10 +1070,16 @@ std::optional<detail::FileInfoProbeWriteResult> RunFileInfoWriteProbe(
         request.cover = cover;
     const bool encoded = detail::WriteFileInfoProbeWriteRequest(
         request_path, request);
+    std::vector<std::wstring> arguments{L"write", addin_directory.wstring(),
+        logical_path.wstring(), ttpcomm_path.wstring()};
+    if (subtrack > 0 && _wcsicmp(logical_path.extension().c_str(), L".cue") == 0) {
+        arguments.front() = L"cue-write";
+        arguments.push_back(std::to_wstring(subtrack));
+    }
+    arguments.push_back(request_path.wstring());
+    arguments.push_back(output_path.wstring());
     const bool completed = encoded && detail::RunFileInfoProbe(stop, helper,
-        {L"write", addin_directory.wstring(), logical_path.wstring(),
-         ttpcomm_path.wstring(), request_path.wstring(),
-         output_path.wstring()}, 20000).Succeeded();
+        arguments, 20000).Succeeded();
     detail::FileInfoProbeWriteResult result;
     const bool decoded = completed &&
         detail::ReadFileInfoProbeWriteResult(output_path, result);
@@ -1114,7 +1131,7 @@ void BeginSave(
             if (fields.empty() && action == detail::FileInfoProbeCoverAction::unchanged) continue;
             const auto written = RunFileInfoWriteProbe(
                 stop, helper, addin_directory, tracks[row].path,
-                ttpcomm_path, fields, action, draft.cover, mp3_policy);
+                ttpcomm_path, fields, action, draft.cover, mp3_policy, tracks[row].subtrack);
             if (!written) {
                 if (!stop.stop_requested() && SUCCEEDED(result->error))
                     result->error = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
@@ -1168,6 +1185,16 @@ void ApplyWriteResult(FileInfoContext& context,
         auto& track = context.tracks[item.row];
         for (const auto& [field, value] : item.values) {
             MergeTrackMetadata(track, field, value);
+            if (track.subtrack > 0 && _wcsicmp(track.path.extension().c_str(), L".cue") == 0 &&
+                AsciiEquals(field, "Album")) {
+                for (size_t i = 0; i < context.tracks.size(); ++i) {
+                    auto& sibling = context.tracks[i];
+                    if (sibling.subtrack > 0 && _wcsicmp(sibling.path.c_str(), track.path.c_str()) == 0) {
+                        MergeTrackMetadata(sibling, field, value);
+                        context.touched_rows.insert(i);
+                    }
+                }
+            }
             for (auto& original : context.originals)
                 if (original.row == item.row) SetRecordField(original, field, value);
         }
@@ -1390,6 +1417,7 @@ void EditAdvancedFileInfo(FileInfoContext& context, bool adding) {
         const int selected = ListView_GetNextItem(GetDlgItem(context.properties_page, 2164), -1, LVNI_SELECTED);
         if (selected < 0 || static_cast<size_t>(selected) >= context.combined.metadata.size()) return;
         state.name = context.combined.metadata[selected].first;
+        if (!CanEditFileInfoField(context, SafeUtf8(state.name))) return;
         state.value = context.combined.metadata[selected].second;
         if (state.value == context.strings.different) state.value.clear();
     }

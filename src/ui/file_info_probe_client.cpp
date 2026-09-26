@@ -203,7 +203,12 @@ std::optional<FileInfoProbeReadResult> RunFileInfoReadProbe(
     const std::filesystem::path& ttpcomm_path,
     DWORD timeout_milliseconds,
     FileInfoProbeProcessState* process_state,
-    const FileInfoProbeMp3Policy& mp3_policy) {
+    const FileInfoProbeMp3Policy& mp3_policy, int subtrack) {
+    if (subtrack > 0 && _wcsicmp(logical_path.extension().c_str(), L".cue") == 0)
+        return RunReadMode(stop, helper,
+            {L"cue-read", addin_directory.wstring(), logical_path.wstring(),
+             ttpcomm_path.wstring(), std::to_wstring(subtrack)},
+            timeout_milliseconds, process_state, mp3_policy);
     return RunReadMode(stop, helper,
         {L"read", addin_directory.wstring(), logical_path.wstring(),
          ttpcomm_path.wstring()}, timeout_milliseconds, process_state,

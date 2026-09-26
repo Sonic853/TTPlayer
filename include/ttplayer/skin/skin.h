@@ -245,6 +245,12 @@ public:
     [[nodiscard]] const DesktopLyricBarSkin& DesktopLyricBar() const noexcept {
         return desktop_lyric_bar_;
     }
+    // 00449451 tests the loaded background, not merely the presence of XML.
+    // Images share ownership so the temporary fallback skin can be released.
+    void ApplyDesktopLyricBarFallback(const LegacySkin& fallback) {
+        if (!desktop_lyric_bar_.background.image)
+            desktop_lyric_bar_ = fallback.desktop_lyric_bar_;
+    }
     [[nodiscard]] const VisualSkin& Visual() const noexcept { return visual_; }
     [[nodiscard]] const SkinElement* Find(std::wstring_view name) const;
     [[nodiscard]] const SkinElement* FindMini(std::wstring_view name) const;

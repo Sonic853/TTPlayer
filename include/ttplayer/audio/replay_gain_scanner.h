@@ -57,14 +57,14 @@ using ReplayGainProgress =
 [[nodiscard]] ReplayGainScanResult AnalyzeReplayGainTrack(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
-    std::stop_token stop = {}, ReplayGainProgress progress = {});
+    std::stop_token stop = {}, ReplayGainProgress progress = {}, int subtrack = 0);
 
 [[nodiscard]] ReplayGainScanResult CommitReplayGainTrack(
     const plugins::PluginManager& library,
     const std::filesystem::path& path,
     const ReplayGainScanResult& analysis,
     ReplayGainCommitPolicy policy,
-    std::stop_token stop = {});
+    std::stop_token stop = {}, int subtrack = 0);
 
 // FUN_004B107E creates ordinal 101 beside the playback processor and
 // FUN_004B1950 feeds it the already-decoded double PCM before ReplayGain/EQ.
@@ -97,7 +97,7 @@ private:
 // the UI thread and live decoder input is never modified concurrently.
 void QueueReplayGainCommit(
     std::shared_ptr<plugins::PluginManager> retained_library,
-    std::filesystem::path path, ReplayGainScanResult analysis) noexcept;
+    std::filesystem::path path, ReplayGainScanResult analysis, int subtrack = 0) noexcept;
 
 // Decode one physical sound file through the registered private reader ABI,
 // feed normalized double samples to ttpcomm ordinal 101, then store the two
@@ -106,6 +106,6 @@ void QueueReplayGainCommit(
 [[nodiscard]] ReplayGainScanResult ScanReplayGainTrack(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
-    std::stop_token stop = {}, ReplayGainProgress progress = {});
+    std::stop_token stop = {}, ReplayGainProgress progress = {}, int subtrack = 0);
 
 } // namespace ttplayer::audio

@@ -956,6 +956,9 @@ bool PlayerWindow::CollectImportedTracks(const std::filesystem::path& input,
                     cue_track.number,
                     sheet.Title().empty() ? std::string{} :
                         core::WideToUtf8(sheet.Title())});
+                tracks.back().track_number = cue_track.number;
+                for (const auto& [key, value] : cue_track.metadata)
+                    tracks.back().metadata.emplace_back(core::WideToUtf8(key), core::WideToUtf8(value));
             }
             return tracks.size() != before;
         } catch (const std::exception&) {
@@ -1001,8 +1004,11 @@ bool PlayerWindow::CollectImportedTracks(const std::filesystem::path& input,
                         for (const auto& cue_track : sheet.Tracks()) {
                             tracks.push_back({
                                 logical,
-                                ImportedTrackTitle(logical), {}, -2,
-                                cue_track.number, {}});
+                                core::WideToUtf8(cue_track.title), core::WideToUtf8(cue_track.performer), -2,
+                                cue_track.number, core::WideToUtf8(sheet.Title())});
+                            tracks.back().track_number = cue_track.number;
+                            for (const auto& [key, value] : cue_track.metadata)
+                                tracks.back().metadata.emplace_back(core::WideToUtf8(key), core::WideToUtf8(value));
                         }
                     } catch (const std::exception&) {
                         // Like 00474051, a malformed individual CUE member
@@ -1054,8 +1060,11 @@ bool PlayerWindow::CollectImportedTracks(const std::filesystem::path& input,
                         for (const auto& cue_track : sheet.Tracks()) {
                             tracks.push_back({
                                 logical,
-                                ImportedTrackTitle(logical), {}, -2,
-                                cue_track.number, {}});
+                                core::WideToUtf8(cue_track.title), core::WideToUtf8(cue_track.performer), -2,
+                                cue_track.number, core::WideToUtf8(sheet.Title())});
+                            tracks.back().track_number = cue_track.number;
+                            for (const auto& [key, value] : cue_track.metadata)
+                                tracks.back().metadata.emplace_back(core::WideToUtf8(key), core::WideToUtf8(value));
                         }
                     } catch (const std::exception&) {
                     }

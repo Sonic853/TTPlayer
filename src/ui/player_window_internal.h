@@ -471,6 +471,8 @@ void DrawResizableSkinBitmap(HDC target, const skin::SkinBitmap& bitmap,
                              RECT resize_rect, int width, int height, bool tile);
 HRGN CreateColorKeyRegion(HBITMAP bitmap, int width, int height,
                           COLORREF transparent);
+void ApplySkinButtonRegion(HWND window, const skin::SkinElement& element,
+                           COLORREF transparent);
 HRGN CreateSkinWindowRegion(const skin::SkinBitmap& bitmap, RECT resize_rect,
                            int width, int height, bool tile, COLORREF transparent);
 // Independent, initial-state main-window preview (0049A6EF), never live state.

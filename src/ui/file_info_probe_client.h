@@ -49,7 +49,7 @@ struct FileInfoProbeProcessResult {
     const std::filesystem::path& ttpcomm_path,
     DWORD timeout_milliseconds = 15000,
     FileInfoProbeProcessState* process_state = nullptr,
-    const FileInfoProbeMp3Policy& mp3_policy = {});
+    const FileInfoProbeMp3Policy& mp3_policy = {}, int subtrack = 0);
 
 [[nodiscard]] std::optional<FileInfoProbeReadResult>
 RunPlaylistInfoReadProbe(

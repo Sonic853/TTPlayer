@@ -606,8 +606,14 @@ public:
         DWORD requested = static_cast<DWORD>(std::clamp<int64_t>(
             position.count(), 0, std::numeric_limits<DWORD>::max()));
         const HRESULT result = reader_->Seek(requested);
+        last_seek_position_ = SUCCEEDED(result)
+            ? std::optional(std::chrono::milliseconds(requested)) : std::nullopt;
         return FAILED(result)
             ? Fail(L"IPlayerSoundReader::Seek", result) : true;
+    }
+
+    std::optional<std::chrono::milliseconds> LastSeekPosition() const override {
+        return last_seek_position_;
     }
 
     [[nodiscard]] const WAVEFORMATEX& OutputFormat() const override {
@@ -625,6 +631,7 @@ public:
     [[nodiscard]] AudioMetadata Metadata() const override { return metadata_; }
 
 private:
+    std::optional<std::chrono::milliseconds> last_seek_position_;
     bool Fail(std::wstring_view operation, HRESULT result) {
         error_ = HResultMessage(operation, result);
         error_result_ = result;
@@ -1207,6 +1214,9 @@ public:
     bool Seek(std::chrono::milliseconds position) override {
         return source_ && source_->Seek(position);
     }
+    std::optional<std::chrono::milliseconds> LastSeekPosition() const override {
+        return source_ ? source_->LastSeekPosition() : std::nullopt;
+    }
     void SetPaused(bool paused) override { if (source_) source_->SetPaused(paused); }
     bool CanOverlapPlayback() const override { return source_ && source_->CanOverlapPlayback(); }
     HRESULT WriteLyrics(std::wstring_view text) override { return source_ ? source_->WriteLyrics(text) : E_NOINTERFACE; }
@@ -1273,11 +1283,18 @@ public:
             return false;
         }
         track_ = *selected;
-        inner_ = MakeBaseSource(track_.audio_path, manager_, ttpcomm_);
-        if (!inner_->Open(track_.audio_path, options)) {
-            error_ = inner_->Error();
+        if (!track_.has_index01) {
+            error_ = L"CUE sub-track has no INDEX 01";
             return false;
         }
+        for (const auto& candidate : sheet_->AudioCandidates(track_)) {
+            inner_ = MakeBaseSource(candidate, manager_, ttpcomm_);
+            if (inner_->Open(candidate, options)) break;
+            error_ = inner_->Error();
+            inner_.reset();
+        }
+        if (!inner_) return false;
+        error_.clear();
         wave_format_ = inner_->OutputFormat();
         if (wave_format_.nAvgBytesPerSec == 0 ||
             wave_format_.nBlockAlign == 0) {
@@ -1285,12 +1302,25 @@ public:
             return false;
         }
         display_format_ = inner_->DisplayFormat();
-        metadata_ = inner_->Metadata();
-        if (!track_.title.empty()) metadata_.title = track_.title;
-        if (!track_.performer.empty()) metadata_.artist = track_.performer;
-        if (!sheet_->Title().empty()) metadata_.album = sheet_->Title();
+        metadata_ = {};
+        metadata_.title = track_.title;
+        metadata_.artist = track_.performer;
+        metadata_.album = sheet_->Title();
+        metadata_.entries = track_.metadata;
+        for (const auto& [key, value] : metadata_.entries) {
+            if (_wcsicmp(key.c_str(), L"replaygain_track_gain") == 0)
+                metadata_.replay_gain_db = MetadataNumber(value);
+            else if (_wcsicmp(key.c_str(), L"replaygain_track_peak") == 0)
+                metadata_.replay_peak = MetadataNumber(value);
+        }
         const auto start = std::chrono::milliseconds(
             static_cast<int64_t>(track_.start_frame * 1000 / 75));
+        duration_frames_.reset();
+        duration_ = {};
+        if (inner_->Duration().count() > 0 && start > inner_->Duration()) {
+            error_ = L"CUE sub-track starts beyond the audio stream";
+            return false;
+        }
         if (track_.end_frame) {
             if (*track_.end_frame < track_.start_frame) {
                 error_ = L"CUE sub-track has an invalid frame range";
@@ -1304,10 +1334,13 @@ public:
                 duration_ = inner_->Duration() - start;
         }
         if (duration_frames_) {
-            if (!FramesToBytes(*duration_frames_, byte_limit_)) {
+            uint64_t first_byte{}, last_byte{};
+            if (!FramesToBytes(track_.start_frame, first_byte) ||
+                !FramesToBytes(*track_.end_frame, last_byte)) {
                 error_ = L"CUE sub-track byte length overflow";
                 return false;
             }
+            byte_limit_ = last_byte - first_byte;
         } else {
             byte_limit_ = std::numeric_limits<uint64_t>::max();
         }
@@ -1381,17 +1414,20 @@ public:
     }
 
     bool Seek(std::chrono::milliseconds position) override {
-        position = std::max(position, std::chrono::milliseconds(0));
-        std::uint64_t relative_frame =
-            static_cast<std::uint64_t>(position.count()) * 75U / 1000U;
-        if (duration_frames_)
-            relative_frame = std::min(relative_frame, *duration_frames_);
-        if (!PositionAtFrame(track_.start_frame + relative_frame))
+        if (position.count() < 0 || (duration_.count() >= 0 && position >= duration_))
             return false;
-        if (!FramesToBytes(relative_frame, bytes_read_)) {
+        const auto milliseconds = static_cast<uint64_t>(position.count());
+        if (milliseconds > std::numeric_limits<uint64_t>::max() / wave_format_.nAvgBytesPerSec) {
             error_ = L"CUE seek position overflow";
             return false;
         }
+        uint64_t first_byte{};
+        if (!FramesToBytes(track_.start_frame, first_byte)) return false;
+        auto relative = milliseconds * wave_format_.nAvgBytesPerSec / 1000U;
+        relative -= relative % wave_format_.nBlockAlign;
+        if (relative > std::numeric_limits<uint64_t>::max() - first_byte ||
+            !PositionAtByte(first_byte + relative)) return false;
+        bytes_read_ = relative;
         return true;
     }
 
@@ -1415,7 +1451,13 @@ private:
     }
 
     bool PositionAtFrame(std::uint64_t absolute_frame) {
-        const std::uint64_t whole_seconds = absolute_frame / 75U;
+        uint64_t absolute_byte{};
+        if (!FramesToBytes(absolute_frame, absolute_byte)) return false;
+        return PositionAtByte(absolute_byte);
+    }
+
+    bool PositionAtByte(std::uint64_t absolute_byte) {
+        const std::uint64_t whole_seconds = absolute_byte / wave_format_.nAvgBytesPerSec;
         if (whole_seconds > static_cast<std::uint64_t>(
                                 std::numeric_limits<int64_t>::max()) / 1000U) {
             error_ = L"CUE sub-track start exceeds source seek range";
@@ -1430,11 +1472,23 @@ private:
         pending_offset_ = 0;
         inner_end_ = false;
 
-        std::uint64_t discard{};
-        if (!FramesToBytes(absolute_frame % 75U, discard)) {
-            error_ = L"CUE sub-track byte offset overflow";
-            return false;
+        auto actual = inner_->LastSeekPosition().value_or(
+            std::chrono::milliseconds(whole_seconds * 1000U));
+        auto actual_byte = static_cast<uint64_t>(std::max<int64_t>(0, actual.count())) *
+            wave_format_.nAvgBytesPerSec / 1000U;
+        actual_byte -= actual_byte % wave_format_.nBlockAlign;
+        if (actual_byte > absolute_byte) {
+            if (!inner_->Seek(std::chrono::milliseconds(0))) return false;
+            actual = inner_->LastSeekPosition().value_or(std::chrono::milliseconds(0));
+            actual_byte = static_cast<uint64_t>(std::max<int64_t>(0, actual.count())) *
+                wave_format_.nAvgBytesPerSec / 1000U;
+            actual_byte -= actual_byte % wave_format_.nBlockAlign;
+            if (actual_byte > absolute_byte) {
+                error_ = L"CUE source cannot seek before its track boundary";
+                return false;
+            }
         }
+        std::uint64_t discard = absolute_byte - actual_byte;
         while (discard != 0) {
             std::vector<std::byte> decoded;
             bool reached_end{};
@@ -1496,11 +1550,11 @@ public:
                  const std::filesystem::path& path, int subtrack,
                  bool auto_scan_gain) {
         if (!ShouldAnalyzeReplayGainOnPlayback(auto_scan_gain) ||
-            !manager || path.empty() || subtrack != 0 ||
+            !manager || path.empty() ||
             AudioEngine::IsNetworkMediaLocation(path) ||
             path.native().find(L'|') != std::wstring::npos ||
             _wcsicmp(path.extension().c_str(), L".cda") == 0 ||
-            !manager->HasReaderForPath(path)) {
+            (subtrack == 0 && !manager->HasReaderForPath(path))) {
             return false;
         }
         const DWORD attributes = GetFileAttributesW(path.c_str());
@@ -1510,6 +1564,7 @@ public:
         library_ = manager->RetainForBackground();
         if (!library_) return false;
         path_ = path;
+        subtrack_ = subtrack;
         return true;
     }
 
@@ -1523,7 +1578,7 @@ public:
     ~PlaybackReplayGainCommit() {
         if (playback_accepted_ && analysis_ && library_) {
             QueueReplayGainCommit(
-                std::move(library_), std::move(path_), std::move(*analysis_));
+                std::move(library_), std::move(path_), std::move(*analysis_), subtrack_);
         }
     }
 
@@ -1532,6 +1587,7 @@ private:
     std::filesystem::path path_;
     std::optional<ReplayGainScanResult> analysis_;
     bool playback_accepted_{};
+    int subtrack_{};
 };
 
 class RecoveredProcessorChain {
