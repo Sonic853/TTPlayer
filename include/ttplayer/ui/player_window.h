@@ -721,6 +721,8 @@ private:
     void DetachPlayingPlaylistItem();
     void ClearActivePlaylist();
     void ShowPlaylistFindDialog(bool quick);
+    struct PlaylistFindSelectionScope;
+    void UpdatePlaylistSelectionVisibility();
     bool FindNextPlaylistTrack(DWORD flags, bool all = false);
     static INT_PTR CALLBACK PlaylistFindDialogProc(HWND, UINT, WPARAM, LPARAM);
     bool HandlePlaylistTypeToSelect(bool catalogue, wchar_t character);
@@ -1204,6 +1206,7 @@ private:
     HWND playlist_find_dialog_{};
     HWND playlist_find_progress_{};
     bool playlist_find_running_{};
+    size_t playlist_find_selection_depth_{}; // Nested find/progress visibility scopes.
     bool playlist_find_quick_{};
     std::wstring playlist_find_artist_, playlist_find_album_;
     std::array<std::vector<std::wstring>, 3> playlist_find_history_;

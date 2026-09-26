@@ -3027,12 +3027,7 @@ void PlayerWindow::CreatePlaylistListControls() {
         L"Files", 0x50015001U, 0, 0, 0, 0, playlist_window_,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPlaylistTrackId)),
         instance_, this);
-    if (playlist_track_control_ && settings_.player.play_follow_cursor) {
-        const LONG_PTR style = GetWindowLongPtrW(
-            playlist_track_control_, GWL_STYLE);
-        SetWindowLongPtrW(playlist_track_control_, GWL_STYLE,
-                          style | LVS_SHOWSELALWAYS);
-    }
+    UpdatePlaylistSelectionVisibility();
     for (HWND control : {playlist_tree_control_, playlist_list_control_,
                          playlist_track_control_}) {
         if (control) SendMessageW(control, CCM_SETUNICODEFORMAT, TRUE, 0);
@@ -4227,8 +4222,9 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
             const bool show_selection_always = playlist_track_control_ &&
                 (GetWindowLongW(playlist_track_control_, GWL_STYLE) &
                  LVS_SHOWSELALWAYS) != 0;
+            const bool selection_visible = control_focused || show_selection_always;
             const bool selected = playlist_selected_rows_.contains(index) &&
-                (control_focused || show_selection_always);
+                selection_visible;
             if (selected && layout.selected.image) {
                 TileBitmap(canvas, layout.selected, row_bounds);
             } else if (selected) {
@@ -4306,7 +4302,7 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
             if (playlist_selection_ && *playlist_selection_ == index &&
-                control_focused)
+                selection_visible)
                 DrawSolidFrame(canvas, row_bounds, title_color);
         }
         if (playlist_marquee_.Active()) {
@@ -4942,6 +4938,35 @@ std::wstring PlaylistFindControlText(HWND dialog, int id) {
 }
 } // namespace
 
+void PlayerWindow::UpdatePlaylistSelectionVisibility() {
+    if (!playlist_track_control_ || !IsWindow(playlist_track_control_)) return;
+    const LONG_PTR style = GetWindowLongPtrW(playlist_track_control_, GWL_STYLE);
+    const LONG_PTR updated = playlist_find_selection_depth_ || settings_.player.play_follow_cursor
+        ? style | LVS_SHOWSELALWAYS : style & ~static_cast<LONG_PTR>(LVS_SHOWSELALWAYS);
+    if (style != updated) {
+        SetWindowLongPtrW(playlist_track_control_, GWL_STYLE, updated);
+        InvalidateRect(playlist_track_control_, nullptr, FALSE);
+        if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
+    }
+}
+
+// 00486056 brackets resource 203 with ModifyStyle(0, 8) / (8, 0) on
+// Files (+0x548). Keep both selected rows and the focus frame visible while
+// the query edit/progress owns keyboard focus. Count nested modal loops so
+// reopening find, rebuilding skin controls, and cursor-follow changes cannot
+// remove another live search's flag or clear the persistent cursor-follow flag.
+struct PlayerWindow::PlaylistFindSelectionScope {
+    PlayerWindow& player;
+    explicit PlaylistFindSelectionScope(PlayerWindow& owner) : player(owner) {
+        ++player.playlist_find_selection_depth_;
+        player.UpdatePlaylistSelectionVisibility();
+    }
+    ~PlaylistFindSelectionScope() {
+        --player.playlist_find_selection_depth_;
+        player.UpdatePlaylistSelectionVisibility();
+    }
+};
+
 bool PlayerWindow::FindNextPlaylistTrack(DWORD flags, bool all) {
     if (playlist_find_running_) return false;
     const PlaylistFindQuery query{playlist_find_text_,playlist_find_artist_,
@@ -4949,6 +4974,7 @@ bool PlayerWindow::FindNextPlaylistTrack(DWORD flags, bool all) {
     const size_t count=VisiblePlaylistTrackCount();
     if (count==0 || (query.title.empty() && (query.quick ||
         (query.artist.empty() && query.album.empty())))) return false; // 0047AFDA: no-op.
+    const PlaylistFindSelectionScope selection_scope(*this);
     // 00486138 always selects all in quick mode, including the menu's F3.
     all = all || query.quick;
     const bool forward=(flags & FR_DOWN)!=0;
@@ -5206,10 +5232,15 @@ void PlayerWindow::ShowPlaylistFindDialog(bool quick) {
         playlist_find_.lStructSize = sizeof(playlist_find_);
         playlist_find_.Flags = FR_DOWN;
     }
+    const PlaylistFindSelectionScope selection_scope(*this);
     // 00486056 -> 0048ABBD: resource 203 with no disabled parent. Its modal
     // loop continues to dispatch the player's timers and other HWNDs.
     ShowWtlModalDialog(ResourceModule(), MAKEINTRESOURCEW(203), nullptr,
         PlaylistFindDialogProc, reinterpret_cast<LPARAM>(this));
+    // SetActiveWindow in 00454A06/004548D8 returns to the playlist. The skin
+    // parent is not itself a ListView: return keyboard focus to Files as well.
+    if (IsWindow(playlist_track_control_) && GetActiveWindow() == playlist_window_)
+        SetFocus(playlist_track_control_);
 }
 
 void PlayerWindow::BeginPlaylistOleDrag() {
@@ -6397,7 +6428,15 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
         // 004860E5 repeats the last submitted criteria. In quick mode this
         // reselects all matches; it must not click the dialog's default
         // button and close it, or reopen an empty search dialog.
-        static_cast<void>(FindNextPlaylistTrack(playlist_find_.Flags));
+        const HWND active_before = GetActiveWindow();
+        const bool found = FindNextPlaylistTrack(playlist_find_.Flags);
+        const HWND active_after = GetActiveWindow();
+        // An unowned progress dialog can leave the UI thread with no active
+        // HWND when destroyed. Restore its caller, but not another active UI.
+        if (found && !playlist_find_dialog_ && IsWindow(playlist_track_control_) &&
+            (active_after == playlist_window_ ||
+             (!active_after && active_before == playlist_window_)))
+            SetFocus(playlist_track_control_);
         return true;
     }
     if (command >= kPlaylistModeSingle && command <= kPlaylistModeShuffle) {
@@ -6410,21 +6449,7 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
     }
     if (command == kPlaylistPlayFollowCursor) {
         settings_.player.play_follow_cursor = !settings_.player.play_follow_cursor;
-        if (playlist_track_control_) {
-            LONG_PTR style = GetWindowLongPtrW(
-                playlist_track_control_, GWL_STYLE);
-            if (settings_.player.play_follow_cursor)
-                style |= LVS_SHOWSELALWAYS;
-            else
-                style &= ~static_cast<LONG_PTR>(LVS_SHOWSELALWAYS);
-            SetWindowLongPtrW(playlist_track_control_, GWL_STYLE, style);
-            // FUN_00483AF8 repaints selected rows which intersect the client
-            // immediately after modifying style bit 8.  Our owner paint uses
-            // that same bit, so invalidating the visible surface is exact and
-            // avoids walking native virtual rows a second time.
-            if (playlist_window_)
-                InvalidateRect(playlist_window_, nullptr, FALSE);
-        }
+        UpdatePlaylistSelectionVisibility();
         return true;
     }
     return false;
