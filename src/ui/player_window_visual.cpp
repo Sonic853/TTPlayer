@@ -4,6 +4,7 @@
 #include "ttplayer/platform/optional_windows_api.h"
 #include "player_window_internal.h"
 #include "album_background.h"
+#include "player_visual_effect.h"
 #include "ttplayer/ui/cover_image.h"
 #include "ttplayer/app/worker_process.h"
 #include "../app/resource_ids.h"
@@ -29,6 +30,18 @@
 
 namespace ttplayer::ui {
 using namespace detail;
+void detail::AppendPlayerVisualMenuItems(HMENU menu) {
+    const HMENU popup = FindCommandMenu(menu, kCmdVisualScope);
+    if (!popup || FindCommandMenu(popup, kCmdVisualPulse)) return;
+    int position = 0;
+    for (; position < GetMenuItemCount(popup); ++position)
+        if (GetMenuItemID(popup, position) == kCmdVisualScope) { ++position; break; }
+    for (const UINT id : {IDS_VISUAL_PULSE, IDS_VISUAL_RIPPLE}) {
+        const auto label = i18n::ResourceText(GetModuleHandleW(nullptr), id);
+        InsertMenuW(popup, position++, MF_BYPOSITION | MF_STRING,
+                    id == IDS_VISUAL_PULSE ? kCmdVisualPulse : kCmdVisualRipple, label.c_str());
+    }
+}
 namespace {
 
 constexpr size_t kAnalysisSamples = 512;
@@ -515,6 +528,10 @@ HBITMAP detail::LoadTaskbarCoverBitmap(const std::filesystem::path& path,
 // in PlayerWindow, matching the original lifetime split.
 class VisualRuntime {
 public:
+    void SetPlayerEffectColor(COLORREF color) {
+        std::scoped_lock lock(mutex_);
+        player_effect_color_ = color;
+    }
     ~VisualRuntime() {
         DestroyDream();
         DestroySpectrumProcessor();
@@ -575,8 +592,11 @@ public:
         }
         const bool geometry_changed = next_width != width_ ||
                                       next_height != height_;
+        const bool player_effect_mode_changed = settings_.type != settings.type;
+        const bool preserve_player_effect_frame = !player_effect_mode_changed &&
+            settings.type >= 5 && have_dynamic_frame_;
         settings_ = settings;
-        settings_.type = std::clamp(settings_.type, 0, 4);
+        settings_.type = std::clamp(settings_.type, 0, 6);
         settings_.frames_per_second = std::clamp(
             settings_.frames_per_second, 0, 100);
         settings_.blur_speed = std::clamp(settings_.blur_speed, 0, 255);
@@ -595,7 +615,12 @@ public:
         peak_speed_.assign(static_cast<size_t>(width_), int16_t{});
         previous_peaks_.assign(static_cast<size_t>(width_), int16_t{});
         scope_.assign(static_cast<size_t>(width_ + 2) * (height_ + 2), 0);
-        have_dynamic_frame_ = false;
+        have_dynamic_frame_ = preserve_player_effect_frame;
+        // Baidu's layout only changes Draw's RECT. Reset is dispatched when
+        // the mode changes, so resizing while paused retains the spectrum.
+        if (player_effect_mode_changed) {
+            player_effect_.Reset();
+        }
         ++spectrum_generation_;
         dream_bits_ = nullptr;
         if (geometry_changed || !surface_dc_ || !surface_bits_)
@@ -728,6 +753,14 @@ public:
         case 1: UpdateDream(samples); break;
         case 2: UpdateSpectrum(samples); break;
         case 3: UpdateScope(samples); break;
+        case 5:
+        case 6: {
+            // Advance one native effect frame at the configured visual FPS.
+            const auto frequency = PlayerFrequencyData(samples.left);
+            player_effect_.Update(frequency);
+            have_dynamic_frame_ = true;
+            break;
+        }
         default: break;
         }
     }
@@ -768,6 +801,25 @@ public:
         case 4:
             PaintCover(dc, bounds);
             break;
+        case 5:
+        case 6: {
+            // BaiduMusic.exe!00432740 paints a black backing and passes the
+            // middle half of the lyric surface to VisualEffectCtrl::Draw.
+            if (!have_dynamic_frame_) { PaintCachedBackground(dc, bounds); break; }
+            if (!surface_dc_ || !surface_bits_) break;
+            RECT frame{0, 0, width_, height_};
+            FillRect(surface_dc_, &frame, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            if (have_dynamic_frame_) {
+                RECT effect = frame;
+                const LONG quarter = height_ / 4;
+                effect.top += quarter;
+                effect.bottom -= quarter;
+                player_effect_.Paint(surface_dc_, effect, settings_.type, player_effect_color_);
+            }
+            StretchBlt(dc, bounds.left, bounds.top, bounds.right - bounds.left,
+                bounds.bottom - bounds.top, surface_dc_, 0, 0, width_, height_, SRCCOPY);
+            break;
+        }
         default:
             PaintCachedBackground(dc, bounds);
             break;
@@ -960,6 +1012,7 @@ private:
     }
 
     void UpdateSpectrum(const audio::VisualizationSamples&) {
+        PrimePlayerSpectrumScale();
         ++spectrum_revision_;
         if (spectrum_.size() != static_cast<size_t>(width_))
             spectrum_.assign(static_cast<size_t>(width_), int16_t{});
@@ -1404,6 +1457,8 @@ private:
     }
 
     HMODULE module_{};
+    PlayerVisualEffect player_effect_;
+    COLORREF player_effect_color_{RGB(0, 255, 0)};
     DreamCreate create_{};
     DreamResize resize_{};
     DreamProcess process_{};
@@ -1610,7 +1665,7 @@ void PlayerWindow::ApplySkinVisualSettings() {
         settings_.visual.font = *source.font;
         settings_.visual.font_valid = true;
     }
-    settings_.visual.type = std::clamp(settings_.visual.type, 0, 4);
+    settings_.visual.type = std::clamp(settings_.visual.type, 0, 6);
 }
 
 void PlayerWindow::UpdateVisualWindowLayout() {
@@ -1631,6 +1686,8 @@ void PlayerWindow::UpdateVisualWindowLayout() {
         plugin_content_runtime_=std::make_shared<VisualRuntime>();
         plugin_content_runtime_->SetModule(ttpcomm_module_);
     }
+    visual_runtime_->SetPlayerEffectColor(fullscreen_visual_detached_
+        ? settings_.lyric.fullscreen_highlight_color : settings_.lyric.highlight_color);
     if (fullscreen_visual_detached_) {
         RECT client{};
         GetClientRect(visual_window_, &client);
@@ -1775,7 +1832,7 @@ void PlayerWindow::SkinPluginContentRects(const RECT& bounds,uint32_t mode,uint3
 
 BOOL WINAPI PlayerWindow::PaintSkinPluginContent(void* context,HDC dc,const RECT* bounds,
                                                 uint32_t mode,uint32_t visual_type) {
-    if(!context || !dc || !bounds || IsRectEmpty(bounds) || mode<1 || mode>3 || visual_type>4)
+    if(!context || !dc || !bounds || IsRectEmpty(bounds) || mode<1 || mode>3 || visual_type>6)
         return FALSE;
     try {
         auto& self=*static_cast<PlayerWindow*>(context);
@@ -1802,6 +1859,7 @@ BOOL WINAPI PlayerWindow::PaintSkinPluginContent(void* context,HDC dc,const RECT
                 metadata=self.audio_->Metadata();
             }
             auto& runtime=*self.plugin_content_runtime_;
+            runtime.SetPlayerEffectColor(self.settings_.lyric.highlight_color);
             if(self.plugin_content_visual_type_!=settings.type || self.plugin_content_size_.cx!=size.cx ||
                self.plugin_content_size_.cy!=size.cy || self.plugin_content_combined_!=combined) {
                 // Reconfigure only at a mode/geometry/settings boundary. Doing
@@ -1830,6 +1888,10 @@ void PlayerWindow::PaintVisualControl(HDC dc) const {
     if(external_skin_ && !fullscreen_visual_detached_) return;
     RECT client{};
     GetClientRect(visual_window_, &client);
+    if (settings_.visual.type >= 5 && visual_runtime_) {
+        visual_runtime_->Paint(dc, client);
+        return;
+    }
     if (fullscreen_visual_detached_) {
         // Album backgrounds already publish a complete composited frame.
         // Erasing the visible DC first would reintroduce cover flicker.
@@ -1855,7 +1917,7 @@ void PlayerWindow::PaintVisualControl(HDC dc) const {
 }
 
 void PlayerWindow::SetVisualType(int type) {
-    if (fullscreen_mode_ == 1 && type >= 1 && type <= 4) {
+    if (fullscreen_mode_ == 1 && type >= 1 && type <= 6) {
         // Choosing an effect in the fullscreen lyric menu must display it,
         // not change a hidden visual or clamp album art back to dream.
         // Publish the requested type before layout/render reconfiguration;
@@ -1866,8 +1928,8 @@ void PlayerWindow::SetVisualType(int type) {
     }
     settings_.visual.type = fullscreen_mode_ != 0
         ? ((type == 0 || (type == 4 && fullscreen_mode_ != 3)) ? 1
-            : std::clamp(type, 1, fullscreen_mode_ == 3 ? 4 : 3))
-        : std::clamp(type, 0, 4);
+            : std::clamp(type, 1, 6))
+        : std::clamp(type, 0, 6);
     if (fullscreen_mode_ == 3) UpdateFullScreenLayout();
     UpdateVisualWindowLayout();
     UpdateVisualFrame();
@@ -2139,7 +2201,7 @@ void PlayerWindow::UpdateFullScreenLayout() {
 
     int profile = settings_.fullscreen.visual_type != 0
         ? settings_.visual.type : 0;
-    profile = std::clamp(profile, 0, 4);
+    profile = std::clamp(profile, 0, 6);
     const int lyric_tenths = std::clamp(
         settings_.fullscreen.lyric_size[static_cast<size_t>(profile)], 0, 10);
     const int relation = std::clamp(
@@ -2192,7 +2254,7 @@ void PlayerWindow::SetFullScreenMode(int mode, HWND origin, int visual_type_over
         if (lyric_editor_) LeaveLyricEditor(true);
         if (lyric_window_) ShowWindow(lyric_window_, SW_HIDE);
     }
-    if(visual_type_override>=0 && visual_type_override<=4)
+    if(visual_type_override>=0 && visual_type_override<=6)
         settings_.visual.type=visual_type_override;
     else if ((mode == 2 || mode == 3) &&
         (settings_.visual.type == 0 || (mode == 2 && settings_.visual.type == 4)))
@@ -2302,6 +2364,7 @@ HMENU PlayerWindow::CreateVisualContextMenu(bool detached,int mode,int type) {
         DeleteMenu(popup, kCmdVisualOptions, MF_BYCOMMAND);
         const int last = GetMenuItemCount(popup) - 1;
         if (last >= 0) DeleteMenu(popup, last, MF_BYPOSITION);
+        AppendPlayerVisualMenuItems(popup);
         PopulateFullScreenMonitorMenu(popup);
         CheckMenuItem(popup,
             static_cast<UINT>(kCmdVisualFirst + type),
@@ -2323,6 +2386,7 @@ HMENU PlayerWindow::CreateVisualContextMenu(bool detached,int mode,int type) {
     // presents the complete ten-item menu (None/Cover/Options included).
     // Keep the complete resource menu here; the compact seven-item variant is
     // selected by the full-screen host, not merely by right-clicking Visual.
+    AppendPlayerVisualMenuItems(popup);
     CheckMenuItem(popup,
         static_cast<UINT>(kCmdVisualFirst + type),
         MF_BYCOMMAND | MF_CHECKED);

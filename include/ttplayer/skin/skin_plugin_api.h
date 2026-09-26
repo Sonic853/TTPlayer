@@ -96,6 +96,7 @@ typedef struct TtpSkinContent {
     HWND window;
     RECT bounds;
     uint32_t mode, visual_type;
+    // visual_type: 0 none, 1 dream, 2 spectrum, 3 scope, 4 cover, 5 pulse, 6 ripple.
 } TtpSkinContent;
 typedef struct TtpSkinLyricColors {
     uint32_t size;

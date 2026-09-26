@@ -383,7 +383,7 @@ BOOL WINAPI PlayerWindow::ResizeSkinPluginWindow(void* context,HWND source,SIZE 
 BOOL WINAPI PlayerWindow::HandleSkinPluginContentInput(void* context,const TtpSkinContent* content,
                                                        const MSG* event,LRESULT* result) {
     if(!context || !content || content->size<sizeof(*content) || !event || !result ||
-       content->mode<1 || content->mode>3 || content->visual_type>4) return FALSE;
+       content->mode<1 || content->mode>3 || content->visual_type>6) return FALSE;
     auto& self=*static_cast<PlayerWindow*>(context);
     if(event->hwnd!=content->window || (content->window!=self.lyric_window_ && content->window!=self.window_)) return FALSE;
     *result=0;
@@ -661,7 +661,7 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     }
     case TTP_SKIN_PROPERTIES: HandleContextCommand(kCmdFileProperties);break;
     case TTP_SKIN_ALWAYS_ON_TOP: HandleContextCommand(kCmdAlwaysOnTop);break;
-    case TTP_SKIN_VISUAL_NEXT: SetVisualType((settings_.visual.type+1)%5);break;
+    case TTP_SKIN_VISUAL_NEXT: SetVisualType((settings_.visual.type+1)%7);break;
     case TTP_SKIN_VISUAL_MENU: {POINT p{};GetCursorPos(&p);ShowVisualContextMenu(p);break;}
     case TTP_SKIN_EQ_BANDS:
         for(int i=0;i<10;++i) SetEqualizerSliderValue(kEqSliderFirstBand+i,std::clamp(value,-12,12),true);

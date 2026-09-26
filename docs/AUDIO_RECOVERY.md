@@ -66,14 +66,19 @@
 
 ## CDA 数字抓轨
 
-- 路径保持原版 `X:\TrackNN.cda` 语义。
-- `IOCTL_CDROM_READ_TOC` 取得轨道与 lead-out，拒绝 data track。
-- 输出格式固定为原版的 PCM 44100 Hz、2 声道、16 bit，block align 4，
+- 当前重建版路径保持 `X:\TrackNN.cda` 语义。
+- 重建版使用 `IOCTL_CDROM_READ_TOC` 取得轨道与 lead-out，拒绝 data track。
+- 当前输出固定为普通 CD-DA 的 PCM 44100 Hz、2 声道、16 bit，block align 4，
   `nAvgBytesPerSec = 176400`。
-- 抓取使用 `IOCTL_CDROM_RAW_READ`、`TrackMode=CDDA`、2352 字节/扇区、
+- 重建版抓取使用 `IOCTL_CDROM_RAW_READ`、`TrackMode=CDDA`、2352 字节/扇区、
   75 扇区/秒；`DiskOffset` 按 Windows 接口要求使用 `LBA*2048`。
-- 每次最多读取原版的 24 扇区；失败时按 24、20、16、12、8、4 的顺序
-  回退，以兼容拒绝大块 raw transfer 的旧光驱。
+- 每次请求最多 24 扇区，失败时在请求不少于 8 扇区时减 4 再试；
+  满批量时表现为 24、20、16、12、8、4。较小请求和轨道末尾从实际请求数量开始。
+
+2026-09-27 复核：以上是重建版的简化实现，不能等同于原版完整 CDA 恢复。
+原版 NT 分支使用 SCSI 直通的 READ TOC/READ CD，有 48 扇区开播缓存、
+DTS-CD 探测、CDA 描述文件属性后备和本地 CDDB 元数据读写；这些尚未完整接入重建版。
+完整证据、原版边界问题及恢复顺序见 [CDA 实现分析](CDA_IMPLEMENTATION_ANALYSIS.md)。
 
 当前机器没有可读取的物理 Audio CD，因此 TOC/LBA/请求结构和无硬件
 错误路径已经编译、测试，真实光盘的驱动返回数据仍需在有光驱的 x86

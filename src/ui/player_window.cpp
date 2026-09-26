@@ -3335,9 +3335,10 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                 HandlePlaylistCommand(kPlaylistProperties);
             } else {
                 SetVisualType(fullscreen_mode_ != 0
-                    ? (settings_.visual.type >= (fullscreen_mode_ == 3 ? 4 : 3)
-                        ? 1 : settings_.visual.type + 1)
-                    : (settings_.visual.type + 1) % 5);
+                    ? (settings_.visual.type >= 6 ? 1
+                        : (settings_.visual.type == 3 && fullscreen_mode_ != 3 ? 5
+                           : settings_.visual.type + 1))
+                    : (settings_.visual.type + 1) % 7);
             }
             return 0;
         default:
@@ -5437,6 +5438,7 @@ void PlayerWindow::PrepareContextMenu(HMENU menu) {
 
     PreparePlaylistModeMenu(menu);
     PrepareEqualizerMenu(menu);
+    AppendPlayerVisualMenuItems(menu);
     if (current_) CheckCommand(menu, kCmdFirstTrack + static_cast<UINT>(*current_), true);
     for (UINT command = kCmdFirstAlpha; command <= kCmdLastAlpha; ++command)
         CheckCommand(menu, command, static_cast<int>(command - kCmdFirstAlpha) * 10 == transparency_percent_);

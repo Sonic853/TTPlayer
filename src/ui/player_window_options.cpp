@@ -5159,6 +5159,11 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         const auto album_label = AlbumOptionText(IDS_FULLSCREEN_ALBUM);
         SendDlgItemMessageW(dialog, 2232, CB_ADDSTRING, 0,
                             reinterpret_cast<LPARAM>(album_label.c_str()));
+        for (const UINT id : {IDS_VISUAL_PULSE, IDS_VISUAL_RIPPLE}) {
+            const auto label = AlbumOptionText(id);
+            SendDlgItemMessageW(dialog, 2232, CB_ADDSTRING, 0,
+                                reinterpret_cast<LPARAM>(label.c_str()));
+        }
         PopulateAlbumBackgroundOptions(dialog, instance_, settings_.fullscreen);
         SetChecked(dialog, 2233, unified);
         PopulateResourceCombo(dialog, 2230, resources, 2, -1);

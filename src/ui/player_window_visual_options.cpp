@@ -4,6 +4,7 @@
 #include "player_window_internal.h"
 #include "options_buttons.h"
 #include "modern_file_dialog.h"
+#include "../app/resource_ids.h"
 
 #include <algorithm>
 #include <array>
@@ -198,7 +199,7 @@ bool LoadVisualProfile(const std::filesystem::path& path,
 
     int integer{};
     if (XmlInteger(node, L"Type", integer))
-        visual.type = std::clamp(integer, 0, 4);
+        visual.type = std::clamp(integer, 0, 6);
     XmlColor(node, L"SpectrumTopColor", visual.spectrum_top_color);
     XmlColor(node, L"SpectrumBtmColor", visual.spectrum_bottom_color);
     XmlColor(node, L"SpectrumMidColor", visual.spectrum_middle_color);
@@ -268,7 +269,7 @@ bool SaveVisualProfile(const std::filesystem::path& path,
     SetXmlAttribute(element, L"SpectrumWide", visual.spectrum_wide);
     SetXmlAttribute(element, L"BlurSpeed", visual.blur_speed);
     SetXmlAttribute(element, L"Blur", visual.blur ? 1 : 0);
-    SetXmlAttribute(element, L"Type", std::clamp(visual.type, 0, 4));
+    SetXmlAttribute(element, L"Type", std::clamp(visual.type, 0, 6));
     SetXmlAttribute(element, L"BlurScopeColor",
                     ColorText(visual.blur_scope_color));
     SetXmlAttribute(element, L"TextColor", ColorText(visual.text_color));
@@ -306,8 +307,14 @@ void SetFramesText(HWND dialog, HMODULE resources, int frames) {
 
 void SyncVisualPage(HWND dialog, HMODULE resources,
                     const settings::VisualSettings& visual, bool first) {
-    PopulateCombo(dialog, kVisualType, resources, 5,
-                  std::clamp(visual.type, 0, 4));
+    PopulateCombo(dialog, kVisualType, resources, 5, -1);
+    for (const UINT id : {IDS_VISUAL_PULSE, IDS_VISUAL_RIPPLE}) {
+        const auto label = i18n::ResourceText(GetModuleHandleW(nullptr), id);
+        SendDlgItemMessageW(dialog, kVisualType, CB_ADDSTRING, 0,
+                            reinterpret_cast<LPARAM>(label.c_str()));
+    }
+    SendDlgItemMessageW(dialog, kVisualType, CB_SETCURSEL,
+                        std::clamp(visual.type, 0, 6), 0);
     PopulateCombo(dialog, kScopeSpeed, resources, 3,
                   std::clamp((visual.blur_speed - 1) / 2, 0, 2));
     CheckDlgButton(dialog, kSpectrumWide,
@@ -503,7 +510,10 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
         if (control == kVisualType && notification == CBN_SELCHANGE) {
             const int type = static_cast<int>(SendDlgItemMessageW(
                 dialog, kVisualType, CB_GETCURSEL, 0, 0));
-            if (type != CB_ERR) SetVisualType(type);
+            if (type != CB_ERR) {
+                SetVisualType(type);
+                SyncVisualPage(dialog, resources, settings_.visual, false);
+            }
             return TRUE;
         }
         if (control == kScopeSpeed && notification == CBN_SELCHANGE) {

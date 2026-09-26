@@ -195,9 +195,11 @@ constexpr UINT kCmdVisualDream = 0x8086;
 constexpr UINT kCmdVisualSpectrum = 0x8087;
 constexpr UINT kCmdVisualScope = 0x8088;
 constexpr UINT kCmdVisualCover = 0x8089;
+constexpr UINT kCmdVisualPulse = 0x808a;
+constexpr UINT kCmdVisualRipple = 0x808b;
 constexpr UINT kCmdVisualOptions = 0x8084;
 constexpr UINT kCmdVisualFirst = kCmdVisualNone;
-constexpr UINT kCmdVisualLast = kCmdVisualCover;
+constexpr UINT kCmdVisualLast = kCmdVisualRipple;
 constexpr UINT kCmdFullscreenToggle = 0x7de6;
 constexpr UINT kCmdFullscreenExit = 0x7de7;
 constexpr UINT kCmdFullscreenLyrics = 0x7de8;
@@ -439,6 +441,7 @@ std::vector<wchar_t> BuildAudioDialogFilter(
 void ReplaceAll(std::wstring& value, std::wstring_view needle,
                 std::wstring_view replacement);
 HMENU FindCommandMenu(HMENU menu, UINT command);
+void AppendPlayerVisualMenuItems(HMENU menu);
 void EnableCommand(HMENU root, UINT command, bool enabled);
 void CheckCommand(HMENU root, UINT command, bool checked);
 COLORREF InterpolateMenuColor(COLORREF first, COLORREF second, int numerator,

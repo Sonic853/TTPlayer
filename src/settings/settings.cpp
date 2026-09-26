@@ -423,7 +423,7 @@ void ApplyVisualAttributes(IXMLDOMNode* node, VisualSettings& visual,
                            bool include_global_fields) {
     if (!node) return;
     if (include_global_fields) {
-        visual.type = std::clamp(IntAttr(node, L"Type", visual.type), 0, 4);
+        visual.type = std::clamp(IntAttr(node, L"Type", visual.type), 0, 6);
         visual.frames_per_second = std::clamp(
             IntAttr(node, L"FramesPerSec", visual.frames_per_second), 0, 100);
     }
@@ -1015,16 +1015,16 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
     if (auto node=SelectOwned(doc,L"/ttplayer/FullScreen")) {
         auto* const n=node.Get();
         s.fullscreen.visual_type=std::clamp(
-            IntAttr(n,L"VisualType",s.fullscreen.visual_type),0,4);
+            IntAttr(n,L"VisualType",s.fullscreen.visual_type),0,6);
         s.fullscreen.album_fallback_image=StringAttr(n,L"AlbumFallbackImage");
         s.fullscreen.album_transparency_percent=std::clamp(IntAttr(
             n,L"AlbumTransparency",s.fullscreen.album_transparency_percent),0,100);
-        constexpr std::array<const wchar_t*,5> relation_names{
+        constexpr std::array<const wchar_t*,7> relation_names{
             L"PosRelationAll",L"PosRelationGoom",
-            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum"};
-        constexpr std::array<const wchar_t*,5> size_names{
+            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum",L"PosRelationPulse",L"PosRelationRipple"};
+        constexpr std::array<const wchar_t*,7> size_names{
             L"LrcSizeAll",L"LrcSizeGoom",
-            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum"};
+            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum",L"LrcSizePulse",L"LrcSizeRipple"};
         for(size_t index=0;index<relation_names.size();++index) {
             // CSettings preserves the raw profile integers in TTPlayer.xml.
             // Full-screen layout normalizes them only when it consumes the
@@ -1801,7 +1801,7 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"Blur",settings.visual.blur ? 1 : 0);
         SetAttribute(element,L"BlurScopeColor",ColorText(settings.visual.blur_scope_color));
         SetAttribute(element,L"TextColor",ColorText(settings.visual.text_color));
-        SetAttribute(element,L"Type",std::clamp(settings.visual.type,0,4));
+        SetAttribute(element,L"Type",std::clamp(settings.visual.type,0,6));
         SetAttribute(element,L"FramesPerSec",
                      std::clamp(settings.visual.frames_per_second,0,100));
         if(settings.visual.font_valid)
@@ -1810,16 +1810,16 @@ void SaveWindowState(const std::filesystem::path& path,
     if(auto* element=EnsureElement(document,L"FullScreen")) {
         auto element_owner=AdoptCom(element);
         SetAttribute(element,L"VisualType",
-                     std::clamp(settings.fullscreen.visual_type,0,4));
+                     std::clamp(settings.fullscreen.visual_type,0,6));
         SetAttribute(element,L"AlbumFallbackImage",settings.fullscreen.album_fallback_image);
         SetAttribute(element,L"AlbumTransparency",
                      std::clamp(settings.fullscreen.album_transparency_percent,0,100));
-        constexpr std::array<const wchar_t*,5> relation_names{
+        constexpr std::array<const wchar_t*,7> relation_names{
             L"PosRelationAll",L"PosRelationGoom",
-            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum"};
-        constexpr std::array<const wchar_t*,5> size_names{
+            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum",L"PosRelationPulse",L"PosRelationRipple"};
+        constexpr std::array<const wchar_t*,7> size_names{
             L"LrcSizeAll",L"LrcSizeGoom",
-            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum"};
+            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum",L"LrcSizePulse",L"LrcSizeRipple"};
         for(size_t index=0;index<relation_names.size();++index) {
             SetAttribute(element,relation_names[index],
                          settings.fullscreen.position_relation[index]);

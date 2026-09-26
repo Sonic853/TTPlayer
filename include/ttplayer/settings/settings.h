@@ -148,7 +148,7 @@ struct HotKeySettings {
 // Type/FramesPerSec are global; the remaining colours, blur parameters and
 // LOGFONT are also serialized into each per-skin .skn.xml profile.
 struct VisualSettings {
-    int type{2};                         // 0 none, 1 dream, 2 spectrum, 3 scope, 4 cover
+    int type{2}; // 0 none, 1 dream, 2 spectrum, 3 scope, 4 cover, 5 pulse, 6 ripple
     int frames_per_second{25};
     COLORREF spectrum_top_color{skin::DefaultSkinColors().visual.spectrum_top_color};
     COLORREF spectrum_bottom_color{skin::DefaultSkinColors().visual.spectrum_bottom_color};
@@ -164,11 +164,11 @@ struct VisualSettings {
 };
 // CSettings +0x788..+0x7A8.  VisualType 0 uses the shared "All" profile;
 // values 1..3 select the independent Goom/Spectrum/BlurScope profile.
-// Community extension: profile 4 is the combined fullscreen album background.
+// Extensions: 4 album background, 5 Baidu pulse, 6 Baidu ripple.
 struct FullScreenSettings {
     int visual_type{1};
-    std::array<int, 5> position_relation{0, 1, 0, 1, 1};
-    std::array<int, 5> lyric_size{2, 2, 2, 2, 10};
+    std::array<int, 7> position_relation{0, 1, 0, 1, 1, 1, 1};
+    std::array<int, 7> lyric_size{2, 2, 2, 2, 10, 10, 10};
     std::wstring album_fallback_image;
     int album_transparency_percent{60}; // 0 = opaque, 100 = no image
     // Background colour is LyricSettings::fullscreen_background_color.

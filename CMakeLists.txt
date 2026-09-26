@@ -144,6 +144,7 @@ add_library(ttplayer_core
   src/ui/playlist_network_commands.cpp
   src/ui/playlist_transforms.cpp
   src/ui/player_window_visual.cpp
+  src/ui/player_visual_effect.cpp
   src/ui/album_background.cpp
   src/ui/cover_image.cpp
   src/ui/player_window_visual_options.cpp
