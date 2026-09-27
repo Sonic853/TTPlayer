@@ -195,6 +195,7 @@ private:
     static bool RegisterPlaylistListClass(HINSTANCE instance);
     static LRESULT CALLBACK PlaylistListWindowProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT DefaultPlaylistListMessage(HWND, UINT, WPARAM, LPARAM);
+    void ReadPlaylistNativeState(HWND);
     [[nodiscard]] std::optional<LRESULT> PlaylistNativeNotification(LPARAM notification);
     static LRESULT CALLBACK LyricWindowProc(HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK FullScreenLyricInputProc(HWND, UINT, WPARAM, LPARAM);

@@ -11,6 +11,10 @@ For the 2026-09-15 marquee restoration, menu-state corrections and per-command
 implementation/remaining-gap audit, see [PLAYLIST_MARQUEE_MENU_AUDIT.md](PLAYLIST_MARQUEE_MENU_AUDIT.md).
 That audit distinguishes implemented command routing from full original behavior.
 
+The 2026-09-27 [mouse behavior audit](PLAYLIST_MOUSE_BEHAVIOR_AUDIT.md) corrects
+right-click selection/caret synchronization, drag-edge scrolling, wheel handling
+and keyboard context-menu positioning, with additional native-control comparisons.
+
 - `FUN_00482BAF` creates the playlist toolbar and calls
   `FUN_0048AA1F((LPCWSTR)0x8B)`.
 - `FUN_0048AA1F` calls `LoadMenuW(DAT_0054605C, ...)`, so menu 139 (`0x8B`)
@@ -64,9 +68,10 @@ catalogue row with `LVM_GETNEXTITEM`, and enters the same edit path.
 
 `FUN_00489B06` is the corresponding `LVN_ENDLABELEDITW` handler. It updates a
 title only when `LVITEM.mask & LVIF_TEXT`, `pszText` is non-null and the first
-character is non-zero. Physical probes resolve the remaining observable
-lifecycle: Enter commits, while Escape, an empty Enter, and loss of focus all
-retain the previous title. Whitespace is not trimmed. A committed title marks
+character is non-zero. Enter and real focus loss commit nonempty text;
+Escape and empty labels retain the previous title. The first click in the
+catalogue during editing completes the edit without also changing selection.
+Whitespace is not trimmed. A committed title marks
 that catalogue entry's numbered TTBL dirty even when another playlist is
 active.
 
@@ -79,7 +84,10 @@ playlist origin of `(100,400)` produces `[默认]` at
 `(115,432)-(171,448)`. Entering `Probe title` produces the same title in the
 same `%04d.ttbl` in both programs. The reusable cases are `RenameCommit`,
 `RenameEmpty`, `RenameEscape`, `RenameBlur`, `RightClickRename` and
-`NewCommit` in `rebuild/tools/probe_playlist_context.ps1`.
+`NewCommit` in `rebuild/tools/probe_playlist_context.ps1`. The old `RenameBlur`
+probe did not verify that its cross-process `SetFocus` actually transferred
+focus before closing the player, so its previous cancellation conclusion is
+superseded by [the actual-click analysis and regression tests](PLAYLIST_RENAME_COMPLETION.md).
 
 ## Toolbar geometry
 

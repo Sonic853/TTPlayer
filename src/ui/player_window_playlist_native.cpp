@@ -35,7 +35,8 @@ public:
 
 // The skin/model remains the owner of rows and playback selection. This is
 // only the native control's cached projection, updated at the default-proc
-// boundary. Mouse/paint traffic handled by the skin does not copy selections.
+// boundary. Skin drawing and left-button gestures use the model directly;
+// native right clicks publish their state before the context menu opens.
 struct NativeListState {
     PlayerWindow* owner{};
     bool ready{}, synchronizing{}, row_height_checked{};
@@ -120,6 +121,14 @@ LRESULT PlayerWindow::DefaultPlaylistListMessage(
     HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     auto* state = State(window);
     if (!state || !state->ready) return DefWindowProcW(window, message, wparam, lparam);
+    // SysListView32 may bubble an unconsumed partial/modifier wheel message
+    // to its parent. The skin parent must not route it back into that same
+    // native call: this would accumulate the delta twice or recurse forever.
+    if (state->synchronizing && message == WM_MOUSEWHEEL) return 0;
+    // The original report ListViews leave Ctrl/Shift wheel input unhandled.
+    // Consume it here so the skin/owner cannot turn the bubbled message into
+    // a second gesture or move keyboard focus to the hovered pane.
+    if (message == WM_MOUSEWHEEL && (LOWORD(wparam) & (MK_CONTROL | MK_SHIFT))) return 0;
     const bool catalogue = GetDlgCtrlID(window) == kPlaylistListId;
     const size_t count = catalogue ? playlists_.Size() : VisiblePlaylistTrackCount();
     const auto focus = catalogue ? playlist_list_focus_ : playlist_selection_;
@@ -211,33 +220,48 @@ LRESULT PlayerWindow::DefaultPlaylistListMessage(
     const auto result = Native(window, message, wparam, lparam);
     if (message == LVM_SETITEMSTATE || message == LVM_SETITEMW || message == LVM_SETITEMA ||
         message == LVM_SETSELECTIONMARK || message == LVM_SCROLL ||
-        message == WM_VSCROLL || message == WM_KEYDOWN) {
-        state->selected.clear();
-        for (LRESULT item = Native(window, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED);
-             item >= 0; item = Native(window, LVM_GETNEXTITEM, item, LVNI_SELECTED))
-            state->selected.insert(static_cast<size_t>(item));
-        state->focus = Row(Native(window, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_FOCUSED));
-        state->mark = Row(Native(window, LVM_GETSELECTIONMARK));
-        const auto scroll = static_cast<size_t>(Native(window, LVM_GETTOPINDEX));
-        if (catalogue) {
-            playlist_list_selection_ = state->selected.empty() ? std::nullopt
-                : std::optional<size_t>{*state->selected.begin()};
-            playlist_list_focus_ = state->focus;
-            playlist_list_scroll_ = scroll;
-            LayoutPlaylistListEdit();
-        } else {
-            playlist_selected_rows_ = state->selected;
-            playlist_selection_ = state->focus;
-            playlist_selection_anchor_ = state->mark;
-            playlist_scroll_ = scroll;
-            if (!settings_.playlist.library_mode)
-                RememberPlaylistRow(playlists_.ActiveIndex(), playlist_selection_);
-            UpdatePlaylistItemTipRects();
-        }
-        InvalidateRect(GetParent(window), nullptr, FALSE);
+        message == WM_VSCROLL || message == WM_KEYDOWN || message == WM_MOUSEWHEEL) {
+        ReadPlaylistNativeState(window);
     }
     state->synchronizing = false;
     return result;
+}
+
+void PlayerWindow::ReadPlaylistNativeState(HWND window) {
+    auto* state = State(window);
+    if (!state || !state->ready) return;
+    const bool catalogue = GetDlgCtrlID(window) == kPlaylistListId;
+    state->selected.clear();
+    for (LRESULT item = Native(window, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED);
+         item >= 0; item = Native(window, LVM_GETNEXTITEM, item, LVNI_SELECTED))
+        state->selected.insert(static_cast<size_t>(item));
+    state->focus = Row(Native(window, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_FOCUSED));
+    state->mark = Row(Native(window, LVM_GETSELECTIONMARK));
+    RECT client{};
+    GetClientRect(window, &client);
+    const size_t count = catalogue ? playlists_.Size() : VisiblePlaylistTrackCount();
+    const size_t page = static_cast<size_t>(std::max<LONG>(1, client.bottom / 16));
+    // The skin consumes the whole client area and owns its scrollbar. Native
+    // bookkeeping can still reserve a hidden scrollbar gutter after a count
+    // change, so never expose a top row past the skin's last complete page.
+    const auto scroll = std::min(static_cast<size_t>(Native(window, LVM_GETTOPINDEX)),
+        count > page ? count - page : 0);
+    if (catalogue) {
+        playlist_list_selection_ = state->selected.empty() ? std::nullopt
+            : std::optional<size_t>{*state->selected.begin()};
+        playlist_list_focus_ = state->focus;
+        playlist_list_scroll_ = scroll;
+        LayoutPlaylistListEdit();
+    } else {
+        playlist_selected_rows_ = state->selected;
+        playlist_selection_ = state->focus;
+        playlist_selection_anchor_ = state->mark;
+        playlist_scroll_ = scroll;
+        if (!settings_.playlist.library_mode)
+            RememberPlaylistRow(playlists_.ActiveIndex(), playlist_selection_);
+        UpdatePlaylistItemTipRects();
+    }
+    InvalidateRect(GetParent(window), nullptr, FALSE);
 }
 
 std::optional<LRESULT> PlayerWindow::PlaylistNativeNotification(LPARAM value) {
@@ -264,6 +288,15 @@ std::optional<LRESULT> PlayerWindow::PlaylistNativeNotification(LPARAM value) {
             WideCharToMultiByte(CP_ACP, 0, text.c_str(), -1, converted.data(), length, nullptr, nullptr);
             lstrcpynA(ansi->item.pszText, converted.c_str(), ansi->item.cchTextMax);
         }
+        return 0;
+    }
+    // 00489D2E/00488FEF build menus from the selection already established by
+    // SysListView32. Publish it before the nested popup loop, not after the
+    // right-button procedure returns (when a menu command may have run).
+    if (header->code == NM_RCLICK) {
+        ReadPlaylistNativeState(header->hwndFrom);
+        if (header->idFrom == kPlaylistListId && playlist_list_selection_)
+            SwitchPlaylist(*playlist_list_selection_);
         return 0;
     }
     // Projecting model state must never activate a playlist or start playback.

@@ -1778,6 +1778,10 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
         return forward_point(message);
     }
     case WM_LBUTTONDOWN:
+        // Let the catalogue end its label edit before focus changes destroy
+        // the editor. Native ListCtrl consumes this first click (even below
+        // the last row) instead of also changing the catalogue selection.
+        if (catalogue && playlist_list_edit_) return forward_point(message);
         if (list_control) SetFocus(control);
         if (close_button && GetCapture() != control) SetCapture(control);
         return forward_point(message);
@@ -2206,7 +2210,9 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
                 const auto metrics = geometry();
                 RECT client{};
                 GetClientRect(playlist_window_, &client);
-                if (!PtInRect(&client, point)) {
+                RECT drop_bounds = metrics.tracks;
+                InflateRect(&drop_bounds, 0, 2);
+                if (!PtInRect(&client, point) && !PtInRect(&drop_bounds, point)) {
                     // Once the pointer leaves CPlayListWnd, switch from the
                     // lightweight in-window reorder feedback to the same OLE
                     // source contract used by 004894AF. This enables drops on
@@ -2237,7 +2243,11 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
                     }
                     return 0;
                 }
-                if (!PtInRect(&metrics.tracks, point)) {
+                // 0048218C accepts a two-pixel strip above/below Files.
+                // 0041CA6B ensures the hovered row and its successor are
+                // visible, allowing a drag to advance beyond the last page
+                // row. The old outside-row checks below were unreachable.
+                if (!PtInRect(&drop_bounds, point)) {
                     const bool had_feedback =
                         playlist_list_hover_.has_value() ||
                         playlist_track_drop_row_.has_value();
@@ -2249,7 +2259,14 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
                 }
                 playlist_list_hover_.reset();
                 if (point.y < metrics.tracks.top) ScrollPlaylist(-1);
-                else if (point.y >= metrics.tracks.bottom) ScrollPlaylist(1);
+                else {
+                    const size_t hovered = playlist_scroll_ +
+                        static_cast<size_t>((point.y - metrics.tracks.top) / metrics.row_height);
+                    if (hovered + 1 < VisiblePlaylistTrackCount() &&
+                        metrics.tracks.top + static_cast<LONG>(hovered + 1 - playlist_scroll_) *
+                            metrics.row_height >= metrics.tracks.bottom)
+                        ScrollPlaylist(1);
+                }
                 const int relative = std::clamp<int>(
                     static_cast<int>(point.y - metrics.tracks.top +
                         metrics.row_height / 2) / metrics.row_height,
@@ -2306,6 +2323,11 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
     case WM_LBUTTONDOWN: {
         const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         const auto metrics = geometry();
+        if (playlist_list_edit_ && PtInRect(&metrics.list_titles, point)) {
+            FinishPlaylistListEdit(true);
+            if (playlist_list_control_) SetFocus(playlist_list_control_);
+            return 0;
+        }
         const unsigned int resize_hit = PlaylistDragHitTest(point);
         if (resize_hit != kDragMove) {
             SetFocus(playlist_window_);
@@ -2597,8 +2619,6 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
     }
     case WM_MOUSEWHEEL:
     {
-        const int rows = -GET_WHEEL_DELTA_WPARAM(wparam) /
-            WHEEL_DELTA * 3;
         POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         ScreenToClient(playlist_window_, &point);
         const auto metrics = geometry();
@@ -2613,19 +2633,12 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
             (over_catalogue || mouse_source == playlist_list_control_ ||
              (mouse_source != playlist_track_control_ &&
               (focus == playlist_list_control_ || focus == playlist_list_edit_)));
-        if (!catalogue) {
-            ScrollPlaylist(rows);
-            return 0;
-        }
-        const size_t visible = static_cast<size_t>(metrics.page_rows);
-        const size_t maximum = playlists_.Size() > visible
-            ? playlists_.Size() - visible : 0;
-        const auto next = static_cast<long long>(playlist_list_scroll_) + rows;
-        playlist_list_scroll_ = static_cast<size_t>(std::clamp<long long>(
-            next, 0, static_cast<long long>(maximum)));
-        LayoutPlaylistListEdit();
-        InvalidateRect(playlist_window_, &metrics.list_titles, FALSE);
-        return 0;
+        // The original forwards this to SysListView32. Retain its wheel
+        // accumulation, system scroll-lines/page setting and modifier policy.
+        // 0042D982/0042DA95 finish label editing before forwarding the wheel.
+        if (playlist_list_edit_) FinishPlaylistListEdit(true);
+        const HWND target = catalogue ? playlist_list_control_ : playlist_track_control_;
+        return target ? DefaultPlaylistListMessage(target, message, wparam, lparam) : 0;
     }
     case WM_KEYDOWN: {
         if (playlist_marquee_.Pending()) {
@@ -2748,7 +2761,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
                 caret = {metrics.list_titles.left + 8,
                     metrics.list_titles.top + static_cast<LONG>(
                         *playlist_list_focus_ - playlist_list_scroll_) *
-                        metrics.row_height + metrics.row_height};
+                        metrics.row_height + metrics.row_height / 2};
                 ClientToScreen(playlist_window_, &caret);
                 point = caret;
             } else if (focus == playlist_track_control_ &&
@@ -2757,7 +2770,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
                              *playlist_selection_, FALSE);
                 caret = {metrics.tracks.left + 8,
                     metrics.tracks.top + static_cast<LONG>(*playlist_selection_ - playlist_scroll_) *
-                        metrics.row_height + metrics.row_height};
+                        metrics.row_height + metrics.row_height / 2};
                 ClientToScreen(playlist_window_, &caret);
                 point = caret;
             } else {
@@ -3984,6 +3997,7 @@ void PlayerWindow::FinishPlaylistListEdit(bool commit) {
     if (!playlist_list_edit_ || playlist_list_edit_finishing_) return;
     playlist_list_edit_finishing_ = true;
     const HWND edit = playlist_list_edit_;
+    const bool restore_focus = GetFocus() == edit;
     const auto index = playlist_list_edit_index_;
     std::wstring title;
     if (commit) {
@@ -4008,6 +4022,10 @@ void PlayerWindow::FinishPlaylistListEdit(bool commit) {
     // empty label, but assigns every other string verbatim.
     if (commit && index && !title.empty())
         playlists_.Rename(*index, std::move(title));
+    // Enter/Escape return to the catalogue. A real focus transfer must keep
+    // its destination (e.g. the Files control or another application).
+    if (restore_focus && IsWindow(playlist_list_control_))
+        SetFocus(playlist_list_control_);
     if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
 }
 
@@ -4588,9 +4606,8 @@ void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_poin
     bool converted_blank_menu{};
     if (const auto track = PlaylistTrackAt(client_point)) {
         if (playlist_track_control_) SetFocus(playlist_track_control_);
-        // Native ListCtrl right-click keeps an existing multi-selection.  It
-        // moves the caret only when the clicked row was not already selected.
-        if (!playlist_selected_rows_.contains(*track)) SelectPlaylistRow(*track);
+        // Selection/caret come from native NM_RCLICK before this menu opens.
+        // Re-selecting here loses native Ctrl/Shift right-click semantics.
         const UINT resource = playlist_selected_rows_.size() > 1
             ? kMenuPlaylistItems : kMenuPlaylistItem;
         menu = DetachFirstPopup(i18n::LoadMenu(ResourceModule(), MAKEINTRESOURCEW(resource)));
@@ -5503,8 +5520,11 @@ void PlayerWindow::FinishPlaylistTrackDrag(POINT point) {
     // Files/PlayLists drop target returns a real effect.  Releasing capture
     // over toolbar, scrollbar, splitter, window chrome, or outside the
     // playlist is a cancelled drag and must not be interpreted as an
-    // insertion at the first/last track.
-    if (!PtInRect(&metrics.tracks, point)) {
+    // insertion at the first/last track. Retain the same two-pixel edge
+    // strip used by the original drag-over hit test and our move feedback.
+    RECT drop_bounds = metrics.tracks;
+    InflateRect(&drop_bounds, 0, 2);
+    if (!PtInRect(&drop_bounds, point)) {
         playlist_list_hover_.reset();
         playlist_track_drop_row_.reset();
         return;
@@ -6636,10 +6656,10 @@ LRESULT CALLBACK PlayerWindow::PlaylistEditProc(HWND window, UINT message,
         return 0;
     }
     if (message == WM_KILLFOCUS && !self->playlist_list_edit_finishing_) {
-        // The native ListView label editor ends a focus-loss edit with a
-        // null pszText.  00489B06 consequently leaves the stored title
-        // untouched; only Enter supplies text for a commit.
-        self->FinishPlaylistListEdit(false);
+        // Native ListCtrl supplies the current text on focus loss as well as
+        // Enter. 00489B06 accepts nonempty text; only explicit cancellation
+        // (Escape/teardown) supplies no text. Preserve the new focus target.
+        self->FinishPlaylistListEdit(true);
         return 0;
     }
     const LRESULT result = DefSubclassProc(window, message, wparam, lparam);
