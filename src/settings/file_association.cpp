@@ -16,6 +16,8 @@
 #include <shlwapi.h>
 #include <shobjidl.h>
 #include <shellapi.h>
+#include <propkey.h>
+#include <propsys.h>
 
 #pragma comment(lib, "Advapi32.lib")
 #pragma comment(lib, "Ole32.lib")
@@ -1440,6 +1442,18 @@ FileAssociationResult FileAssociationBackend::CreateShortcut(
                                                      : options.icon_path;
     if (SUCCEEDED(status) && !icon_path.empty())
         status = link->SetIconLocation(icon_path.c_str(), options.icon_index);
+    if (SUCCEEDED(status) && !options.app_user_model_id.empty()) {
+        IPropertyStore* raw_store{};
+        status = link->QueryInterface(IID_PPV_ARGS(&raw_store));
+        UniqueComPtr<IPropertyStore> store(raw_store);
+        if (SUCCEEDED(status)) {
+            PROPVARIANT id{};
+            id.vt = VT_LPWSTR;
+            id.pwszVal = const_cast<wchar_t*>(options.app_user_model_id.c_str());
+            status = store->SetValue(PKEY_AppUserModel_ID, id);
+            if (SUCCEEDED(status)) status = store->Commit();
+        }
+    }
     if (FAILED(status))
         return HResultFailure(FileAssociationError::com,
                               i18n::Literal(L"configure IShellLinkW"), status);

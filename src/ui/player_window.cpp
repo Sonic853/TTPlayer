@@ -18,6 +18,7 @@
 #include "ttplayer/ui/playlist_transforms.h"
 #include "ttplayer/ui/player_runtime_policy.h"
 #include "ttplayer/ui/tooltip_policy.h"
+#include "ttplayer/ui/taskbar_icon.h"
 #include "ttplayer/ui/window_fade_policy.h"
 #include "ttplayer/ui/window_drag.h"
 
@@ -1536,12 +1537,8 @@ void PlayerWindow::UpdateTrayIcon() {
         ? skin_->Icon()
         : (window_icon_small_ ? window_icon_small_
                               : LoadIconW(nullptr, IDI_APPLICATION));
-    auto tip = display_title_;
-    if (tip.empty()) {
-        std::array<wchar_t, 128> title{};
-        GetWindowTextW(window_, title.data(), static_cast<int>(title.size()));
-        tip = title.data();
-    }
+    // 0045CA57 -> 00451B82 publishes the complete, unrotated caption.
+    const auto tip = MainWindowCaptionText();
     wcsncpy_s(icon.szTip, tip.c_str(), _TRUNCATE);
 
     const DWORD operation = tray_icon_added_ ? NIM_MODIFY : NIM_ADD;
@@ -2525,6 +2522,7 @@ void PlayerWindow::ApplyApplicationIcons() {
     SetClassLongPtrW(window_, GCLP_HICON, reinterpret_cast<LONG_PTR>(large_icon));
     SendMessageW(window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
     SendMessageW(window_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large_icon));
+    taskbar_icon_file_ = PublishTaskbarIcon(window_, small_icon, large_icon, DefaultPlayerTitle());
     UpdateTrayIcon();
     InvalidateRect(window_, nullptr, FALSE);
 }
@@ -2650,6 +2648,7 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
         style, create_x, create_y, create_width, create_height,
         nullptr, nullptr, instance, this);
     if (!window_) return false;
+    ApplyApplicationIcons();
     if (skinned) {
         const LONG_PTR final_style =
             WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPSIBLINGS;
@@ -3630,6 +3629,9 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             FinishCloseWhenFadesComplete();
         }
         return 0;
+    case WM_NCDESTROY:
+        ClearTaskbarIconProperties(window_);
+        break;
     case WM_DESTROY:
         CancelWaveTrackChange();
         if (playlist_find_progress_ && IsWindow(playlist_find_progress_))
@@ -6562,23 +6564,37 @@ void PlayerWindow::UpdateDiscordPresence() {
     discord_presence_.Update(std::move(presence), clock.observed_at);
 }
 
-void PlayerWindow::UpdateMainWindowCaption() {
+std::wstring PlayerWindow::MainWindowCaptionText() const {
+    const auto* track = PlaybackTrackForUi();
+    if (!track) return DefaultPlayerTitle();
+    // 0045CA57 uses CPlayItem's formatted title (004AE7FD), before the
+    // playlist row number is added for the skin's scrolling info control.
+    // The final space precedes the original's optional distribution label;
+    // that label is empty in the standard player, including when stopped.
+    return PlaylistDisplayText(*track) + L" - " + ResourceText(0x80) + L" ";
+}
+
+void PlayerWindow::UpdateMainWindowCaption(bool force_reset) {
     if (!window_) return;
-    const bool scrolling = settings_.general.scroll_title &&
+    const bool scrolling = PlaybackTrackForUi() && settings_.general.scroll_title &&
         audio_->State() == audio::PlaybackState::playing;
-    std::wstring source = display_title_;
-    if (scrolling) source += L"  ";
-    if (source == window_caption_source_ &&
+    auto source = MainWindowCaptionText();
+    if (!force_reset && source == window_caption_source_ &&
         scrolling == window_caption_scrolling_) return;
     window_caption_source_ = std::move(source);
     window_caption_scrolling_ = scrolling;
-    SetWindowTextW(window_, window_caption_source_.c_str());
+    // Start/resume append two spaces; pause/stop restore the base caption.
+    const auto caption = window_caption_source_ + (scrolling ? L"  " : L"");
+    SetWindowTextW(window_, caption.c_str());
     UpdateTrayIcon(); // 0045CA57 updates the unscrolled tray tooltip as well.
 }
 
 void PlayerWindow::RotateMainWindowCaption() {
     if (!window_ || !window_caption_scrolling_ ||
-        window_caption_source_.empty()) return;
+        window_caption_source_.empty() || progress_tracking_position_ ||
+        audio_->State() != audio::PlaybackState::playing) return;
+    // 0046010E timer 10 runs every 250 ms, but skips 0045D434 while the
+    // progress slider is tracking (+0x1B48). Resume at the same character.
     const int length = GetWindowTextLengthW(window_);
     if (length <= 1) return;
     std::wstring current(static_cast<size_t>(length) + 1U, L'\0');
@@ -7014,6 +7030,8 @@ bool PlayerWindow::PlayCurrent() {
     // available before choosing embedded / associated / local lyrics.
     if (!lyric_editor_) LoadCurrentLyrics();
     playback_was_active_ = true;
+    // 0045BF4B also resets a replay or a new item with an identical title.
+    UpdateMainWindowCaption(true);
     RefreshPlaybackUi();
     ShowPlaybackOpenTip();
     CheckExtensionCorrection(requested_track.path, requested_track.subtrack);
@@ -7132,7 +7150,7 @@ void PlayerWindow::SelectTrackFrom(size_t playlist_index, size_t index,
     if (artist_) SetWindowTextW(artist_, artist.c_str());
     if (skin_) InvalidateRect(window_, nullptr, FALSE);
     UpdateVisualFrame();
-    UpdateMainWindowCaption();
+    UpdateMainWindowCaption(true);
     if (start_playback) PlayCurrent();
 }
 
@@ -7361,6 +7379,7 @@ void PlayerWindow::Stop() {
     PollFadingAudio(true);
     audio_->StopWithFade();
     UpdateVisualFrame();
+    UpdateMainWindowCaption(true);
     RefreshPlaybackUi();
 }
 

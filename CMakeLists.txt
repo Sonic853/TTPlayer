@@ -121,6 +121,7 @@ add_library(ttplayer_core
   src/ui/player_window_skin_animation.cpp
   src/ui/player_window_taskbar.cpp
   src/ui/taskbar_playback.cpp
+  src/ui/taskbar_icon.cpp
   src/ui/taskbar_preview.cpp
   src/ui/player_window_equalizer.cpp
   src/ui/player_window_file_intake.cpp

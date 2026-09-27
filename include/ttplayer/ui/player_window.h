@@ -428,7 +428,8 @@ private:
     void FinishCloseWhenFadesComplete();
     [[nodiscard]] BYTE EffectiveSkinWindowAlpha(HWND target) const noexcept;
     void ApplyWindowShadow();
-    void UpdateMainWindowCaption();
+    [[nodiscard]] std::wstring MainWindowCaptionText() const;
+    void UpdateMainWindowCaption(bool force_reset = false);
     void RotateMainWindowCaption();
     void UpdateAutoShutdownTimer();
     void ShowAutoShutdownDialog();
@@ -897,6 +898,7 @@ private:
     bool popup_menu_hide_keyboard_cues_{};
     HICON window_icon_small_{};
     HICON window_icon_big_{};
+    std::filesystem::path taskbar_icon_file_;
     bool tray_icon_added_{};
     bool minimized_to_tray_{};
     bool tray_app_active_{};

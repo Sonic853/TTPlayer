@@ -1,4 +1,5 @@
 #include "ttplayer/i18n/i18n.h"
+#include "ttplayer/ui/taskbar_icon.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/wtl_runtime.h"
@@ -6403,7 +6404,19 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
     }
 
     if ((mask & 0x0001U) != 0) ApplyOptionsRuntime(253);
-    if ((mask & 0x0002U) != 0) ApplyOptionsRuntime(250);
+    if ((mask & 0x0002U) != 0) {
+        ApplyOptionsRuntime(250);
+        if (source_control == 2189) {
+            // 0046228D / 0x88D resets even a paused/stopped caption and
+            // appends the two spaces whenever the checkbox is enabled.
+            // Rotation itself remains gated by the playback state.
+            UpdateMainWindowCaption(true);
+            if (window_ && settings_.general.scroll_title) {
+                const auto caption = window_caption_source_ + L"  ";
+                SetWindowTextW(window_, caption.c_str());
+            }
+        }
+    }
     if ((mask & 0x0004U) != 0) ApplyOptionsRuntime(251);
     if ((mask & 0x0008U) != 0) ApplyOptionsRuntime(252);
     if ((mask & 0x0010U) != 0) ApplyOptionsRuntime(384);
@@ -6422,7 +6435,6 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
             output_restart_position.count(), 0, INT_MAX));
         RefreshPlaybackUi();
     }
-    static_cast<void>(source_control);
 }
 
 void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
@@ -7371,7 +7383,9 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 shortcut.display_name = ResourceText(0x80);
                 shortcut.description = ResourceText(0x80f2);
                 shortcut.working_directory = executable.parent_path();
-                shortcut.icon_path = executable;
+                shortcut.icon_path = taskbar_icon_file_.empty() ? executable : taskbar_icon_file_;
+                if (!taskbar_icon_file_.empty())
+                    shortcut.app_user_model_id = PlayerAppUserModelId(executable);
                 const auto location = control == 2030
                     ? settings::ShortcutLocation::desktop
                     : control == 2031
@@ -7757,7 +7771,10 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 FlushDeferredOptionsRuntime(template_id);
             } else {
                 options_deferred_apply_mask_ &= ~dirty;
-                ApplyOptionsPageRuntime(template_id);
+                if (template_id == 250 && control == 2189)
+                    ApplyOptionsChangeMask(0x0002U, control);
+                else
+                    ApplyOptionsPageRuntime(template_id);
             }
             return TRUE;
         }

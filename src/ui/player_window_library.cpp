@@ -2342,6 +2342,7 @@ void PlayerWindow::SelectMediaLibraryPlaybackTrack(size_t index,
     if (skin_) InvalidateRect(window_, nullptr, FALSE);
     if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
     UpdateVisualFrame();
+    UpdateMainWindowCaption(true);
     if (start_playback) PlayCurrent();
 }
 

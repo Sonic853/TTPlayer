@@ -101,6 +101,7 @@ struct ShortcutOptions {
     std::filesystem::path working_directory;
     std::filesystem::path icon_path;
     int icon_index{};
+    std::wstring app_user_model_id;
     // Used only for ShortcutLocation::programs.  It must be a relative path
     // and may be empty, matching the original direct Programs-folder link.
     std::filesystem::path programs_subdirectory;
