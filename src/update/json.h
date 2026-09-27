@@ -101,7 +101,7 @@ class JsonReader {
         out.kind=Json::number;out.text=input.substr(start,at-start);return out;
     }
 public:
-    explicit JsonReader(std::string_view s):input(s) {if(s.size()>2*1024*1024) Fail();}
+    explicit JsonReader(std::string_view s,size_t maximum=2*1024*1024):input(s) {if(s.size()>maximum) Fail();}
     Json Read() {auto out=Value(0);Space();if(at!=input.size()) Fail();return out;}
 };
 }

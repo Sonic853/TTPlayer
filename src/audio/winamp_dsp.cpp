@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <utility>
 
 namespace ttplayer::audio {
@@ -20,18 +21,56 @@ constexpr int kMaximumModuleSlots = 10;
 constexpr int kSplitFrameThreshold = 0x3fff;
 constexpr wchar_t kDspOriginalProcedure[] = L"TTPlayer.DspOriginalProcedure";
 constexpr wchar_t kDspHostWindow[] = L"TTPlayer.DspHostWindow";
+constexpr wchar_t kDspDragState[] = L"TTPlayer.DspDragState";
+
+struct DspDragState {
+    RECT first_proposed{};
+    POINT first_cursor{};
+    bool anchored{};
+};
+
+void ClearDspDragState(HWND window) noexcept {
+    delete reinterpret_cast<DspDragState*>(RemovePropW(window, kDspDragState));
+}
 
 LRESULT CALLBACK DspWindowProcedure(HWND window, UINT message,
                                     WPARAM wparam, LPARAM lparam) {
+    if (message == WM_ENTERSIZEMOVE) {
+        ClearDspDragState(window);
+        auto* drag = new (std::nothrow) DspDragState;
+        if (drag && !SetPropW(window, kDspDragState, drag)) delete drag;
+    }
     const auto previous = reinterpret_cast<WNDPROC>(GetPropW(window, kDspOriginalProcedure));
     const LRESULT result = previous
         ? CallWindowProcW(previous, window, message, wparam, lparam)
         : DefWindowProcW(window, message, wparam, lparam);
-    if (message == WM_MOVING) {
+    if (message == WM_MOVING && lparam) {
+        auto* proposed = reinterpret_cast<RECT*>(lparam);
+        auto* drag = reinterpret_cast<DspDragState*>(GetPropW(window, kDspDragState));
+        POINT cursor{};
+        if (drag && GetCursorPos(&cursor)) {
+            // USER32's next proposal can be the snapped HWND plus only the
+            // latest mouse delta. Re-snapping that delta pins slow drags to
+            // the edge forever. Preserve an unsnapped screen-space anchor,
+            // like the fixed grab point in 0044F670/0046EB64. The first
+            // WM_MOVING includes the native caption-drag threshold; keep it.
+            if (!drag->anchored) {
+                drag->first_proposed = *proposed;
+                drag->first_cursor = cursor;
+                drag->anchored = true;
+            } else {
+                OffsetRect(proposed,
+                    drag->first_proposed.left + cursor.x - drag->first_cursor.x - proposed->left,
+                    drag->first_proposed.top + cursor.y - drag->first_cursor.y - proposed->top);
+            }
+        }
         const HWND host = reinterpret_cast<HWND>(GetPropW(window, kDspHostWindow));
         if (IsWindow(host) && SendMessageW(host, kWinampDspMovingMessage,
                 reinterpret_cast<WPARAM>(window), lparam)) return TRUE;
+    } else if (message == WM_EXITSIZEMOVE || message == WM_CANCELMODE) {
+        ClearDspDragState(window);
     } else if (message == WM_NCDESTROY) {
+        ClearDspDragState(window);
         RemovePropW(window, kDspHostWindow);
         RemovePropW(window, kDspOriginalProcedure);
     }
@@ -316,7 +355,7 @@ public:
             }
             if (registry) {
                 if (!registry->Flush() && diagnostics) {
-                    try { diagnostics->push_back(L"Unable to save Ozone file configuration: " + path.wstring()); }
+                    try { diagnostics->push_back(L"Unable to save plug-in file configuration: " + path.wstring()); }
                     catch (...) {}
                 }
                 registry.reset();
@@ -456,6 +495,7 @@ public:
                 const auto previous = reinterpret_cast<WNDPROC>(GetPropW(window, kDspOriginalProcedure));
                 if (previous && reinterpret_cast<WNDPROC>(GetWindowLongPtrW(window, GWLP_WNDPROC)) == DspWindowProcedure) {
                     SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(previous));
+                    ClearDspDragState(window);
                     RemovePropW(window, kDspOriginalProcedure);
                     RemovePropW(window, kDspHostWindow);
                 }
@@ -476,6 +516,10 @@ public:
         return dispatcher.Post([this, path] {
             auto* current = Find(path);
             if (!current || callback_depth_ != 0) return;
+            if(current->registry) {
+                try {if(current->registry->ConfigureDfx(parent_window_))return;}
+                catch(const std::exception&) {diagnostics_.push_back(L"DFX file configuration helper could not start: "+path.wstring());return;}
+            }
             // This bundle's DFX Config does nothing except read the obsolete
             // HKLM top_folder and launch Apps/dfxwsettings.exe (10001070).
             // Resolve that existing helper beside the DLL instead. This fixes
@@ -518,7 +562,7 @@ public:
             if (process != GetCurrentProcessId()) return TRUE;
             wchar_t name[64]{};
             GetClassNameW(window, name, 64);
-            if (_wcsicmp(name, L"DFX_WINDOW") == 0 || _wcsicmp(name, L"Dee2") == 0)
+            if (_wcsicmp(name, L"DFX_WINDOW") == 0 || _wcsicmp(name, L"DFX_WINDOW_11") == 0 || _wcsicmp(name, L"Dee2") == 0)
                 reinterpret_cast<std::vector<HWND>*>(parameter)->push_back(window);
             return TRUE;
         }, reinterpret_cast<LPARAM>(&result));
@@ -542,6 +586,10 @@ public:
     }
 
     std::vector<std::wstring> TakeDiagnostics() {
+        for(auto& module:modules_)if(module.registry) {
+            auto messages=module.registry->Diagnostics();
+            diagnostics_.insert(diagnostics_.end(),std::make_move_iterator(messages.begin()),std::make_move_iterator(messages.end()));
+        }
         return std::exchange(diagnostics_, {});
     }
 
@@ -589,7 +637,7 @@ private:
         std::unique_ptr<detail::PluginRegistry> registry;
         try { registry = detail::PluginRegistry::Attach(library, path, storage_directory); }
         catch (const std::exception&) {
-            diagnostics_.push_back(L"Ozone file configuration is invalid, busy, or read-only: " + path.wstring());
+            diagnostics_.push_back(L"Plug-in file configuration is invalid, busy, or read-only: " + path.wstring());
             FreeLibrary(library);
             return;
         }

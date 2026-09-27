@@ -88,6 +88,7 @@ add_library(ttplayer_core
   src/audio/replay_gain_scanner.cpp
   src/audio/winamp_dsp.cpp
   src/audio/plugin_registry.cpp
+  src/audio/dfx_registry_helper.cpp
   src/core/text.cpp
   src/integrations/discord_presence.cpp
   src/integrations/discord_track_presence.cpp

@@ -1,3 +1,7 @@
+> 2026-09-28 共享存储更新：已移除按插件分区，增加缺失键/值的系统只读回退，以及 Enhancer 适配。当前行为与范围以 [共享注册表说明](SHARED_PLUGIN_REGISTRY_IMPORT.md) 为准；下面保留早期实施记录。
+
+> 2026-09-28 更新：第 1–6 节保留 Ozone 首阶段记录；当前共用存储及 REG 导入见 [使用说明](SHARED_PLUGIN_REGISTRY_IMPORT.md)，DFX 后续实现见第 7 节及 [详细记录](DFX_FILE_REGISTRY_IMPLEMENTATION.md)。
+
 # 插件范围的文件型注册表兼容层
 
 实施日期：2026-09-27。
@@ -141,26 +145,16 @@ DLL 的自定义入口 `59456652` 直接返回成功，外层 `5944FA8B` 仍执�
 
 Release EXE 已通过 XP / Win7 静态导入检查：x86、子系统 5.01；具体导入数量以发行目录的 `legacy-imports.json` 为准。
 
-## 7. DFX 接入检查与下一阶段
+## 7. DFX 建议实施结果（2026-09-28）
 
-现有 `Dsp_Dfx.dll` 摘要为 `987e7d531b92df9a582c1ab803f92856e948cc87f0a6b1ed900d3a7898a0eb03`。
-该 DLL 导入 RegOpenKeyExA/W、RegCreateKeyExW、RegQueryValueExA/W、RegSetValueExW、RegCloseKey；还使用 HKLM 下的安装路径和 HKCU 下的会话、窗口、登记信息。
+已按本节原建议补齐 DFX DLL、设置辅助进程和共用文件存储。实现与二进制分析、验证记录见 [DFX 文件配置实现](DFX_FILE_REGISTRY_IMPLEMENTATION.md)。
 
-它的 Config `10001070` 会读取 `HKLM/SOFTWARE/DFX/11/top_folder` 并启动 `Apps/dfxwsettings.exe`。前一轮宿主修复已经让设置入口从实际插件目录启动这个 EXE，但这不代表 EXE 内部的访问已经被接管。
-
-已检查的 `dfxwsettings.exe` 为 48,128 字节，入口 `00401DC1`，启动导入包含 LoadLibraryA/GetProcAddress；它的静态导入表不足以给出实际注册表调用全集。DFX 二进制中还存在 `fileRegCreateKey` 等字符串，单凭名字也不能认定已有可直接启用的完整便携模式。
-
-因此本阶段没有对 DFX 单独打开 DLL 层重定向，否则 DLL 与设置 EXE 会读写两个不同的数据源，设置界面可能无法控制正在播放的实例。
-
-后续应当按以下依赖顺序实施：
-
-1. 对设置 EXE 及其运行时模块记录打开、读写、枚举、删除和进程创建轨迹，确定完整分支及调用方。
-2. 为 DFX 建立单一配置服务，通过进程间协议让 DLL 和设置 EXE 共享同一份内存状态；服务统一执行文件落盘，避免多个 JSON 写入者覆盖数据。
-3. 在辅助进程执行其业务初始化之前安装适配，覆盖动态解析和后续模块加载；接入失败必须终止该次便携启动并给出诊断。
-4. 实现该插件实际需要的多根键、默认值、缺失值、枚举/删除和视图规则，从实际 DLL 路径生成资源位置；保持原插件登记校验。
-5. 验证正在播放时改设置立即生效、两个界面同时修改、异常退出、目录迁移，以及 XP/Win7 的全过程原生写入检查，再启用 DFX 文件型模式。
-
-这部分需要独立的跨进程实现与验证，不能通过给当前 Ozone 路径白名单增加 `Software/DFX` 就完成。
+- DLL 与设置进程共用播放器中的同一个内存配置，统一写入 `PluginState/registry.json`。
+- 对辅助程序在业务入口运行前接管动态 API 解析；保留其脱壳异常处理。
+- 兼容随包辅助程序的 DFX 8 分支、窗口名称与实际 DFX 9 DLL 的差异。
+- 根据插件实际目录更新安装资源路径，附加文件放在 `PluginState/Dsp_Dfx`。
+- 补充多根键、枚举、删除、错误和长度处理，解决高频轮询导致句柄累计耗尽的问题。
+- 仅对核验过的 DLL／EXE 启用；辅助进程适配失败时停止该进程并报告诊断。
 
 ## 8. 相关记录
 

@@ -13,6 +13,8 @@ struct ParsedCommandLine {
     std::filesystem::path file;
     std::vector<std::wstring> switches;
     bool smoke_test{};
+    size_t file_count{};
+    bool registry_import{};
     [[nodiscard]] bool HasSwitch(std::wstring_view name) const;
     // 004C038B/004C0DB2: /a -> 1, /e -> 2, ordinary open -> 0.
     [[nodiscard]] ULONG_PTR FileMode() const;
