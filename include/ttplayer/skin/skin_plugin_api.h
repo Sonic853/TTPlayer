@@ -33,6 +33,8 @@ enum TtpSkinCommand {
     TTP_SKIN_VOLUME_DELTA, // signed relative adjustment; option query >=1 advertises support
     TTP_SKIN_VOLUME_END, // finish/cancel a provider volume gesture
     TTP_SKIN_STATUS_TEXT, // tip query only: temporary native slider feedback, or empty
+    TTP_SKIN_PLAYLIST_DRAG_ENABLED, // option query: 0 disabled, 1 enabled, -1 unavailable
+    TTP_SKIN_LIST_CONTEXT, // host-reserved dispatch for playlist_context; do not send directly
     TTP_SKIN_EQ_VALUE = 100 // + 0: preamp, + 1..10: frequency bands; value -12..12
 };
 
@@ -121,6 +123,16 @@ typedef struct TtpSkinPlaylistDrop {
     int32_t insertion; // Output: position in [0, track_count], -1 rejects the point.
 } TtpSkinPlaylistDrop;
 
+// A copied, deferred menu request. No provider pointer survives the callback.
+typedef struct TtpSkinPlaylistContext {
+    uint32_t size;
+    HWND window;
+    POINT point; // Menu anchor in screen coordinates; keyboard uses the row centre.
+    int32_t row; // Visible row, -1 for the empty area.
+    uint32_t modifiers; // MK_CONTROL / MK_SHIFT captured from the mouse event.
+    BOOL keyboard; // Preserve selection/caret/anchor for keyboard invocation.
+} TtpSkinPlaylistContext;
+
 typedef struct TtpSkinHost {
     uint32_t size, version;
     void* context;
@@ -158,6 +170,9 @@ typedef struct TtpSkinHost {
     // Optional query for boolean command settings (currently CROSSFADE).
     // -1 means unavailable. Does not modify settings or create UI.
     int32_t (WINAPI *option)(void*, uint32_t command);
+    // Optional UI-thread enqueue only. The host copies the request, applies
+    // native right-click selection and opens the menu after the DLL returns.
+    BOOL (WINAPI *playlist_context)(void*, const TtpSkinPlaylistContext*);
 } TtpSkinHost;
 #define TTP_SKIN_HOST_V1_SIZE offsetof(TtpSkinHost, drag)
 

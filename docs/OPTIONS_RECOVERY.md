@@ -200,8 +200,10 @@ Windows Sandbox 证据及当前宿主机双版本对照确认的选项窗口行�
 - 列资源 `0x815B` 的文本顺序为“描述|文件名”；实际列顺序是空白勾选列、
   描述、文件名，宽度 20/256/100。
 - 同时扫描配置目录与 `exe\Plugins`（两者不同时），只接受 `dsp_*.dll`。
-- 候选 DLL 必须可加载、导出 `winampDSPGetHeader2`，且头版本大于 `0x1F`；
-  描述来自 DSP header，不能直接用文件 stem 伪造。
+- 原版先枚举候选路径，再为描述查询／激活加载 DLL，校验导出
+  `winampDSPGetHeader2` 且头版本大于 `0x1F`；描述来自 DSP header，不能直接
+  用文件 stem 伪造。`00498C2C` 不根据描述查询失败跳过候选行；重建版隔离
+  扫描只返回验证成功的项目，是与原版不同的筛选策略。
 - 勾选/取消立即加载或卸载；配置按钮和双击调用已激活模块的配置回调；上移、
   下移和自定义通知 `-197` 修改实际 processor 顺序。
 - `Plugin/@Folder` 保存插件目录；`Modules_Count` 和 `Modules_N` 保存活动模块。
@@ -209,12 +211,18 @@ Windows Sandbox 证据及当前宿主机双版本对照确认的选项窗口行�
   文件名。
 - 实时链已按 `FUN_00427EDC`、`FUN_00428061`、`FUN_004280CD` 和
   `FUN_0042898D` 接通：校验 header 版本、拒绝 PaceMaker、在模块槽 0..9
-  中取第一个有效模块，依次调用 `Init/ModifySamples/Quit`。ABI 是不含
-  `userData` 的旧 Winamp 结构；Win32 偏移分别为 `+0x10/+0x14/+0x18`。
+  中取第一个有效模块，依次调用 `Init/ModifySamples/Quit`。ABI 头部不能插入
+  `userData`；Win32 回调偏移分别为 `+0x10/+0x14/+0x18`。DLL 返回的模块对象
+  可以带尾部私有字段，例如 Ozone 在 `+0x1C` 保存 `userData`。
 - 原版在送入 DSP 前把 PCM 转成有符号 16 位，并在帧数大于 `0x3FFF` 时只拆成
   前后两段；`ModifySamples` 的返回帧数不参与调整。重建链保留这一行为，同时
   用 SEH/C++ 异常边界把出错模块从当前链摘除。DLL 内部永久阻塞仍不能在
   in-process 实时 ABI 中安全强杀；文件发现和配置窗口继续由限时辅助进程隔离。
+
+2026-09-27 实际插件复核：上述即时启停、同实例配置、保留实例的排序是原版
+行为，重建版尚有差异。当前配置子进程未执行 Init，且与实时实例分离；排序会
+重建整条链。详见 [音效插件实现分析](WINAMP_DSP_PLUGIN_IMPLEMENTATION_ANALYSIS.md)
+和 [REG 文件分析](PLUGIN_REGISTRY_FILES_ANALYSIS.md)。
 
 ### 6.3 音频设备页 260
 

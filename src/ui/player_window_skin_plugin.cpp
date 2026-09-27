@@ -31,7 +31,7 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
         if(!module->OwnsInstalledPackage(PlayerRuntimeDirectory()/L"Skin",path) || !module->Probe(path,info)) continue;
         const TtpSkinHost host{sizeof(TtpSkinHost),TTP_SKIN_ABI,this,
             QuerySkinPluginState,QuerySkinPluginTrack,PostSkinPluginCommand,HandleSkinPluginDrag,
-            QuerySkinPluginSelection,PaintSkinPluginVisual,QuerySkinPluginTip,ResizeSkinPluginWindow,QuerySkinPluginSpectrum,PaintSkinPluginContent,HandleSkinPluginContentInput,QuerySkinPluginOption};
+            QuerySkinPluginSelection,PaintSkinPluginVisual,QuerySkinPluginTip,ResizeSkinPluginWindow,QuerySkinPluginSpectrum,PaintSkinPluginContent,HandleSkinPluginContentInput,QuerySkinPluginOption,PostSkinPluginPlaylistContext};
         auto next=skin::SkinPluginInstance::Create(module,path,&host);
         if(!next) {
             if(window_) {
@@ -264,8 +264,9 @@ BOOL WINAPI PlayerWindow::QuerySkinPluginState(void* context,TtpSkinState* state
 int32_t WINAPI PlayerWindow::QuerySkinPluginOption(void* context,uint32_t command) {
     if(!context)return -1;
     if(command==TTP_SKIN_VOLUME_DELTA)return 1;
-    if(command!=TTP_SKIN_CROSSFADE)return -1;
     const auto& self=*static_cast<PlayerWindow*>(context);
+    if(command==TTP_SKIN_PLAYLIST_DRAG_ENABLED)return self.settings_.playlist.enable_drag_drop;
+    if(command!=TTP_SKIN_CROSSFADE)return -1;
     return (self.settings_.playback.sound_fade_mode&0x10)!=0;
 }
 BOOL WINAPI PlayerWindow::QuerySkinPluginTrack(void* context,uint32_t index,TtpSkinTrack* output) {
@@ -290,6 +291,33 @@ uint32_t WINAPI PlayerWindow::QuerySkinPluginSelection(void* context,uint32_t ro
 void WINAPI PlayerWindow::PostSkinPluginCommand(void* context,uint32_t command,int32_t value) {
     const auto* self=static_cast<PlayerWindow*>(context);
     if(self && self->window_) PostMessageW(self->window_,RegisterWindowMessageW(TTP_SKIN_COMMAND_MESSAGE),command,value);
+}
+BOOL WINAPI PlayerWindow::PostSkinPluginPlaylistContext(void* context,const TtpSkinPlaylistContext* event) {
+    if(!context || !event || event->size<sizeof(*event))return FALSE;
+    auto& self=*static_cast<PlayerWindow*>(context);
+    if(!self.window_ || !self.external_skin_ || !self.external_skin_->Handles(event->window) ||
+       (event->window!=self.window_ && event->window!=self.playlist_window_))return FALSE;
+    try {
+        self.skin_plugin_playlist_contexts_.push_back(*event);
+        if(PostMessageW(self.window_,RegisterWindowMessageW(TTP_SKIN_COMMAND_MESSAGE),TTP_SKIN_LIST_CONTEXT,0))return TRUE;
+        self.skin_plugin_playlist_contexts_.pop_back();
+    } catch(...) {}
+    return FALSE;
+}
+void PlayerWindow::ShowSkinPluginPlaylistMenu(int32_t row,HWND owner,POINT point) {
+    playlist_send_to_catalog_.Clear();
+    HMENU menu=row<0
+        ? ConvertMenuBarToPopup(LoadMenuW(ResourceModule(),MAKEINTRESOURCEW(kMenuPlaylistToolbar)))
+        : DetachPopup(LoadMenuW(ResourceModule(),MAKEINTRESOURCEW(
+            playlist_selected_rows_.size()>1?kMenuPlaylistItems:kMenuPlaylistItem)),0);
+    if(menu) {
+        PreparePlaylistMenu(menu);BeginPopupMenuStyle(menu);
+        const UINT selected=TrackPlayerPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,
+            point.x,point.y,0,owner,nullptr);
+        EndPopupMenuStyle();DestroyMenu(menu);
+        if(selected && !HandlePlaylistCommand(selected))HandleContextCommand(selected);
+    }
+    playlist_send_to_catalog_.Clear();
 }
 BOOL WINAPI PlayerWindow::HandleSkinPluginDrag(void* context,const TtpSkinDrag* event) {
     if (!context || !event || event->size < sizeof(*event)) return FALSE;
@@ -644,20 +672,29 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
             !playlist_selected_rows_.contains(static_cast<size_t>(value)))
             SelectPlaylistRow(static_cast<size_t>(value),false,false,
                 PlaylistSelectionTrigger::selection_changed);
-        playlist_send_to_catalog_.Clear();
-        HMENU menu = value<0
-            ? ConvertMenuBarToPopup(LoadMenuW(ResourceModule(),MAKEINTRESOURCEW(kMenuPlaylistToolbar)))
-            : DetachPopup(LoadMenuW(ResourceModule(),MAKEINTRESOURCEW(
-                playlist_selected_rows_.size()>1?kMenuPlaylistItems:kMenuPlaylistItem)),0);
-        if(menu) {
-            PreparePlaylistMenu(menu);BeginPopupMenuStyle(menu);
-            POINT p{};GetCursorPos(&p);
-            const UINT selected=TrackPlayerPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,
-                p.x,p.y,0,playlist_window_,nullptr);
-            EndPopupMenuStyle();DestroyMenu(menu);
-            if(selected && !HandlePlaylistCommand(selected)) HandleContextCommand(selected);
+        POINT point{};GetCursorPos(&point);
+        ShowSkinPluginPlaylistMenu(value,playlist_window_,point);break;
+    }
+    case TTP_SKIN_LIST_CONTEXT: {
+        if(skin_plugin_playlist_contexts_.empty())break;
+        const auto event=skin_plugin_playlist_contexts_.front();skin_plugin_playlist_contexts_.pop_front();
+        if(!external_skin_ || !IsWindow(event.window) || !external_skin_->Handles(event.window))break;
+        const int row=event.row>=0 && static_cast<size_t>(event.row)<VisiblePlaylistTrackCount()?event.row:-1;
+        // SysListView32 right-button semantics (00488FEF observes this state).
+        // Unlike left selection, Ctrl never toggles and Shift never extends.
+        if(!event.keyboard && !(event.modifiers&MK_SHIFT)) {
+            const bool control=(event.modifiers&MK_CONTROL)!=0;
+            if(row>=0) {
+                if(!control) {
+                    if(!playlist_selected_rows_.contains(row))playlist_selected_rows_={static_cast<size_t>(row)};
+                    playlist_selection_=row;
+                }
+                playlist_selection_anchor_=row;
+            } else if(!control)playlist_selected_rows_.clear();
+            if(!settings_.playlist.library_mode)RememberPlaylistRow(playlists_.ActiveIndex(),playlist_selection_);
         }
-        playlist_send_to_catalog_.Clear();break;
+        InvalidateRect(event.window,nullptr,FALSE);
+        ShowSkinPluginPlaylistMenu(row,event.window,event.point);break;
     }
     case TTP_SKIN_PROPERTIES: HandleContextCommand(kCmdFileProperties);break;
     case TTP_SKIN_ALWAYS_ON_TOP: HandleContextCommand(kCmdAlwaysOnTop);break;

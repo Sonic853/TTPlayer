@@ -101,6 +101,9 @@ private:
     bool InstallPluginSkin(const std::filesystem::path& path);
     static BOOL WINAPI QuerySkinPluginState(void*, TtpSkinState*);
     static int32_t WINAPI QuerySkinPluginOption(void*, uint32_t);
+    static BOOL WINAPI PostSkinPluginPlaylistContext(void*, const TtpSkinPlaylistContext*);
+    void ShowSkinPluginPlaylistMenu(int32_t row, HWND owner, POINT point);
+    std::deque<TtpSkinPlaylistContext> skin_plugin_playlist_contexts_;
     static BOOL WINAPI QuerySkinPluginTrack(void*, uint32_t, TtpSkinTrack*);
     static uint32_t WINAPI QuerySkinPluginSelection(void*, uint32_t);
     static BOOL WINAPI PaintSkinPluginVisual(void*, HDC, const RECT*, const TtpSkinVisualColors*);
