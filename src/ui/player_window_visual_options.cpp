@@ -3,6 +3,7 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "options_buttons.h"
+#include "options_visual_tabs.h"
 #include "modern_file_dialog.h"
 #include "../app/resource_ids.h"
 
@@ -45,9 +46,10 @@ constexpr UINT kResetAllOptions = 0x04d3;
 constexpr int kPropertySheetApply = 0x3021;
 constexpr UINT_PTR kVisualOptionsSheetSubclass = 0x5454564f;
 
-constexpr std::array<UINT, 6> kColorControls{
+constexpr std::array<UINT, 10> kColorControls{
     kPeakColor, kTopColor, kMiddleColor, kBottomColor, kScopeColor,
-    kVisualTextColor};
+    kVisualTextColor, IDC_VISUAL_PULSE_COLOR, IDC_VISUAL_RIPPLE_COLOR,
+    IDC_VISUAL_PULSE_BACKGROUND, IDC_VISUAL_RIPPLE_BACKGROUND};
 
 COLORREF* VisualColor(settings::VisualSettings& visual, UINT control) {
     switch (control) {
@@ -57,6 +59,10 @@ COLORREF* VisualColor(settings::VisualSettings& visual, UINT control) {
     case kBottomColor: return &visual.spectrum_bottom_color;
     case kScopeColor: return &visual.blur_scope_color;
     case kVisualTextColor: return &visual.text_color;
+    case IDC_VISUAL_PULSE_COLOR: return &visual.pulse_color;
+    case IDC_VISUAL_RIPPLE_COLOR: return &visual.ripple_color;
+    case IDC_VISUAL_PULSE_BACKGROUND: return &visual.pulse_background;
+    case IDC_VISUAL_RIPPLE_BACKGROUND: return &visual.ripple_background;
     default: return nullptr;
     }
 }
@@ -211,6 +217,12 @@ bool LoadVisualProfile(const std::filesystem::path& path,
     if (XmlInteger(node, L"Blur", integer)) visual.blur = integer != 0;
     XmlColor(node, L"BlurScopeColor", visual.blur_scope_color);
     XmlColor(node, L"TextColor", visual.text_color);
+    XmlColor(node, L"PulseColor", visual.pulse_color);
+    XmlColor(node, L"RippleColor", visual.ripple_color);
+    XmlColor(node, L"PulseBackground", visual.pulse_background);
+    XmlColor(node, L"RippleBackground", visual.ripple_background);
+    if (XmlInteger(node, L"PulseFollowLyric", integer)) visual.pulse_follow_lyric = integer != 0;
+    if (XmlInteger(node, L"RippleFollowLyric", integer)) visual.ripple_follow_lyric = integer != 0;
     LOGFONTW font = visual.font;
     if (XmlFont(node, font)) {
         visual.font = font;
@@ -273,6 +285,12 @@ bool SaveVisualProfile(const std::filesystem::path& path,
     SetXmlAttribute(element, L"BlurScopeColor",
                     ColorText(visual.blur_scope_color));
     SetXmlAttribute(element, L"TextColor", ColorText(visual.text_color));
+    SetXmlAttribute(element, L"PulseColor", ColorText(visual.pulse_color));
+    SetXmlAttribute(element, L"RippleColor", ColorText(visual.ripple_color));
+    SetXmlAttribute(element, L"PulseBackground", ColorText(visual.pulse_background));
+    SetXmlAttribute(element, L"RippleBackground", ColorText(visual.ripple_background));
+    SetXmlAttribute(element, L"PulseFollowLyric", visual.pulse_follow_lyric ? 1 : 0);
+    SetXmlAttribute(element, L"RippleFollowLyric", visual.ripple_follow_lyric ? 1 : 0);
     if (visual.font_valid)
         SetXmlAttribute(element, L"Font", FontText(visual.font));
 
@@ -328,6 +346,11 @@ void SyncVisualPage(HWND dialog, HMODULE resources,
         SendMessageW(track, TBM_SETPOS, TRUE, visual.frames_per_second);
     }
     SetFramesText(dialog, resources, visual.frames_per_second);
+    CheckDlgButton(dialog, IDC_VISUAL_PULSE_FOLLOW, visual.pulse_follow_lyric ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(dialog, IDC_VISUAL_RIPPLE_FOLLOW, visual.ripple_follow_lyric ? BST_CHECKED : BST_UNCHECKED);
+    EnableWindow(GetDlgItem(dialog, IDC_VISUAL_PULSE_COLOR), !visual.pulse_follow_lyric);
+    EnableWindow(GetDlgItem(dialog, IDC_VISUAL_RIPPLE_COLOR), !visual.ripple_follow_lyric);
+    VisualOptionsTabs::SelectForType(dialog, visual.type);
     for (const UINT control : kColorControls) {
         const HWND button = GetDlgItem(dialog, static_cast<int>(control));
         if (first && button) {
@@ -479,6 +502,7 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
     case WM_INITDIALOG: {
         const auto description = ResourceText(kVisualOptionsPage);
         if (!description.empty()) SetWindowTextW(dialog, description.c_str());
+        VisualOptionsTabs::Attach(dialog);
         SyncVisualPage(dialog, resources, settings_.visual, true);
         InstallOptionsBitmapButton(dialog, kVisualFont, resources, 0x161);
         InstallOptionsBitmapButton(dialog, kVisualProfile, resources, 0x160);
@@ -501,12 +525,25 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
         const COLORREF* color = item
             ? VisualColor(settings_.visual, item->CtlID) : nullptr;
         if (!item || !color) break;
-        DrawOptionsColorButton(*item, *color);
+        const bool follow = (item->CtlID == IDC_VISUAL_PULSE_COLOR && settings_.visual.pulse_follow_lyric) ||
+            (item->CtlID == IDC_VISUAL_RIPPLE_COLOR && settings_.visual.ripple_follow_lyric);
+        DrawOptionsColorButton(*item, follow ? settings_.lyric.highlight_color : *color);
         return TRUE;
     }
     case WM_COMMAND: {
         const UINT control = LOWORD(wparam);
         const UINT notification = HIWORD(wparam);
+        if ((control == IDC_VISUAL_PULSE_FOLLOW || control == IDC_VISUAL_RIPPLE_FOLLOW) &&
+            notification == BN_CLICKED) {
+            const bool follow = IsDlgButtonChecked(dialog, control) == BST_CHECKED;
+            const bool pulse = control == IDC_VISUAL_PULSE_FOLLOW;
+            (pulse ? settings_.visual.pulse_follow_lyric : settings_.visual.ripple_follow_lyric) = follow;
+            const HWND button = GetDlgItem(dialog, pulse ? IDC_VISUAL_PULSE_COLOR : IDC_VISUAL_RIPPLE_COLOR);
+            EnableWindow(button, !follow);
+            InvalidateRect(button, nullptr, TRUE);
+            refresh();
+            return TRUE;
+        }
         if (control == kVisualType && notification == CBN_SELCHANGE) {
             const int type = static_cast<int>(SendDlgItemMessageW(
                 dialog, kVisualType, CB_GETCURSEL, 0, 0));

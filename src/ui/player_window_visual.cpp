@@ -805,16 +805,34 @@ public:
         case 6: {
             // BaiduMusic.exe!00432740 paints a black backing and passes the
             // middle half of the lyric surface to VisualEffectCtrl::Draw.
-            if (!have_dynamic_frame_) { PaintCachedBackground(dc, bounds); break; }
+            if (!have_dynamic_frame_ && !full_screen_) {
+                PaintCachedBackground(dc, bounds);
+                break;
+            }
             if (!surface_dc_ || !surface_bits_) break;
             RECT frame{0, 0, width_, height_};
-            FillRect(surface_dc_, &frame, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            const COLORREF background = settings_.type == 5
+                ? settings_.pulse_background : settings_.ripple_background;
+            GdiFlush();
+            if (full_screen_) {
+                SetDCBrushColor(surface_dc_, background);
+                FillRect(surface_dc_, &frame, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+            } else {
+                // Always restore the skin before compositing coverage. Reusing
+                // the preceding frame would accumulate opacity and leave trails.
+                RestoreBackground();
+            }
             if (have_dynamic_frame_) {
                 RECT effect = frame;
                 const LONG quarter = height_ / 4;
                 effect.top += quarter;
                 effect.bottom -= quarter;
-                player_effect_.Paint(surface_dc_, effect, settings_.type, player_effect_color_);
+                const bool pulse = settings_.type == 5;
+                const bool follow = pulse ? settings_.pulse_follow_lyric : settings_.ripple_follow_lyric;
+                const COLORREF color = follow ? player_effect_color_
+                    : pulse ? settings_.pulse_color : settings_.ripple_color;
+                player_effect_.Paint(surface_dc_, effect, settings_.type, color,
+                                     background, !full_screen_);
             }
             StretchBlt(dc, bounds.left, bounds.top, bounds.right - bounds.left,
                 bounds.bottom - bounds.top, surface_dc_, 0, 0, width_, height_, SRCCOPY);

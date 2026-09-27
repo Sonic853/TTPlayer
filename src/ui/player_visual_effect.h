@@ -22,19 +22,24 @@ public:
 
     void Reset() noexcept;
     void Update(std::span<const int16_t> frequency) noexcept;
-    void Paint(HDC dc, const RECT& bounds, int type, COLORREF color);
+    void Paint(HDC dc, const RECT& bounds, int type, COLORREF color,
+               COLORREF background = RGB(0, 0, 0), bool transparent = false);
 
 private:
     friend struct ttplayer::testing::PlayerVisualAccess;
     struct Band { int16_t level{}, fall{}, peak{}, previous_peak{}; };
     std::array<Band, 256> bands_{};
-    HDC pulse_dc_{};
-    HBITMAP pulse_bitmap_{};
-    HGDIOBJ pulse_previous_{};
-    uint32_t* pulse_pixels_{};
+    struct Surface {
+        HDC dc{};
+        HBITMAP bitmap{};
+        HGDIOBJ previous{};
+        uint32_t* pixels{};
+        int width{}, height{};
+        ~Surface();
+        bool Resize(int w, int h);
+    } pulse_, mask_, composite_;
     ULONG_PTR graphics_token_{};
-    bool EnsurePulseSurface();
-    void PaintPulse(HDC dc, const RECT& bounds, COLORREF color);
-    void PaintRipple(HDC dc, const RECT& bounds, COLORREF color);
+    void PaintPulse(HDC dc, const RECT& bounds);
+    void PaintRipple(HDC dc, const RECT& bounds);
 };
 }

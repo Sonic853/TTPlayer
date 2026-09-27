@@ -8,6 +8,12 @@
 
 namespace ttplayer::ui::detail {
 namespace {
+int GradientWeight(double amount, int highlight = 0) noexcept {
+    // Keep the original white-on-black intensity as coverage, including the
+    // brighter inner layers. Tint only after rasterization and scaling.
+    return std::clamp(int(255.0 * amount) + highlight, 0, 255);
+}
+
 double FrequencyScale(bool spectrum) noexcept {
     // 10002990 caches this once per DLL, shared by ALL processors. Preserve
     // both launch orders: spectrum first uses 100*(4/3); pulse/ripple first
@@ -93,9 +99,6 @@ std::array<int16_t, 257> PlayerFrequencyData(std::span<const int16_t, 512> pcm) 
 }
 
 PlayerVisualEffect::~PlayerVisualEffect() {
-    if (pulse_dc_ && pulse_previous_) SelectObject(pulse_dc_, pulse_previous_);
-    if (pulse_bitmap_) DeleteObject(pulse_bitmap_);
-    if (pulse_dc_) DeleteDC(pulse_dc_);
     if (graphics_token_) Gdiplus::GdiplusShutdown(graphics_token_);
 }
 
@@ -130,55 +133,63 @@ void PlayerVisualEffect::Update(std::span<const int16_t> frequency) noexcept {
     }
 }
 
-bool PlayerVisualEffect::EnsurePulseSurface() {
-    if (pulse_pixels_) return true;
-    pulse_dc_ = CreateCompatibleDC(nullptr);
-    if (!pulse_dc_) return false;
+PlayerVisualEffect::Surface::~Surface() {
+    if (dc && previous) SelectObject(dc, previous);
+    if (bitmap) DeleteObject(bitmap);
+    if (dc) DeleteDC(dc);
+}
+
+bool PlayerVisualEffect::Surface::Resize(int w, int h) {
+    if (pixels && width == w && height == h) return true;
+    if (!dc) dc = CreateCompatibleDC(nullptr);
+    if (!dc) return false;
     BITMAPINFO info{};
-    info.bmiHeader = {sizeof(BITMAPINFOHEADER), 512, 160, 1, 32, BI_RGB};
-    void* pixels{};
-    pulse_bitmap_ = CreateDIBSection(pulse_dc_, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
-    if (!pulse_bitmap_) { DeleteDC(pulse_dc_); pulse_dc_ = nullptr; return false; }
-    pulse_previous_ = SelectObject(pulse_dc_, pulse_bitmap_);
-    pulse_pixels_ = static_cast<uint32_t*>(pixels);
+    info.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB};
+    void* bits{};
+    const HBITMAP next = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!next) return false;
+    const auto old = SelectObject(dc, next);
+    if (!previous) previous = old;
+    if (bitmap) DeleteObject(bitmap);
+    bitmap = next;
+    pixels = static_cast<uint32_t*>(bits);
+    width = w;
+    height = h;
     return true;
 }
 
-void PlayerVisualEffect::PaintPulse(HDC dc, const RECT& bounds, COLORREF color) {
-    if (!EnsurePulseSurface()) return;
+void PlayerVisualEffect::PaintPulse(HDC dc, const RECT& bounds) {
+    if (!pulse_.Resize(512, 160)) return;
     GdiFlush();
-    std::fill_n(pulse_pixels_, 512 * 160, 0U);
+    std::fill_n(pulse_.pixels, 512 * 160, 0U);
     // 100034D0: four nested vertical strokes per band, mirrored about
     // x=255/256. LineTo excludes its final pixel, as in the original.
     for (int i = 0; i < 256; ++i) {
         const int level = bands_[i].level;
         if (!level) continue;
         const double amount = double(level) / 160.0;
-        const int red = int(GetRValue(color) * amount);
-        const int green = int(GetGValue(color) * amount);
-        const int blue = int(GetBValue(color) * amount);
         for (int layer = 4; layer > 0; --layer) {
             const int top = int(80.0 - layer * double(level) * 0.125);
             const int bottom = int(layer * double(level) * 0.25 + top);
             if (top == bottom) continue;
             const int add = (4 - layer) * 16;
-            const HPEN pen = CreatePen(PS_SOLID, 1, RGB(
-                std::min(255, red + add), std::min(255, green + add), std::min(255, blue + add)));
+            const int weight = GradientWeight(amount, add);
+            const HPEN pen = CreatePen(PS_SOLID, 1, RGB(weight, weight, weight));
             if (!pen) continue;
-            const HGDIOBJ old = SelectObject(pulse_dc_, pen);
-            MoveToEx(pulse_dc_, i + 256, top, nullptr);
-            LineTo(pulse_dc_, i + 256, bottom);
-            MoveToEx(pulse_dc_, 255 - i, top, nullptr);
-            LineTo(pulse_dc_, 255 - i, bottom);
-            SelectObject(pulse_dc_, old);
+            const HGDIOBJ old = SelectObject(pulse_.dc, pen);
+            MoveToEx(pulse_.dc, i + 256, top, nullptr);
+            LineTo(pulse_.dc, i + 256, bottom);
+            MoveToEx(pulse_.dc, 255 - i, top, nullptr);
+            LineTo(pulse_.dc, 255 - i, bottom);
+            SelectObject(pulse_.dc, old);
             DeleteObject(pen);
         }
     }
     StretchBlt(dc, bounds.left, bounds.top, bounds.right - bounds.left,
-               bounds.bottom - bounds.top, pulse_dc_, 0, 0, 512, 160, SRCCOPY);
+               bounds.bottom - bounds.top, pulse_.dc, 0, 0, 512, 160, SRCCOPY);
 }
 
-void PlayerVisualEffect::PaintRipple(HDC dc, const RECT& bounds, COLORREF color) {
+void PlayerVisualEffect::PaintRipple(HDC dc, const RECT& bounds) {
     if (!graphics_token_) {
         Gdiplus::GdiplusStartupInput input;
         if (Gdiplus::GdiplusStartup(&graphics_token_, &input, nullptr) != Gdiplus::Ok) {
@@ -198,26 +209,50 @@ void PlayerVisualEffect::PaintRipple(HDC dc, const RECT& bounds, COLORREF color)
         if (!level || drawn[level]) continue;
         drawn[level] = true;
         const double amount = double(160 - level) / 160.0;
-        const int red = int(GetRValue(color) * amount);
-        const int green = int(GetGValue(color) * amount);
-        const int blue = int(GetBValue(color) * amount);
-        if (!(red || green || blue)) continue;
+        const auto outer_weight = static_cast<BYTE>(GradientWeight(amount));
+        const auto inner_weight = static_cast<BYTE>(GradientWeight(amount, 16));
         const int y = bounds.top - int((160 - level) * sy * -0.5);
         const int height = int(level * sy);
         if (!height) continue;
         const int x = bounds.left - int((256 - level) * sx * -0.5);
         const int width = int(level * sx);
-        Gdiplus::Pen outer(Gdiplus::Color(0xd5, BYTE(red), BYTE(green), BYTE(blue)), 3.0f);
+        Gdiplus::Pen outer(Gdiplus::Color(0xd5, outer_weight, outer_weight, outer_weight), 3.0f);
         graphics.DrawEllipse(&outer, x, y, width, height);
-        Gdiplus::Pen inner(Gdiplus::Color(0xd5, BYTE(std::min(255, red + 16)),
-            BYTE(std::min(255, green + 16)), BYTE(std::min(255, blue + 16))), 1.0f);
+        Gdiplus::Pen inner(Gdiplus::Color(0xd5, inner_weight, inner_weight, inner_weight), 1.0f);
         graphics.DrawEllipse(&inner, x, y, width, height);
     }
 }
 
-void PlayerVisualEffect::Paint(HDC dc, const RECT& bounds, int type, COLORREF color) {
-    if (!dc || bounds.right <= bounds.left || bounds.bottom <= bounds.top) return;
-    if (type == 5) PaintPulse(dc, bounds, color);
-    else if (type == 6) PaintRipple(dc, bounds, color);
+void PlayerVisualEffect::Paint(HDC dc, const RECT& bounds, int type, COLORREF color,
+                               COLORREF background, bool transparent) {
+    if (!dc || bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
+        (type != 5 && type != 6)) return;
+    const int width = bounds.right - bounds.left, height = bounds.bottom - bounds.top;
+    if (!mask_.Resize(width, height) || !composite_.Resize(width, height)) return;
+    const size_t count = static_cast<size_t>(width) * height;
+    GdiFlush();
+    std::fill_n(mask_.pixels, count, 0U);
+    const RECT local{0, 0, width, height};
+    // Scale coverage, never RGB colors: GDI's default BLACKONWHITE shrink
+    // combines bits, which can turn a red/blue gradient into unrelated colors.
+    SetStretchBltMode(mask_.dc, GetStretchBltMode(dc));
+    if (type == 5) PaintPulse(mask_.dc, local);
+    else PaintRipple(mask_.dc, local);
+    if (transparent && !BitBlt(composite_.dc, 0, 0, width, height,
+                               dc, bounds.left, bounds.top, SRCCOPY)) return;
+    GdiFlush();
+    const uint32_t backdrop = (uint32_t(GetRValue(background)) << 16) |
+        (uint32_t(GetGValue(background)) << 8) | GetBValue(background);
+    const int red = GetRValue(color), green = GetGValue(color), blue = GetBValue(color);
+    for (size_t i = 0; i < count; ++i) {
+        const int weight = mask_.pixels[i] & 255;
+        const uint32_t base = transparent ? composite_.pixels[i] : backdrop;
+        const auto blend = [weight](int foreground, int behind) {
+            return (behind * (255 - weight) + foreground * weight) / 255;
+        };
+        composite_.pixels[i] = (uint32_t(blend(red, (base >> 16) & 255)) << 16) |
+            (uint32_t(blend(green, (base >> 8) & 255)) << 8) | blend(blue, base & 255);
+    }
+    BitBlt(dc, bounds.left, bounds.top, width, height, composite_.dc, 0, 0, SRCCOPY);
 }
 }

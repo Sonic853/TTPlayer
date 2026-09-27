@@ -150,6 +150,12 @@ struct HotKeySettings {
 struct VisualSettings {
     int type{2}; // 0 none, 1 dream, 2 spectrum, 3 scope, 4 cover, 5 pulse, 6 ripple
     int frames_per_second{25};
+    COLORREF pulse_color{skin::DefaultSkinColors().lyric.highlight_color};
+    COLORREF ripple_color{skin::DefaultSkinColors().lyric.highlight_color};
+    COLORREF pulse_background{RGB(0, 0, 0)};
+    COLORREF ripple_background{RGB(0, 0, 0)};
+    bool pulse_follow_lyric{true};
+    bool ripple_follow_lyric{true};
     COLORREF spectrum_top_color{skin::DefaultSkinColors().visual.spectrum_top_color};
     COLORREF spectrum_bottom_color{skin::DefaultSkinColors().visual.spectrum_bottom_color};
     COLORREF spectrum_middle_color{skin::DefaultSkinColors().visual.spectrum_middle_color};

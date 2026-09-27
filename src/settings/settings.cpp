@@ -443,6 +443,12 @@ void ApplyVisualAttributes(IXMLDOMNode* node, VisualSettings& visual,
     visual.blur_scope_color = ColorAttr(
         node, L"BlurScopeColor", visual.blur_scope_color);
     visual.text_color = ColorAttr(node, L"TextColor", visual.text_color);
+    visual.pulse_color = ColorAttr(node, L"PulseColor", visual.pulse_color);
+    visual.ripple_color = ColorAttr(node, L"RippleColor", visual.ripple_color);
+    visual.pulse_background = ColorAttr(node, L"PulseBackground", visual.pulse_background);
+    visual.ripple_background = ColorAttr(node, L"RippleBackground", visual.ripple_background);
+    visual.pulse_follow_lyric = IntAttr(node, L"PulseFollowLyric", visual.pulse_follow_lyric) != 0;
+    visual.ripple_follow_lyric = IntAttr(node, L"RippleFollowLyric", visual.ripple_follow_lyric) != 0;
     LOGFONTW font = visual.font;
     if (LogFontAttr(node, L"Font", font)) {
         visual.font = font;
@@ -1589,6 +1595,12 @@ bool SaveSkinVisualProfile(const std::filesystem::path& path,
         SetAttribute(element,L"Blur",visual.blur ? 1 : 0);
         SetAttribute(element,L"BlurScopeColor",ColorText(visual.blur_scope_color));
         SetAttribute(element,L"TextColor",ColorText(visual.text_color));
+        SetAttribute(element,L"PulseColor",ColorText(visual.pulse_color));
+        SetAttribute(element,L"RippleColor",ColorText(visual.ripple_color));
+        SetAttribute(element,L"PulseBackground",ColorText(visual.pulse_background));
+        SetAttribute(element,L"RippleBackground",ColorText(visual.ripple_background));
+        SetAttribute(element,L"PulseFollowLyric",visual.pulse_follow_lyric ? 1 : 0);
+        SetAttribute(element,L"RippleFollowLyric",visual.ripple_follow_lyric ? 1 : 0);
         if(visual.font_valid)
             SetAttribute(element,L"Font",LogFontText(visual.font));
     }
@@ -1801,6 +1813,12 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"Blur",settings.visual.blur ? 1 : 0);
         SetAttribute(element,L"BlurScopeColor",ColorText(settings.visual.blur_scope_color));
         SetAttribute(element,L"TextColor",ColorText(settings.visual.text_color));
+        SetAttribute(element,L"PulseColor",ColorText(settings.visual.pulse_color));
+        SetAttribute(element,L"RippleColor",ColorText(settings.visual.ripple_color));
+        SetAttribute(element,L"PulseBackground",ColorText(settings.visual.pulse_background));
+        SetAttribute(element,L"RippleBackground",ColorText(settings.visual.ripple_background));
+        SetAttribute(element,L"PulseFollowLyric",settings.visual.pulse_follow_lyric ? 1 : 0);
+        SetAttribute(element,L"RippleFollowLyric",settings.visual.ripple_follow_lyric ? 1 : 0);
         SetAttribute(element,L"Type",std::clamp(settings.visual.type,0,6));
         SetAttribute(element,L"FramesPerSec",
                      std::clamp(settings.visual.frames_per_second,0,100));
