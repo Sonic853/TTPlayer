@@ -10,6 +10,7 @@
 #include "../app/resource_ids.h"
 
 #include "ttplayer/audio/cue_sheet.h"
+#include "ttplayer/audio/winamp_dsp.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/skin/skin_package.h"
 #include "ttplayer/ui/playback_track_state.h"
@@ -1400,6 +1401,8 @@ using namespace detail;
 
 PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(settings)) {
     if (FAILED(EnsureWtlRuntime())) throw std::runtime_error("WTL initialization failed");
+    if (!settings_.source_path.empty())
+        audio_->SetDspStorageDirectory(settings_.source_path.parent_path() / L"PluginState");
     lyric_editor_new_line_ = settings_.lyric.new_line_after_tag;
     // OPENFILENAMEW::lpstrInitialDir in 0048059D points at CSettings
     // Histroy/SoundPath (+0x750).
@@ -2459,8 +2462,11 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
 }
 
 void PlayerWindow::ReloadApplicationIcons() {
-    if (window_icon_small_) DestroyIcon(window_icon_small_);
-    if (window_icon_big_) DestroyIcon(window_icon_big_);
+    // Keep the currently published handles alive until every consumer has
+    // received the replacement. Both the window class and the HWND may still
+    // be queried by Explorer while a new ICO/DLL is being read.
+    const HICON previous_small = window_icon_small_;
+    const HICON previous_big = window_icon_big_;
     window_icon_small_ = nullptr;
     window_icon_big_ = nullptr;
 
@@ -2500,6 +2506,27 @@ void PlayerWindow::ReloadApplicationIcons() {
             instance_, MAKEINTRESOURCEW(128), IMAGE_ICON,
             GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0));
     }
+    ApplyApplicationIcons();
+    if (previous_small) DestroyIcon(previous_small);
+    if (previous_big && previous_big != previous_small) DestroyIcon(previous_big);
+}
+
+void PlayerWindow::ApplyApplicationIcons() {
+    if (!window_ || !IsWindow(window_)) return;
+    // 0045C937: an explicit AppIconFile overrides the skin; clearing it
+    // restores the skin icon (or the application's fallback).
+    const HICON skin_icon = settings_.general.app_icon_file.empty() && skin_
+        ? skin_->Icon() : nullptr;
+    const HICON small_icon = skin_icon ? skin_icon : window_icon_small_;
+    const HICON large_icon = skin_icon ? skin_icon : window_icon_big_;
+    // The class is private to the player. Refresh it too: otherwise the
+    // taskbar's fallback can retain the icon installed at RegisterClassEx.
+    SetClassLongPtrW(window_, GCLP_HICONSM, reinterpret_cast<LONG_PTR>(small_icon));
+    SetClassLongPtrW(window_, GCLP_HICON, reinterpret_cast<LONG_PTR>(large_icon));
+    SendMessageW(window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
+    SendMessageW(window_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large_icon));
+    UpdateTrayIcon();
+    InvalidateRect(window_, nullptr, FALSE);
 }
 
 bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
@@ -2641,13 +2668,7 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
         SetWindowPos(window_, nullptr, left, top, size.cx, size.cy,
                      SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         SetWindowRgn(window_, skin_->CreateWindowRegion(mini_mode_), FALSE);
-        const bool custom_icon = !settings_.general.app_icon_file.empty();
-        const HICON small_icon = !custom_icon && skin_->Icon()
-            ? skin_->Icon() : window_icon_small_;
-        const HICON big = !custom_icon && skin_->Icon()
-            ? skin_->Icon() : window_icon_big_;
-        if (small_icon) SendMessageW(window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
-        if (big) SendMessageW(window_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
+        ApplyApplicationIcons();
         if (equalizer_window_ && skin_->Equalizer().valid &&
             !(settings_.player.equalizer_window.right >
                   settings_.player.equalizer_window.left &&
@@ -2770,6 +2791,23 @@ LRESULT CALLBACK PlayerWindow::PlaybackTipWindowProc(
 }
 
 LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == audio::kWinampDspMovingMessage) {
+        const auto option = DecodePackedRuntimeOption(settings_.general.snap_windows, 1, 100);
+        const HWND source = reinterpret_cast<HWND>(wparam);
+        if (!option.enabled || !lparam || !IsWindow(source)) return FALSE;
+        auto* proposed = reinterpret_cast<RECT*>(lparam);
+        std::vector<RECT> stationary;
+        for (const HWND candidate : RegisteredDragWindows()) {
+            RECT bounds{};
+            if (candidate != source && IsWindowVisible(candidate) &&
+                GetWindowRect(candidate, &bounds)) stationary.push_back(bounds);
+        }
+        const POINT correction = ComputeDragSnapCorrection(
+            std::span<const RECT>(proposed, 1), stationary,
+            DragWorkAreaForRect(*proposed), option.value);
+        OffsetRect(proposed, correction.x, correction.y);
+        return TRUE;
+    }
     static const UINT skin_plugin_command = RegisterWindowMessageW(TTP_SKIN_COMMAND_MESSAGE);
     if (message == skin_plugin_command) {
         HandleSkinPluginCommand(static_cast<uint32_t>(wparam), static_cast<int32_t>(lparam));
@@ -2800,13 +2838,14 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
     if (message == taskbar_created) {
         taskbar_playback_.Reset();
         tray_icon_added_ = false;
-        UpdateTrayIcon();
+        ApplyApplicationIcons();
         // Explorer lost the fullscreen marks for the detached partial-screen
         // surfaces along with its taskbar state. Republish without activation.
         if (fullscreen_mode_ != 0) UpdateFullScreenLayout();
         return 0;
     }
     if (message == taskbar_button_created) {
+        ApplyApplicationIcons();
         static_cast<void>(taskbar_playback_.OnButtonCreated(
             window_, TaskbarState(), TaskbarLabels()));
         taskbar_preview_.Refresh(window_, true);
@@ -3442,6 +3481,9 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             wparam == kInfoScrollTimer) {
             AdvanceSkinInfoScroll(static_cast<UINT_PTR>(wparam));
         } else if (wparam == kUiTimer) {
+            // DFX may create its top-level window after Init returns.
+            // Register it for native WM_MOVING and grouped skin drags.
+            if (audio_) static_cast<void>(audio_->DspWindows());
             PollFadingAudio();
             // A save-policy MessageBox pumps messages. Defer completions and
             // track navigation until it returns, so neither a downloaded lyric
@@ -4355,6 +4397,13 @@ std::vector<HWND> PlayerWindow::RegisteredDragWindows() const {
         if (candidate && IsWindow(candidate) &&
             std::find(result.begin(), result.end(), candidate) == result.end()) {
             result.push_back(candidate);
+        }
+    }
+    if (audio_) {
+        for (const HWND candidate : audio_->DspWindows()) {
+            if (IsWindow(candidate) &&
+                std::find(result.begin(), result.end(), candidate) == result.end())
+                result.push_back(candidate);
         }
     }
     return result;
@@ -5808,14 +5857,7 @@ bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings, bool saved_bounds
     // package has been validated.  Its sparse Visual.xml fields overwrite
     // the current global visual settings at this point.
     if (apply_visual_settings) ApplySkinVisualSettings();
-    const bool custom_icon = !settings_.general.app_icon_file.empty();
-    const HICON small_icon = !custom_icon && skin_->Icon()
-        ? skin_->Icon() : window_icon_small_;
-    const HICON big = !custom_icon && skin_->Icon()
-        ? skin_->Icon() : window_icon_big_;
-    if (small_icon) SendMessageW(window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
-    if (big) SendMessageW(window_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
-    UpdateTrayIcon();
+    ApplyApplicationIcons();
     UpdateLyricWindowSkin(saved_bounds);
     desktop_lyrics_.SetSkin(&*skin_);
     desktop_lyrics_.ApplySettings();

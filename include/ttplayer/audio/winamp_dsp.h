@@ -12,12 +12,13 @@
 
 namespace ttplayer::audio {
 
+inline constexpr UINT kWinampDspMovingMessage = WM_APP + 0x393;
+
 // In-process adapter for the Winamp DSP ABI recovered at
 // FUN_00427EDC/FUN_00428061/FUN_004280CD.  Instances are deliberately owned
-// by the playback session family: UI-side discovery/configuration remains isolated in
-// a private worker mode of the player EXE, while ModifySamples runs in
-// the process which owns the PCM stream. Callbacks are serialized when the
-// previous sound's fade overlaps the new sound; DLLs are not initialized twice.
+// by the playback session family. Discovery is isolated; Init/Config/Modify/Quit
+// share a persistent in-process thread with a window message loop. This keeps
+// modeless plug-in windows alive and preserves one instance across track fades.
 class WinampDspChain {
 public:
     WinampDspChain();
@@ -26,14 +27,21 @@ public:
     WinampDspChain& operator=(const WinampDspChain&) = delete;
     WinampDspChain(WinampDspChain&&) noexcept;
     WinampDspChain& operator=(WinampDspChain&&) noexcept;
+    void SetStorageDirectory(const std::filesystem::path& directory);
 
     // Relative module names are resolved against folder, matching the
     // /Plugin Folder + Modules_N representation in TTPlayer.xml.  Repeating
-    // an identical configuration is a no-op; changing it performs Quit and
-    // re-loads the ordered chain before the next decoded block.
+    // an identical configuration is a no-op. Reordering preserves instances;
+    // only added/removed paths receive Init/Quit. This also works while stopped.
     void Update(const std::filesystem::path& folder,
                 const std::vector<std::wstring>& modules,
                 HWND parent_window = nullptr);
+
+    // Schedule Config on the active instance without blocking the player's UI
+    // for a modal third-party dialog. False means no configurable active module.
+    [[nodiscard]] bool Configure(const std::filesystem::path& module);
+    [[nodiscard]] bool IsActive(const std::filesystem::path& module) const;
+    [[nodiscard]] std::vector<HWND> Windows() const;
 
     // Winamp's ABI is signed 16-bit interleaved PCM.  The original player
     // converts other decoded sample formats to 16-bit around this call.  The

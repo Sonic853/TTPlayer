@@ -2,6 +2,8 @@
 
 分析日期：2026-09-27。与 [音效插件实现分析](WINAMP_DSP_PLUGIN_IMPLEMENTATION_ANALYSIS.md) 配套。
 
+> 后续修改：两份清理 REG 已缩小删除范围，三份添加 REG 已注明为历史安装快照；未导入或执行。本文各节仍描述修改前的原文件，当前实现及免系统注册表方案见 [DSP 修复文档](WINAMP_DSP_RECOVERY.md)。
+
 ## 1. 总结
 
 目录中共有 **5 个 `.reg` 文件**，全部是 UTF-16LE（带 BOM）、`Windows Registry Editor Version 5.00` 格式。

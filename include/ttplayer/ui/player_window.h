@@ -306,6 +306,7 @@ private:
     void ApplyOptionsRuntime(UINT template_id = 0);
     void ApplyOptionsChangeMask(UINT mask, LPARAM source_control);
     void ReloadApplicationIcons();
+    void ApplyApplicationIcons();
     void UpdateTrayIcon();
     void CheckForUpdates(bool manual);
     void PollUpdateCheck();

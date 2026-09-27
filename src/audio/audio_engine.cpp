@@ -1659,8 +1659,8 @@ public:
 #else
         static_cast<void>(options);
 #endif
-        winamp_dsp_.Update(options.dsp_folder, options.dsp_modules,
-                           options.dsp_parent_window);
+        // The application applies DSP lifecycle changes even while stopped.
+        // A fading older sound must not restore its stale plugin snapshot.
     }
 
     ~RecoveredProcessorChain() {
@@ -2210,7 +2210,7 @@ bool AudioEngine::IsNetworkMediaLocation(
 }
 
 void AudioEngine::Configure(const PlaybackOptions& options) {
-    std::scoped_lock lock(mutex_);
+    std::unique_lock lock(mutex_);
     const HWND existing_dsp_parent = options_.dsp_parent_window;
     options_ = options;
     // hwndParent is a runtime attachment made after WM_CREATE. Aggregate
@@ -2232,14 +2232,42 @@ void AudioEngine::Configure(const PlaybackOptions& options) {
     balance_ = options_.balance;
     ++processor_revision_;
     ApplyVolumeLocked();
+    const auto folder = options_.dsp_folder;
+    const auto modules = options_.dsp_modules;
+    const HWND parent = options_.dsp_parent_window;
+    lock.unlock();
+    // Init may query hwndParent. Never hold the audio engine mutex across a
+    // callback on the DSP apartment, including while no sound is open.
+    if (parent) dsp_chain_->Update(folder, modules, parent);
+    for (auto& diagnostic : dsp_chain_->TakeDiagnostics())
+        RecordDiagnostic(std::move(diagnostic));
 }
 
 void AudioEngine::SetDspParentWindow(HWND window) {
-    std::scoped_lock lock(mutex_);
+    std::unique_lock lock(mutex_);
     if (options_.dsp_parent_window == window) return;
     options_.dsp_parent_window = window;
     ++processor_revision_;
     if (completion_event_) SetEvent(completion_event_);
+    const auto folder = options_.dsp_folder;
+    const auto modules = options_.dsp_modules;
+    lock.unlock();
+    dsp_chain_->Update(folder, window ? modules : std::vector<std::wstring>{}, window);
+}
+
+bool AudioEngine::ConfigureDsp(const std::filesystem::path& module) {
+    return dsp_chain_->Configure(module);
+}
+void AudioEngine::SetDspStorageDirectory(const std::filesystem::path& directory) {
+    dsp_chain_->SetStorageDirectory(directory);
+}
+
+bool AudioEngine::IsDspActive(const std::filesystem::path& module) const {
+    return dsp_chain_->IsActive(module);
+}
+
+std::vector<HWND> AudioEngine::DspWindows() const {
+    return dsp_chain_->Windows();
 }
 
 std::shared_ptr<AudioEngine> AudioEngine::CreateSuccessor() const {

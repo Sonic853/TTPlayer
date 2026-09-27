@@ -33,13 +33,6 @@ struct WinampDspHeader {
     void* (__cdecl* get_module)(int);
 };
 
-struct WinampDspModule {
-    const char* description;
-    HWND parent;
-    HINSTANCE instance;
-    void (__cdecl* configure)(WinampDspModule*);
-};
-
 bool ReadExact(HANDLE file, void* destination, DWORD bytes) {
     auto* cursor = static_cast<std::byte*>(destination);
     while (bytes != 0) {
@@ -251,8 +244,12 @@ std::vector<ProbeResult> Scan(const std::filesystem::path& executable,
 
     std::vector<ProbeResult> accepted;
     for (const auto& candidate : candidates) {
+        const auto previous_count = accepted.size();
         const auto scratch = TemporaryFile();
-        if (scratch.empty()) continue;
+        if (scratch.empty()) {
+            accepted.push_back({candidate, {}});
+            continue;
+        }
         std::wstring command = ttplayer::app::WorkerCommandPrefix(
                                    executable, embedded
                                        ? ttplayer::app::kDspWorkerSwitch : L"") +
@@ -288,27 +285,12 @@ std::vector<ProbeResult> Scan(const std::filesystem::path& executable,
             CloseHandle(process.hProcess);
         }
         DeleteFileW(scratch.c_str());
+        // Discovery failure is not a request to delete a configured plug-in.
+        // Preserve the candidate and its order even if its header times out.
+        if (accepted.size() == previous_count)
+            accepted.push_back({candidate, {}});
     }
     return accepted;
-}
-
-int Configure(const std::filesystem::path& plugin, HWND parent) {
-    HMODULE module{};
-    WinampDspHeader* header = LoadHeader(plugin, module);
-    if (!header || !header->get_module) {
-        if (module) FreeLibrary(module);
-        return 2;
-    }
-    auto* dsp = static_cast<WinampDspModule*>(header->get_module(0));
-    if (!dsp || !dsp->configure) {
-        FreeLibrary(module);
-        return 3;
-    }
-    dsp->parent = parent;
-    dsp->instance = module;
-    dsp->configure(dsp);
-    FreeLibrary(module);
-    return 0;
 }
 
 } // namespace
@@ -322,9 +304,7 @@ int ttplayer::app::RunDspWorker(int argc, wchar_t** argv, bool embedded) {
         const auto results = Scan(executable, ReadRequest(argv[2]), embedded);
         return WriteResults(argv[3], results) ? 0 : 5;
     }
-    if (argc == 4 && _wcsicmp(argv[1], L"--configure") == 0) {
-        const auto numeric = static_cast<ULONG_PTR>(_wcstoui64(argv[3], nullptr, 10));
-        return Configure(argv[2], reinterpret_cast<HWND>(numeric));
-    }
+    // Config is intentionally not a worker command: it must operate on the
+    // initialized in-process instance that owns the audible processor state.
     return 1;
 }

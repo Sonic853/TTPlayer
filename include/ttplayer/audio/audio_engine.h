@@ -239,6 +239,10 @@ public:
     }
     void SetTtpCommModule(HMODULE module) noexcept { ttpcomm_module_ = module; }
     void SetDspParentWindow(HWND window);
+    void SetDspStorageDirectory(const std::filesystem::path& directory);
+    [[nodiscard]] bool ConfigureDsp(const std::filesystem::path& module);
+    [[nodiscard]] bool IsDspActive(const std::filesystem::path& module) const;
+    [[nodiscard]] std::vector<HWND> DspWindows() const;
     void SetVolume(float volume);
     void SetBalance(int balance);
     void SetEqualizer(int profile, int surround,

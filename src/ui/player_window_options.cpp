@@ -2589,13 +2589,19 @@ void UpdateHotKeyListRow(HWND list, int row,
     ListView_SetItemText(list, row, 2, global.data());
 }
 
-void UpdateDspButtons(HWND dialog) {
+LPARAM GetListItemData(HWND list, int row);
+
+void UpdateDspButtons(HWND dialog, const audio::AudioEngine* engine,
+                      const std::vector<std::filesystem::path>& paths) {
     const HWND list = GetDlgItem(dialog, 1064);
     const int selected = list
         ? ListView_GetNextItem(list, -1, LVNI_SELECTED) : -1;
     const int count = list ? ListView_GetItemCount(list) : 0;
-    EnableWindow(GetDlgItem(dialog, 1015), selected >= 0 &&
-                 ListView_GetCheckState(list, selected));
+    const LPARAM data = selected < 0 ? -1 : GetListItemData(list, selected);
+    EnableWindow(GetDlgItem(dialog, 1015), selected >= 0 && engine &&
+                 ListView_GetCheckState(list, selected) && data >= 0 &&
+                 static_cast<size_t>(data) < paths.size() &&
+                 engine->IsDspActive(paths[static_cast<size_t>(data)]));
     EnableWindow(GetDlgItem(dialog, 1042), selected > 0);
     EnableWindow(GetDlgItem(dialog, 1045),
                  selected >= 0 && selected + 1 < count);
@@ -3195,7 +3201,7 @@ void PlayerWindow::PollOptionsDspScan(HWND dialog) {
     // allowed to replace it after a completely validated result stream.
     if (!results) {
         options_dsp_scan_complete_ = false;
-        UpdateDspButtons(dialog);
+        UpdateDspButtons(dialog, audio_.get(), options_dsp_paths_);
         return;
     }
     options_dsp_scan_complete_ = true;
@@ -3212,42 +3218,31 @@ void PlayerWindow::PollOptionsDspScan(HWND dialog) {
         AddListText(list, static_cast<int>(index), L"");
         SetListItemData(list, static_cast<int>(index),
                         static_cast<LPARAM>(index));
-        auto description = result.description;
+        auto description = result.description.empty()
+            ? std::wstring(L"（无法读取插件信息）") : result.description;
         ListView_SetItemText(list, static_cast<int>(index), 1,
                              description.data());
         ListView_SetItemText(list, static_cast<int>(index), 2,
                              const_cast<wchar_t*>(file.c_str()));
         const auto full = result.path.wstring();
         const bool active = std::any_of(settings_.plugin.modules.begin(),
-            settings_.plugin.modules.end(), [&file, &full](const auto& module) {
-                return _wcsicmp(module.c_str(), full.c_str()) == 0 ||
-                       _wcsicmp(std::filesystem::path(module).filename().c_str(),
-                               file.c_str()) == 0;
+            settings_.plugin.modules.end(), [this, &full](const auto& module) {
+                std::filesystem::path path(module);
+                if (path.is_relative()) path = settings_.plugin.folder / path;
+                std::error_code error;
+                path = std::filesystem::absolute(path, error).lexically_normal();
+                return !error && _wcsicmp(path.c_str(), full.c_str()) == 0;
             });
         ListView_SetCheckState(list, static_cast<int>(index), active);
     }
     SetPropW(dialog, kPageReadyProperty, reinterpret_cast<HANDLE>(1));
-    UpdateDspButtons(dialog);
+    UpdateDspButtons(dialog, audio_.get(), options_dsp_paths_);
 }
 
 void PlayerWindow::LaunchOptionsDspConfiguration(
     HWND dialog, const std::filesystem::path& module) {
-    const auto helper = app::CurrentExecutablePath();
-    if (helper.empty()) return;
-    std::wstring command = app::WorkerCommandPrefix(helper, app::kDspWorkerSwitch) +
-                           L" --configure " +
-                           QuoteDspArgument(module.wstring()) + L" " +
-                           std::to_wstring(reinterpret_cast<ULONG_PTR>(dialog));
-    STARTUPINFOW startup{sizeof(startup)};
-    PROCESS_INFORMATION process{};
-    const auto working = module.parent_path().wstring();
-    if (CreateProcessW(helper.c_str(), command.data(), nullptr, nullptr, FALSE,
-                       CREATE_NO_WINDOW, nullptr,
-                       working.empty() ? nullptr : working.c_str(),
-                       &startup, &process)) {
-        CloseHandle(process.hThread);
-        CloseHandle(process.hProcess);
-    }
+    if (audio_) static_cast<void>(audio_->ConfigureDsp(module));
+    UpdateDspButtons(dialog, audio_.get(), options_dsp_paths_);
 }
 
 void PlayerWindow::ShowVisualOptions() {
@@ -6256,17 +6251,6 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
         // association page.  A full reset/save must refresh the same global
         // icon path as command 33000/33001.
         ReloadApplicationIcons();
-        const bool custom = !settings_.general.app_icon_file.empty();
-        const HICON small_icon = !custom && skin_ && skin_->Icon()
-            ? skin_->Icon() : window_icon_small_;
-        const HICON large_icon = !custom && skin_ && skin_->Icon()
-            ? skin_->Icon() : window_icon_big_;
-        if (window_) {
-            SendMessageW(window_, WM_SETICON, ICON_SMALL,
-                         reinterpret_cast<LPARAM>(small_icon));
-            SendMessageW(window_, WM_SETICON, ICON_BIG,
-                         reinterpret_cast<LPARAM>(large_icon));
-        }
     }
     if (all || template_id == 251 || template_id == 259 ||
         template_id == 260) {
@@ -7307,7 +7291,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                     CommitOptionsPage(dialog, template_id);
                     ApplyOptionsPageRuntime(template_id);
                 }
-                UpdateDspButtons(dialog);
+                UpdateDspButtons(dialog, audio_.get(), options_dsp_paths_);
                 return TRUE;
             }
             if (control == 1015 && notification == BN_CLICKED) {
@@ -7317,15 +7301,13 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                     const LPARAM data = GetListItemData(list, row);
                     if (data >= 0 && static_cast<size_t>(data) <
                             options_dsp_paths_.size()) {
-                        // Configuration is isolated too: the DSP ABI has no
-                        // cancellation contract and many plug-ins implement a
-                        // modal Config callback.  The player never waits for
-                        // that third-party callback on its UI thread.
+                        // Config belongs to the same initialized instance as
+                        // ModifySamples, on its persistent message-loop thread.
                         LaunchOptionsDspConfiguration(dialog,
                             options_dsp_paths_[static_cast<size_t>(data)]);
                     }
                 }
-                UpdateDspButtons(dialog);
+                UpdateDspButtons(dialog, audio_.get(), options_dsp_paths_);
                 return TRUE;
             }
         }
@@ -7436,32 +7418,20 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
 
                 bool changed = false;
                 if (command == 33000) {
-                    changed = !settings_.general.app_icon_file.empty();
+                    changed = true;
                     settings_.general.app_icon_file.clear();
                 } else if (command == 33001) {
                     if (const auto selected = ChooseIconSelection(
                             dialog, ResourceModule(),
                             settings_.general.app_icon_file.wstring())) {
-                        changed = settings_.general.app_icon_file.wstring() !=
-                                  *selected;
+                        // The file can have been replaced in place. Like
+                        // 0049DDD9, accepting the picker always reloads it.
+                        changed = true;
                         settings_.general.app_icon_file = *selected;
                     }
                 }
                 if (changed) {
                     ReloadApplicationIcons();
-                    const bool custom =
-                        !settings_.general.app_icon_file.empty();
-                    const HICON small_icon = !custom && skin_ && skin_->Icon()
-                        ? skin_->Icon() : window_icon_small_;
-                    const HICON large_icon = !custom && skin_ && skin_->Icon()
-                        ? skin_->Icon() : window_icon_big_;
-                    if (window_) {
-                        SendMessageW(window_, WM_SETICON, ICON_SMALL,
-                                     reinterpret_cast<LPARAM>(small_icon));
-                        SendMessageW(window_, WM_SETICON, ICON_BIG,
-                                     reinterpret_cast<LPARAM>(large_icon));
-                    }
-                    UpdateTrayIcon();
                     BUTTON_IMAGELIST empty{};
                     Button_SetImageList(GetDlgItem(dialog, 2106), &empty);
                     if (options_association_button_images_[3])
@@ -7886,7 +7856,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                     CommitOptionsPage(dialog, template_id);
                     ApplyOptionsPageRuntime(template_id);
                 }
-                UpdateDspButtons(dialog);
+                UpdateDspButtons(dialog, audio_.get(), options_dsp_paths_);
                 return TRUE;
             }
             if (header->code == NM_DBLCLK ||
@@ -7906,7 +7876,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                     CommitOptionsPage(dialog, template_id);
                     ApplyOptionsPageRuntime(template_id);
                 }
-                UpdateDspButtons(dialog);
+                UpdateDspButtons(dialog, audio_.get(), options_dsp_paths_);
                 return TRUE;
             }
         }
