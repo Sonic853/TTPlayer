@@ -5176,7 +5176,7 @@ INT_PTR CALLBACK PlayerWindow::PlaylistFindDialogProc(HWND dialog, UINT message,
     if (!self) return FALSE;
     if (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wp) == IDCANCEL)) {
         EndDialog(dialog, IDCANCEL);
-        if (IsWindow(self->playlist_window_)) SetActiveWindow(self->playlist_window_);
+        if (IsWindow(self->playlist_find_return_window_)) SetActiveWindow(self->playlist_find_return_window_);
         return TRUE;
     }
     if (message == WM_NCDESTROY) {
@@ -5218,7 +5218,7 @@ INT_PTR CALLBACK PlayerWindow::PlaylistFindDialogProc(HWND dialog, UINT message,
     self->FindNextPlaylistTrack(self->playlist_find_.Flags, live || control == 1107);
     if (self->playlist_find_quick_ && !live) {
         EndDialog(dialog, IDCANCEL);
-        if (IsWindow(self->playlist_window_)) SetActiveWindow(self->playlist_window_);
+        if (IsWindow(self->playlist_find_return_window_)) SetActiveWindow(self->playlist_find_return_window_);
     }
     return TRUE;
 }
@@ -5233,14 +5233,21 @@ void PlayerWindow::ShowPlaylistFindDialog(bool quick) {
         playlist_find_.Flags = FR_DOWN;
     }
     const PlaylistFindSelectionScope selection_scope(*this);
+    // Provider lists may live in the main HWND (WAL) or replace the playlist
+    // HWND's children (WSZ). Remember the caller before the search edit owns
+    // focus; the hidden native Files control must not receive it on return.
+    const HWND surface = external_skin_ && GetActiveWindow() == window_
+        ? window_ : playlist_window_;
+    const HWND previous_return = std::exchange(playlist_find_return_window_, surface);
     // 00486056 -> 0048ABBD: resource 203 with no disabled parent. Its modal
     // loop continues to dispatch the player's timers and other HWNDs.
     ShowWtlModalDialog(ResourceModule(), MAKEINTRESOURCEW(203), nullptr,
         PlaylistFindDialogProc, reinterpret_cast<LPARAM>(this));
-    // SetActiveWindow in 00454A06/004548D8 returns to the playlist. The skin
-    // parent is not itself a ListView: return keyboard focus to Files as well.
-    if (IsWindow(playlist_track_control_) && GetActiveWindow() == playlist_window_)
-        SetFocus(playlist_track_control_);
+    playlist_find_return_window_ = previous_return;
+    // Native skins still focus Files; a provider handles keys on its surface.
+    if (IsWindow(surface) && GetActiveWindow() == surface)
+        SetFocus(external_skin_ && external_skin_->Handles(surface)
+            ? surface : playlist_track_control_);
 }
 
 void PlayerWindow::BeginPlaylistOleDrag() {
@@ -6429,14 +6436,17 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
         // reselects all matches; it must not click the dialog's default
         // button and close it, or reopen an empty search dialog.
         const HWND active_before = GetActiveWindow();
+        const HWND surface = external_skin_ && active_before == window_
+            ? window_ : playlist_window_;
         const bool found = FindNextPlaylistTrack(playlist_find_.Flags);
         const HWND active_after = GetActiveWindow();
         // An unowned progress dialog can leave the UI thread with no active
         // HWND when destroyed. Restore its caller, but not another active UI.
         if (found && !playlist_find_dialog_ && IsWindow(playlist_track_control_) &&
-            (active_after == playlist_window_ ||
-             (!active_after && active_before == playlist_window_)))
-            SetFocus(playlist_track_control_);
+            (active_after == surface ||
+             (!active_after && active_before == surface)))
+            SetFocus(external_skin_ && external_skin_->Handles(surface)
+                ? surface : playlist_track_control_);
         return true;
     }
     if (command >= kPlaylistModeSingle && command <= kPlaylistModeShuffle) {

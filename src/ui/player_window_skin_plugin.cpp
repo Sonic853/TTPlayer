@@ -575,7 +575,7 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     case TTP_SKIN_LYRICS: ToggleLyricWindow();break;
     case TTP_SKIN_CONTENT_FULLSCREEN:
         if(external_skin_->Handles(lyric_window_) && (value&255)>=1 && (value&255)<=3 &&
-           ((value>>8)&255)<=4 && audio_->State()==audio::PlaybackState::playing) {
+           ((value>>8)&255)<=6 && audio_->State()==audio::PlaybackState::playing) {
             if(fullscreen_mode_==0) plugin_content_fullscreen_saved_type_=settings_.visual.type;
             SetFullScreenMode(value&255,lyric_window_,(value>>8)&255);
         }

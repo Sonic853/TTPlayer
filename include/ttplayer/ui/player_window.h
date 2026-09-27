@@ -1204,6 +1204,7 @@ private:
     FINDREPLACEW playlist_find_{};
     std::wstring playlist_find_text_;
     HWND playlist_find_dialog_{};
+    HWND playlist_find_return_window_{}; // Native/WSZ list or an embedded provider list.
     HWND playlist_find_progress_{};
     bool playlist_find_running_{};
     size_t playlist_find_selection_depth_{}; // Nested find/progress visibility scopes.
