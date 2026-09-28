@@ -1,5 +1,6 @@
 #include "plugin_registry.h"
 #include "dfx_registry_helper.h"
+#include "dsp_imports.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/update/update.h"
 #include "../update/json.h"
@@ -79,6 +80,10 @@ std::string Read(const std::filesystem::path& path) {
     return bytes;
 }
 bool Save(const std::filesystem::path& path, const std::string& bytes) {
+    const DWORD attributes=GetFileAttributesW(path.c_str());
+    // CopyFile also copies READONLY onto .bak. Reject before rotating the
+    // backup so removing READONLY from registry.json makes retries succeed.
+    if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_READONLY))return false;
     const auto temporary = path.wstring() + L".tmp";
     HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -515,6 +520,7 @@ LSTATUS FileRegistry::Close(HKEY key) {
     return ERROR_SUCCESS;
 }
 LSTATUS FileRegistry::Flush() { return impl_->Flush(); }
+LSTATUS FileRegistry::SaveStatus() const { std::lock_guard lock(impl_->mutex); return impl_->save_error; }
 LSTATUS FileRegistry::EnumKey(HKEY key, DWORD index, std::wstring& name) {
     std::lock_guard lock(impl_->mutex);
     LSTATUS status{}; const auto found = impl_->Handle(key, KEY_ENUMERATE_SUB_KEYS, status);
@@ -770,6 +776,13 @@ void FileRegistry::MigrateEnhancer() {
     }
 }
 
+struct DspModuleImports {
+    struct Slot { ULONG_PTR* address; ULONG_PTR original, replacement; };
+    HMODULE module{};
+    size_t image_size{};
+    bool retained{};
+    std::vector<Slot> slots;
+};
 struct PluginRegistry::Impl {
     HMODULE module{};
     size_t image_size{};
@@ -778,16 +791,21 @@ struct PluginRegistry::Impl {
     std::filesystem::path data_directory;
     bool dfx{};
     bool enhancer{};
+    bool ozone{};
+    std::mutex diagnostics_mutex;
+    std::wstring import_error;
     std::mutex handles_mutex;
-    std::set<HKEY> enhancer_handles;
+    std::set<HKEY> open_handles;
     std::unique_ptr<DfxRegistryHelper> helper;
     std::vector<std::wstring> helper_diagnostics;
     std::vector<std::wstring> helper_trace;
     std::function<void(std::wstring_view)> trace;
-    std::vector<std::pair<ULONG_PTR*, ULONG_PTR>> imports;
+    std::vector<std::shared_ptr<DspModuleImports>> modules;
 };
 namespace {
 std::mutex contexts_mutex;
+std::recursive_mutex import_mutex;
+std::map<HMODULE,std::weak_ptr<DspModuleImports>> import_modules;
 std::vector<std::shared_ptr<PluginRegistry::Impl>> contexts;
 using Context = std::shared_ptr<PluginRegistry::Impl>;
 thread_local Context broker_context;
@@ -805,6 +823,10 @@ Context FindContext(void* caller, HKEY key = nullptr) {
     for (const auto& context : contexts) {
         const auto base = reinterpret_cast<ULONG_PTR>(context->module);
         if (address >= base && address - base < context->image_size) return context;
+    }
+    for(const auto& context:contexts) for(const auto& module:context->modules) {
+        const auto base=reinterpret_cast<ULONG_PTR>(module->module);
+        if(address>=base&&address-base<module->image_size)return context;
     }
     for(const auto& context:contexts)
         if(key && context->registry->Owns(key)) return context;
@@ -827,7 +849,7 @@ bool Within(std::wstring_view path,std::wstring_view root) {
     return path==root || (path.starts_with(root) && path.size()>root.size() && path[root.size()]==L'\\');
 }
 LSTATUS CloseVirtual(const Context& c, HKEY key) {
-    if (c->enhancer) { std::lock_guard lock(c->handles_mutex); c->enhancer_handles.erase(key); }
+    { std::lock_guard lock(c->handles_mutex); c->open_handles.erase(key); }
     return c->registry->Close(key);
 }
 LSTATUS Open(const Context& c, HKEY parent, const wchar_t* subkey, REGSAM access,
@@ -848,8 +870,8 @@ LSTATUS Open(const Context& c, HKEY parent, const wchar_t* subkey, REGSAM access
     if (c->dfx && broker_context == c && Within(path, old_helper))
         path.replace(0, old_helper.size(), L"hkey_current_user\\software\\dfx\\9\\11");
     const auto status = c->registry->Open(path, access, create, result, disposition);
-    if (status == ERROR_SUCCESS && c->enhancer) {
-        std::lock_guard lock(c->handles_mutex); c->enhancer_handles.insert(*result);
+    if (status == ERROR_SUCCESS) {
+        std::lock_guard lock(c->handles_mutex); c->open_handles.insert(*result);
     }
     return status;
 }
@@ -1183,6 +1205,10 @@ LSTATUS WINAPI BasicSetW(HKEY key, LPCWSTR sub, DWORD type, LPCWSTR data, DWORD 
     } catch (...) { return ERROR_INVALID_HANDLE; }
 }
 FARPROC WINAPI Resolve(HMODULE module, LPCSTR name) noexcept;
+HMODULE WINAPI LibraryA(LPCSTR path) noexcept;
+HMODULE WINAPI LibraryW(LPCWSTR path) noexcept;
+HMODULE WINAPI LibraryExA(LPCSTR path,HANDLE file,DWORD flags) noexcept;
+HMODULE WINAPI LibraryExW(LPCWSTR path,HANDLE file,DWORD flags) noexcept;
 BOOL WINAPI StopOzoneThread(HANDLE thread, DWORD exit_code) noexcept {
     try {
         const auto caller = _ReturnAddress();
@@ -1190,7 +1216,7 @@ BOOL WINAPI StopOzoneThread(HANDLE thread, DWORD exit_code) noexcept {
         // In this exact binary 59445706 has already cleared object+100, and
         // its worker (59443D30 / 594441C2) polls that flag. TerminateThread at
         // 5944570D can abandon the loader lock during DLL_THREAD_ATTACH.
-        if (!context || context->dfx || context->enhancer || reinterpret_cast<BYTE*>(caller) !=
+        if (!context || !context->ozone || reinterpret_cast<BYTE*>(caller) !=
                 reinterpret_cast<BYTE*>(context->module) + 0x35713 || exit_code != 0)
             return TerminateThread(thread, exit_code);
         MemoryBarrier();
@@ -1255,113 +1281,199 @@ FARPROC Replacement(std::string_view name) {
     ENTRY(RegQueryValueA, BasicQueryA); ENTRY(RegQueryValueW, BasicQueryW);
     ENTRY(RegSetValueA, BasicSetA); ENTRY(RegSetValueW, BasicSetW);
     ENTRY(GetProcAddress, Resolve);
+    ENTRY(LoadLibraryA, LibraryA); ENTRY(LoadLibraryW, LibraryW);
+    ENTRY(LoadLibraryExA, LibraryExA); ENTRY(LoadLibraryExW, LibraryExW);
     ENTRY(TerminateThread, StopOzoneThread);
     ENTRY(SHGetSpecialFolderPathW, DfxFolderW); ENTRY(SHGetSpecialFolderPathA, DfxFolderA);
     ENTRY(FindWindowA,DfxFindWindowA);
 #undef ENTRY
     return nullptr;
 }
-FARPROC WINAPI Resolve(HMODULE module, LPCSTR name) noexcept {
-    if (reinterpret_cast<ULONG_PTR>(name) > 0xffff && module == GetModuleHandleW(L"advapi32.dll") &&
-        std::strncmp(name, "Reg", 3) == 0) {
-        if (auto replacement = Replacement(name)) return replacement;
-        SetLastError(ERROR_PROC_NOT_FOUND); return nullptr;
-    }
-    return GetProcAddress(module, name);
+bool RegistryApi(std::string_view name) {
+    return name.size()>3&&name.starts_with("Reg")&&name[3]>='A'&&name[3]<='Z';
 }
-void Restore(PluginRegistry::Impl& context) {
-    MEMORY_BASIC_INFORMATION info{};
-    if (!VirtualQuery(context.module, &info, sizeof(info)) || info.AllocationBase != context.module || info.Type != MEM_IMAGE) return;
-    for (const auto& [slot, original] : context.imports) {
-        DWORD previous{};
-        if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &previous)) continue;
-        InterlockedExchangePointer(reinterpret_cast<PVOID volatile*>(slot), reinterpret_cast<void*>(original));
-        DWORD ignored{}; VirtualProtect(slot, sizeof(*slot), previous, &ignored);
+const std::map<ULONG_PTR,std::string>& SystemImports() {
+    static const auto table=[] {
+        std::map<ULONG_PTR,std::string> result;
+        const HMODULE advapi=GetModuleHandleW(L"advapi32.dll");
+        const auto image=dsp_imports::Memory(advapi);
+        IMAGE_EXPORT_DIRECTORY exports{};
+        if(!image.Get(image.nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress,exports))
+            throw std::runtime_error("Cannot inspect registry exports");
+        for(DWORD i=0;i<exports.NumberOfNames&&i<65536;++i){
+            DWORD rva{};if(!image.Get(size_t(exports.AddressOfNames)+4*i,rva))break;
+            auto name=image.Text(rva);if(!RegistryApi(name))continue;
+            if(const auto address=GetProcAddress(advapi,name.c_str()))result.emplace(reinterpret_cast<ULONG_PTR>(address),std::move(name));
+        }
+        for(const auto name:{"GetProcAddress","LoadLibraryA","LoadLibraryW","LoadLibraryExA","LoadLibraryExW","TerminateThread"})
+            if(const auto address=GetProcAddress(GetModuleHandleW(L"kernel32.dll"),name))result.emplace(reinterpret_cast<ULONG_PTR>(address),name);
+        return result;
+    }();
+    return table;
+}
+FARPROC ScopedReplacement(const Context& context,std::string_view name,HMODULE source) {
+    if(name=="TerminateThread"&&(!context->ozone||source!=context->module))return nullptr;
+    if((name=="FindWindowA"||name.starts_with("SHGetSpecialFolderPath"))&&(!context->dfx||source!=context->module))return nullptr;
+    return Replacement(name);
+}
+void ImportDiagnostic(const Context& context,std::wstring text) {
+    std::lock_guard lock(context->diagnostics_mutex);
+    context->import_error=text;
+    if(context->helper_diagnostics.size()<64)context->helper_diagnostics.push_back(std::move(text));
+}
+std::filesystem::path ModulePath(HMODULE module) {
+    std::wstring path(32768,L'\0');const auto length=GetModuleFileNameW(module,path.data(),static_cast<DWORD>(path.size()));
+    if(!length||length==path.size())throw std::runtime_error("Cannot locate DSP dependency");
+    path.resize(length);return path;
+}
+void AdaptModule(const Context& context,HMODULE module,const std::filesystem::path& path,bool dependency) {
+    std::lock_guard lock(import_mutex);
+    {
+        std::lock_guard contexts_lock(contexts_mutex);
+        if(std::any_of(context->modules.begin(),context->modules.end(),[&](const auto& m){return m->module==module;}))return;
     }
+    const auto inspected=dsp_imports::Inspect(module,path,SystemImports());
+    auto shared=import_modules[module].lock();
+    if(!shared){
+        shared=std::make_shared<DspModuleImports>();shared->module=module;shared->image_size=inspected.image_size;
+        if(dependency){HMODULE retained{};
+            if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,reinterpret_cast<LPCWSTR>(module),&retained))
+                throw std::runtime_error("Cannot retain DSP dependency");
+            shared->retained=true;
+        }
+        import_modules[module]=shared;
+    }
+    {std::lock_guard contexts_lock(contexts_mutex);context->modules.push_back(shared);}
+    // Validate the complete plan first. An unsupported static registry call
+    // must not silently retain a native write path after partial adaptation.
+    std::vector<std::pair<const dsp_imports::Import*,FARPROC>> plan;
+    for(const auto& entry:inspected.imports){
+        const auto known=SystemImports().find(entry.original);
+        const bool registry=known!=SystemImports().end()&&RegistryApi(known->second);
+        if(RegistryApi(entry.name)&&!registry)continue; // unrelated DLL export
+        if(!registry&&entry.library!="<resolved>"){
+            const bool kernel=_stricmp(entry.library.c_str(),"kernel32.dll")==0||_stricmp(entry.library.c_str(),"kernelbase.dll")==0||entry.library.starts_with("api-ms-win-core-");
+            const bool special=context->dfx&&_stricmp(entry.library.c_str(),"shell32.dll")==0;
+            if(!kernel&&!special)continue;
+        }
+        const auto replacement=ScopedReplacement(context,registry?known->second:entry.name,module);
+        if(registry&&!replacement)throw std::runtime_error("Unsupported DSP registry API: "+entry.name);
+        if(replacement)plan.emplace_back(&entry,replacement);
+    }
+    for(const auto& [entry,replacement]:plan){
+        if(std::any_of(shared->slots.begin(),shared->slots.end(),[&](const auto& slot){return slot.address==entry->slot;}))continue;
+        DWORD previous{};
+        if(!VirtualProtect(entry->slot,sizeof(ULONG_PTR),PAGE_READWRITE,&previous))throw std::runtime_error("Cannot adapt DSP import: "+entry->name);
+        // Reserve before changing memory so allocation failure cannot leave an
+        // untracked patched slot behind.
+        try {shared->slots.push_back({entry->slot,entry->original,reinterpret_cast<ULONG_PTR>(replacement)});}
+        catch(...){DWORD ignored{};VirtualProtect(entry->slot,sizeof(ULONG_PTR),previous,&ignored);throw;}
+        InterlockedExchangePointer(reinterpret_cast<PVOID volatile*>(entry->slot),reinterpret_cast<void*>(replacement));
+        DWORD ignored{};VirtualProtect(entry->slot,sizeof(ULONG_PTR),previous,&ignored);
+    }
+    // Only private dependencies next to the plug-in participate. Do not patch
+    // Windows DLLs, the player or every module in its process.
+    for(const auto& name:inspected.libraries){
+        const auto child=GetModuleHandleA(name.c_str());if(!child||child==module||child==GetModuleHandleW(nullptr))continue;
+        const auto child_path=ModulePath(child);
+        if(_wcsicmp(child_path.parent_path().c_str(),context->plugin.parent_path().c_str())==0)
+            AdaptModule(context,child,child_path,true);
+    }
+}
+void Restore(PluginRegistry::Impl& context,size_t first=0);
+void AdaptLoaded(const Context& context,HMODULE module,DWORD flags=0) {
+    if(!context||!module||(reinterpret_cast<ULONG_PTR>(module)&3)||
+       (flags&(LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE|DONT_RESOLVE_DLL_REFERENCES)))return;
+    const auto path=ModulePath(module);
+    if(module!=GetModuleHandleW(nullptr)&&_wcsicmp(path.parent_path().c_str(),context->plugin.parent_path().c_str())==0){
+        std::lock_guard lock(import_mutex);
+        const auto first=context->modules.size();
+        try {AdaptModule(context,module,path,true);}
+        catch(...){Restore(*context,first);throw;}
+    }
+}
+FARPROC WINAPI Resolve(HMODULE module,LPCSTR name) noexcept {
+    const auto context=FindContext(_ReturnAddress());
+    try {
+        const auto function=GetProcAddress(module,name);if(!context||!function)return function;
+        AdaptLoaded(context,module);
+        const auto known=SystemImports().find(reinterpret_cast<ULONG_PTR>(function));
+        if(known==SystemImports().end())return function;
+        if(const auto replacement=ScopedReplacement(context,known->second,context->module))return replacement;
+        if(RegistryApi(known->second)){
+            ImportDiagnostic(context,L"不支持的动态注册表接口："+core::Utf8ToWide(known->second)+L"；"+context->plugin.wstring());
+            SetLastError(ERROR_PROC_NOT_FOUND);return nullptr;
+        }
+        return function;
+    }catch(const std::exception& error){
+        try {if(context)ImportDiagnostic(context,L"动态依赖注册表接入失败："+core::Utf8ToWide(error.what()));}catch(...){}
+        SetLastError(ERROR_PROC_NOT_FOUND);return nullptr;
+    }
+}
+HMODULE FinishLibrary(const Context& context,HMODULE module,DWORD flags) noexcept {
+    if(!module)return nullptr;
+    try {AdaptLoaded(context,module,flags);return module;}
+    catch(const std::exception& error){
+        try {if(context)ImportDiagnostic(context,L"插件依赖的注册表接入失败："+core::Utf8ToWide(error.what())+L"；"+context->plugin.wstring());}catch(...){}
+        FreeLibrary(module);SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;
+    }
+}
+HMODULE WINAPI LibraryA(LPCSTR path) noexcept {return FinishLibrary(FindContext(_ReturnAddress()),LoadLibraryA(path),0);}
+HMODULE WINAPI LibraryW(LPCWSTR path) noexcept {return FinishLibrary(FindContext(_ReturnAddress()),LoadLibraryW(path),0);}
+HMODULE WINAPI LibraryExA(LPCSTR path,HANDLE file,DWORD flags) noexcept {return FinishLibrary(FindContext(_ReturnAddress()),LoadLibraryExA(path,file,flags),flags);}
+HMODULE WINAPI LibraryExW(LPCWSTR path,HANDLE file,DWORD flags) noexcept {return FinishLibrary(FindContext(_ReturnAddress()),LoadLibraryExW(path,file,flags),flags);}
+void Restore(PluginRegistry::Impl& context,size_t first) {
+    std::lock_guard lock(import_mutex);
+    for(size_t index=first;index<context.modules.size();++index){
+        const auto& module=context.modules[index];
+        if(module.use_count()!=1)continue;
+        // Keep hooks and the context alive through the dependency's detach.
+        if(module->retained){module->retained=false;FreeLibrary(module->module);}
+        for(const auto& slot:module->slots){
+            MEMORY_BASIC_INFORMATION info{};ULONG_PTR current{};SIZE_T copied{};
+            if(!VirtualQuery(slot.address,&info,sizeof(info))||info.AllocationBase!=module->module||info.Type!=MEM_IMAGE||
+               !ReadProcessMemory(GetCurrentProcess(),slot.address,&current,sizeof(current),&copied)||current!=slot.replacement)continue;
+            DWORD previous{};if(!VirtualProtect(slot.address,sizeof(current),PAGE_READWRITE,&previous))continue;
+            InterlockedExchangePointer(reinterpret_cast<PVOID volatile*>(slot.address),reinterpret_cast<void*>(slot.original));
+            DWORD ignored{};VirtualProtect(slot.address,sizeof(current),previous,&ignored);
+        }
+        module->slots.clear();
+    }
+    {std::lock_guard contexts_lock(contexts_mutex);context.modules.erase(context.modules.begin()+first,context.modules.end());}
+    std::erase_if(import_modules,[](const auto& item){return item.second.expired();});
 }
 }
 bool PluginRegistry::Supports(const std::filesystem::path& plugin) {
-    if (_wcsicmp(plugin.filename().c_str(), L"dsp_enh.dll") == 0)
-        return update::Sha256(plugin) == "55eb2f2dece655a491141376916f4488a6714e221298fab26032d647fff2287f";
-    if (_wcsicmp(plugin.filename().c_str(), L"dsp_dfx.dll") == 0)
-        return update::Sha256(plugin) == "987e7d531b92df9a582c1ab803f92856e948cc87f0a6b1ed900d3a7898a0eb03";
-    if (_wcsicmp(plugin.filename().c_str(), L"dsp_izOzone.dll") != 0) return false;
-    return update::Sha256(plugin) == "e3bb0eef979ea8016fb1278b373c7c70ae4507719524bfefe802b5bc3c800e59";
+    std::error_code error;
+    return std::filesystem::is_regular_file(plugin,error);
 }
 std::unique_ptr<PluginRegistry> PluginRegistry::Attach(HMODULE module,
-    const std::filesystem::path& plugin, const std::filesystem::path& directory) {
-    if (!Supports(plugin)) return {};
-    auto context = std::make_shared<Impl>(); context->module = module;
-    context->plugin=plugin;
-    context->dfx=_wcsicmp(plugin.filename().c_str(),L"dsp_dfx.dll")==0;
+    const std::filesystem::path& plugin,const std::filesystem::path& directory) {
+    if(!module||!Supports(plugin))throw std::runtime_error("DSP file is missing");
+    auto context=std::make_shared<Impl>();context->module=module;
+    context->plugin=std::filesystem::absolute(plugin).lexically_normal();
+    // Hashes select proven binary-specific fixes only, never eligibility for
+    // the shared registry. Renamed and rebuilt plug-ins use the same adapter.
+    const auto hash=update::Sha256(plugin);
+    context->dfx=hash=="987e7d531b92df9a582c1ab803f92856e948cc87f0a6b1ed900d3a7898a0eb03";
+    context->ozone=hash=="e3bb0eef979ea8016fb1278b373c7c70ae4507719524bfefe802b5bc3c800e59";
     context->enhancer=_wcsicmp(plugin.filename().c_str(),L"dsp_enh.dll")==0;
-    auto* base = reinterpret_cast<BYTE*>(module);
-    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-    context->image_size = nt->OptionalHeader.SizeOfImage;
-    const auto folder = directory.empty() ? plugin.parent_path() / L"PluginState" : directory;
+    context->image_size=dsp_imports::Memory(module).bytes.size();
+    const auto folder=std::filesystem::absolute(directory.empty()?context->plugin.parent_path()/L"PluginState":directory).lexically_normal();
     context->data_directory=folder/L"Dsp_Dfx";
-    const auto legacy_folder = directory.empty() ? plugin.parent_path() / L"Ozone" : directory / L"Ozone";
-    const auto file = folder / L"registry.json";
-    context->registry = SharedStore(file);
-    context->registry->MigrateLegacyOzone(legacy_folder / L"registry.json");
-    if (context->registry->Empty()) {
-        auto import = folder / L"registry-import.reg";
-        if (!std::filesystem::exists(import)) import = legacy_folder / L"registry-import.reg";
-        if (std::filesystem::exists(import)) context->registry->Import(import);
+    context->registry=SharedStore(folder/L"registry.json");
+    const auto legacy_folder=directory.empty()?context->plugin.parent_path()/L"Ozone":folder/L"Ozone";
+    context->registry->MigrateLegacyOzone(legacy_folder/L"registry.json");
+    if(context->registry->Empty()){
+        auto import=folder/L"registry-import.reg";
+        if(!std::filesystem::exists(import))import=legacy_folder/L"registry-import.reg";
+        if(std::filesystem::exists(import))context->registry->Import(import);
     }
-    if (context->dfx) context->registry->ConfigureDfxPaths(plugin, update::ExecutablePath().parent_path());
-    if (context->enhancer) context->registry->MigrateEnhancer();
-    { std::lock_guard lock(contexts_mutex); contexts.push_back(context); }
-    auto attachment = std::unique_ptr<PluginRegistry>(new PluginRegistry(context));
-    if (context->enhancer) {
-        // PECompact overwrites its import-name table. Patch only the audited
-        // decompressed business IAT, after checking every original pointer.
-        constexpr std::pair<DWORD, const char*> slots[] = {
-            {0xf000, "RegCreateKeyExA"}, {0xf004, "RegSetValueA"}, {0xf008, "RegSetValueExA"},
-            {0xf00c, "RegQueryValueA"}, {0xf010, "RegEnumValueA"}
-        };
-        for (const auto& [rva, name] : slots) {
-            if (rva + sizeof(ULONG_PTR) > context->image_size ||
-                *reinterpret_cast<FARPROC*>(base + rva) != GetProcAddress(GetModuleHandleW(L"advapi32.dll"), name))
-                throw std::runtime_error("Enhancer business imports do not match the audited binary");
-        }
-        for (const auto& [rva, name] : slots) {
-            auto* slot = reinterpret_cast<ULONG_PTR*>(base + rva); DWORD previous{};
-            if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &previous)) throw std::runtime_error("Cannot adapt Enhancer imports");
-            context->imports.emplace_back(slot, *slot);
-            InterlockedExchangePointer(reinterpret_cast<PVOID volatile*>(slot), reinterpret_cast<void*>(Replacement(name)));
-            DWORD ignored{}; VirtualProtect(slot, sizeof(*slot), previous, &ignored);
-        }
-        return attachment;
-    }
-    const auto rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
-    auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + rva);
-    for (; descriptor->Name; ++descriptor) {
-        const auto* library = reinterpret_cast<const char*>(base + descriptor->Name);
-        const bool registry = _stricmp(library, "ADVAPI32.dll") == 0;
-        if (!registry && _stricmp(library, "KERNEL32.dll") != 0 &&
-            !(context->dfx && _stricmp(library,"SHELL32.dll")==0)) continue;
-        if (!descriptor->OriginalFirstThunk) throw std::runtime_error("Plugin imports have no name table");
-        auto* names = reinterpret_cast<IMAGE_THUNK_DATA*>(base + descriptor->OriginalFirstThunk);
-        auto* slots = reinterpret_cast<IMAGE_THUNK_DATA*>(base + descriptor->FirstThunk);
-        for (; names->u1.AddressOfData; ++names, ++slots) {
-            if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
-            const auto* name = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData)->Name;
-            const auto replacement = Replacement(reinterpret_cast<const char*>(name));
-            if (!replacement) {
-                if (registry && std::strncmp(reinterpret_cast<const char*>(name), "Reg", 3) == 0)
-                    throw std::runtime_error("Uncovered plugin registry import");
-                continue;
-            }
-            auto* slot = &slots->u1.Function;
-            DWORD previous{};
-            if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &previous)) throw std::runtime_error("Cannot adapt plugin imports");
-            context->imports.emplace_back(slot, *slot);
-            InterlockedExchangePointer(reinterpret_cast<PVOID volatile*>(slot), reinterpret_cast<void*>(replacement));
-            DWORD ignored{}; VirtualProtect(slot, sizeof(*slot), previous, &ignored);
-        }
-    }
+    if(context->dfx)context->registry->ConfigureDfxPaths(context->plugin,update::ExecutablePath().parent_path());
+    if(context->enhancer)context->registry->MigrateEnhancer();
+    {std::lock_guard lock(contexts_mutex);contexts.push_back(context);}
+    auto attachment=std::unique_ptr<PluginRegistry>(new PluginRegistry(context));
+    AdaptModule(context,module,context->plugin,false);
     return attachment;
 }
 PluginRegistry::PluginRegistry(std::shared_ptr<Impl> state) : impl_(std::move(state)) {}
@@ -1369,8 +1481,8 @@ PluginRegistry::~PluginRegistry() {
     impl_->helper.reset();
     Restore(*impl_);
     { std::lock_guard lock(impl_->handles_mutex);
-      for (const auto key : impl_->enhancer_handles) impl_->registry->Close(key);
-      impl_->enhancer_handles.clear(); }
+      for (const auto key : impl_->open_handles) impl_->registry->Close(key);
+      impl_->open_handles.clear(); }
     std::lock_guard lock(contexts_mutex);
     std::erase(contexts, impl_);
 }
@@ -1422,9 +1534,16 @@ bool PluginRegistry::ConfigureDfx(HWND) {
     return true;
 }
 std::vector<std::wstring> PluginRegistry::Diagnostics() {
+    std::lock_guard lock(impl_->diagnostics_mutex);
     auto messages=std::exchange(impl_->helper_diagnostics,{});
     if(impl_->helper) {auto current=impl_->helper->Diagnostics();messages.insert(messages.end(),current.begin(),current.end());}
     return messages;
+}
+std::wstring PluginRegistry::StorageDescription() const {
+    {std::lock_guard lock(impl_->diagnostics_mutex);if(!impl_->import_error.empty())return impl_->import_error;}
+    if(impl_->registry->SaveStatus()!=ERROR_SUCCESS)
+        return L"registry.json 保存失败，请检查文件权限或磁盘空间";
+    return L"注册表：共享 registry.json（缺失时读取系统）";
 }
 std::vector<std::wstring> PluginRegistry::HelperTrace() {
     auto result=impl_->helper_trace;

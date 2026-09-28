@@ -33,6 +33,7 @@ public:
                       DWORD& max_value_name, DWORD& max_value_data, bool ansi = false);
     void ConfigureDfxPaths(const std::filesystem::path& plugin, const std::filesystem::path& host);
     LSTATUS Flush();
+    LSTATUS SaveStatus() const;
     bool Empty() const;
     // Shared full-hive namespace. Missing data falls back to read-only native
     // registry access; mutations and imports only change this file.
@@ -46,8 +47,8 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// Enabled only for the audited Ozone/DFX/Enhancer binaries. Must outlive FreeLibrary so Quit
-// and DLL_PROCESS_DETACH see the same file-backed settings.
+// Shared adapter for DSP modules and their private dependencies. Must outlive
+// FreeLibrary so Quit and DLL_PROCESS_DETACH see the same file-backed settings.
 class PluginRegistry {
 public:
     struct Impl;
@@ -57,6 +58,7 @@ public:
         const std::filesystem::path& directory = {});
     ~PluginRegistry();
     bool Flush() noexcept;
+    std::wstring StorageDescription() const;
     bool ConfigureDfx(HWND owner);
     std::vector<std::wstring> Diagnostics();
     std::vector<std::wstring> HelperTrace();

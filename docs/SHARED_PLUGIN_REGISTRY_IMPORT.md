@@ -63,7 +63,7 @@
 
 原版没有有效的 UAC 执行级别声明，系统可以把 Enhancer 的 HKLM 写入虚拟化到当前用户的 VirtualStore。重建版的 `asInvoker` 清单关闭了这项隐式虚拟化；插件使用 `KEY_ALL_ACCESS` 创建 HKLM 键，失败后弹出“无法访问注册信息”。
 
-现已接管经过哈希校验的 `dsp_enh.dll` 解压后的 5 个业务导入槽：`RegCreateKeyExA`、`RegSetValueA`、`RegSetValueExA`、`RegQueryValueA`、`RegEnumValueA`。不遍历被 PECompact 覆盖的导入名称表，不改写磁盘 DLL。
+Enhancer 现使用通用导入表／已解析入口识别，覆盖创建、查询、设置、枚举等业务调用。不再依赖文件哈希或固定导入槽 RVA，原始压缩版和恢复后的 DLL 使用相同共享存储；不改写磁盘 DLL。
 
 `Skin File` 是子键的默认字符串，不是父键的同名值。已按这一语义实现 ANSI/Unicode 基本查询、写入 API，包含缓冲区大小和结束符处理。卸载后释放插件遗留的文件注册表句柄。
 
@@ -73,7 +73,7 @@
 
 ## 适配范围与测试
 
-当前接入并固定二进制哈希的是 Ozone、DFX（含已审计的设置助手）和 Enhancer，彼此没有配置可见性隔离。其他未经适配的 DLL 不会仅因导入 REG 就自动获得文件注册表能力；共享数据空间不代表已接管任意第三方 DLL 的全部调用。
+已改为通用 DSP 接入，不再按文件名或哈希限制为 Ozone、DFX、Enhancer。原始及恢复 DLL、合法的 `OriginalFirstThunk == 0`、动态接口解析和同目录私有依赖使用同一适配流程。哈希仅选取已验证的 Ozone／DFX 特定修复。未支持的 Reg 接口拒绝接入并记录内部诊断；接入、保存失败不在前端显示，音效插件列表没有“注册表配置”列。完整范围和限制见 [通用接入说明](DSP_GENERIC_REGISTRY_INTEGRATION.md)。
 
 DFX 的 `PluginState/Dsp_Dfx` 目录仍用于普通配置文件和缓存，不是注册表数据分区。它的安装位置键仍在加载时按当前插件及播放器目录更新。
 

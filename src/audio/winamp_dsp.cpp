@@ -1,6 +1,7 @@
 #include "ttplayer/audio/winamp_dsp.h"
 #include "dsp_dispatcher.h"
 #include "plugin_registry.h"
+#include "ttplayer/core/text.h"
 #include <atomic>
 #include <exception>
 #include <functional>
@@ -547,8 +548,9 @@ public:
             // retire its vector entry, but cannot unload it until we return.
             auto* module = current->module;
             ++callback_depth_;
-            if (!InvokeConfigure(module))
+            if (!InvokeConfigure(module)) {
                 diagnostics_.push_back(L"Winamp DSP Config failed: " + path.wstring());
+            }
             FinishCallback();
             Windows();
         });
@@ -637,13 +639,12 @@ private:
         }
         std::unique_ptr<detail::PluginRegistry> registry;
         try { registry = detail::PluginRegistry::Attach(library, path, storage_directory); }
-        catch (const std::exception&) {
-            diagnostics_.push_back(L"Plug-in file configuration is invalid, busy, or read-only: " + path.wstring());
+        catch (const std::exception& error) {
+            const auto message=L"注册表配置接入失败："+core::Utf8ToWide(error.what());
+            diagnostics_.push_back(message+L"；"+path.wstring());
             FreeLibrary(library);
             return;
         }
-        if (!registry && _wcsicmp(path.filename().c_str(), L"dsp_izOzone.dll") == 0)
-            diagnostics_.push_back(L"This Ozone version has no file-registry adapter; native registry behavior is unchanged: " + path.wstring());
         const auto fail = [&](std::wstring reason) {
             diagnostics_.push_back(std::move(reason) + L": " + path.wstring());
             FreeLibrary(library);

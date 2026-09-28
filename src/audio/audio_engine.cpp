@@ -70,6 +70,24 @@ constexpr DWORD kAllStreams = static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS);
 constexpr DWORD kFirstAudioStream =
     static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
 
+size_t SourceReadBytes(const WAVEFORMATEX& source,
+                       const WAVEFORMATEX& output,
+                       size_t output_bytes, int file_buffer_bytes) noexcept {
+    // Decoder/DSP packets are in the SOURCE format. In particular, shrinking
+    // a 24-bit read to the remaining 16-bit output space converges to 1-2
+    // frames and breaks legacy DSPs (Vinyl's filter requires at least three).
+    // Keep normal decoder reads independent of the output packet's tail;
+    // decoded_offset already retains all processed output for the next fill.
+    // 004B1375/004AC166 process reader PCM before handing it to the output.
+    const std::uint64_t align = std::max<WORD>(1, source.nBlockAlign);
+    const std::uint64_t bytes = std::max<std::uint64_t>(file_buffer_bytes,
+        static_cast<std::uint64_t>(output_bytes) * source.nAvgBytesPerSec /
+            std::max<DWORD>(1, output.nAvgBytesPerSec) + align);
+    constexpr std::uint64_t limit = 64U * 1024U * 1024U;
+    const auto bounded = std::min(bytes, limit - align);
+    return static_cast<size_t>((bounded + align - 1) / align * align);
+}
+
 WORD PcmProcessingTag(const WAVEFORMATEX& format) noexcept {
     if (format.wFormatTag != WAVE_FORMAT_EXTENSIBLE ||
         format.cbSize < sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX))
@@ -2671,11 +2689,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             decoded.clear();
             decoded_offset = 0;
             std::vector<std::byte> native;
-            const size_t native_request = std::max<size_t>(
-                options.file_buffer_bytes,
-                requested * static_cast<size_t>(source_format.nAvgBytesPerSec) /
-                    std::max<DWORD>(1, wave_format.nAvgBytesPerSec) +
-                    source_format.nBlockAlign);
+            const size_t native_request = SourceReadBytes(
+                source_format, wave_format, requested, options.file_buffer_bytes);
             if (!source->Read(native_request, native, decoder_eof)) {
                 if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                 return false;
@@ -3034,6 +3049,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     uint64_t next_stream_byte{};
     uint64_t last_visual_byte = std::numeric_limits<uint64_t>::max();
 
+    const size_t native_request = SourceReadBytes(
+        source_format, wave_format, buffer_bytes, options.file_buffer_bytes);
     auto fill = [&](OutputBuffer& output) -> bool {
         size_t written{};
         while (!stop_requested_ && written < output.data.size() &&
@@ -3041,7 +3058,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             if (decoded_offset == decoded.size()) {
                 decoded.clear();
                 decoded_offset = 0;
-                if (!source->Read(output.data.size() - written, decoded, decoder_eof)) {
+                if (!source->Read(native_request, decoded, decoder_eof)) {
                     if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                     return false;
                 }
