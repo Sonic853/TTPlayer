@@ -5,6 +5,7 @@
 #include "ttplayer/app/worker_process.h"
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/settings/settings.h"
+#include "ttplayer/ui/taskbar_icon.h"
 #include "../ui/file_info_probe_client.h"
 #include "../audio/plugin_registry.h"
 
@@ -207,6 +208,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, 
         }
     }
     if (arguments) LocalFree(arguments);
+    // Before any player or DSP UI; workers above deliberately keep their own
+    // identity. Plugin windows and the main window belong to the same group.
+    ttplayer::ui::InitializePlayerTaskbarIdentity();
     ttplayer::ui::detail::EnableEmbeddedFileInfoProbe();
     return TTPlayer_wWinMain(instance, previous, command_line, show_command);
 }

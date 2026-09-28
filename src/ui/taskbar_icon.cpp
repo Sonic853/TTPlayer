@@ -181,6 +181,21 @@ std::wstring PlayerAppUserModelId(const std::filesystem::path& executable) {
     return path.empty() ? L"" : L"Sonic853.TTPlayerRebuild." + Hash(path.data(), path.size() * sizeof(wchar_t));
 }
 
+HRESULT InitializePlayerTaskbarIdentity() {
+    using SetProcessIdFn = HRESULT(WINAPI*)(PCWSTR);
+    const auto set_id = reinterpret_cast<SetProcessIdFn>(GetProcAddress(
+        GetModuleHandleW(L"shell32.dll"), "SetCurrentProcessExplicitAppUserModelID"));
+    if (!set_id) return S_FALSE; // XP/Vista: retain the system's legacy grouping.
+    std::array<wchar_t, 32768> path{};
+    const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (!length || length >= path.size()) return E_FAIL;
+    const auto id = PlayerAppUserModelId(path.data());
+    if (id.empty()) return E_FAIL;
+    // A window-level ID overrides this. Publishing it only on the player
+    // splits unowned plug-in windows (e.g. Ozone) into an implicit-ID group.
+    return set_id(id.c_str());
+}
+
 ShortcutIconUpdate UpdatePlayerShortcutIcon(const std::filesystem::path& shortcut,
     const std::filesystem::path& executable, const std::filesystem::path& icon, const std::wstring& id) {
     IShellLinkW* raw_link{};
@@ -227,8 +242,8 @@ std::filesystem::path PublishTaskbarIcon(HWND window, HICON small_icon, HICON la
     const auto id = PlayerAppUserModelId(executable);
     const auto icon = CacheIcon(small_icon, large_icon, id);
     if (icon.empty()) return {};
-    // Migrate implicit-ID pins before publishing the window's explicit ID,
-    // otherwise Explorer creates a second taskbar group after an upgrade.
+    // Migrate legacy implicit-ID pins as well, so they match the startup
+    // process identity and do not retain a separate group after an upgrade.
     bool changed{};
     const bool links_ready = UpdatePinnedIcons(executable, icon, id, changed);
     if (!links_ready) return {};

@@ -7,6 +7,10 @@
 namespace ttplayer::ui {
 // Stable across updates/icon selections, distinct for portable installations.
 std::wstring PlayerAppUserModelId(const std::filesystem::path& executable);
+// Call before showing UI. Unowned DSP windows inherit this process identity,
+// while the main window and pinned shortcuts use the same explicit ID.
+// S_FALSE on systems without Windows 7 taskbar identities.
+HRESULT InitializePlayerTaskbarIdentity();
 bool HasTaskbarIconProperties();
 
 // Updates only links targeting this executable; preserves launch parameters,
