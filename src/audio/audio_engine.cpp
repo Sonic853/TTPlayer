@@ -26,6 +26,7 @@
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -1726,7 +1727,8 @@ public:
                     std::clamp(sample, -0.5, 32767.0 / 65536.0) * 65536.0));
             }
             winamp_dsp_.Process(pcm16, format_.nChannels,
-                                static_cast<int>(format_.nSamplesPerSec));
+                                static_cast<int>(format_.nSamplesPerSec),
+                                &diagnostics_);
             for (size_t index = 0; index < samples.size(); ++index)
                 samples[index] = pcm16[index] / 65536.0;
         }
@@ -1744,8 +1746,19 @@ public:
 #endif
     }
 
-    std::vector<std::wstring> TakeDiagnostics() {
-        return winamp_dsp_.TakeDiagnostics();
+    std::vector<std::wstring> TakeDiagnostics(bool poll_plugin = false) {
+        // The PCM callback already collected its diagnostics. A second
+        // synchronous dispatcher call here can wait behind Ozone's UI Sleep
+        // for every 1024-frame FLAC block, exhausting the output lookahead.
+        // Explicit polling is only needed at setup / configuration changes.
+        auto result = std::exchange(diagnostics_, {});
+        if (poll_plugin) {
+            auto messages = winamp_dsp_.TakeDiagnostics();
+            result.insert(result.end(),
+                std::make_move_iterator(messages.begin()),
+                std::make_move_iterator(messages.end()));
+        }
+        return result;
     }
 
     std::optional<ReplayGainScanResult> FinishReplayGain() noexcept {
@@ -1936,6 +1949,7 @@ private:
     HMODULE ttpcomm_module_{};
     int surround_amount_{};
     WinampDspChain& winamp_dsp_;
+    std::vector<std::wstring> diagnostics_;
 };
 
 struct OutputBuffer {
@@ -2478,7 +2492,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     RecoveredProcessorChain processors(
         source_format, source_metadata, options, ttpcomm_module_, *dsp_chain_,
         analyze_replay_gain);
-    for (auto& diagnostic : processors.TakeDiagnostics())
+    for (auto& diagnostic : processors.TakeDiagnostics(true))
         RecordDiagnostic(std::move(diagnostic));
     uint64_t processor_revision = processor_revision_.load();
 
@@ -2681,6 +2695,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                     SetError(L"The recovered audio processor chain failed");
                 return false;
             }
+            for (auto& diagnostic : processors.TakeDiagnostics())
+                RecordDiagnostic(std::move(diagnostic));
             if (!output_transform.Process(native, decoded, decoder_eof)) {
                 if (!stop_requested_) SetError(output_transform.Error());
                 return false;
@@ -3038,7 +3054,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                         current = options_;
                     }
                     processors.Update(current);
-                    for (auto& diagnostic : processors.TakeDiagnostics())
+                    for (auto& diagnostic : processors.TakeDiagnostics(true))
                         RecordDiagnostic(std::move(diagnostic));
                     processor_revision = latest_revision;
                 }

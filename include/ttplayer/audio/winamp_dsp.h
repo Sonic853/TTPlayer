@@ -47,8 +47,12 @@ public:
     // converts other decoded sample formats to 16-bit around this call.  The
     // return value from ModifySamples is intentionally ignored, as it is by
     // FUN_004280CD; TTPlayer treats the processor as an in-place transform.
+    // When supplied, diagnostics are appended on the same dispatcher visit.
+    // This avoids a second wait behind plug-in UI work for every decoded block.
+    // Without a destination, messages remain available to TakeDiagnostics().
     void Process(std::span<std::int16_t> interleaved_samples,
-                 int channels, int sample_rate);
+                 int channels, int sample_rate,
+                 std::vector<std::wstring>* diagnostics = nullptr);
 
     [[nodiscard]] std::size_t ActiveCount() const noexcept;
     [[nodiscard]] std::vector<std::wstring> TakeDiagnostics();

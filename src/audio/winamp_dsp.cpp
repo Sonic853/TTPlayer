@@ -4,6 +4,7 @@
 #include <atomic>
 #include <exception>
 #include <functional>
+#include <iterator>
 #include <optional>
 #include <thread>
 
@@ -727,7 +728,8 @@ std::vector<HWND> WinampDspChain::Windows() const {
 }
 
 void WinampDspChain::Process(std::span<std::int16_t> interleaved_samples,
-                             int channels, int sample_rate) {
+                             int channels, int sample_rate,
+                             std::vector<std::wstring>* diagnostics) {
     if (impl_->active_count == 0) return;
     const int priority = GetThreadPriority(GetCurrentThread());
     impl_->dispatcher.InvokeQueued([&] {
@@ -736,6 +738,12 @@ void WinampDspChain::Process(std::span<std::int16_t> interleaved_samples,
             SetThreadPriority(GetCurrentThread(), priority))
             impl_->processing_priority = priority;
         impl_->Process(interleaved_samples, channels, sample_rate);
+        if (diagnostics) {
+            auto messages = impl_->TakeDiagnostics();
+            diagnostics->insert(diagnostics->end(),
+                std::make_move_iterator(messages.begin()),
+                std::make_move_iterator(messages.end()));
+        }
     });
 }
 
