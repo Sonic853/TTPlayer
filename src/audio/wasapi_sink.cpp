@@ -116,6 +116,9 @@ struct WasapiStream {
     UINT32 capacity{};
     bool paused{true};
     bool started{};
+    bool buffering{};
+    bool input_finished{};
+    std::uint64_t low_frames{}, resume_frames{};
     std::deque<std::vector<std::byte>> queue;
     size_t offset{};
     std::uint64_t written_frames{}, played_frames{};
@@ -167,6 +170,10 @@ bool WasapiStream::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
     auto& s = *this;
     if (!s.error.empty()) return false;
     s.source = source_format;
+    const auto lookahead = static_cast<std::uint64_t>(s.source.nSamplesPerSec) *
+                           std::clamp(buffer_ms, 100, 10000) / 1000;
+    s.low_frames = std::min<std::uint64_t>(lookahead / 4, s.source.nSamplesPerSec / 10);
+    s.resume_frames = lookahead * 8 / 10;
     if (s.source.wFormatTag != WAVE_FORMAT_PCM || s.source.nChannels == 0 ||
         s.source.nChannels > 8 || s.source.nSamplesPerSec < 1000 ||
         s.source.nSamplesPerSec > 768000 ||
@@ -246,6 +253,18 @@ bool WasapiStream::Pump(float left_gain, float right_gain) {
     if (s.paused) return true;
     UINT32 padding{};
     if (!s.Padding(padding)) return false;
+    std::uint64_t ready = padding;
+    for (const auto& packet : s.queue) ready += packet.size() / s.source.nBlockAlign;
+    ready -= s.offset / s.source.nBlockAlign;
+    // 004AC605 stops at low water and resumes after refilling, rather than
+    // repeatedly playing isolated small arrivals. Leave queued samples and
+    // the source clock intact; a final short tail must drain without waiting.
+    if (s.started && !s.input_finished && ready < s.low_frames) {
+        if (!s.Fail(s.client->Stop(), L"Buffering pause")) return false;
+        s.started = false;
+        s.buffering = true;
+    }
+    if (s.buffering && !s.input_finished && ready < s.resume_frames) return true;
     UINT32 available = s.capacity - padding;
     while (available && !s.queue.empty()) {
         auto& packet = s.queue.front();
@@ -289,6 +308,7 @@ bool WasapiStream::Pump(float left_gain, float right_gain) {
     if (!s.started && s.written_frames > s.played_frames) {
         if (!s.Fail(s.client->Start(), L"开始播放")) return false;
         s.started = true;
+        s.buffering = false;
     }
     return true;
 }
@@ -310,6 +330,7 @@ bool WasapiStream::Reset() {
     s.queue.clear();
     s.offset = 0;
     s.written_frames = s.played_frames = 0;
+    s.input_finished = s.buffering = false;
     return true;
 }
 
@@ -436,6 +457,10 @@ bool WasapiSink::SetPaused(bool paused) {
     bool good{};
     impl_->Invoke([&] { good = impl_->stream.SetPaused(paused); });
     return good;
+}
+
+void WasapiSink::FinishInput() {
+    if (impl_) impl_->Invoke([&] { impl_->stream.input_finished = true; });
 }
 
 bool WasapiSink::Reset() {

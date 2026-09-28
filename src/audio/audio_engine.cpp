@@ -2722,6 +2722,14 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
 
         std::optional<uint64_t> final_stream_byte;
         uint64_t stream_write_byte{};
+        // Device progress must be observed even while a decoder/DSP blocks.
+        // The recovered 004AC605 coordinator pauses at low water instead of
+        // allowing DSBPLAY_LOOPING to replay previously consumed ring data.
+        std::mutex ring_mutex;
+        uint64_t observed_played{};
+        DWORD observed_cursor{};
+        bool ring_buffering{}, ring_suspended{};
+        HRESULT ring_error = S_OK;
         auto fill_segment = [&]() -> bool {
             std::vector<std::byte> segment(segment_bytes, silence);
             size_t written{};
@@ -2740,6 +2748,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 decoded_offset += copy;
             }
             written -= written % wave_format.nBlockAlign;
+            std::scoped_lock ring_lock(ring_mutex);
             if (stream_eof && decoded_offset == decoded.size() &&
                 !final_stream_byte) {
                 final_stream_byte = stream_write_byte + written;
@@ -2785,9 +2794,46 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             Backend::direct_sound, source->DisplayFormat(), source->Duration());
         if (usable) replay_gain_commit.MarkPlaybackAccepted();
         uint64_t played_bytes{};
-        DWORD last_cursor{};
         int64_t position_base_ms{};
         uint64_t last_visual_byte = std::numeric_limits<uint64_t>::max();
+        const uint64_t low_water = std::min<uint64_t>(
+            segment_bytes, std::max<uint64_t>(wave_format.nBlockAlign,
+                                             wave_format.nAvgBytesPerSec / 10));
+        const uint64_t resume_water = ring_bytes * 8 / 10;
+        std::jthread ring_monitor([&](std::stop_token stop) {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+            while (!stop.stop_requested()) {
+                {
+                    std::scoped_lock ring_lock(ring_mutex);
+                    if (!ring_suspended && SUCCEEDED(ring_error)) {
+                        DWORD cursor{}, write_cursor{}, status{};
+                        ring_error = sound_buffer->GetCurrentPosition(&cursor, &write_cursor);
+                        if (SUCCEEDED(ring_error)) ring_error = sound_buffer->GetStatus(&status);
+                        if (SUCCEEDED(ring_error)) {
+                            observed_played += cursor >= observed_cursor
+                                ? cursor - observed_cursor
+                                : ring_bytes - observed_cursor + cursor;
+                            observed_cursor = cursor;
+                            const uint64_t ready = stream_write_byte > observed_played
+                                ? stream_write_byte - observed_played : 0;
+                            if (final_stream_byte && observed_played >= *final_stream_byte) {
+                                ring_error = sound_buffer->Stop();
+                            } else if ((status & DSBSTATUS_PLAYING) &&
+                                       !final_stream_byte && ready < low_water) {
+                                ring_error = sound_buffer->Stop();
+                                ring_buffering = true;
+                            } else if (ring_buffering && !stop_requested_ &&
+                                       state_.load() == PlaybackState::playing &&
+                                       (ready >= resume_water || final_stream_byte)) {
+                                ring_error = sound_buffer->Play(0, 0, DSBPLAY_LOOPING);
+                                ring_buffering = false;
+                            }
+                        }
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        });
 
         bool natural_replay_gain_end{};
         while (usable && !stop_requested_) {
@@ -2797,16 +2843,21 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             const int64_t requested = request.position_ms;
             if (requested >= 0) {
                 const auto previous_state = state_.load();
-                sound_buffer->Stop();
-                sound_buffer->SetCurrentPosition(0);
+                {
+                    std::scoped_lock ring_lock(ring_mutex);
+                    ring_suspended = true;
+                    sound_buffer->Stop();
+                    sound_buffer->SetCurrentPosition(0);
+                    final_stream_byte.reset();
+                    stream_write_byte = observed_played = 0;
+                    observed_cursor = 0;
+                    ring_buffering = false;
+                }
                 decoded.clear();
                 decoded_offset = 0;
                 decoder_eof = false;
                 stream_eof = false;
-                final_stream_byte.reset();
-                stream_write_byte = 0;
                 played_bytes = 0;
-                last_cursor = 0;
                 position_base_ms = std::clamp<int64_t>(
                     requested, 0, duration_ms_.load());
                 processors.Reset();
@@ -2837,37 +2888,35 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                         break;
                     }
                 }
+                {
+                    std::scoped_lock ring_lock(ring_mutex);
+                    ring_suspended = false;
+                }
                 last_visual_byte = std::numeric_limits<uint64_t>::max();
                 ClearVisualization();
                 CompleteSeek(request, position_base_ms);
             }
 
             DWORD cursor{};
-            DWORD write_cursor{};
-            const HRESULT positioned = sound_buffer->GetCurrentPosition(
-                &cursor, &write_cursor);
+            HRESULT positioned;
+            const auto observe = [&] {
+                std::scoped_lock ring_lock(ring_mutex);
+                cursor = observed_cursor;
+                played_bytes = observed_played;
+                positioned = ring_error;
+            };
+            observe();
             if (FAILED(positioned)) {
                 if (!stop_requested_)
                     SetError(HResultMessage(
                         L"IDirectSoundBuffer::GetCurrentPosition", positioned));
                 break;
             }
-            const DWORD delta = cursor >= last_cursor
-                ? cursor - last_cursor
-                : static_cast<DWORD>(ring_bytes - last_cursor + cursor);
-            DWORD buffer_status{};
-            if (SUCCEEDED(sound_buffer->GetStatus(&buffer_status)) &&
-                (buffer_status & DSBSTATUS_PLAYING) != 0) {
-                // Pause publishes its logical state before the 10 ms fade
-                // worker stops the device (004AC7DD).  Account that audible
-                // transition from the actual DirectSound clock, not State().
-                played_bytes += delta;
-            }
-            last_cursor = cursor;
             while (!final_stream_byte &&
-                   stream_write_byte - played_bytes <=
+                   (stream_write_byte > played_bytes ? stream_write_byte - played_bytes : 0) <=
                        ring_bytes - segment_bytes) {
                 if (!fill_segment()) { usable = false; break; }
+                observe();
             }
             if (!usable) break;
             position_ms_ = BoundPlaybackClock(
@@ -2902,6 +2951,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
+        ring_monitor.request_stop();
+        ring_monitor.join();
         sound_buffer->Stop();
         {
             std::scoped_lock lock(mutex_);
@@ -3102,7 +3153,11 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             decoded_offset += copy;
         }
         written -= written % wave_format.nBlockAlign;
-        if (written == 0) return true;
+        if (written == 0) {
+            if (wasapi_sink && decoder_eof && decoded_offset == decoded.size())
+                wasapi_sink->FinishInput();
+            return true;
+        }
         output.stream_byte_offset = next_stream_byte;
         next_stream_byte += written;
         output.header = {};
@@ -3113,6 +3168,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 if (!stop_requested_) SetError(wasapi_sink->Error(), wasapi_sink->ErrorResult());
                 return false;
             }
+            if (decoder_eof && decoded_offset == decoded.size()) wasapi_sink->FinishInput();
             output.header.dwFlags = WHDR_PREPARED;
         } else if (ks_sink || asio_sink) {
             float left{1.0F}, right{1.0F};

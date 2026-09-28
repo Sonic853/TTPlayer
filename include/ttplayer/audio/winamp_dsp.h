@@ -16,9 +16,9 @@ inline constexpr UINT kWinampDspMovingMessage = WM_APP + 0x393;
 
 // In-process adapter for the Winamp DSP ABI recovered at
 // FUN_00427EDC/FUN_00428061/FUN_004280CD.  Instances are deliberately owned
-// by the playback session family. Discovery is isolated; Init/Config/Modify/Quit
-// share a persistent in-process thread with a window message loop. This keeps
-// modeless plug-in windows alive and preserves one instance across track fades.
+// by the playback session family. Init/Config/Quit own a persistent window
+// apartment; ModifySamples runs serially on the calling audio worker, as in
+// the original host. Lifecycle changes defer until in-flight PCM/Config ends.
 class WinampDspChain {
 public:
     WinampDspChain();
@@ -47,8 +47,7 @@ public:
     // converts other decoded sample formats to 16-bit around this call.  The
     // return value from ModifySamples is intentionally ignored, as it is by
     // FUN_004280CD; TTPlayer treats the processor as an in-place transform.
-    // When supplied, diagnostics are appended on the same dispatcher visit.
-    // This avoids a second wait behind plug-in UI work for every decoded block.
+    // When supplied, diagnostics are drained without visiting the UI queue.
     // Without a destination, messages remain available to TakeDiagnostics().
     void Process(std::span<std::int16_t> interleaved_samples,
                  int channels, int sample_rate,

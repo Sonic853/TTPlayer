@@ -13,6 +13,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <mutex>
 #include <utility>
 
 namespace ttplayer::audio {
@@ -311,19 +312,20 @@ class WinampDspChain::Impl {
 public:
     detail::DspDispatcher dispatcher;
     std::atomic<std::size_t> active_count{};
-    int processing_priority = THREAD_PRIORITY_NORMAL;
     struct LoadedModule {
         std::filesystem::path path;
         HMODULE library{};
         WinampDspModule* module{};
         std::unique_ptr<detail::PluginRegistry> registry;
+        std::atomic<bool> failed{};
 
         LoadedModule() = default;
         LoadedModule(const LoadedModule&) = delete;
         LoadedModule& operator=(const LoadedModule&) = delete;
         LoadedModule(LoadedModule&& other) noexcept
             : path(std::move(other.path)), library(std::exchange(other.library, nullptr)),
-              module(std::exchange(other.module, nullptr)), registry(std::move(other.registry)) {}
+              module(std::exchange(other.module, nullptr)), registry(std::move(other.registry)),
+              failed(other.failed.load()) {}
         LoadedModule& operator=(LoadedModule&& other) noexcept {
             if (this == &other) return *this;
             Close(nullptr);
@@ -331,6 +333,7 @@ public:
             library = std::exchange(other.library, nullptr);
             module = std::exchange(other.module, nullptr);
             registry = std::move(other.registry);
+            failed = other.failed.load();
             return *this;
         }
         ~LoadedModule() { Close(nullptr); }
@@ -379,10 +382,16 @@ public:
         }
         // Config can run a modal message loop. Nested requests must never
         // unload its DLL (or a ModifySamples stack which queried the player).
-        if (callback_depth_ != 0) {
-            pending_ = Pending{folder, configured, parent_window};
-            return;
-        }
+        // Publish before trying the PCM lock: otherwise the final callback
+        // could finish between try_lock failing and setting the flag, leaving
+        // a removal pending forever when there is no next block at EOF.
+        pending_ = Pending{folder, configured, parent_window};
+        pending_update_ = true;
+        std::unique_lock processing_lock(processing_mutex_, std::try_to_lock);
+        if (callback_depth_ != 0 || !processing_lock.owns_lock() || processing_) return;
+        // A newer accepted control request supersedes a deferred older one.
+        pending_.reset();
+        pending_update_ = false;
         const bool same_parent = parent_window == parent_window_;
         const bool same_modules = requested.size() == requested_.size() &&
             std::equal(requested.begin(), requested.end(), requested_.begin(),
@@ -412,13 +421,31 @@ public:
                 Load(path);
             }
         }
-        active_count = modules_.size();
+        active_count = std::count_if(modules_.begin(), modules_.end(),
+            [](const auto& module) { return !module.failed.load(); });
         FinishCallback();
         Windows();
     }
 
     void Process(std::span<std::int16_t> samples, int channels,
-                 int sample_rate) {
+                 int sample_rate, std::vector<std::wstring>* diagnostics) {
+        // The recovered 0042898D/004280CD runs PCM on the audio worker, not
+        // on the apartment that owns plug-in windows. Serialize overlapping
+        // playback sessions, but never make UI Update wait for a callback
+        // which may itself synchronously query that UI.
+        std::unique_lock processing_lock(processing_mutex_);
+        if (processing_) return; // A third-party message pump re-entered PCM.
+        processing_ = true;
+        struct Completion {
+            Impl& self;
+            std::unique_lock<std::recursive_mutex>& lock;
+            ~Completion() {
+                self.processing_ = false;
+                lock.unlock();
+                if (self.pending_update_.load())
+                    self.dispatcher.Post([&self = self] { self.FinishPending(); });
+            }
+        } completion{*this, processing_lock};
         if (samples.empty() || channels <= 0 || sample_rate <= 0 ||
             samples.size() % static_cast<std::size_t>(channels) != 0)
             return;
@@ -445,9 +472,8 @@ public:
             if (good) std::copy_n(scratch_.data(), count, samples.data() + offset);
             return good;
         };
-        ++callback_depth_;
-        for (std::size_t index = 0; index < modules_.size();) {
-            auto& loaded = modules_[index];
+        for (auto& loaded : modules_) {
+            if (loaded.failed.load()) continue;
             const int frames = static_cast<int>(frame_count);
             bool good = true;
             // This apparently unusual one-time half split is literal
@@ -462,36 +488,42 @@ public:
             } else {
                 good = modify(loaded.module, 0, frames);
             }
-            if (good) {
-                ++index;
-                continue;
+            if (good) continue;
+            loaded.failed = true;
+            --active_count;
+            {
+                std::scoped_lock lock(diagnostics_mutex_);
+                diagnostics_.push_back(
+                    L"Winamp DSP ModifySamples raised an exception; disabled: " +
+                    loaded.path.wstring());
             }
-
-            diagnostics_.push_back(
-                L"Winamp DSP ModifySamples raised an exception; disabled: " +
-                loaded.path.wstring());
-            // A Config frame may still own the failed module. Delay Quit
-            // until the outermost third-party callback has returned.
-            retired_.push_back(std::move(loaded));
-            modules_.erase(modules_.begin() + static_cast<std::ptrdiff_t>(index));
+            // Original +0x24 marks a failed processor as bypassed. Keep its
+            // instance mapped until UI-side removal; Config may still be on
+            // its stack, and Quit must run on the initializing apartment.
         }
-        active_count = modules_.size();
-        FinishCallback();
+        if (diagnostics) {
+            auto messages = TakeDiagnostics();
+            diagnostics->insert(diagnostics->end(),
+                std::make_move_iterator(messages.begin()),
+                std::make_move_iterator(messages.end()));
+        }
     }
 
     void CloseAll(bool publish_count = true) noexcept {
         // FUN_00428B16 destroys the wrappers in ascending vector order.
-        for (auto& current : modules_) current.Close(&diagnostics_);
+        std::vector<std::wstring> messages;
+        for (auto& current : modules_) current.Close(&messages);
         modules_.clear();
         if (publish_count) active_count = 0;
+        try { for (auto& message : messages) AddDiagnostic(std::move(message)); }
+        catch (...) {} // Teardown must still release the remaining host state.
     }
 
     ~Impl() {
         dispatcher.Stop([this] {
+            std::scoped_lock processing_lock(processing_mutex_);
             pending_.reset();
             CloseAll();
-            for (auto& retired : retired_) retired.Close(&diagnostics_);
-            retired_.clear();
             for (const HWND window : hooked_windows_) {
                 if (!IsWindow(window)) continue;
                 const auto previous = reinterpret_cast<WNDPROC>(GetPropW(window, kDspOriginalProcedure));
@@ -508,7 +540,9 @@ public:
     LoadedModule* Find(const std::filesystem::path& path) {
         const auto normalized = ResolveModulePath({}, path.wstring());
         const auto found = std::find_if(modules_.begin(), modules_.end(),
-            [&normalized](const auto& loaded) { return SamePath(loaded.path, normalized); });
+            [&normalized](const auto& loaded) {
+                return !loaded.failed.load() && SamePath(loaded.path, normalized);
+            });
         return found == modules_.end() ? nullptr : &*found;
     }
 
@@ -520,7 +554,7 @@ public:
             if (!current || callback_depth_ != 0) return;
             if(current->registry) {
                 try {if(current->registry->ConfigureDfx(parent_window_))return;}
-                catch(const std::exception&) {diagnostics_.push_back(L"DFX file configuration helper could not start: "+path.wstring());return;}
+                catch(const std::exception&) {AddDiagnostic(L"DFX file configuration helper could not start: "+path.wstring());return;}
             }
             // This bundle's DFX Config does nothing except read the obsolete
             // HKLM top_folder and launch Apps/dfxwsettings.exe (10001070).
@@ -541,7 +575,7 @@ public:
                     CloseHandle(process.hProcess);
                     return;
                 }
-                diagnostics_.push_back(WindowsError(L"Unable to open DFX settings", GetLastError()));
+                AddDiagnostic(WindowsError(L"Unable to open DFX settings", GetLastError()));
                 return;
             }
             // Keep only the ABI pointer across Config: nested audio calls may
@@ -549,7 +583,7 @@ public:
             auto* module = current->module;
             ++callback_depth_;
             if (!InvokeConfigure(module)) {
-                diagnostics_.push_back(L"Winamp DSP Config failed: " + path.wstring());
+                AddDiagnostic(L"Winamp DSP Config failed: " + path.wstring());
             }
             FinishCallback();
             Windows();
@@ -589,7 +623,12 @@ public:
     }
 
     std::vector<std::wstring> TakeDiagnostics() {
-        for(auto& module:modules_)if(module.registry) {
+        // A UI caller must not wait for PCM that may be querying its window.
+        // PCM already owns this recursive lock; other callers can always
+        // drain published messages and leave live registry polling to it.
+        std::unique_lock processing_lock(processing_mutex_, std::try_to_lock);
+        std::scoped_lock lock(diagnostics_mutex_);
+        if (processing_lock.owns_lock()) for(auto& module:modules_)if(module.registry) {
             auto messages=module.registry->Diagnostics();
             diagnostics_.insert(diagnostics_.end(),std::make_move_iterator(messages.begin()),std::make_move_iterator(messages.end()));
         }
@@ -603,25 +642,33 @@ public:
     std::filesystem::path storage_directory;
 
 private:
+    void AddDiagnostic(std::wstring message) {
+        std::scoped_lock lock(diagnostics_mutex_);
+        diagnostics_.push_back(std::move(message));
+    }
     struct Pending {
         std::filesystem::path folder;
         std::vector<std::wstring> configured;
         HWND parent{};
     };
     std::optional<Pending> pending_;
-    std::vector<LoadedModule> retired_;
+    std::atomic<bool> pending_update_{};
+    std::recursive_mutex processing_mutex_;
+    std::mutex diagnostics_mutex_;
+    bool processing_{}; // protected by processing_mutex_, including recursion
     std::vector<HWND> hooked_windows_;
     std::vector<std::int16_t> scratch_;
     unsigned callback_depth_{};
 
     void FinishCallback() {
         if (--callback_depth_ != 0) return;
-        ++callback_depth_;
-        for (auto& retired : retired_) retired.Close(&diagnostics_);
-        retired_.clear();
-        --callback_depth_;
-        if (pending_) {
+        FinishPending();
+    }
+
+    void FinishPending() {
+        if (callback_depth_ == 0 && pending_) {
             auto pending = std::exchange(pending_, std::nullopt);
+            pending_update_ = false;
             Update(pending->folder, pending->configured, pending->parent);
         }
     }
@@ -633,7 +680,7 @@ private:
         HMODULE library = LoadLibraryExW(path.c_str(), nullptr,
                                          LOAD_WITH_ALTERED_SEARCH_PATH);
         if (!library) {
-            diagnostics_.push_back(WindowsError(
+            AddDiagnostic(WindowsError(
                 L"Unable to load Winamp DSP: " + path.wstring(), GetLastError()));
             return;
         }
@@ -641,12 +688,12 @@ private:
         try { registry = detail::PluginRegistry::Attach(library, path, storage_directory); }
         catch (const std::exception& error) {
             const auto message=L"注册表配置接入失败："+core::Utf8ToWide(error.what());
-            diagnostics_.push_back(message+L"；"+path.wstring());
+            AddDiagnostic(message+L"；"+path.wstring());
             FreeLibrary(library);
             return;
         }
         const auto fail = [&](std::wstring reason) {
-            diagnostics_.push_back(std::move(reason) + L": " + path.wstring());
+            AddDiagnostic(std::move(reason) + L": " + path.wstring());
             FreeLibrary(library);
         };
 
@@ -732,20 +779,7 @@ void WinampDspChain::Process(std::span<std::int16_t> interleaved_samples,
                              int channels, int sample_rate,
                              std::vector<std::wstring>* diagnostics) {
     if (impl_->active_count == 0) return;
-    const int priority = GetThreadPriority(GetCurrentThread());
-    impl_->dispatcher.InvokeQueued([&] {
-        if (priority != THREAD_PRIORITY_ERROR_RETURN &&
-            priority != impl_->processing_priority &&
-            SetThreadPriority(GetCurrentThread(), priority))
-            impl_->processing_priority = priority;
-        impl_->Process(interleaved_samples, channels, sample_rate);
-        if (diagnostics) {
-            auto messages = impl_->TakeDiagnostics();
-            diagnostics->insert(diagnostics->end(),
-                std::make_move_iterator(messages.begin()),
-                std::make_move_iterator(messages.end()));
-        }
-    });
+    impl_->Process(interleaved_samples, channels, sample_rate, diagnostics);
 }
 
 std::size_t WinampDspChain::ActiveCount() const noexcept {
@@ -753,9 +787,7 @@ std::size_t WinampDspChain::ActiveCount() const noexcept {
 }
 
 std::vector<std::wstring> WinampDspChain::TakeDiagnostics() {
-    std::vector<std::wstring> result;
-    impl_->dispatcher.Invoke([&] { result = impl_->TakeDiagnostics(); });
-    return result;
+    return impl_->TakeDiagnostics();
 }
 
 } // namespace ttplayer::audio

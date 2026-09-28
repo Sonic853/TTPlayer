@@ -11,7 +11,8 @@
 
 namespace ttplayer::audio::detail {
 
-// One apartment for a chain's legacy callbacks and its modeless dialogs.
+// One apartment for a chain's lifecycle callbacks and its modeless dialogs.
+// PCM executes separately on the audio worker; never enqueue it behind UI.
 // SendMessage services incoming sent messages while the caller waits, unlike a
 // mutex/condition-variable wait that deadlocks a DSP querying hwndParent.
 class DspDispatcher {
@@ -81,25 +82,6 @@ public:
         return true;
     }
 
-    void InvokeQueued(std::function<void()> function) const {
-        if (GetCurrentThreadId() == thread_id_) { function(); return; }
-        const HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!done) throw std::runtime_error("Unable to create DSP completion event");
-        Task task{std::move(function)};
-        task.done = done;
-        if (!PostMessageW(window_, kQueued, 0, reinterpret_cast<LPARAM>(&task))) {
-            CloseHandle(done);
-            throw std::runtime_error("Winamp DSP dispatcher stopped");
-        }
-        while (MsgWaitForMultipleObjects(1, &done, FALSE, INFINITE,
-                                         QS_SENDMESSAGE) == WAIT_OBJECT_0 + 1) {
-            MSG message{};
-            PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
-        }
-        CloseHandle(done);
-        if (task.error) std::rethrow_exception(task.error);
-    }
-
     void Stop(std::function<void()> cleanup) {
         if (!thread_.joinable()) return;
         Invoke([this, cleanup = std::move(cleanup)]() mutable {
@@ -124,21 +106,18 @@ public:
 private:
     static constexpr UINT kInvoke = WM_APP + 1;
     static constexpr UINT kPosted = WM_APP + 2;
-    static constexpr UINT kQueued = WM_APP + 3;
     struct Task {
         std::function<void()> function;
         std::exception_ptr error;
         bool executed{};
-        HANDLE done{};
     };
     static LRESULT CALLBACK Procedure(HWND window, UINT message,
                                        WPARAM wparam, LPARAM lparam) {
-        if (message == kInvoke || message == kPosted || message == kQueued) {
+        if (message == kInvoke || message == kPosted) {
             auto* task = reinterpret_cast<Task*>(lparam);
             try { task->function(); }
             catch (...) { task->error = std::current_exception(); }
             task->executed = true;
-            if (task->done) SetEvent(task->done);
             if (message == kPosted) delete task;
             return 1;
         }

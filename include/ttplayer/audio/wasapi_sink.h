@@ -35,6 +35,9 @@ public:
     bool OpenDevice(const std::wstring& endpoint_id, bool exclusive,
                     const WAVEFORMATEX& source_format, int buffer_ms);
     bool Submit(std::span<const std::byte> pcm);
+    // The final submitted packet may be shorter than the buffering threshold.
+    // Reset clears this marker before a seek/refill.
+    void FinishInput();
     // Update gain and service the endpoint immediately. The render worker
     // also services it independently between calls. Gain is applied only at
     // that short endpoint buffer, never baked into decoded lookahead.
