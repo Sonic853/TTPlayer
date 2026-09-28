@@ -3285,7 +3285,9 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 if (balance_ > 0) left *= (100 - balance_) / 100.0F;
                 else if (balance_ < 0) right *= (100 + balance_) / 100.0F;
             }
-            if (!wasapi_sink->SetPaused(paused) || !wasapi_sink->Pump(left, right)) {
+            // Publish gain before resuming the independent render thread;
+            // its first packet must use this play/seek/fade's current gain.
+            if (!wasapi_sink->Pump(left, right) || !wasapi_sink->SetPaused(paused)) {
                 SetError(wasapi_sink->Error(), wasapi_sink->ErrorResult()); break;
             }
         }

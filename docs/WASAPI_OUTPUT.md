@@ -30,7 +30,9 @@ MMDevice 的持久标识保存，不受枚举顺序变化影响；默认设备�
 - `DeviceType` 使用 `wasapi:shared:` / `wasapi:exclusive:` 加设备 ID；
   `default` 表示系统默认设备。原版 GUID 配置解析不变。
 - `WasapiSink` 通过 COM 激活 MMDevice、`IAudioClient`、`IAudioRenderClient`。
-  所有 COM 对象和 PCM 队列只在音频工作线程使用和释放。
+  所有 COM 对象和 PCM 队列由独立渲染线程使用和释放，解码／DSP 线程通过
+  同步命令提交数据和控制播放；渲染线程在 DSP 忙碌时仍继续播放已有缓冲。
+  详见 [Ozone 与 WASAPI 断续修复](OZONE_WASAPI_CONTINUITY_FIX.md)。
 - 共享模式使用 `AUTOCONVERTPCM | SRC_DEFAULT_QUALITY`。
 - 独占模式先测试所选位深，必要时尝试同采样率、同声道的 32/24/16 位 PCM
   容器；不隐式更改采样率和声道。实际流格式写入播放诊断。

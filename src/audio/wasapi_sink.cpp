@@ -9,6 +9,12 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <condition_variable>
+#include <functional>
+#include <future>
+#include <mutex>
+#include <thread>
+#include <utility>
 
 namespace ttplayer::audio {
 namespace {
@@ -98,7 +104,10 @@ std::vector<WasapiEndpoint> EnumerateWasapiEndpoints() {
     return result;
 }
 
-struct WasapiSink::Impl {
+namespace {
+// Created, used and released only on WasapiSink's render thread. In
+// particular, GetService/GetBuffer/ReleaseBuffer/Release never cross threads.
+struct WasapiStream {
     ComPtr<IMMDevice> device;
     ComPtr<IAudioClient> client;
     ComPtr<IAudioRenderClient> render;
@@ -112,6 +121,15 @@ struct WasapiSink::Impl {
     std::uint64_t written_frames{}, played_frames{};
     std::wstring error;
     HRESULT error_result{S_OK};
+
+    bool OpenDevice(const std::wstring& endpoint_id, bool exclusive,
+                    const WAVEFORMATEX& source_format, int buffer_ms);
+    bool Submit(std::span<const std::byte> pcm);
+    bool Pump(float left_gain, float right_gain);
+    bool SetPaused(bool value);
+    bool Reset();
+    void Close() noexcept;
+    std::uint64_t PositionSourceBytes();
 
     bool Fail(HRESULT hr, const wchar_t* operation) {
         if (SUCCEEDED(hr)) return true;
@@ -143,14 +161,11 @@ struct WasapiSink::Impl {
     }
 };
 
-WasapiSink::WasapiSink() : impl_(std::make_unique<Impl>()) {}
-WasapiSink::~WasapiSink() { Close(); }
-
-bool WasapiSink::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
+bool WasapiStream::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
                            const WAVEFORMATEX& source_format, int buffer_ms) {
     Close();
-    impl_ = std::make_unique<Impl>();
-    auto& s = *impl_;
+    auto& s = *this;
+    if (!s.error.empty()) return false;
     s.source = source_format;
     if (s.source.wFormatTag != WAVE_FORMAT_PCM || s.source.nChannels == 0 ||
         s.source.nChannels > 8 || s.source.nSamplesPerSec < 1000 ||
@@ -216,8 +231,8 @@ bool WasapiSink::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
     return true;
 }
 
-bool WasapiSink::Submit(std::span<const std::byte> pcm) {
-    auto& s = *impl_;
+bool WasapiStream::Submit(std::span<const std::byte> pcm) {
+    auto& s = *this;
     if (!s.render || pcm.empty() || pcm.size() % s.source.nBlockAlign != 0 ||
         pcm.size() > 4 * 1024 * 1024 || s.queue.size() >= 4)
         return s.Fail(E_INVALIDARG, L"提交音频数据");
@@ -225,8 +240,8 @@ bool WasapiSink::Submit(std::span<const std::byte> pcm) {
     return true;
 }
 
-bool WasapiSink::Pump(float left_gain, float right_gain) {
-    auto& s = *impl_;
+bool WasapiStream::Pump(float left_gain, float right_gain) {
+    auto& s = *this;
     if (!s.error.empty()) return false;
     if (s.paused) return true;
     UINT32 padding{};
@@ -278,19 +293,19 @@ bool WasapiSink::Pump(float left_gain, float right_gain) {
     return true;
 }
 
-bool WasapiSink::SetPaused(bool paused) {
-    auto& s = *impl_;
+bool WasapiStream::SetPaused(bool value) {
+    auto& s = *this;
     if (!s.error.empty()) return false;
-    if (paused && s.started) {
+    if (value && s.started) {
         if (!s.Fail(s.client->Stop(), L"暂停播放")) return false;
         s.started = false;
     }
-    s.paused = paused;
+    s.paused = value;
     return true; // Pump starts/resumes after prefill on this same thread.
 }
 
-bool WasapiSink::Reset() {
-    auto& s = *impl_;
+bool WasapiStream::Reset() {
+    auto& s = *this;
     if (!s.client || !SetPaused(true) || !s.Fail(s.client->Reset(), L"重置音频流")) return false;
     s.queue.clear();
     s.offset = 0;
@@ -298,23 +313,157 @@ bool WasapiSink::Reset() {
     return true;
 }
 
+void WasapiStream::Close() noexcept {
+    if (client && started) client->Stop();
+    started = false;
+    paused = true;
+    render.Reset();
+    client.Reset();
+    device.Reset();
+    queue.clear();
+}
+
+std::uint64_t WasapiStream::PositionSourceBytes() {
+    UINT32 padding{};
+    Padding(padding);
+    return played_frames * source.nBlockAlign;
+}
+} // namespace
+
+struct WasapiSink::Impl {
+    WasapiStream stream;
+    std::thread worker;
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::shared_ptr<std::packaged_task<void()>> command;
+    bool closing{};
+    float left_gain{}, right_gain{};
+    // Only synchronous facade calls update these snapshots. Returning Error
+    // by reference must not expose a string concurrently changed by Pump.
+    std::wstring reported_error;
+    HRESULT reported_result{S_OK};
+
+    Impl() {
+        const int priority = GetThreadPriority(GetCurrentThread());
+        worker = std::thread([this, priority] {
+            if (priority != THREAD_PRIORITY_ERROR_RETURN)
+                SetThreadPriority(GetCurrentThread(), std::max(priority, THREAD_PRIORITY_HIGHEST));
+            const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            stream.Fail(com, L"COM initialization");
+            for (;;) {
+                std::shared_ptr<std::packaged_task<void()>> work;
+                {
+                    std::unique_lock lock(mutex);
+                    wake.wait_for(lock, std::chrono::milliseconds(5),
+                                  [this] { return closing || command; });
+                    if (closing) break;
+                    work = std::exchange(command, nullptr);
+                }
+                // The producer can spend hundreds of milliseconds decoding,
+                // resampling or waiting for a DSP window. Already processed
+                // PCM must keep reaching the 40-80 ms endpoint in that time.
+                if (work) (*work)();
+                if (stream.client && !stream.paused && stream.error.empty())
+                    stream.Pump(left_gain, right_gain);
+            }
+            stream.Close();
+            if (SUCCEEDED(com)) CoUninitialize();
+        });
+    }
+    ~Impl() { Stop(); }
+
+    void Invoke(std::function<void()> function) {
+        auto task = std::make_shared<std::packaged_task<void()>>([&] {
+            function();
+            reported_error = stream.error;
+            reported_result = stream.error_result;
+        });
+        auto result = task->get_future();
+        {
+            std::scoped_lock lock(mutex);
+            if (closing) return;
+            command = std::move(task);
+        }
+        wake.notify_one();
+        result.get();
+    }
+    void Stop() noexcept {
+        if (!worker.joinable()) return;
+        {
+            std::scoped_lock lock(mutex);
+            closing = true;
+        }
+        wake.notify_one();
+        worker.join();
+    }
+};
+
+WasapiSink::WasapiSink() = default;
+WasapiSink::~WasapiSink() { Close(); }
+
+bool WasapiSink::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
+                           const WAVEFORMATEX& source_format, int buffer_ms) {
+    Close();
+    impl_ = std::make_unique<Impl>();
+    bool opened{};
+    impl_->Invoke([&] {
+        opened = impl_->stream.OpenDevice(endpoint_id, exclusive, source_format, buffer_ms);
+    });
+    if (!opened) impl_->Stop();
+    return opened;
+}
+
+bool WasapiSink::Submit(std::span<const std::byte> pcm) {
+    if (!impl_) return false;
+    bool submitted{};
+    impl_->Invoke([&] { submitted = impl_->stream.Submit(pcm); });
+    return submitted;
+}
+
+bool WasapiSink::Pump(float left_gain, float right_gain) {
+    if (!impl_) return false;
+    bool good{};
+    impl_->Invoke([&] {
+        impl_->left_gain = left_gain;
+        impl_->right_gain = right_gain;
+        good = impl_->stream.Pump(left_gain, right_gain);
+    });
+    return good;
+}
+
+bool WasapiSink::SetPaused(bool paused) {
+    if (!impl_) return false;
+    bool good{};
+    impl_->Invoke([&] { good = impl_->stream.SetPaused(paused); });
+    return good;
+}
+
+bool WasapiSink::Reset() {
+    if (!impl_) return false;
+    bool good{};
+    impl_->Invoke([&] { good = impl_->stream.Reset(); });
+    return good;
+}
+
 void WasapiSink::Close() noexcept {
-    if (!impl_) return;
-    if (impl_->client && impl_->started) impl_->client->Stop();
-    impl_->started = false;
-    impl_->paused = true;
-    impl_->render.Reset();
-    impl_->client.Reset();
-    impl_->device.Reset();
-    impl_->queue.clear();
+    if (impl_) impl_->Stop();
 }
 
 std::uint64_t WasapiSink::PositionSourceBytes() {
-    UINT32 padding{};
-    impl_->Padding(padding);
-    return impl_->played_frames * impl_->source.nBlockAlign;
+    if (!impl_) return 0;
+    std::uint64_t position{};
+    impl_->Invoke([&] { position = impl_->stream.PositionSourceBytes(); });
+    return position;
 }
-const WAVEFORMATEX& WasapiSink::DeviceFormat() const noexcept { return impl_->format.Format; }
-const std::wstring& WasapiSink::Error() const noexcept { return impl_->error; }
-HRESULT WasapiSink::ErrorResult() const noexcept { return impl_->error_result; }
+const WAVEFORMATEX& WasapiSink::DeviceFormat() const noexcept {
+    static const WAVEFORMATEX empty{};
+    return impl_ ? impl_->stream.format.Format : empty;
+}
+const std::wstring& WasapiSink::Error() const noexcept {
+    static const std::wstring empty;
+    return impl_ ? impl_->reported_error : empty;
+}
+HRESULT WasapiSink::ErrorResult() const noexcept {
+    return impl_ ? impl_->reported_result : S_OK;
+}
 } // namespace ttplayer::audio
