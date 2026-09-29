@@ -273,8 +273,8 @@ void PlayerWindow::PollPlaylistInfo() {
     if (now - playlist_info_poll_tick_ >= 1000) {
         playlist_info_poll_tick_ = now;
         if (!settings_.playlist.library_mode) {
-            const auto [first, count] = VisiblePlaylistInfoRange();
-            QueuePlaylistInfoRange(playlists_.ActiveIndex(), first, count, true, true);
+            for (const auto [first, count] : VisiblePlaylistInfoRanges())
+                QueuePlaylistInfoRange(playlists_.ActiveIndex(), first, count, true, true);
         }
     }
     StartNextPlaylistInfoRead();
@@ -296,11 +296,13 @@ void PlayerWindow::StartNextPlaylistInfoRead() {
         const auto& list = playlists_.At(*index);
         const auto& tracks = list.Tracks();
         const auto& rows = PlaylistInfoSourceRows(*index, SourceKey(request.path, request.subtrack));
-        const auto [first, count] = VisiblePlaylistInfoRange();
+        const auto visible_ranges = VisiblePlaylistInfoRanges();
         const auto row = std::find_if(rows.begin(), rows.end(), [&](size_t candidate) {
             return tracks[candidate].duration_ms == -2 && (!request.visible_only ||
                 (!settings_.playlist.library_mode && *index == playlists_.ActiveIndex() &&
-                 candidate >= first && candidate - first < count));
+                 std::any_of(visible_ranges.begin(), visible_ranges.end(), [&](const auto& range) {
+                     return candidate >= range.first && candidate - range.first < range.second;
+                 })));
         });
         if (row == rows.end()) continue;
         request.row_hint = *row;

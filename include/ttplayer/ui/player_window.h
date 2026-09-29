@@ -101,6 +101,7 @@ private:
     bool InstallPluginSkin(const std::filesystem::path& path);
     static BOOL WINAPI QuerySkinPluginState(void*, TtpSkinState*);
     static int32_t WINAPI QuerySkinPluginOption(void*, uint32_t);
+    static BOOL WINAPI QuerySkinPluginPlaylistFont(void*, LOGFONTW*);
     static BOOL WINAPI PostSkinPluginPlaylistContext(void*, const TtpSkinPlaylistContext*);
     void ShowSkinPluginPlaylistMenu(int32_t row, HWND owner, POINT point);
     std::deque<TtpSkinPlaylistContext> skin_plugin_playlist_contexts_;
@@ -540,7 +541,7 @@ private:
                                 size_t count, bool priority = false, bool visible_only = false);
     void RequestPlaylistTrackInfo(size_t playlist_index, size_t row,
                                   bool priority = false, bool visible_only = false);
-    std::pair<size_t, size_t> VisiblePlaylistInfoRange() const;
+    std::vector<std::pair<size_t, size_t>> VisiblePlaylistInfoRanges() const;
     void InvalidatePlaylistInfoRows(const std::vector<size_t>& rows);
     void PollPlaylistInfo();
     const std::vector<size_t>& PlaylistInfoSourceRows(size_t index, const std::wstring& source);

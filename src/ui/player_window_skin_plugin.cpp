@@ -31,7 +31,7 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
         if(!module->OwnsInstalledPackage(PlayerRuntimeDirectory()/L"Skin",path) || !module->Probe(path,info)) continue;
         const TtpSkinHost host{sizeof(TtpSkinHost),TTP_SKIN_ABI,this,
             QuerySkinPluginState,QuerySkinPluginTrack,PostSkinPluginCommand,HandleSkinPluginDrag,
-            QuerySkinPluginSelection,PaintSkinPluginVisual,QuerySkinPluginTip,ResizeSkinPluginWindow,QuerySkinPluginSpectrum,PaintSkinPluginContent,HandleSkinPluginContentInput,QuerySkinPluginOption,PostSkinPluginPlaylistContext};
+            QuerySkinPluginSelection,PaintSkinPluginVisual,QuerySkinPluginTip,ResizeSkinPluginWindow,QuerySkinPluginSpectrum,PaintSkinPluginContent,HandleSkinPluginContentInput,QuerySkinPluginOption,PostSkinPluginPlaylistContext,QuerySkinPluginPlaylistFont};
         auto next=skin::SkinPluginInstance::Create(module,path,&host);
         if(!next) {
             if(window_) {
@@ -61,6 +61,15 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
         const auto previous_playlist=settings_.playlist;
         const auto previous_lyric=settings_.lyric;
         const auto previous_visual=settings_.visual;
+        LOGFONTW playlist_font{};
+        if(next->DefaultPlaylistFont(playlist_font) && playlist_font.lfHeight &&
+           playlist_font.lfHeight>=-4096 && playlist_font.lfHeight<=4096) {
+            playlist_font.lfFaceName[LF_FACESIZE-1]=0;
+            settings_.playlist.font=playlist_font.lfFaceName;
+            settings_.playlist.font_height=playlist_font.lfHeight;
+            settings_.playlist.font_descriptor=playlist_font;
+            settings_.playlist.font_descriptor_valid=true;
+        }
         // As with native skins, apply package defaults first and then overlay
         // only the attributes present in the target profile. The resulting
         // settings are shared by Lyrics Show, rendering and the editor.
@@ -268,6 +277,11 @@ int32_t WINAPI PlayerWindow::QuerySkinPluginOption(void* context,uint32_t comman
     if(command==TTP_SKIN_PLAYLIST_DRAG_ENABLED)return self.settings_.playlist.enable_drag_drop;
     if(command!=TTP_SKIN_CROSSFADE)return -1;
     return (self.settings_.playback.sound_fade_mode&0x10)!=0;
+}
+BOOL WINAPI PlayerWindow::QuerySkinPluginPlaylistFont(void* context,LOGFONTW* font) {
+    if(!context || !font)return FALSE;
+    *font=PlaylistFontDescriptor(static_cast<PlayerWindow*>(context)->settings_.playlist);
+    return TRUE;
 }
 BOOL WINAPI PlayerWindow::QuerySkinPluginTrack(void* context,uint32_t index,TtpSkinTrack* output) {
     if(!context || !output || output->size<sizeof(*output)) return FALSE;

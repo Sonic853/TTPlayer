@@ -2899,6 +2899,14 @@ void PlayerWindow::TogglePlaylistWindow() {
 }
 
 void PlayerWindow::UpdatePlaylistWindowSkin(bool saved_bounds) {
+    if (external_skin_ && external_skin_->Handles(playlist_window_)) {
+        // Options may change the shared font/model, but the provider owns
+        // this HWND's dimensions, region and visible child controls.
+        LayoutPlaylistListControls();
+        InvalidateRect(playlist_window_, nullptr, FALSE);
+        if (window_) InvalidateRect(window_, nullptr, FALSE);
+        return;
+    }
     if (!skin_ || !skin_->Playlist().valid) {
         if (playlist_window_) ShowWindow(playlist_window_, SW_HIDE);
         if (window_) InvalidateRect(window_, nullptr, FALSE);
@@ -2948,6 +2956,7 @@ void PlayerWindow::UpdatePlaylistWindowSkin(bool saved_bounds) {
 }
 
 void PlayerWindow::UpdatePlaylistWindowRegion() {
+    if (external_skin_ && external_skin_->Handles(playlist_window_)) return;
     if (!playlist_window_ || !skin_ || !skin_->Playlist().valid) return;
     RECT client{};
     GetClientRect(playlist_window_, &client);
@@ -3072,6 +3081,11 @@ void PlayerWindow::DestroyPlaylistListControls() {
 }
 
 void PlayerWindow::LayoutPlaylistListControls() {
+    if (external_skin_ && external_skin_->Handles(playlist_window_)) {
+        for (HWND control : {playlist_tree_control_, playlist_list_control_, playlist_track_control_})
+            if (control) ShowWindow(control, SW_HIDE);
+        return;
+    }
     if (!playlist_window_ || !skin_ || !skin_->Playlist().valid) return;
     RECT client{};
     GetClientRect(playlist_window_, &client);
@@ -3442,27 +3456,49 @@ void PlayerWindow::UpdatePlaylistToolRects() {
     park_unused();
 }
 
-std::pair<size_t, size_t> PlayerWindow::VisiblePlaylistInfoRange() const {
+std::vector<std::pair<size_t, size_t>> PlayerWindow::VisiblePlaylistInfoRanges() const {
     if (settings_.playlist.library_mode) return {};
+    if (external_skin_) {
+        std::vector<std::pair<size_t, size_t>> ranges;
+        bool handled = false;
+        const auto total = VisiblePlaylistTrackCount();
+        for (HWND surface : {window_, playlist_window_}) {
+            uint32_t first{}, count{};
+            if (!external_skin_->PlaylistViewport(surface, first, count)) continue;
+            handled = true;
+            if (first < total && count) {
+                const std::pair<size_t, size_t> range{first, std::min<size_t>(count, total - first)};
+                if (std::find(ranges.begin(), ranges.end(), range) == ranges.end()) ranges.push_back(range);
+            }
+        }
+        if (handled) return ranges;
+    }
     if (playlist_window_ && IsWindowVisible(playlist_window_) && skin_ && skin_->Playlist().valid) {
         RECT client{};
         GetClientRect(playlist_window_, &client);
         const auto metrics = MakePlaylistGeometry(skin_->Playlist(), settings_.playlist.split_on_lists,
             client.right, client.bottom, VisiblePlaylistTrackCount(), PlaylistRowHeight());
-        return {playlist_scroll_, static_cast<size_t>(std::max(0, metrics.visible_rows))};
+        return {{playlist_scroll_, static_cast<size_t>(std::max(0, metrics.visible_rows))}};
     }
     if (playlist_view_ && IsWindowVisible(playlist_view_)) {
         RECT client{}; GetClientRect(playlist_view_, &client);
         const auto first = SendMessageW(playlist_view_, LB_GETTOPINDEX, 0, 0);
         const auto height = SendMessageW(playlist_view_, LB_GETITEMHEIGHT, 0, 0);
         if (first >= 0 && height > 0)
-            return {static_cast<size_t>(first), static_cast<size_t>((client.bottom + height - 1) / height)};
+            return {{static_cast<size_t>(first), static_cast<size_t>((client.bottom + height - 1) / height)}};
     }
     return {};
 }
 
 void PlayerWindow::InvalidatePlaylistInfoRows(const std::vector<size_t>& rows) {
     if (settings_.playlist.library_mode) return;
+    if (external_skin_) {
+        // Popup and embedded lists may have different scroll positions;
+        // rectangles from the native fallback skin cannot invalidate them.
+        for (HWND surface : {window_, playlist_window_})
+            if (external_skin_->Handles(surface)) InvalidateRect(surface, nullptr, FALSE);
+        return;
+    }
     if (playlist_window_ && skin_ && skin_->Playlist().valid) {
         RECT client{}; GetClientRect(playlist_window_, &client);
         const auto metrics = MakePlaylistGeometry(skin_->Playlist(), settings_.playlist.split_on_lists,

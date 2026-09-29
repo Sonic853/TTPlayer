@@ -173,6 +173,9 @@ typedef struct TtpSkinHost {
     // Optional UI-thread enqueue only. The host copies the request, applies
     // native right-click selection and opens the menu after the DLL returns.
     BOOL (WINAPI *playlist_context)(void*, const TtpSkinPlaylistContext*);
+    // Optional live playlist font from Options / the active skin profile.
+    // UI thread, caller-owned LOGFONT; FALSE keeps the package default.
+    BOOL (WINAPI *playlist_font)(void*, LOGFONTW*);
 } TtpSkinHost;
 #define TTP_SKIN_HOST_V1_SIZE offsetof(TtpSkinHost, drag)
 
@@ -266,6 +269,14 @@ typedef struct TtpSkinPlugin {
     // visibility; scroll to row and synchronize the host's caret (-1 = none).
     // Quick find reveals its first match while retaining its last-match caret.
     BOOL (WINAPI *playlist_reveal)(void*, uint32_t row, int32_t caret);
+    // Optional package default for playlist rows, before profile restore.
+    // Independent of lyric overrides and of fixed-size title/chrome fonts.
+    BOOL (WINAPI *default_playlist_font)(void*, LOGFONTW*);
+    // Optional UI-thread viewport query for each provider-owned window.
+    // TRUE with count=0 means hidden/folded/covered or empty; FALSE means
+    // this HWND is not a playlist surface. Include the bottom partial row.
+    // Query geometry only: the host asynchronously reads track information.
+    BOOL (WINAPI *playlist_viewport)(void*, HWND, uint32_t* first, uint32_t* count);
 } TtpSkinPlugin;
 #define TTP_SKIN_PLUGIN_V1_SIZE offsetof(TtpSkinPlugin, skin_directory)
 #define TTP_SKIN_PLUGIN_DECLARATION_SIZE offsetof(TtpSkinPlugin, layout)

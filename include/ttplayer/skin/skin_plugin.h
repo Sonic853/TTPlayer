@@ -57,6 +57,12 @@ public:
     bool LyricFont(LOGFONTW& font) const noexcept {
         return module_->Api().lyric_font && module_->Api().lyric_font(instance_,&font);
     }
+    bool DefaultPlaylistFont(LOGFONTW& font) const noexcept {
+        return module_->Api().default_playlist_font && module_->Api().default_playlist_font(instance_,&font);
+    }
+    bool PlaylistViewport(HWND window,uint32_t& first,uint32_t& count) const noexcept {
+        return module_->Api().playlist_viewport && module_->Api().playlist_viewport(instance_,window,&first,&count);
+    }
     bool VolumeTracking() const noexcept {
         return module_->Api().volume_tracking && module_->Api().volume_tracking(instance_);
     }
