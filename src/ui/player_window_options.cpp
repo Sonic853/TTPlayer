@@ -6441,22 +6441,26 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
     const HWND devices = GetDlgItem(dialog, 1059);
     const HWND details = GetDlgItem(dialog, 1064);
     if (!devices || !details) return;
-    const auto selected = SelectedOutputDeviceEntry(
-        dialog, options_device_entries_.size());
-    if (!selected) return;
-
     ListView_SetExtendedListViewStyle(details,
         LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
     const HWND header = ListView_GetHeader(details);
     if (!header || Header_GetItemCount(header) == 0) {
         for (int column_index = 0; column_index < 2; ++column_index) {
+            // 00499498 splits resource 0x8156 (property|value) and inserts
+            // two text columns with widths 100/200 via 00413585.
+            auto title = ResourceListItem(ResourceModule(), 0x8156, column_index);
             LVCOLUMNW column{};
-            column.mask = LVCF_WIDTH;
+            column.mask = LVCF_WIDTH | LVCF_TEXT;
             column.cx = column_index == 0 ? 100 : 200;
+            column.pszText = title.data();
             ListView_InsertColumn(details, column_index, &column);
         }
     }
     ListView_DeleteAllItems(details);
+
+    const auto selected = SelectedOutputDeviceEntry(
+        dialog, options_device_entries_.size());
+    if (!selected) return;
 
     auto& entry = options_device_entries_[*selected];
     if (!entry.details_resolved) {

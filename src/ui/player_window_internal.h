@@ -487,7 +487,9 @@ void DrawElementFrame(HDC target, const skin::SkinElement& element, RECT bounds,
                       int state, COLORREF transparent);
 PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
                                       int split_on_lists, int width, int height,
-                                      size_t track_count);
+                                      size_t track_count, int row_height = 16);
+LOGFONTW PlaylistFontDescriptor(const settings::PlaylistSettings& settings);
+HFONT CreatePlaylistFont(const settings::PlaylistSettings& settings);
 void ApplyPlaylistSkinDefaults(const skin::PlaylistSkin& source,
                                settings::PlaylistSettings& target);
 void ApplyLyricSkinDefaults(const skin::LyricSkin& source,

@@ -39,9 +39,10 @@ public:
 // native right clicks publish their state before the context menu opens.
 struct NativeListState {
     PlayerWindow* owner{};
-    bool ready{}, synchronizing{}, row_height_checked{};
+    bool ready{}, synchronizing{}, column_created{};
     HFONT font{};
-    int font_height{13};
+    LOGFONTW font_descriptor{};
+    int row_height{16};
     int count{-1}, width{-1};
     DWORD extended_style{MAXDWORD};
     std::set<size_t> selected;
@@ -58,7 +59,53 @@ LRESULT Native(HWND window, UINT message, WPARAM wparam = 0, LPARAM lparam = 0) 
 std::optional<size_t> Row(LRESULT value) {
     return value < 0 ? std::nullopt : std::optional<size_t>{static_cast<size_t>(value)};
 }
+
+void ApplyListFont(HWND window, NativeListState& state,
+                   const settings::PlaylistSettings& settings) {
+    const auto descriptor = PlaylistFontDescriptor(settings);
+    if (state.font && memcmp(&descriptor, &state.font_descriptor, sizeof(descriptor)) == 0)
+        return;
+    const HFONT font = CreateFontIndirectW(&descriptor);
+    if (!font) return;
+    const bool synchronizing = state.synchronizing;
+    state.synchronizing = true;
+    // WM_SETFONT belongs to SysListView32 (0048301E -> 004052D6), including
+    // its font mapping and item padding on the running Windows version.
+    Native(window, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+    if (state.font) DeleteObject(state.font);
+    state.font = font;
+    state.font_descriptor = descriptor;
+    if (!state.column_created) {
+        LVCOLUMNW column{}; column.mask = LVCF_WIDTH; column.cx = 1;
+        Native(window, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&column));
+        state.column_created = true;
+    }
+    // Empty owner-data lists have no item rectangle. Measure one temporary
+    // native row without changing the model, selection or cached item count.
+    // This keeps empty->populated lists and font changes equally correct.
+    const auto count = Native(window, LVM_GETITEMCOUNT);
+    if (count == 0)
+        Native(window, LVM_SETITEMCOUNT, 1, LVSICF_NOSCROLL | LVSICF_NOINVALIDATEALL);
+    RECT bounds{LVIR_BOUNDS};
+    if (Native(window, LVM_GETITEMRECT, 0, reinterpret_cast<LPARAM>(&bounds)))
+        state.row_height = std::max<LONG>(1, bounds.bottom - bounds.top);
+    if (count == 0)
+        Native(window, LVM_SETITEMCOUNT, 0, LVSICF_NOSCROLL | LVSICF_NOINVALIDATEALL);
+    state.synchronizing = synchronizing;
+}
 } // namespace
+
+int PlayerWindow::PlaylistRowHeight() const {
+    for (const HWND window : {playlist_track_control_, playlist_list_control_}) {
+        if (auto* state = State(window); state && state->ready) {
+            if (!state->synchronizing) ApplyListFont(window, *state, settings_.playlist);
+            return state->row_height;
+        }
+    }
+    // Only used before the list HWNDs exist; their first layout measures the
+    // real font. No visible list is rendered with this creation-time default.
+    return 16;
+}
 
 bool PlayerWindow::RegisterPlaylistListClass(HINSTANCE instance) {
     WNDCLASSEXW type{sizeof(type)};
@@ -138,16 +185,7 @@ LRESULT PlayerWindow::DefaultPlaylistListMessage(
     const auto mark = catalogue ? (focus != state->focus ? focus : state->mark)
                                 : playlist_selection_anchor_;
     state->synchronizing = true;
-    if (!state->font) {
-        // This font serves native scrolling/keyboard geometry only. The skin
-        // renderer owns the visible font and uses 16-pixel rows.
-        state->font = CreateFontW(state->font_height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH, L"Tahoma");
-        Native(window, WM_SETFONT, reinterpret_cast<WPARAM>(state->font), FALSE);
-        LVCOLUMNW column{}; column.mask = LVCF_WIDTH; column.cx = 1;
-        Native(window, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&column));
-    }
+    ApplyListFont(window, *state, settings_.playlist);
     RECT client{}; GetClientRect(window, &client);
     if (state->width != client.right) {
         state->width = client.right;
@@ -163,30 +201,6 @@ LRESULT PlayerWindow::DefaultPlaylistListMessage(
     if (count_changed) {
         state->count = native_count;
         Native(window, LVM_SETITEMCOUNT, native_count, LVSICF_NOSCROLL | LVSICF_NOINVALIDATEALL);
-    }
-    if (native_count && !state->row_height_checked) {
-        // The same Tahoma font produces 13-pixel rows on XP but 16-pixel
-        // rows on newer ComCtl32. Measure the real control before exposing
-        // its paging/scrolling results to the 16-pixel skin projection.
-        // Empty lists defer this until a real owner-data row is available.
-        state->row_height_checked = true;
-        for (int attempt = 0; attempt < 4; ++attempt) {
-            RECT bounds{LVIR_BOUNDS};
-            if (!Native(window, LVM_GETITEMRECT, 0, reinterpret_cast<LPARAM>(&bounds))) break;
-            const int height = bounds.bottom - bounds.top;
-            if (height == 16) break;
-            // Positive lfHeight specifies the whole cell. Negative character
-            // heights can jump over the desired size on XP's font mapper.
-            const int font_height = std::clamp(state->font_height + 16 - height, 4, 32);
-            if (font_height == state->font_height) break;
-            const HFONT font = CreateFontW(font_height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                DEFAULT_QUALITY, DEFAULT_PITCH, L"Tahoma");
-            if (!font) break;
-            Native(window, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
-            if (state->font) DeleteObject(state->font);
-            state->font = font; state->font_height = font_height;
-        }
     }
     const DWORD extended = catalogue ? playlist_list_extended_style_ : playlist_track_extended_style_;
     if (state->extended_style != extended) {
@@ -211,7 +225,7 @@ LRESULT PlayerWindow::DefaultPlaylistListMessage(
     const auto native_top = Native(window, LVM_GETTOPINDEX);
     RECT row{LVIR_BOUNDS};
     const bool have_row = Native(window, LVM_GETITEMRECT, 0, reinterpret_cast<LPARAM>(&row)) != 0;
-    const int row_height = have_row ? std::max<LONG>(1, row.bottom - row.top) : 16;
+    const int row_height = have_row ? std::max<LONG>(1, row.bottom - row.top) : state->row_height;
     if (top != static_cast<size_t>(native_top)) {
         const auto delta = (static_cast<std::int64_t>(top) - native_top) * row_height;
         Native(window, LVM_SCROLL, 0, static_cast<LPARAM>(std::clamp<std::int64_t>(delta,
@@ -240,7 +254,7 @@ void PlayerWindow::ReadPlaylistNativeState(HWND window) {
     RECT client{};
     GetClientRect(window, &client);
     const size_t count = catalogue ? playlists_.Size() : VisiblePlaylistTrackCount();
-    const size_t page = static_cast<size_t>(std::max<LONG>(1, client.bottom / 16));
+    const size_t page = static_cast<size_t>(std::max<LONG>(1, client.bottom / state->row_height));
     // The skin consumes the whole client area and owns its scrollbar. Native
     // bookkeeping can still reserve a hidden scrollbar gutter after a count
     // change, so never expose a top row past the skin's last complete page.

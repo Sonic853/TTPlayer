@@ -1340,6 +1340,28 @@ std::optional<size_t> PlayerWindow::VisiblePlaylistPlayingRow() const {
     return std::nullopt;
 }
 
+void PlayerWindow::UpdatePlaylistTreeFont() {
+    if (!playlist_tree_control_) return;
+    if (!media_library_) media_library_ = std::make_shared<MediaLibraryState>();
+    auto& font = media_library_->tree_font;
+    const auto descriptor = detail::PlaylistFontDescriptor(settings_.playlist);
+    LOGFONTW current{};
+    if (font && GetObjectW(font, sizeof(current), &current) &&
+        memcmp(&descriptor, &current, sizeof(current)) == 0) {
+        // A skin rebuild can replace the HWND while retaining the library.
+        if (reinterpret_cast<HFONT>(SendMessageW(playlist_tree_control_, WM_GETFONT, 0, 0)) != font)
+            SendMessageW(playlist_tree_control_, WM_SETFONT,
+                         reinterpret_cast<WPARAM>(font), TRUE);
+        return;
+    }
+    const HFONT replacement = CreateFontIndirectW(&descriptor);
+    if (!replacement) return;
+    SendMessageW(playlist_tree_control_, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(replacement), TRUE);
+    if (font) DeleteObject(font);
+    font = replacement;
+}
+
 void PlayerWindow::InitializeMediaLibraryTree() {
     if (!playlist_tree_control_) return;
     if (!media_library_) media_library_ = std::make_shared<MediaLibraryState>();
@@ -1358,22 +1380,7 @@ void PlayerWindow::InitializeMediaLibraryTree() {
                  settings_.playlist.text_color);
     SendMessageW(playlist_tree_control_, TVM_SETLINECOLOR, 0,
                  settings_.playlist.text_color);
-    if (!state.tree_font) {
-        LOGFONTW font{};
-        if (settings_.playlist.font_descriptor_valid) {
-            font = settings_.playlist.font_descriptor;
-        } else {
-            NONCLIENTMETRICSW metrics{sizeof(metrics)};
-            if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, 0, &metrics, 0))
-                font = metrics.lfMessageFont;
-            font.lfHeight = settings_.playlist.font_height;
-            wcsncpy_s(font.lfFaceName, settings_.playlist.font.c_str(), _TRUNCATE);
-        }
-        state.tree_font = CreateFontIndirectW(&font);
-    }
-    if (state.tree_font)
-        SendMessageW(playlist_tree_control_, WM_SETFONT,
-                     reinterpret_cast<WPARAM>(state.tree_font), TRUE);
+    UpdatePlaylistTreeFont();
 
     const auto rebuild = [this, &state]() {
         state.rebuilding = true;

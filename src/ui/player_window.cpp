@@ -952,19 +952,40 @@ void DrawElementFrame(HDC target, const skin::SkinElement& element, RECT bounds,
                        frame_width, element.image_size.cy, transparent);
 }
 
+LOGFONTW PlaylistFontDescriptor(const settings::PlaylistSettings& settings) {
+    NONCLIENTMETRICSW nonclient{sizeof(nonclient)};
+    LOGFONTW descriptor{};
+    if (settings.font_descriptor_valid) {
+        descriptor = settings.font_descriptor;
+    } else {
+        if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, 0, &nonclient, 0))
+            descriptor = nonclient.lfMessageFont;
+        descriptor.lfHeight = settings.font_height;
+        descriptor.lfWeight = FW_NORMAL;
+        descriptor.lfQuality = ANTIALIASED_QUALITY;
+        wcsncpy_s(descriptor.lfFaceName, settings.font.c_str(), _TRUNCATE);
+    }
+    return descriptor;
+}
+
+HFONT CreatePlaylistFont(const settings::PlaylistSettings& settings) {
+    const auto descriptor = PlaylistFontDescriptor(settings);
+    return CreateFontIndirectW(&descriptor);
+}
+
 PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
                                       int split_on_lists, int width, int height,
-                                      size_t track_count) {
+                                      size_t track_count, int row_height) {
     PlaylistGeometry result;
     result.list = layout.list_bounds;
     const int extra_width = std::max<int>(0, width - layout.background.size.cx);
     const int extra_height = std::max<int>(0, height - layout.background.size.cy);
     result.list.right += extra_width;
     result.list.bottom += extra_height;
-    // The selected bitmap is a tiled highlight, not the ListCtrl item height.
-    // Runtime pixel probes show 16-pixel rows with LX-iPlay's 19-pixel
-    // selected.bmp clipped and restarted for every item.
-    result.row_height = 16;
+    // 0048301E applies the playlist LOGFONT to both native ListViews. Their
+    // measured row height also drives skin drawing, hit tests and scrolling;
+    // the selected bitmap is only a tiled highlight, not an item-height hint.
+    result.row_height = std::max(1, row_height);
     const int available_height = std::max<LONG>(0, result.list.bottom - result.list.top);
     result.page_rows = std::max(1, available_height / result.row_height);
     result.visible_rows = std::max(1, (available_height + result.row_height - 1) /

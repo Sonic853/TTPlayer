@@ -198,6 +198,7 @@ private:
     static bool RegisterPlaylistListClass(HINSTANCE instance);
     static LRESULT CALLBACK PlaylistListWindowProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT DefaultPlaylistListMessage(HWND, UINT, WPARAM, LPARAM);
+    [[nodiscard]] int PlaylistRowHeight() const;
     void ReadPlaylistNativeState(HWND);
     [[nodiscard]] std::optional<LRESULT> PlaylistNativeNotification(LPARAM notification);
     static LRESULT CALLBACK LyricWindowProc(HWND, UINT, WPARAM, LPARAM);
@@ -480,6 +481,7 @@ private:
     // 004AF7F4/004AF838; the UI index remains an independent identity model.
     struct MediaLibraryState;
     void InitializeMediaLibraryTree();
+    void UpdatePlaylistTreeFont();
     void SetMediaLibraryMode(bool enabled);
     void StartMediaLibraryRefresh();
     void PollMediaLibraryWorkers();

@@ -418,21 +418,6 @@ FormattedPlaylistTitle FormatPlaylistTitle(
     return formatted;
 }
 
-HFONT CreatePlaylistFont(const settings::PlaylistSettings& settings) {
-    NONCLIENTMETRICSW nonclient{sizeof(nonclient)};
-    LOGFONTW descriptor{};
-    if (settings.font_descriptor_valid) {
-        descriptor = settings.font_descriptor;
-    } else {
-        if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, 0, &nonclient, 0))
-            descriptor = nonclient.lfMessageFont;
-        descriptor.lfHeight = settings.font_height;
-        descriptor.lfWeight = FW_NORMAL;
-        descriptor.lfQuality = ANTIALIASED_QUALITY;
-        wcsncpy_s(descriptor.lfFaceName, settings.font.c_str(), _TRUNCATE);
-    }
-    return CreateFontIndirectW(&descriptor);
-}
 
 int PlaylistNumberColumnWidth(HDC dc, size_t item_count, bool visible) {
     if (!visible || !dc) return 0;
@@ -1592,7 +1577,7 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
         RECT client{};
         GetClientRect(control, &client);
         // SysListView32 counts complete rows, excluding a clipped bottom row.
-        return std::max<LONG>(0, client.bottom - client.top) / 16;
+        return std::max<LONG>(0, client.bottom - client.top) / PlaylistRowHeight();
     }
     case LVM_GETITEMSTATE:
     case LVM_SETITEMSTATE:
@@ -1636,7 +1621,7 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
         RECT client{};
         GetClientRect(control, &client);
         if (!PtInRect(&client, hit->pt) || hit->pt.y < 0) return -1;
-        constexpr size_t row_height = 16;
+        const size_t row_height = static_cast<size_t>(PlaylistRowHeight());
         const size_t first = catalogue ? playlist_list_scroll_ :
             (tracks ? playlist_scroll_ : 0);
         const size_t index = first +
@@ -1661,8 +1646,9 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
             (tracks ? playlist_scroll_ : 0);
         const auto relative = static_cast<std::int64_t>(index) -
                               static_cast<std::int64_t>(first);
-        *bounds = {0, static_cast<LONG>(relative * 16), client.right,
-                   static_cast<LONG>((relative + 1) * 16)};
+        const int row_height = PlaylistRowHeight();
+        *bounds = {0, static_cast<LONG>(relative * row_height), client.right,
+                   static_cast<LONG>((relative + 1) * row_height)};
         return TRUE;
     }
     case LVM_EDITLABELW:
@@ -1699,7 +1685,7 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
         }
         RECT client{};
         GetClientRect(control, &client);
-        constexpr size_t row_height = 16;
+        const size_t row_height = static_cast<size_t>(PlaylistRowHeight());
         const size_t height = static_cast<size_t>(std::max<LONG>(0, client.bottom - client.top));
         const size_t visible = std::max<size_t>(1, height / row_height);
         const size_t maximum = count > visible ? count - visible : 0;
@@ -1718,7 +1704,7 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
         if (catalogue && static_cast<size_t>(wparam) < playlists_.Size()) {
             RECT client{};
             GetClientRect(control, &client);
-            constexpr size_t row_height = 16;
+            const size_t row_height = static_cast<size_t>(PlaylistRowHeight());
             const size_t height = static_cast<size_t>(std::max<LONG>(0, client.bottom - client.top));
             const size_t visible = std::max<size_t>(1, height / row_height);
             const size_t index = static_cast<size_t>(wparam);
@@ -1736,7 +1722,7 @@ LRESULT PlayerWindow::HandlePlaylistControlMessage(HWND control, UINT message,
                     playlist_selection_?static_cast<int32_t>(*playlist_selection_):-1));
             RECT client{};
             GetClientRect(control, &client);
-            constexpr size_t row_height = 16;
+            const size_t row_height = static_cast<size_t>(PlaylistRowHeight());
             const size_t height = static_cast<size_t>(std::max<LONG>(0, client.bottom - client.top));
             const size_t visible = std::max<size_t>(1, height / row_height);
             const size_t previous = playlist_scroll_;
@@ -1854,7 +1840,7 @@ LRESULT PlayerWindow::HandlePlaylistMessage(UINT message, WPARAM wparam,
         if (playlist_window_) GetClientRect(playlist_window_, &client);
         return skin_ ? MakePlaylistGeometry(skin_->Playlist(),
             settings_.playlist.split_on_lists, client.right, client.bottom,
-            VisiblePlaylistTrackCount()) : PlaylistGeometry{};
+            VisiblePlaylistTrackCount(), PlaylistRowHeight()) : PlaylistGeometry{};
     };
     const auto scrollbar_metrics = [this, &geometry]() {
         if (!skin_) return PlaylistScrollbarMetrics{};
@@ -3091,7 +3077,8 @@ void PlayerWindow::LayoutPlaylistListControls() {
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
-        VisiblePlaylistTrackCount());
+        VisiblePlaylistTrackCount(), PlaylistRowHeight());
+    UpdatePlaylistTreeFont();
     const size_t visible = static_cast<size_t>(
         std::max(1, metrics.page_rows));
     const size_t maximum = playlists_.Size() > visible
@@ -3196,7 +3183,7 @@ bool PlayerWindow::RoutePlayerMouseWheel(const MSG& message) const {
     } else if (within(playlist_window_) && skin_ && skin_->Playlist().valid) {
         RECT client{}; GetClientRect(playlist_window_, &client);
         const auto metrics = MakePlaylistGeometry(skin_->Playlist(), settings_.playlist.split_on_lists,
-            client.right, client.bottom, VisiblePlaylistTrackCount());
+            client.right, client.bottom, VisiblePlaylistTrackCount(), PlaylistRowHeight());
         POINT point = screen; ScreenToClient(playlist_window_, &point);
         if (PtInRect(&metrics.list_titles, point))
             target = settings_.playlist.library_mode ? playlist_tree_control_ : playlist_list_control_;
@@ -3414,7 +3401,7 @@ void PlayerWindow::UpdatePlaylistToolRects() {
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
-        VisiblePlaylistTrackCount());
+        VisiblePlaylistTrackCount(), PlaylistRowHeight());
     const auto add_control = [this, &placed](UINT_PTR identifier, UINT control_id,
                                     const RECT& bounds) {
         if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) return;
@@ -3461,7 +3448,7 @@ std::pair<size_t, size_t> PlayerWindow::VisiblePlaylistInfoRange() const {
         RECT client{};
         GetClientRect(playlist_window_, &client);
         const auto metrics = MakePlaylistGeometry(skin_->Playlist(), settings_.playlist.split_on_lists,
-            client.right, client.bottom, VisiblePlaylistTrackCount());
+            client.right, client.bottom, VisiblePlaylistTrackCount(), PlaylistRowHeight());
         return {playlist_scroll_, static_cast<size_t>(std::max(0, metrics.visible_rows))};
     }
     if (playlist_view_ && IsWindowVisible(playlist_view_)) {
@@ -3479,7 +3466,7 @@ void PlayerWindow::InvalidatePlaylistInfoRows(const std::vector<size_t>& rows) {
     if (playlist_window_ && skin_ && skin_->Playlist().valid) {
         RECT client{}; GetClientRect(playlist_window_, &client);
         const auto metrics = MakePlaylistGeometry(skin_->Playlist(), settings_.playlist.split_on_lists,
-            client.right, client.bottom, VisiblePlaylistTrackCount());
+            client.right, client.bottom, VisiblePlaylistTrackCount(), PlaylistRowHeight());
         for (const auto row : rows) {
             if (row < playlist_scroll_ || row - playlist_scroll_ >= static_cast<size_t>(std::max(0, metrics.visible_rows))) continue;
             const int top = metrics.tracks.top + static_cast<int>(row - playlist_scroll_) * metrics.row_height;
@@ -3537,7 +3524,7 @@ void PlayerWindow::UpdatePlaylistItemTipRects() {
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
-        VisiblePlaylistTrackCount());
+        VisiblePlaylistTrackCount(), PlaylistRowHeight());
     if (!settings_.playlist.library_mode &&
         settings_.playlist.read_info_mode != 2 && metrics.visible_rows > 0) {
         // FUN_00487C0D queues an unread (-2) non-network CPlayItem only when
@@ -3714,7 +3701,7 @@ std::optional<size_t> PlayerWindow::PlaylistTrackAt(POINT point) const {
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
-        VisiblePlaylistTrackCount());
+        VisiblePlaylistTrackCount(), PlaylistRowHeight());
     if (!PtInRect(&metrics.tracks, point)) return std::nullopt;
     const size_t index = playlist_scroll_ +
         static_cast<size_t>((point.y - metrics.tracks.top) / metrics.row_height);
@@ -3729,7 +3716,7 @@ std::optional<size_t> PlayerWindow::PlaylistListAt(POINT point) const {
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
-        VisiblePlaylistTrackCount());
+        VisiblePlaylistTrackCount(), PlaylistRowHeight());
     if (!PtInRect(&metrics.list_titles, point)) return std::nullopt;
     const size_t index = playlist_list_scroll_ + static_cast<size_t>(
         (point.y - metrics.list_titles.top) / metrics.row_height);
@@ -3743,7 +3730,7 @@ std::optional<size_t> PlayerWindow::PlaylistListInsertionAt(POINT point) const {
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
-        VisiblePlaylistTrackCount());
+        VisiblePlaylistTrackCount(), PlaylistRowHeight());
     if (!PtInRect(&metrics.list_titles, point) || metrics.row_height <= 0)
         return std::nullopt;
 
@@ -3762,7 +3749,7 @@ std::optional<size_t> PlayerWindow::PlaylistToolbarButtonAt(POINT point) const {
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
-        VisiblePlaylistTrackCount());
+        VisiblePlaylistTrackCount(), PlaylistRowHeight());
     if (!PtInRect(&metrics.toolbar, point)) return std::nullopt;
     if (skin_->Playlist().toolbar_items) {
         for (size_t index = 0; index < 7; ++index) {
@@ -3840,7 +3827,7 @@ void PlayerWindow::RestorePlaylistRowSelection() {
         GetClientRect(playlist_window_, &client);
         const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
             settings_.playlist.split_on_lists, client.right, client.bottom,
-            ActivePlaylist().Tracks().size());
+            ActivePlaylist().Tracks().size(), PlaylistRowHeight());
         if (*visible < playlist_scroll_) playlist_scroll_ = *visible;
         const size_t rows = static_cast<size_t>(metrics.page_rows);
         if (*visible >= playlist_scroll_ + rows)
@@ -3867,7 +3854,7 @@ void PlayerWindow::EnsurePlaylistSelectionVisible() {
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
-        VisiblePlaylistTrackCount());
+        VisiblePlaylistTrackCount(), PlaylistRowHeight());
     const size_t previous = playlist_scroll_;
     if (*playlist_selection_ < playlist_scroll_) playlist_scroll_ = *playlist_selection_;
     const size_t visible = static_cast<size_t>(metrics.page_rows);
@@ -3962,7 +3949,7 @@ void PlayerWindow::LayoutPlaylistListEdit() {
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
-        ActivePlaylist().Tracks().size());
+        ActivePlaylist().Tracks().size(), PlaylistRowHeight());
     if (*playlist_list_edit_index_ < playlist_list_scroll_) {
         ShowWindow(playlist_list_edit_, SW_HIDE);
         return;
@@ -4057,7 +4044,7 @@ void PlayerWindow::ScrollPlaylist(int rows) {
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
-        VisiblePlaylistTrackCount());
+        VisiblePlaylistTrackCount(), PlaylistRowHeight());
     const size_t visible = static_cast<size_t>(
         std::max(1, metrics.page_rows));
     const size_t count = VisiblePlaylistTrackCount();
@@ -4075,7 +4062,7 @@ void PlayerWindow::UpdatePlaylistMarquee(POINT point) {
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
-        VisiblePlaylistTrackCount());
+        VisiblePlaylistTrackCount(), PlaylistRowHeight());
     playlist_selected_rows_ = playlist_marquee_.Update(point, metrics.tracks,
         playlist_scroll_, metrics.row_height, VisiblePlaylistTrackCount(),
         {GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)});
@@ -4124,7 +4111,7 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
 
     const auto metrics = MakePlaylistGeometry(layout, settings_.playlist.split_on_lists,
                                                width, height,
-                                               VisiblePlaylistTrackCount());
+                                               VisiblePlaylistTrackCount(), PlaylistRowHeight());
     if (metrics.list.right > metrics.list.left && metrics.list.bottom > metrics.list.top) {
         const RECT group = metrics.list_titles;
         // The left TreeCtrl and the track ListCtrl both receive Color_Bkgnd.
@@ -4648,7 +4635,7 @@ void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_poin
         GetClientRect(playlist_window_, &client);
         const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
             settings_.playlist.split_on_lists, client.right, client.bottom,
-            VisiblePlaylistTrackCount());
+            VisiblePlaylistTrackCount(), PlaylistRowHeight());
         blank_catalogue = !settings_.playlist.library_mode &&
             PtInRect(&metrics.list_titles, client_point);
         if (blank_catalogue) {
@@ -5472,7 +5459,7 @@ void PlayerWindow::FinishPlaylistTrackDrag(POINT point) {
     GetClientRect(playlist_window_, &client);
     const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
         settings_.playlist.split_on_lists, client.right, client.bottom,
-        ActivePlaylist().Tracks().size());
+        ActivePlaylist().Tracks().size(), PlaylistRowHeight());
 
     if (!settings_.playlist.library_mode &&
         settings_.playlist.split_on_lists > 0 &&
@@ -6131,7 +6118,7 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
             GetClientRect(playlist_window_, &client);
             const auto metrics = MakePlaylistGeometry(skin_->Playlist(),
                 settings_.playlist.split_on_lists, client.right,
-                client.bottom, ActivePlaylist().Tracks().size());
+                client.bottom, ActivePlaylist().Tracks().size(), PlaylistRowHeight());
             if (*playing < playlist_scroll_) playlist_scroll_ = *playing;
             const size_t visible = static_cast<size_t>(metrics.page_rows);
             if (*playing >= playlist_scroll_ + visible)
