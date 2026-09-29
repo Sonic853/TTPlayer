@@ -36,6 +36,10 @@ public:
     void Update(const std::filesystem::path& folder,
                 const std::vector<std::wstring>& modules,
                 HWND parent_window = nullptr);
+    // Runtime UI changes must not wait for a third-party Init/Quit callback.
+    void RequestUpdate(const std::filesystem::path& folder,
+                       const std::vector<std::wstring>& modules,
+                       HWND parent_window);
 
     // Schedule Config on the active instance without blocking the player's UI
     // for a modal third-party dialog. False means no configurable active module.

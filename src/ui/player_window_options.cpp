@@ -138,6 +138,7 @@ constexpr UINT_PTR kOptionsSkinPollTimer = 0x5453;
 constexpr UINT_PTR kOptionsLyricServicesTimer = 0x5454;
 constexpr UINT kOptionsSkinPollMilliseconds = 40;
 constexpr UINT_PTR kOptionsDspPollTimer = 0x4453;
+constexpr UINT_PTR kOptionsDspStateTimer = 0x4454;
 constexpr UINT kOptionsDspPollMilliseconds = 60;
 constexpr ULONGLONG kOptionsDspScanTimeoutMilliseconds = 120000;
 constexpr DWORD kOptionsDeviceProbeTimeoutMilliseconds = 4000;
@@ -4961,6 +4962,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             // otherwise reproduce the old application's long UI hangs.
             StartOptionsDspScan(dialog, folder);
         }
+        SetTimer(dialog, kOptionsDspStateTimer, 100, nullptr);
         break;
     }
     case 260: {
@@ -6852,6 +6854,10 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         }
         return TRUE;
     case WM_TIMER:
+        if (template_id == 259 && wparam == kOptionsDspStateTimer) {
+            UpdateDspButtons(dialog, audio_.get(), options_dsp_paths_);
+            return TRUE;
+        }
         if (template_id == 259 && wparam == kOptionsDspPollTimer) {
             PollOptionsDspScan(dialog);
             return TRUE;
@@ -7970,6 +7976,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         }
         if (template_id == 259) {
             KillTimer(dialog, kOptionsDspPollTimer);
+            KillTimer(dialog, kOptionsDspStateTimer);
             CancelOptionsDspScan();
         }
         if (template_id == 262 && !options_association_nodes_.empty()) {

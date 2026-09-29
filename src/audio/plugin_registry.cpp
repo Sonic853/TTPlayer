@@ -778,10 +778,12 @@ void FileRegistry::MigrateEnhancer() {
 
 struct DspModuleImports {
     struct Slot { ULONG_PTR* address; ULONG_PTR original, replacement; };
+    struct CodeByte { BYTE* address; BYTE original, replacement; };
     HMODULE module{};
     size_t image_size{};
     bool retained{};
     std::vector<Slot> slots;
+    std::vector<CodeByte> code_bytes;
 };
 struct PluginRegistry::Impl {
     HMODULE module{};
@@ -1371,6 +1373,32 @@ void AdaptModule(const Context& context,HMODULE module,const std::filesystem::pa
         InterlockedExchangePointer(reinterpret_cast<PVOID volatile*>(entry->slot),reinterpret_cast<void*>(replacement));
         DWORD ignored{};VirtualProtect(entry->slot,sizeof(ULONG_PTR),previous,&ignored);
     }
+    if(context->dfx && module==context->module && shared->code_bytes.empty()) {
+        // Audited DFX SHA256 only. Its WM_NCHITTEST branch zero-extends both
+        // signed screen coordinates (1001EC76/1001EC7A), turning -1 into
+        // 65535. Correct MOVZX to MOVSX before Init creates its window; keep
+        // the plugin's skin-aware hit test, including every control region.
+        // The DLL on disk is untouched. These bytes share the import adapter
+        // lifetime and are restored if another reference keeps it mapped.
+        constexpr DWORD offsets[]{0x1ec76,0x1ec7a};
+        constexpr BYTE operands[]{0xcf,0xd5};
+        for(size_t i=0;i<2;++i) {
+            const auto code=reinterpret_cast<BYTE*>(module)+offsets[i];
+            if(code[0]!=0x0f || code[1]!=0xb7 || code[2]!=operands[i])
+                throw std::runtime_error("DFX coordinate compatibility signature mismatch");
+        }
+        shared->code_bytes.reserve(2);
+        for(const auto offset:offsets) {
+            const auto byte=reinterpret_cast<BYTE*>(module)+offset+1;
+            DWORD previous{};
+            if(!VirtualProtect(byte,1,PAGE_EXECUTE_READWRITE,&previous))
+                throw std::runtime_error("Cannot adapt DFX screen coordinates");
+            shared->code_bytes.push_back({byte,*byte,0xbf});
+            *byte=0xbf;
+            FlushInstructionCache(GetCurrentProcess(),byte,1);
+            DWORD ignored{};VirtualProtect(byte,1,previous,&ignored);
+        }
+    }
     // Only private dependencies next to the plug-in participate. Do not patch
     // Windows DLLs, the player or every module in its process.
     for(const auto& name:inspected.libraries){
@@ -1429,6 +1457,17 @@ void Restore(PluginRegistry::Impl& context,size_t first) {
         if(module.use_count()!=1)continue;
         // Keep hooks and the context alive through the dependency's detach.
         if(module->retained){module->retained=false;FreeLibrary(module->module);}
+        for(const auto& patch:module->code_bytes) {
+            MEMORY_BASIC_INFORMATION info{};BYTE current{};SIZE_T copied{};
+            if(!VirtualQuery(patch.address,&info,sizeof(info)) || info.AllocationBase!=module->module ||
+               info.Type!=MEM_IMAGE || !ReadProcessMemory(GetCurrentProcess(),patch.address,&current,1,&copied) ||
+               current!=patch.replacement)continue;
+            DWORD previous{};if(!VirtualProtect(patch.address,1,PAGE_EXECUTE_READWRITE,&previous))continue;
+            *patch.address=patch.original;
+            FlushInstructionCache(GetCurrentProcess(),patch.address,1);
+            DWORD ignored{};VirtualProtect(patch.address,1,previous,&ignored);
+        }
+        module->code_bytes.clear();
         for(const auto& slot:module->slots){
             MEMORY_BASIC_INFORMATION info{};ULONG_PTR current{};SIZE_T copied{};
             if(!VirtualQuery(slot.address,&info,sizeof(info))||info.AllocationBase!=module->module||info.Type!=MEM_IMAGE||

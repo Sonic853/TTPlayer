@@ -396,33 +396,47 @@ public:
         const bool same_modules = requested.size() == requested_.size() &&
             std::equal(requested.begin(), requested.end(), requested_.begin(),
                        SamePath);
-        if (same_parent && same_modules) return;
+        if (same_parent && same_modules && prepared_.empty()) return;
 
         // Move surviving wrappers, rather than initializing the entire chain.
         // This is the pointer-preserving 00428A7F ordering contract.
-        std::vector<LoadedModule> surviving;
-        surviving.reserve(requested.size());
-        for (auto& loaded : modules_) {
-            if (std::any_of(requested.begin(), requested.end(),
-                    [&loaded](const auto& path) { return SamePath(loaded.path, path); }))
-                surviving.push_back(std::move(loaded));
+        std::vector<LoadedModule> next;
+        std::vector<std::filesystem::path> missing;
+        next.reserve(requested.size());
+        missing.reserve(requested.size());
+        for (const auto& path : requested) {
+            LoadedModule* found{};
+            for (auto* source : {&modules_, &prepared_}) {
+                const auto it = std::find_if(source->begin(), source->end(),
+                    [&path](const auto& item) { return item.module && SamePath(item.path, path); });
+                if (it != source->end()) { found = &*it; break; }
+            }
+            if (found) {
+                PrepareModule(found->module, parent_window, found->library);
+                next.push_back(std::move(*found));
+            } else if (!same_parent || !same_modules) missing.push_back(path);
         }
         ++callback_depth_;
-        CloseAll(false);
+        auto retired = std::move(modules_);
+        auto stale_prepared = std::move(prepared_);
+        modules_ = std::move(next);
         requested_ = std::move(requested);
         parent_window_ = parent_window;
-        for (const auto& path : requested_) {
-            const auto found = std::find_if(surviving.begin(), surviving.end(),
-                [&path](const auto& loaded) { return loaded.module && SamePath(loaded.path, path); });
-            if (found != surviving.end()) {
-                PrepareModule(found->module, parent_window_, found->library);
-                modules_.push_back(std::move(*found));
-            } else {
-                Load(path);
-            }
+        PublishActive();
+        processing_lock.unlock();
+
+        // 00428471 removes the instance under the chain lock; 00428061 calls
+        // Quit/FreeLibrary only after releasing it. Neither plug-in teardown
+        // nor registry persistence may block the remaining audio chain.
+        CloseModules(retired);
+        CloseModules(stale_prepared);
+        for (const auto& path : missing) Load(path);
+        // Init also runs outside the PCM lock. Publish prepared instances at
+        // a callback boundary; never wait on PCM which can query this GUI.
+        if (!prepared_.empty() && !pending_) {
+            pending_ = Pending{folder, configured, parent_window};
+            pending_update_ = true;
         }
-        active_count = std::count_if(modules_.begin(), modules_.end(),
-            [](const auto& module) { return !module.failed.load(); });
         FinishCallback();
         Windows();
     }
@@ -492,6 +506,10 @@ public:
             loaded.failed = true;
             --active_count;
             {
+                std::scoped_lock lock(status_mutex_);
+                std::erase_if(active_paths_, [&](const auto& path) { return SamePath(path, loaded.path); });
+            }
+            {
                 std::scoped_lock lock(diagnostics_mutex_);
                 diagnostics_.push_back(
                     L"Winamp DSP ModifySamples raised an exception; disabled: " +
@@ -509,21 +527,26 @@ public:
         }
     }
 
-    void CloseAll(bool publish_count = true) noexcept {
+    void CloseModules(std::vector<LoadedModule>& modules) noexcept {
         // FUN_00428B16 destroys the wrappers in ascending vector order.
         std::vector<std::wstring> messages;
-        for (auto& current : modules_) current.Close(&messages);
-        modules_.clear();
-        if (publish_count) active_count = 0;
+        for (auto& current : modules) current.Close(&messages);
+        modules.clear();
         try { for (auto& message : messages) AddDiagnostic(std::move(message)); }
         catch (...) {} // Teardown must still release the remaining host state.
     }
 
     ~Impl() {
         dispatcher.Stop([this] {
-            std::scoped_lock processing_lock(processing_mutex_);
+            std::unique_lock processing_lock(processing_mutex_);
             pending_.reset();
-            CloseAll();
+            pending_update_ = false;
+            auto retired = std::move(modules_);
+            auto prepared = std::move(prepared_);
+            PublishActive();
+            processing_lock.unlock();
+            CloseModules(retired);
+            CloseModules(prepared);
             for (const HWND window : hooked_windows_) {
                 if (!IsWindow(window)) continue;
                 const auto previous = reinterpret_cast<WNDPROC>(GetPropW(window, kDspOriginalProcedure));
@@ -592,8 +615,7 @@ public:
 
     std::vector<HWND> Windows() {
         std::vector<HWND> result;
-        if (modules_.empty()) return result;
-        EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
+        if (!modules_.empty()) EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
             DWORD process{};
             GetWindowThreadProcessId(window, &process);
             if (process != GetCurrentProcessId()) return TRUE;
@@ -619,6 +641,25 @@ public:
                 hooked_windows_.push_back(window);
             }
         }
+        { std::scoped_lock lock(status_mutex_); windows_ = result; }
+        return result;
+    }
+
+    bool IsActive(const std::filesystem::path& path) const {
+        const auto normalized = ResolveModulePath({}, path.wstring());
+        std::scoped_lock lock(status_mutex_);
+        return std::any_of(active_paths_.begin(), active_paths_.end(),
+            [&](const auto& item) { return SamePath(item, normalized); });
+    }
+
+    std::vector<HWND> WindowSnapshot() {
+        if (!windows_refresh_pending_.exchange(true)) {
+            if (!dispatcher.Post([this] { windows_refresh_pending_ = false; Windows(); }))
+                windows_refresh_pending_ = false;
+        }
+        std::scoped_lock lock(status_mutex_);
+        auto result = windows_;
+        std::erase_if(result, [](HWND window) { return !IsWindow(window); });
         return result;
     }
 
@@ -642,6 +683,13 @@ public:
     std::filesystem::path storage_directory;
 
 private:
+    void PublishActive() {
+        std::scoped_lock lock(status_mutex_);
+        active_paths_.clear();
+        for (const auto& module : modules_)
+            if (module.module && !module.failed.load()) active_paths_.push_back(module.path);
+        active_count = active_paths_.size();
+    }
     void AddDiagnostic(std::wstring message) {
         std::scoped_lock lock(diagnostics_mutex_);
         diagnostics_.push_back(std::move(message));
@@ -655,6 +703,11 @@ private:
     std::atomic<bool> pending_update_{};
     std::recursive_mutex processing_mutex_;
     std::mutex diagnostics_mutex_;
+    mutable std::mutex status_mutex_;
+    std::vector<std::filesystem::path> active_paths_;
+    std::vector<HWND> windows_;
+    std::atomic<bool> windows_refresh_pending_{};
+    std::vector<LoadedModule> prepared_; // initialized, awaiting a PCM boundary
     bool processing_{}; // protected by processing_mutex_, including recursion
     std::vector<HWND> hooked_windows_;
     std::vector<std::int16_t> scratch_;
@@ -735,7 +788,7 @@ private:
         loaded.library = library;
         loaded.module = module;
         loaded.registry = std::move(registry);
-        modules_.push_back(std::move(loaded));
+        prepared_.push_back(std::move(loaded));
     }
 };
 
@@ -757,22 +810,25 @@ void WinampDspChain::Update(const std::filesystem::path& folder,
     impl_->dispatcher.Invoke([&] { impl_->Update(folder, modules, parent_window); });
 }
 
+void WinampDspChain::RequestUpdate(const std::filesystem::path& folder,
+                                  const std::vector<std::wstring>& modules,
+                                  HWND parent_window) {
+    impl_->dispatcher.Post([state = impl_.get(), folder, modules, parent_window] {
+        state->Update(folder, modules, parent_window);
+    });
+}
+
 bool WinampDspChain::Configure(const std::filesystem::path& module) {
-    bool result{};
-    impl_->dispatcher.Invoke([&] { result = impl_->Configure(module); });
-    return result;
+    if (!impl_->IsActive(module)) return false;
+    return impl_->dispatcher.Post([state = impl_.get(), module] { state->Configure(module); });
 }
 
 bool WinampDspChain::IsActive(const std::filesystem::path& module) const {
-    bool result{};
-    impl_->dispatcher.Invoke([&] { result = impl_->Find(module) != nullptr; });
-    return result;
+    return impl_->IsActive(module);
 }
 
 std::vector<HWND> WinampDspChain::Windows() const {
-    std::vector<HWND> result;
-    impl_->dispatcher.Invoke([&] { result = impl_->Windows(); });
-    return result;
+    return impl_->WindowSnapshot();
 }
 
 void WinampDspChain::Process(std::span<std::int16_t> interleaved_samples,

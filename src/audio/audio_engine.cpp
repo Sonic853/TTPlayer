@@ -2270,7 +2270,10 @@ void AudioEngine::Configure(const PlaybackOptions& options) {
     lock.unlock();
     // Init may query hwndParent. Never hold the audio engine mutex across a
     // callback on the DSP apartment, including while no sound is open.
-    if (parent) dsp_chain_->Update(folder, modules, parent);
+    if (parent) {
+        if (existing_dsp_parent) dsp_chain_->RequestUpdate(folder, modules, parent);
+        else dsp_chain_->Update(folder, modules, parent);
+    }
     for (auto& diagnostic : dsp_chain_->TakeDiagnostics())
         RecordDiagnostic(std::move(diagnostic));
 }
