@@ -3253,8 +3253,12 @@ bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
     }
     if (lyric_editor_accelerators_ && lyric_editor_ &&
         IsWindow(lyric_editor_) && GetFocus() == lyric_editor_) {
-        return TranslateAcceleratorW(window_, lyric_editor_accelerators_,
-                                     queued) != FALSE;
+        // 00449DA8 returns to the original message-filter chain when the
+        // editor's five-entry accelerator table does not match. Our single
+        // filter also owns the application table (0046228D / DAT_0053ABF8),
+        // so continue here: F9/F10/Ctrl+Delete and user bindings live there.
+        if (TranslateAcceleratorW(window_, lyric_editor_accelerators_, queued))
+            return true;
     }
     // DAT_0053ABF8 is the 54-entry application/global shortcut table.  The
     // first default entry is F1 -> E140 (Options).  Application shortcuts are

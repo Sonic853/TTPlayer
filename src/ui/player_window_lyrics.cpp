@@ -314,6 +314,8 @@ bool WriteEditorFile(const std::filesystem::path& path, std::wstring_view text,
 
 std::optional<std::chrono::milliseconds> ParseEditorTimestamp(
     std::wstring_view value) {
+    if (const auto range = lyrics::ParseLrcTimeRange(core::WideToUtf8(value)))
+        return range->start;
     const size_t colon = value.find(L':');
     if (colon == std::wstring_view::npos || colon == 0) return std::nullopt;
     wchar_t* end{};
@@ -331,6 +333,14 @@ std::optional<std::chrono::milliseconds> ParseEditorTimestamp(
 
 std::optional<std::chrono::milliseconds> ParseEditorTimestampLiteral(
     std::wstring_view value) {
+    // The legacy scan accepts two fields even when its closing ']' fails.
+    // A comma tag must be validated completely before it can be retimed.
+    if (value.find(L',') != value.npos) {
+        if (value.size() >= 2 && value.front() == L'[' && value.back() == L']')
+            if (const auto range = lyrics::ParseLrcTimeRange(
+                    core::WideToUtf8(value.substr(1, value.size() - 2)))) return range->start;
+        return std::nullopt;
+    }
     // 00443460/00443806 pass the entire bracket range to
     // swscanf(L"[%d:%f]").  This deliberately accepts the same legacy loose
     // syntax instead of applying the stricter LRC-model parser above.
@@ -1809,7 +1819,8 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
                 draw_text(text, line, format);
                 return;
             }
-            if (ActiveLyricKaraokeMode() && !lyrics_.lines[index].words.empty() &&
+            if (ActiveLyricKaraokeMode() &&
+                (!lyrics_.lines[index].words.empty() || lyrics_.lines[index].end_time) &&
                 !playback_line && !lyric_line_dragging_) {
                 SetTextColor(canvas, text_color);
                 draw_text(text, line, format);
@@ -1826,7 +1837,8 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
             // two clipped passes: highlighted before the playback boundary,
             // normal after it (0043FC10 at 00440426/0044080E).
             RECT highlight_clip = line;
-            const bool word_timed = !lyrics_.lines[current].words.empty();
+            const bool word_timed = !lyrics_.lines[current].words.empty() ||
+                                    lyrics_.lines[current].end_time.has_value();
             if (horizontal_stream && !word_timed) {
                 highlight_clip.right = width / 2;
             } else {
@@ -1839,9 +1851,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
                 else if (ActiveLyricTextAlign() >= 2)
                     text_left = line.right - measured.cx;
                 const auto start = lyrics_.lines[current].time;
-                const auto end = current + 1 < lyrics_.lines.size()
-                    ? lyrics_.lines[current + 1].time
-                    : start + std::chrono::seconds(60);
+                const auto end = lyrics_.LineEnd(current);
                 const auto clock = playback_position - lyrics_.offset;
                 const auto span = std::max<long long>(1, (end - start).count());
                 // Wrapped rows share one timestamp and one karaoke progress.
@@ -2699,8 +2709,11 @@ bool PlayerWindow::EnterLyricEditor() {
 
     // FUN_0044CB58 creates the editor only after RichEdit20W is available.
     // Keep the module loaded for exactly the lifetime of the editor controls.
-    if (!lyric_editor_module_)
-        lyric_editor_module_ = LoadLibraryW(L"Riched20.dll");
+    // RichEdit can leave OLE clipboard objects/callbacks alive after its HWND
+    // is destroyed. Keep one module reference for the process, through OLE
+    // shutdown; unloading it in DestroyLyricEditor can crash after Ctrl+X/C.
+    static const HMODULE rich_edit_module = LoadLibraryW(L"Riched20.dll");
+    lyric_editor_module_ = rich_edit_module;
     if (!lyric_editor_module_) return false;
 
     if (!lyric_editor_toolbar_) {
@@ -2930,10 +2943,7 @@ void PlayerWindow::DestroyLyricEditor() {
         ImageList_Destroy(lyric_editor_images_);
         lyric_editor_images_ = nullptr;
     }
-    if (lyric_editor_module_) {
-        FreeLibrary(lyric_editor_module_);
-        lyric_editor_module_ = nullptr;
-    }
+    lyric_editor_module_ = nullptr; // borrowed from the process-lifetime cache
     lyric_editor_path_.clear();
     lyric_editor_internal_change_ = false;
     lyric_editor_edit_kind_ = 0;
@@ -3138,6 +3148,12 @@ void PlayerWindow::EditLyricTimestamp(UINT command) {
     }
     LONG replace_begin = line_begin;
     LONG replace_end = line_begin;
+    const auto source = LyricEditorRangeText(line_begin, line_end);
+    const auto parsed = lyrics::ParseLrc(core::WideToUtf8(source));
+    const bool ranged = lyrics::HasLrcTimeRange(core::WideToUtf8(source));
+    const auto range_offset = ranged
+        ? lyrics::ParseLrc(core::WideToUtf8(LyricEditorText())).offset
+        : std::chrono::milliseconds{};
     if (command == kCmdLyricEditorReplaceTag) {
         // Replacement is based on time, not textual order: of every valid
         // tag on the caret line, 00443460 selects the one nearest playback.
@@ -3151,8 +3167,10 @@ void PlayerWindow::EditLyricTimestamp(UINT command) {
             if (close < 0) break;
             if (const auto timestamp = ParseEditorTimestampLiteral(
                     LyricEditorRangeText(open, close + 1))) {
+                const auto range = lyrics::ParseLrcTimeRange(core::WideToUtf8(
+                    LyricEditorRangeText(open + 1, close)));
                 const long long distance = std::llabs(
-                    timestamp->count() - playback_position->count());
+                    timestamp->count() - (range ? *playback_position - range_offset : *playback_position).count());
                 if (distance < best_distance) {
                     best_distance = distance;
                     replace_begin = open;
@@ -3162,13 +3180,19 @@ void PlayerWindow::EditLyricTimestamp(UINT command) {
             cursor = close + 1;
         }
     }
-    const auto source = LyricEditorRangeText(line_begin, line_end);
-    const auto parsed = lyrics::ParseLrc(core::WideToUtf8(source));
     const bool enhanced = std::any_of(parsed.lines.begin(), parsed.lines.end(),
         [](const auto& row) { return !row.words.empty(); });
+    auto range = replace_begin < replace_end ? lyrics::ParseLrcTimeRange(core::WideToUtf8(
+        LyricEditorRangeText(replace_begin + 1, replace_end - 1))) : std::nullopt;
+    if (command == kCmdLyricEditorInsertTag && ranged) {
+        const auto found = std::find_if(parsed.lines.begin(), parsed.lines.end(),
+            [](const auto& row) { return row.end_time.has_value(); });
+        if (found != parsed.lines.end()) range = lyrics::LyricTimeRange{found->time, *found->end_time};
+    }
+    const auto target_time = range ? *playback_position - range_offset : *playback_position;
     if (enhanced && replace_begin < replace_end) {
-        const bool rollover = lyrics::HasCentisecondRollover(core::WideToUtf8(LyricEditorText()));
-        const auto previous = lyrics::ParseLrcTimestamp(core::WideToUtf8(
+        const bool rollover = !ranged && lyrics::HasCentisecondRollover(core::WideToUtf8(LyricEditorText()));
+        const auto previous = range ? std::optional(range->start) : lyrics::ParseLrcTimestamp(core::WideToUtf8(
             LyricEditorRangeText(replace_begin + 1, replace_end - 1)), rollover);
         if (previous) {
             // Retiming a whole line preserves the timing within that line.
@@ -3182,15 +3206,16 @@ void PlayerWindow::EditLyricTimestamp(UINT command) {
                             std::wstring_view(source).substr(open + 1, close - open - 1)), rollover))
                         ReplaceLyricEditorRange(line_begin + static_cast<LONG>(open),
                             line_begin + static_cast<LONG>(close + 1),
-                            core::Utf8ToWide(lyrics::FormatLrcTimestamp(*time + *playback_position - *previous, true)), true, false);
+                            core::Utf8ToWide(lyrics::FormatLrcTimestamp(*time + target_time - *previous, true)), true, false);
                 }
                 cursor = open;
             }
         }
     }
-    ReplaceLyricEditorRange(replace_begin, replace_end, enhanced
-        ? core::Utf8ToWide(lyrics::FormatLrcTimestamp(*playback_position))
-        : FormatEditorTimestamp(*playback_position), true);
+    ReplaceLyricEditorRange(replace_begin, replace_end, range
+        ? core::Utf8ToWide(lyrics::FormatLrcTimeRange({target_time, target_time + range->end - range->start}))
+        : enhanced ? core::Utf8ToWide(lyrics::FormatLrcTimestamp(target_time))
+                   : FormatEditorTimestamp(target_time), true);
     // Despite menu 0x804F's “修改标签后换行” check, the 5.7.9 binary never
     // reads DAT_00547B48 here: both 0044DAE2 and 0044DB11 call 00443789
     // unconditionally after a successful insert/replace.
@@ -3300,7 +3325,11 @@ void PlayerWindow::ShiftLyricEditorTimestamps(
     const auto source = LyricEditorRangeText(0, length);
     const auto utf8 = core::WideToUtf8(source);
     const auto parsed = lyrics::ParseLrc(utf8);
-    if (std::any_of(parsed.lines.begin(), parsed.lines.end(), [](const auto& row) { return !row.words.empty(); })) {
+    const bool enhanced = std::any_of(parsed.lines.begin(), parsed.lines.end(),
+        [](const auto& row) { return !row.words.empty(); });
+    const bool ranged = std::any_of(parsed.lines.begin(), parsed.lines.end(),
+        [](const auto& row) { return row.end_time.has_value(); });
+    if (enhanced || ranged) {
         const bool rollover = lyrics::HasCentisecondRollover(utf8);
         struct Edit { LONG first, last; std::wstring text; };
         std::vector<Edit> edits;
@@ -3310,8 +3339,21 @@ void PlayerWindow::ShiftLyricEditorTimestamps(
             const bool word = source[open] == L'<';
             const auto close = source.find(word ? L'>' : L']', open + 1);
             if (close == source.npos) { at = open + 1; continue; }
-            if (const auto time = lyrics::ParseLrcTimestamp(core::WideToUtf8(
-                    std::wstring_view(source).substr(open + 1, close - open - 1)), rollover))
+            const auto tag = std::wstring_view(source).substr(open + 1, close - open - 1);
+            const auto row_begin = source.find_last_of(L"\r\n", open);
+            const bool range_row = lyrics::HasLrcTimeRange(core::WideToUtf8(
+                std::wstring_view(source).substr(row_begin == source.npos ? 0 : row_begin + 1)));
+            if (const auto range = word ? std::nullopt : lyrics::ParseLrcTimeRange(core::WideToUtf8(tag))) {
+                edits.push_back({static_cast<LONG>(open), static_cast<LONG>(close + 1),
+                    core::Utf8ToWide(lyrics::FormatLrcTimeRange({range->start + delta, range->end + delta}))});
+            } else if (!enhanced && !range_row && !word) {
+                // Merely sharing a document with ranges must not change the
+                // original ordinary-line editor's centisecond formatting.
+                if (const auto time = ParseEditorTimestampLiteral(
+                        std::wstring_view(source).substr(open, close + 1 - open)))
+                    edits.push_back({static_cast<LONG>(open), static_cast<LONG>(close + 1),
+                        FormatEditorTimestamp(*time + delta)});
+            } else if (const auto time = lyrics::ParseLrcTimestamp(core::WideToUtf8(tag), rollover && !range_row))
                 edits.push_back({static_cast<LONG>(open), static_cast<LONG>(close + 1),
                     core::Utf8ToWide(lyrics::FormatLrcTimestamp(*time + delta, word))});
             at = close + 1;
@@ -3401,7 +3443,8 @@ void PlayerWindow::ReflowLyricEditor(bool expand) {
             return left.time < right.time;
         });
 
-    if (std::any_of(parsed.lines.begin(), parsed.lines.end(), [](const auto& row) { return !row.words.empty(); })) {
+    if (std::any_of(parsed.lines.begin(), parsed.lines.end(),
+            [](const auto& row) { return !row.words.empty() || row.end_time.has_value(); })) {
         // Absolute word times cannot be shared by merging repeated text.
         // Serialize both clocks together, including the offset and end marker.
         auto result = SerializeLyricDocument(parsed, !expand);

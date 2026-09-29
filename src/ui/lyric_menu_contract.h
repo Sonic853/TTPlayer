@@ -86,10 +86,18 @@ inline std::wstring SerializeLyricDocument(const lyrics::Lyrics& document, bool 
     std::vector<std::pair<std::wstring, std::wstring>> rows;
     for (const auto& line : document.lines) {
         // 0043DEC8 omits bracket-only display rows when serializing LRC.
-        if (line.words.empty() && line.text.size() >= 2 && line.text.front() == '[' && line.text.back() == ']') continue;
+        if (!line.end_time && line.words.empty() && line.text.size() >= 2 && line.text.front() == '[' && line.text.back() == ']') continue;
         const auto ms = (line.time + document.offset).count();
         wchar_t stamp[80]{};
         swprintf_s(stamp, L"[%02lld:%02lld.%02lld]", ms / 60000, (ms % 60000) / 1000, (ms % 1000) / 10);
+        if (line.end_time) {
+            // Keep the explicit interval and millisecond precision. Equal text
+            // does not imply equal duration, so do not compact range rows.
+            rows.emplace_back(core::Utf8ToWide(lyrics::FormatLrcTimeRange(
+                {line.time + document.offset, *line.end_time + document.offset})),
+                core::Utf8ToWide(lyrics::TimedLyricText(line, document.offset)));
+            continue;
+        }
         if (!line.words.empty()) {
             rows.emplace_back(core::Utf8ToWide(lyrics::FormatLrcTimestamp(line.time + document.offset)),
                 core::Utf8ToWide(lyrics::TimedLyricText(line, document.offset)));

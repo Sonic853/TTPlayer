@@ -34,6 +34,38 @@ std::optional<std::chrono::milliseconds> ParseLrcTimestamp(std::string_view valu
     return std::chrono::minutes(minutes) + std::chrono::seconds(seconds) + std::chrono::milliseconds(fraction);
 }
 
+std::optional<LyricTimeRange> ParseLrcTimeRange(std::string_view value) {
+    const auto comma = value.find(',');
+    if (comma == value.npos || value.find(',', comma + 1) != value.npos) return std::nullopt;
+    const auto endpoint = [](std::string_view tag) -> std::optional<std::chrono::milliseconds> {
+        const auto colon = tag.find(':');
+        if (colon == tag.npos) return std::nullopt;
+        const auto fraction = tag.find_first_of(":.", colon + 1);
+        if (fraction == tag.npos || fraction != colon + 3) return std::nullopt;
+        if (tag[fraction] == '.') return ParseLrcTimestamp(tag);
+        if (tag.size() - fraction - 1 != 3) return std::nullopt;
+        std::string normalized(tag);
+        normalized[fraction] = '.';
+        return ParseLrcTimestamp(normalized);
+    };
+    const auto start = endpoint(value.substr(0, comma));
+    const auto end = endpoint(value.substr(comma + 1));
+    if (!start || !end || *end < *start) return std::nullopt;
+    return LyricTimeRange{*start, *end};
+}
+
+bool HasLrcTimeRange(std::string_view line) {
+    line = line.substr(0, line.find_first_of("\r\n"));
+    size_t cursor{};
+    while (cursor < line.size() && line[cursor] == '[') {
+        const auto close = line.find(']', cursor + 1);
+        if (close == line.npos) break;
+        if (ParseLrcTimeRange(line.substr(cursor + 1, close - cursor - 1))) return true;
+        cursor = close + 1;
+    }
+    return false;
+}
+
 bool HasCentisecondRollover(std::string_view content) {
     // Some centisecond exporters emit .100 instead of carrying into the next
     // second. Only opt in when an inline .100 moves BACKWARDS, two-digit tags
@@ -42,6 +74,16 @@ bool HasCentisecondRollover(std::string_view content) {
     std::optional<std::chrono::milliseconds> previous;
     size_t cursor = 0;
     while (cursor < content.size()) {
+        // Range lines use literal milliseconds, including their inline words.
+        // Do not let them enable/disable a legacy exporter's .100 workaround.
+        if ((cursor == 0 || content[cursor - 1] == '\n' || content[cursor - 1] == '\r') &&
+            HasLrcTimeRange(content.substr(cursor))) {
+            const auto newline = content.find_first_of("\r\n", cursor);
+            if (newline == content.npos) break;
+            cursor = newline + 1;
+            previous.reset();
+            continue;
+        }
         const auto open = content.find_first_of("[<\r\n", cursor);
         if (open == content.npos) break;
         cursor = open + 1;
@@ -71,11 +113,14 @@ Lyrics ParseLrc(std::string_view content) {
     Lyrics result; std::istringstream input{std::string(content)}; std::string line;
     while (std::getline(input, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        size_t cursor = 0; std::vector<std::chrono::milliseconds> times;
+        const bool line_rollover = rollover && !HasLrcTimeRange(line);
+        struct Stamp { std::chrono::milliseconds time; std::optional<std::chrono::milliseconds> end; };
+        size_t cursor = 0; std::vector<Stamp> times;
         while (cursor < line.size() && line[cursor] == '[') {
             const auto end = line.find(']', cursor + 1); if (end == line.npos) break;
             const std::string_view tag(line.data() + cursor + 1, end - cursor - 1);
-            if (const auto time = ParseLrcTimestamp(tag, rollover)) times.push_back(*time);
+            if (const auto range = ParseLrcTimeRange(tag)) times.push_back({range->start, range->end});
+            else if (const auto time = ParseLrcTimestamp(tag, line_rollover)) times.push_back({*time, {}});
             else if (tag.starts_with("ti:")) result.title = std::string(tag.substr(3));
             else if (tag.starts_with("ar:")) result.artist = std::string(tag.substr(3));
             else if (tag.starts_with("al:")) result.album = std::string(tag.substr(3));
@@ -84,7 +129,8 @@ Lyrics ParseLrc(std::string_view content) {
             cursor = end + 1;
         }
         if (times.empty()) continue;
-        LyricLine parsed{*std::min_element(times.begin(), times.end()), {}};
+        LyricLine parsed{std::min_element(times.begin(), times.end(),
+            [](const auto& a, const auto& b) { return a.time < b.time; })->time, {}};
         while (cursor < line.size()) {
             if (line[cursor] == '<') {
                 const auto close = line.find('>', cursor + 1);
@@ -94,7 +140,7 @@ Lyrics ParseLrc(std::string_view content) {
                 }
                 if (close != line.npos) {
                     if (const auto time = ParseLrcTimestamp(
-                            std::string_view(line).substr(cursor + 1, close - cursor - 1), rollover)) {
+                            std::string_view(line).substr(cursor + 1, close - cursor - 1), line_rollover)) {
                         // Keep text order and prevent malformed timing from
                         // making the highlight retreat within a line.
                         const auto lower = parsed.words.empty() ? parsed.time : parsed.words.back().time;
@@ -106,9 +152,12 @@ Lyrics ParseLrc(std::string_view content) {
             }
             parsed.text += line[cursor++];
         }
-        for (const auto time : times) {
+        for (const auto& stamp : times) {
             auto repeated = parsed;
-            repeated.Shift(time - parsed.time);
+            repeated.Shift(stamp.time - parsed.time);
+            repeated.end_time = stamp.end;
+            if (stamp.end)
+                for (auto& word : repeated.words) word.time = std::min(word.time, *stamp.end);
             result.lines.push_back(std::move(repeated));
         }
     }
@@ -163,6 +212,12 @@ std::optional<size_t> Lyrics::LineAt(std::chrono::milliseconds position) const {
     return static_cast<size_t>(std::distance(lines.begin(), it) - 1);
 }
 
+std::chrono::milliseconds Lyrics::LineEnd(size_t index) const {
+    const auto& line = lines.at(index);
+    return line.EndOr(index + 1 < lines.size() ? lines[index + 1].time :
+        line.end_time.value_or(line.time + std::chrono::minutes(1)));
+}
+
 void Lyrics::ShiftLines(std::chrono::milliseconds delta) noexcept {
     // CLyric::AdjustTime (0043D7D0), reached from CLyricCtrl's wheel handler
     // at 00442A97, adds the same signed value to every timestamp.  It does not
@@ -173,6 +228,7 @@ void Lyrics::ShiftLines(std::chrono::milliseconds delta) noexcept {
 
 void LyricLine::Shift(std::chrono::milliseconds delta) noexcept {
     time += delta;
+    if (end_time) *end_time += delta;
     for (auto& word : words) word.time += delta;
 }
 
@@ -185,9 +241,15 @@ void LyricLine::TrimSpaces() {
     text = text.substr(begin, length);
 }
 
+std::chrono::milliseconds LyricLine::EndOr(std::chrono::milliseconds fallback) const noexcept {
+    return end_time ? std::max(time, std::min(*end_time, fallback)) : fallback;
+}
+
 WordProgress LyricLine::Progress(std::chrono::milliseconds position,
                                 std::chrono::milliseconds line_end) const {
     if (position < time) return {};
+    line_end = EndOr(line_end);
+    if (end_time && position >= line_end) return {text.size(), text.size(), 1.0};
     size_t begin = 0, end = text.size();
     auto start = time, finish = line_end;
     for (const auto& word : words) {
@@ -207,6 +269,15 @@ std::string FormatLrcTimestamp(std::chrono::milliseconds time, bool word) {
     std::snprintf(text, sizeof(text), "%c%02lld:%02lld.%03lld%c", word ? '<' : '[',
         ms / 60000, (ms % 60000) / 1000, ms % 1000, word ? '>' : ']');
     return text;
+}
+
+std::string FormatLrcTimeRange(LyricTimeRange range) {
+    auto start = FormatLrcTimestamp(range.start);
+    auto end = FormatLrcTimestamp(range.end);
+    start[start.find('.')] = ':';
+    end[end.find('.')] = ':';
+    start.back() = ',';
+    return start + end.substr(1);
 }
 
 std::string TimedLyricText(const LyricLine& line, std::chrono::milliseconds offset) {

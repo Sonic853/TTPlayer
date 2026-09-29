@@ -1950,9 +1950,7 @@ private:
                         std::chrono::milliseconds position) const {
         if (!lyrics_ || current >= lyrics_->lines.size()) return 0.0;
         const auto start = lyrics_->lines[current].time + lyrics_->offset;
-        const auto end = current + 1 < lyrics_->lines.size()
-            ? lyrics_->lines[current + 1].time + lyrics_->offset
-            : start + std::chrono::minutes(1);
+        const auto end = lyrics_->LineEnd(current) + lyrics_->offset;
         const auto duration = std::max<std::int64_t>(1,
             (end - start).count());
         return std::clamp(
@@ -1964,9 +1962,9 @@ private:
                      const GlyphMask& mask) const {
         if (!lyrics_ || current >= lyrics_->lines.size()) return 0;
         const auto& line = lyrics_->lines[current];
-        if (line.words.empty()) return static_cast<int>(std::lround(mask.width * LineFraction(current, position)));
-        const auto end = current + 1 < lyrics_->lines.size()
-            ? lyrics_->lines[current + 1].time : line.time + std::chrono::minutes(1);
+        if (line.words.empty() && !line.end_time)
+            return static_cast<int>(std::lround(mask.width * LineFraction(current, position)));
+        const auto end = lyrics_->LineEnd(current);
         ScopedDc screen(nullptr);
         if (!screen.dc || !font_) return 0;
         const auto old = SelectObject(screen.dc, font_);

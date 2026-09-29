@@ -3519,7 +3519,11 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             if (pending_natural_play_ &&
                 GetTickCount64() >= pending_natural_play_tick_) {
                 pending_natural_play_ = false;
-                static_cast<void>(PlayCurrent());
+                // The editor may have opened during the inter-track delay.
+                // Preserve the EOF editing guard if a queued transition
+                // predates the editor; it must not discard the new draft.
+                if (!lyric_editor_) static_cast<void>(PlayCurrent());
+                else RefreshPlaybackUi();
                 return 0;
             }
             const auto state = audio_->State();
@@ -6914,7 +6918,10 @@ bool PlayerWindow::PlayCurrent() {
         _wcsicmp(opened->path.c_str(), requested_track.path.c_str()) == 0 &&
         opened->subtrack == requested_track.subtrack &&
         (!indexed_playback || PlaybackPlaylist().PlayingRow() == current_);
-    FinishLyricDocument();
+    // 0045BF4B can restart the retained sound without replacing its lyric
+    // editor. Our completed decoder must reopen, but its document, caret,
+    // undo history and modified flag still belong to the same song.
+    if (!lyric_editor_ || !same_item) FinishLyricDocument();
     // 0047FEA3 sends the play request and then 0047FB0C publishes +0x1c.
     // Publish the per-list marker at request time; the failed-open path below
     // performs the later invalidation.
@@ -7308,6 +7315,15 @@ void PlayerWindow::SelectRelative(bool next) {
 }
 
 void PlayerWindow::AdvanceAfterNaturalEnd() {
+    // 00461F87 handles EOF with 0045C0C6, then schedules 0x7EC / timer 0xB
+    // only when +0x1F58 and the lyric RichEdit HWND (+0x1FE8) are zero.
+    // Find/Replace belongs to that editor. Keep its stopped song in every
+    // playback mode; do not take Stop()/PlayCurrent()'s save-policy path.
+    if (lyric_editor_ || (lyric_find_dialog_ && IsWindow(lyric_find_dialog_))) {
+        pending_natural_play_ = false;
+        RefreshPlaybackUi();
+        return;
+    }
     // 0045BD69 shares a transition policy between numbered lists and the
     // library's materialized tree query. Repeat-one restarts the decoder's
     // actual song; traversal uses the displayed list's playing marker.
