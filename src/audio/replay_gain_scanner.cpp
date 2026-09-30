@@ -130,7 +130,8 @@ void InvokeDestroy(void* object) noexcept {
 
 class Analyzer {
 public:
-    Analyzer(HMODULE module, DWORD sample_rate) noexcept {
+    Analyzer(HMODULE module, DWORD sample_rate) noexcept
+        : minimum_frames_((sample_rate + 19ULL) / 20ULL) {
         if (!module) return;
         const FARPROC supports = GetProcAddress(module, MAKEINTRESOURCEA(100));
         const FARPROC create = GetProcAddress(module, MAKEINTRESOURCEA(101));
@@ -147,20 +148,52 @@ public:
 
     explicit operator bool() const noexcept { return object_ != nullptr; }
     bool Analyze(const double* samples, DWORD channels, DWORD frames) noexcept {
-        return InvokeAnalyze(object_, samples, channels, frames);
+        if (!samples || !channels ||
+            frames > std::numeric_limits<size_t>::max() / channels)
+            return false;
+        double peak = peak_;
+        for (size_t i = 0; i < static_cast<size_t>(frames) * channels; ++i) {
+            if (!std::isfinite(samples[i])) return false;
+            peak = std::max(peak, std::abs(samples[i]));
+        }
+        if (!InvokeAnalyze(object_, samples, channels, frames)) return false;
+        peak_ = peak;
+        frames_ += frames;
+        return true;
     }
     bool Finish(double* gain, double* peak) noexcept {
-        return InvokeFinish(object_, gain, peak);
+        // An empty 50 ms histogram also returns zero; it is not a valid
+        // measured 0 dB result. Do not commit such incomplete measurements.
+        if (frames_ < minimum_frames_ || !InvokeFinish(object_, gain, peak))
+            return false;
+        // 60004450 -> 60003B80 only measures the left analysis buffer.
+        // Keep its loudness calculation, but measure source sample peak
+        // across every input channel, before the DLL's channel downmix.
+        *peak = peak_;
+        return true;
     }
 
 private:
     void* object_{};
+    std::uint64_t minimum_frames_{};
+    std::uint64_t frames_{};
+    double peak_{};
 };
 
 bool ExistingGain(const plugins::LegacyReaderSession& reader) {
     const auto gain = reader.MetadataValue("replaygain_track_gain");
     const auto peak = reader.MetadataValue("replaygain_track_peak");
     return gain && peak && !gain->empty() && !peak->empty();
+}
+
+bool ExistingGain(const AudioMetadata& metadata) {
+    bool gain{}, peak{};
+    for (const auto& [key, value] : metadata.entries) {
+        if (value.empty()) continue;
+        if (_wcsicmp(key.c_str(), L"replaygain_track_gain") == 0) gain = true;
+        if (_wcsicmp(key.c_str(), L"replaygain_track_peak") == 0) peak = true;
+    }
+    return gain && peak;
 }
 
 bool ConvertSamples(const std::vector<std::byte>& bytes,
@@ -190,7 +223,7 @@ bool ConvertSamples(const std::vector<std::byte>& bytes,
                 std::memcpy(&value,
                     source + frame * format.nBlockAlign + channel * 8, 8);
                 samples[frame * format.nChannels + channel] =
-                    std::isfinite(value) ? std::clamp(value, -1.0, 1.0) : 0.0;
+                    std::isfinite(value) ? value : 0.0;
             }
         }
     } else if (format.wFormatTag == WAVE_FORMAT_IEEE_FLOAT &&
@@ -202,7 +235,7 @@ bool ConvertSamples(const std::vector<std::byte>& bytes,
                     source + frame * format.nBlockAlign + channel * 4, 4);
                 samples[frame * format.nChannels + channel] =
                     std::isfinite(value)
-                        ? std::clamp(static_cast<double>(value), -1.0, 1.0)
+                        ? static_cast<double>(value)
                         : 0.0;
             }
         }
@@ -244,14 +277,15 @@ bool ConvertSamples(const std::vector<std::byte>& bytes,
 std::wstring FormatGain(double gain) {
     std::wostringstream text;
     text.imbue(std::locale::classic());
-    text << std::fixed << std::setprecision(2) << gain << L" dB";
+    // 004A50B5 / 004B1A5C use "%g dB" (six significant digits).
+    text << std::defaultfloat << std::setprecision(6) << gain << L" dB";
     return text.str();
 }
 
 std::wstring FormatPeak(double peak) {
     std::wostringstream text;
     text.imbue(std::locale::classic());
-    text << std::fixed << std::setprecision(6) << peak;
+    text << std::defaultfloat << std::setprecision(6) << peak;
     return text.str();
 }
 
@@ -318,14 +352,15 @@ bool LegacyReplayGainAvailable(HMODULE ttpcomm) noexcept {
 ReplayGainScanResult AnalyzeReplayGainTrack(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
-    std::stop_token stop, ReplayGainProgress progress, int subtrack) {
+    std::stop_token stop, ReplayGainProgress progress, int subtrack,
+    ReplayGainCheckpoint checkpoint) {
     if (!LegacyReplayGainAvailable(ttpcomm))
         return Error(ReplayGainScanStatus::unsupported, E_NOINTERFACE,
                      L"ttpcomm ReplayGain ordinals 100/101 are unavailable");
     if (path.empty())
         return Error(ReplayGainScanStatus::unsupported, E_INVALIDARG,
                      L"empty source path");
-    if (stop.stop_requested())
+    if (stop.stop_requested() || (checkpoint && !checkpoint()))
         return Error(ReplayGainScanStatus::cancelled,
                      HRESULT_FROM_WIN32(ERROR_CANCELLED), L"cancelled");
 
@@ -343,8 +378,8 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
         return Error(ReplayGainScanStatus::unsupported, opened,
                      diagnostic.empty() ? L"no decoder opened the source"
                                         : std::move(diagnostic));
-    if (skip_existing && (segment ? segment->Metadata().replay_gain_db.has_value() &&
-        segment->Metadata().replay_peak.has_value() : ExistingGain(*reader))) {
+    if (skip_existing && (segment ? ExistingGain(segment->Metadata())
+                                  : ExistingGain(*reader))) {
         auto result = Error(ReplayGainScanStatus::skipped, S_FALSE,
                             L"existing ReplayGain tags retained");
         return result;
@@ -365,7 +400,7 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
     std::uint64_t decoded_frames{};
     bool end{};
     do {
-        if (stop.stop_requested())
+        if (stop.stop_requested() || (checkpoint && !checkpoint()))
             return Error(ReplayGainScanStatus::cancelled,
                          HRESULT_FROM_WIN32(ERROR_CANCELLED), L"cancelled");
         const HRESULT read = segment ? (segment->Read(16384, bytes, end) ? S_OK : E_FAIL)
@@ -416,6 +451,10 @@ ReplayGainScanResult CommitReplayGainTrack(
     std::stop_token stop, int subtrack) {
     if (analysis.status != ReplayGainScanStatus::completed)
         return analysis;
+    if (!std::isfinite(analysis.gain_db) || !std::isfinite(analysis.peak) ||
+        analysis.peak < 0)
+        return Error(ReplayGainScanStatus::write_error, E_INVALIDARG,
+                     L"invalid ReplayGain measurement");
     if (stop.stop_requested()) {
         auto cancelled = analysis;
         cancelled.status = ReplayGainScanStatus::cancelled;
@@ -509,10 +548,15 @@ ReplayGainScanResult CommitReplayGainTrack(
 ReplayGainScanResult ScanReplayGainTrack(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
-    std::stop_token stop, ReplayGainProgress progress, int subtrack) {
+    std::stop_token stop, ReplayGainProgress progress, int subtrack,
+    ReplayGainCheckpoint checkpoint) {
     auto analysis = AnalyzeReplayGainTrack(
-        library, ttpcomm, path, skip_existing, stop, std::move(progress), subtrack);
+        library, ttpcomm, path, skip_existing, stop, std::move(progress), subtrack,
+        checkpoint);
     if (analysis.status != ReplayGainScanStatus::completed) return analysis;
+    if (stop.stop_requested() || (checkpoint && !checkpoint()))
+        return Error(ReplayGainScanStatus::cancelled,
+                     HRESULT_FROM_WIN32(ERROR_CANCELLED), L"cancelled");
     return CommitReplayGainTrack(
         library, path, analysis,
         ReplayGainCommitPolicy::manual_scan_clear_read_only, stop, subtrack);
@@ -526,13 +570,15 @@ struct PlaybackReplayGainAnalyzer::Impl {
 
     Impl(HMODULE retained_module, DWORD sample_rate, WORD channel_count)
         : module{retained_module}, analyzer(module.value, sample_rate),
-          channels(channel_count) {}
+          channels(channel_count), rate(sample_rate) {}
 
     // Reverse member destruction destroys Analyzer's private vtable object
     // before releasing the DLL which contains that vtable.
     ModuleReference module;
     Analyzer analyzer;
     WORD channels{};
+    DWORD rate{};
+    std::vector<double> pcm;
     std::uint64_t frames{};
 };
 
@@ -573,6 +619,22 @@ bool PlaybackReplayGainAnalyzer::Analyze(
     }
     impl_->frames += frames;
     return true;
+}
+
+bool PlaybackReplayGainAnalyzer::AnalyzePcm(
+    const std::vector<std::byte>& bytes, const WAVEFORMATEX& format) noexcept {
+    if (!impl_ || format.nChannels != impl_->channels ||
+        format.nSamplesPerSec != impl_->rate)
+        return false;
+    try {
+        DWORD frames{};
+        if (!ConvertSamples(bytes, format, impl_->pcm, &frames)) return false;
+        if (frames == 0) return true;
+        return Analyze(impl_->pcm.data(), impl_->pcm.size());
+    } catch (...) {
+        Cancel();
+        return false;
+    }
 }
 
 std::optional<ReplayGainScanResult>

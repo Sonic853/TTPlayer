@@ -78,4 +78,7 @@ bool ShowPlaylistReplayGainScanner(
     const plugins::PluginManager* library,
     std::vector<playlist::Track> tracks, bool skip_existing);
 
+bool TranslatePlaylistReplayGainScannerMessage(MSG& message);
+void ClosePlaylistReplayGainScanner(HWND owner);
+
 } // namespace ttplayer::ui

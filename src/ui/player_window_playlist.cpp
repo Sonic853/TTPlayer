@@ -3238,6 +3238,7 @@ bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
     if (lyric_search_dialog_ && IsWindow(lyric_search_dialog_) && IsWindowEnabled(lyric_search_dialog_) &&
         IsDialogMessageW(lyric_search_dialog_, queued)) return true;
     if (TranslatePlaylistConverterMessage(*queued)) return true;
+    if (TranslatePlaylistReplayGainScannerMessage(*queued)) return true;
     // PSH_MODELESS requires the application's message filter to run the
     // property-sheet dialog manager.  Omitting this was also enough to make
     // keyboard navigation appear hung while the audio/UI thread remained up.

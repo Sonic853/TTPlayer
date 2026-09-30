@@ -102,12 +102,31 @@ struct ScanDialogState {
     std::vector<RowState> rows;
     std::vector<std::wstring> diagnostics;
     std::mutex mutex;
+    std::condition_variable condition;
+    bool paused{};
+    bool closing{}; // UI thread only; retain the singleton until the worker exits.
+    std::wstring pause_text, resume_text;
+    std::thread worker;
     std::atomic_size_t active{};
     std::atomic_uint progress_percent{};
     std::atomic_bool finished{};
     std::atomic_bool had_error{};
     std::atomic<HWND> dialog{};
     std::stop_source cancellation;
+
+    bool Checkpoint() {
+        std::unique_lock lock(mutex);
+        condition.wait(lock, [this] {
+            return !paused || cancellation.stop_requested();
+        });
+        return !cancellation.stop_requested();
+    }
+
+    void Cancel() {
+        cancellation.request_stop();
+        { const std::scoped_lock lock(mutex); paused = false; }
+        condition.notify_all();
+    }
 
     ~ScanDialogState() {
         if (ttpcomm) FreeLibrary(ttpcomm);
@@ -117,6 +136,7 @@ struct ScanDialogState {
 using ScanDialogLifetime = std::shared_ptr<ScanDialogState>;
 
 HWND g_scan_dialog{};
+std::weak_ptr<ScanDialogState> g_scan_lifetime;
 
 std::wstring LoadText(HMODULE module, UINT identifier) {
     return i18n::ResourceText(module, identifier);
@@ -266,39 +286,53 @@ void RefreshDialog(HWND dialog, ScanDialogState& state) {
 void RunScan(ScanDialogLifetime lifetime, std::stop_token stop) {
     auto* state = lifetime.get();
     const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    for (size_t index{}; index < state->tracks.size(); ++index) {
-        if (stop.stop_requested()) break;
-        state->active.store(index);
-        state->progress_percent.store(0);
-        {
-            const std::scoped_lock lock(state->mutex);
-            state->rows[index] = RowState::scanning;
-        }
-        PostScanRefresh(*state);
-
-        audio::ReplayGainScanResult result;
-        result = audio::ScanReplayGainTrack(
-            *state->library, state->ttpcomm, state->tracks[index].path,
-            state->skip_existing, stop,
-            [state](std::uint64_t current, std::uint64_t total) {
-                if (total) state->progress_percent.store(static_cast<unsigned>(
-                    std::min<std::uint64_t>(current * 100U / total, 100U)));
-            }, state->tracks[index].subtrack);
-        {
-            const std::scoped_lock lock(state->mutex);
-            state->diagnostics[index] = std::move(result.diagnostic);
-            if (result.status == audio::ReplayGainScanStatus::completed)
-                state->rows[index] = RowState::completed;
-            else if (result.status == audio::ReplayGainScanStatus::skipped ||
-                     result.status == audio::ReplayGainScanStatus::cancelled)
-                state->rows[index] = RowState::skipped;
-            else {
-                state->rows[index] = RowState::error;
-                state->had_error.store(true);
+    try {
+        for (size_t index{}; index < state->tracks.size(); ++index) {
+            if (!state->Checkpoint()) break;
+            state->active.store(index);
+            state->progress_percent.store(0);
+            {
+                const std::scoped_lock lock(state->mutex);
+                state->rows[index] = RowState::scanning;
             }
+            PostScanRefresh(*state);
+
+            audio::ReplayGainScanResult result;
+            result = audio::ScanReplayGainTrack(
+                *state->library, state->ttpcomm, state->tracks[index].path,
+                state->skip_existing, stop,
+                [state](std::uint64_t current, std::uint64_t total) {
+                    if (total) {
+                        const auto percent = static_cast<unsigned>(
+                            std::min<std::uint64_t>(current * 100U / total, 100U));
+                        if (state->progress_percent.exchange(percent) != percent)
+                            PostScanRefresh(*state);
+                    }
+                }, state->tracks[index].subtrack,
+                [state] { return state->Checkpoint(); });
+            {
+                const std::scoped_lock lock(state->mutex);
+                state->diagnostics[index] = std::move(result.diagnostic);
+                if (result.status == audio::ReplayGainScanStatus::completed)
+                    state->rows[index] = RowState::completed;
+                else if (result.status == audio::ReplayGainScanStatus::skipped ||
+                         result.status == audio::ReplayGainScanStatus::cancelled)
+                    state->rows[index] = RowState::skipped;
+                else {
+                    state->rows[index] = RowState::error;
+                    state->had_error.store(true);
+                }
+            }
+            state->progress_percent.store(100);
+            PostScanRefresh(*state);
         }
-        state->progress_percent.store(100);
-        PostScanRefresh(*state);
+    } catch (...) {
+        // A reader/allocation failure must not escape a std::thread and abort
+        // the process, or leave cancellation waiting for a completion message.
+        const std::scoped_lock lock(state->mutex);
+        const auto index = state->active.load();
+        if (index < state->rows.size()) state->rows[index] = RowState::error;
+        state->had_error.store(true);
     }
     if (SUCCEEDED(initialized)) CoUninitialize();
     state->finished.store(true);
@@ -321,14 +355,18 @@ INT_PTR CALLBACK ScanDialogProc(HWND dialog, UINT message,
         state->dialog.store(dialog, std::memory_order_release);
         state->rows.assign(state->tracks.size(), RowState::waiting);
         state->diagnostics.resize(state->tracks.size());
+        const auto captions = Split(WindowCaption(GetDlgItem(dialog, kScanButton)));
+        state->pause_text = captions.empty() ? L"" : captions[0];
+        state->resume_text = captions.size() > 1 ? captions[1] : state->pause_text;
+        SetDlgItemTextW(dialog, kScanButton, state->pause_text.c_str());
         PopulateList(dialog, *state);
         ShowWindow(dialog, SW_SHOWNORMAL);
         try {
             auto lifetime = *holder;
             const auto stop = state->cancellation.get_token();
-            std::thread([lifetime = std::move(lifetime), stop] {
+            state->worker = std::thread([lifetime = std::move(lifetime), stop] {
                 RunScan(lifetime, stop);
-            }).detach();
+            });
         } catch (...) {
             {
                 const std::scoped_lock lock(state->mutex);
@@ -346,28 +384,64 @@ INT_PTR CALLBACK ScanDialogProc(HWND dialog, UINT message,
             return TRUE;
         RefreshDialog(dialog, *state);
         if (lparam == 1 && state->finished.load() &&
-            !state->had_error.load()) {
+            (state->closing || !state->had_error.load())) {
             // FUN_004A58F3 closes the modeless dialog automatically after the
             // last successful row, but retains it when any row is in error.
             PostMessageW(dialog, WM_CLOSE, 0, 0);
         }
         return TRUE;
     case WM_COMMAND:
-        if (LOWORD(wparam) == IDCANCEL || LOWORD(wparam) == kScanButton) {
-            DestroyWindow(dialog);
+        if (LOWORD(wparam) == IDCANCEL) {
+            SendMessageW(dialog, WM_CLOSE, 0, 0);
+            return TRUE;
+        }
+        if (LOWORD(wparam) == kScanButton && state && !state->closing) {
+            if (state->finished.load()) {
+                SendMessageW(dialog, WM_CLOSE, 0, 0);
+            } else {
+                bool paused;
+                {
+                    const std::scoped_lock lock(state->mutex);
+                    state->paused = !state->paused;
+                    paused = state->paused;
+                }
+                state->condition.notify_all();
+                SetDlgItemTextW(dialog, kScanButton,
+                    (paused ? state->resume_text : state->pause_text).c_str());
+            }
             return TRUE;
         }
         break;
     case WM_CLOSE:
-        if (state) state->cancellation.request_stop();
+        if (state) {
+            state->closing = true;
+            state->Cancel();
+            if (!state->finished.load()) {
+                EnableWindow(GetDlgItem(dialog, kScanButton), FALSE);
+                EnableWindow(GetDlgItem(dialog, IDCANCEL), FALSE);
+                // Keep pumping messages until the reader and writer have
+                // closed. Reopening brings this same cancelling dialog up.
+                return TRUE;
+            }
+        }
         DestroyWindow(dialog);
         return TRUE;
     case WM_DESTROY:
         if (state) {
-            state->cancellation.request_stop();
+            state->Cancel();
             HWND expected = dialog;
             state->dialog.compare_exchange_strong(
                 expected, nullptr, std::memory_order_acq_rel);
+            if (state->worker.joinable()) {
+                if (state->finished.load()) state->worker.join();
+                else {
+                    // Forced owner destruction must not hang on a broken
+                    // input plugin. The worker retains its DLLs/library, has
+                    // no UI resource dependency and exits at its checkpoint.
+                    // g_scan_lifetime prevents a second scan in the interim.
+                    state->worker.detach();
+                }
+            }
         }
         if (g_scan_dialog == dialog) g_scan_dialog = nullptr;
         return TRUE;
@@ -1818,6 +1892,8 @@ bool ShowPlaylistReplayGainScanner(
         BringWindowToTop(g_scan_dialog);
         return true;
     }
+    if (auto pending = g_scan_lifetime.lock(); pending && !pending->finished.load())
+        return false;
     if (!owner || !resources || tracks.empty() ||
         !ReplayGainScanCommandAvailable(library, ttpcomm))
         return false;
@@ -1838,6 +1914,7 @@ bool ShowPlaylistReplayGainScanner(
         state->tracks = std::move(tracks);
         state->skip_existing = skip_existing;
         holder = new ScanDialogLifetime(state);
+        g_scan_lifetime = state;
     } catch (...) {
         if (retained_ttpcomm) FreeLibrary(retained_ttpcomm);
         return false;
@@ -1850,6 +1927,18 @@ bool ShowPlaylistReplayGainScanner(
         return false;
     }
     return true;
+}
+
+bool TranslatePlaylistReplayGainScannerMessage(MSG& message) {
+    return g_scan_dialog && IsWindow(g_scan_dialog) &&
+        (message.hwnd == g_scan_dialog || IsChild(g_scan_dialog, message.hwnd)) &&
+        IsDialogMessageW(g_scan_dialog, &message);
+}
+
+void ClosePlaylistReplayGainScanner(HWND owner) {
+    if (g_scan_dialog && IsWindow(g_scan_dialog) &&
+        GetWindow(g_scan_dialog, GW_OWNER) == owner)
+        SendMessageW(g_scan_dialog, WM_CLOSE, 0, 0);
 }
 
 } // namespace ttplayer::ui

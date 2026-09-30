@@ -7,7 +7,9 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <vector>
 #include <windows.h>
+#include <mmreg.h>
 
 namespace ttplayer::plugins { class PluginManager; }
 
@@ -44,6 +46,10 @@ using ReplayGainProgress =
     std::function<void(std::uint64_t decoded_frames,
                        std::uint64_t expected_frames)>;
 
+// Called before opening/reading the source and before committing metadata.
+// A UI may wait here while paused; false requests cooperative cancellation.
+using ReplayGainCheckpoint = std::function<bool()>;
+
 // Ordinals 100/101 are the exact sample-rate predicate and ReplayGain object
 // used by CScanGainDlg::CWorkThread::Run (004A5251).  This query only verifies
 // that the two entry points exist; individual rates are checked when a reader
@@ -57,7 +63,8 @@ using ReplayGainProgress =
 [[nodiscard]] ReplayGainScanResult AnalyzeReplayGainTrack(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
-    std::stop_token stop = {}, ReplayGainProgress progress = {}, int subtrack = 0);
+    std::stop_token stop = {}, ReplayGainProgress progress = {}, int subtrack = 0,
+    ReplayGainCheckpoint checkpoint = {});
 
 [[nodiscard]] ReplayGainScanResult CommitReplayGainTrack(
     const plugins::PluginManager& library,
@@ -79,8 +86,13 @@ public:
 
     [[nodiscard]] static std::unique_ptr<PlaybackReplayGainAnalyzer> Create(
         HMODULE ttpcomm, DWORD sample_rate, WORD channels) noexcept;
+    // Interleaved, finite source samples, with integer PCM full scale at 1.0.
     [[nodiscard]] bool Analyze(
         const double* samples, size_t sample_count) noexcept;
+    // Shares the manual scanner's full-scale conversion. Feed source PCM
+    // before gain/EQ and before private processor-domain scaling.
+    [[nodiscard]] bool AnalyzePcm(
+        const std::vector<std::byte>& bytes, const WAVEFORMATEX& format) noexcept;
     [[nodiscard]] std::optional<ReplayGainScanResult> Finish() noexcept;
     void Cancel() noexcept;
 
@@ -106,6 +118,7 @@ void QueueReplayGainCommit(
 [[nodiscard]] ReplayGainScanResult ScanReplayGainTrack(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
-    std::stop_token stop = {}, ReplayGainProgress progress = {}, int subtrack = 0);
+    std::stop_token stop = {}, ReplayGainProgress progress = {}, int subtrack = 0,
+    ReplayGainCheckpoint checkpoint = {});
 
 } // namespace ttplayer::audio

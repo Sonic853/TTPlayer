@@ -3666,6 +3666,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         CloseOnlineLyricSearch();
         CloseLyricServiceEditor();
         ClosePlaylistConverter(window_);
+        ClosePlaylistReplayGainScanner(window_);
         taskbar_playback_.Reset();
         taskbar_preview_.Reset();
         system_media_controls_.Reset();

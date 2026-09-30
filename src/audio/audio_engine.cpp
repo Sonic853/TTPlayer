@@ -1703,14 +1703,14 @@ public:
         // ReplayGain multiplier and the remaining processor chain.  Analyzer
         // failure disables only automatic scanning; it must never interrupt
         // audible playback.
-        if (replay_gain_analyzer_ && !replay_gain_analyzer_->Analyze(
-                samples.data(), samples.size())) {
+        if (replay_gain_analyzer_ && !replay_gain_analyzer_->AnalyzePcm(bytes, format_)) {
             replay_gain_analyzer_.reset();
         }
 
-        // FUN_004B1950 precedes FUN_004B1B81. The original double stream is
-        // normalized to [-0.5,+0.5], hence these thresholds are not ordinary
-        // full-scale ±1 clipping limits.
+        // This processing chain uses a half-scale domain paired with Encode.
+        // Original 004B0560 and the ReplayGain analyzer use full-scale PCM
+        // (16-bit /32768). AnalyzePcm above deliberately bypasses this local
+        // scaling; 004B1950's +/-0.5 values are nonlinear branch thresholds.
         if (replay_gain_.Scale() != 1.0) {
             for (auto& sample : samples) {
                 double value = sample * replay_gain_.Scale();
