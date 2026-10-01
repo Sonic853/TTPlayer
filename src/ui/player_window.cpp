@@ -1782,9 +1782,10 @@ void PlayerWindow::UnregisterConfiguredHotKeys() {
     registered_hotkey_ids_.clear();
 }
 
-void PlayerWindow::RegisterConfiguredHotKeys() {
+void PlayerWindow::RegisterConfiguredHotKeys(bool report_failures) {
     UnregisterConfiguredHotKeys();
-    if (!window_ || !settings_.hotkey.global) return;
+    if (!window_ || !IsWindow(window_) || !settings_.hotkey.global) return;
+    std::wstring failures;
     for (size_t index = 0; index < settings_.hotkey.key_map.size(); ++index) {
         const auto& binding = settings_.hotkey.key_map[index];
         if (binding.command < 0 || binding.global.virtual_key == 0) continue;
@@ -1794,13 +1795,28 @@ void PlayerWindow::RegisterConfiguredHotKeys() {
             modifiers |= MOD_CONTROL;
         if ((binding.global.modifiers & HOTKEYF_SHIFT) != 0)
             modifiers |= MOD_SHIFT;
-        // CPlayerApp registers the zero-based shortcut row as the hot-key ID
-        // and deliberately ignores RegisterHotKey's result.  Keep every
-        // attempted ID so page activation can symmetrically unregister it.
+        // Preserve the original zero-based row ID, but track only successful
+        // registrations and explain failed activation when editing settings.
         const int identifier = static_cast<int>(index);
-        RegisterHotKey(window_, identifier, modifiers,
-                       static_cast<UINT>(binding.global.virtual_key));
-        registered_hotkey_ids_.push_back(identifier);
+        if (RegisterHotKey(window_, identifier, modifiers,
+                           static_cast<UINT>(binding.global.virtual_key))) {
+            registered_hotkey_ids_.push_back(identifier);
+        } else if (report_failures) {
+            const DWORD error = GetLastError();
+            std::array<wchar_t, 512> description{};
+            FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                nullptr, error, 0, description.data(), static_cast<DWORD>(description.size()), nullptr);
+            std::wstring reason(description.data());
+            while (!reason.empty() && (reason.back() == L'\r' || reason.back() == L'\n')) reason.pop_back();
+            if (reason.empty()) reason = std::to_wstring(error);
+            failures += RuntimeHotKeyText(binding.global) + L" — " + reason + L"\n";
+        }
+    }
+    if (!failures.empty()) {
+        auto message = i18n::Text(L"以下全局快捷键未能启用。请更换组合键，或释放其它程序对这些组合键的占用：");
+        message += L"\n\n" + failures;
+        MessageBoxW(options_window_ && IsWindow(options_window_) ? options_window_ : window_,
+            message.c_str(), i18n::Literal(L"全局快捷键"), MB_OK | MB_ICONWARNING);
     }
 }
 

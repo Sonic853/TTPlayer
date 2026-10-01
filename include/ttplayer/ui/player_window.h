@@ -330,7 +330,7 @@ private:
     void ShowPlaybackOpenTip();
     void ClosePlaybackOpenTip();
     void PaintPlaybackOpenTip(HDC dc) const;
-    void RegisterConfiguredHotKeys();
+    void RegisterConfiguredHotKeys(bool report_failures = false);
     void UnregisterConfiguredHotKeys();
     void PositionOptionsPage(HWND page);
     void SelectOptionsPage(int page, UINT focus_control = 0);

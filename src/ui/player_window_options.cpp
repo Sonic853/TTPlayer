@@ -9,6 +9,7 @@
 #include "player_window_internal.h"
 #include "options_buttons.h"
 #include "options_general_tabs.h"
+#include "hotkey_control.h"
 #include "project_links.h"
 #include "output_devices.h"
 #include "modern_file_dialog.h"
@@ -4694,6 +4695,8 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         break;
     }
     case 252: {
+        ExtendBackspaceHotKeyControl(GetDlgItem(dialog, 2054));
+        ExtendBackspaceHotKeyControl(GetDlgItem(dialog, 2055));
         const HWND list = GetDlgItem(dialog, 1064);
         if (list) {
             ListView_SetExtendedListViewStyle(list,
@@ -7940,7 +7943,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         if (header->code == PSN_KILLACTIVE || header->code == PSN_APPLY ||
             header->code == PSN_RESET) {
             if (header->code == PSN_KILLACTIVE && template_id == 252)
-                RegisterConfiguredHotKeys();
+                RegisterConfiguredHotKeys(true);
             if (header->code == PSN_APPLY) {
                 if (template_id == 262) CommitOptionsAssociations(dialog, true);
                 CommitOptionsPage(dialog, template_id);
