@@ -327,17 +327,34 @@ struct TagData {
     Bytes cover;
 };
 
+// TPE2 was named Orchestra by the original player.  Expose one editable
+// value while retaining AlbumArtist for SMTC and modern metadata consumers.
+std::wstring_view CanonicalTagName(std::wstring_view name) {
+    if (WideAsciiEqual(name, L"Orchestra") || WideAsciiEqual(name, L"Album Artist"))
+        return L"AlbumArtist";
+    if (WideAsciiEqual(name, L"Lyric")) return L"Lyrics";
+    if (WideAsciiEqual(name, L"Author")) return L"Artist";
+    if (WideAsciiEqual(name, L"Track")) return L"Tracknumber";
+    if (WideAsciiEqual(name, L"Year")) return L"Date";
+    return name;
+}
+
+bool SameTagName(std::wstring_view left, std::wstring_view right) {
+    return WideAsciiEqual(CanonicalTagName(left), CanonicalTagName(right));
+}
+
 std::wstring GetField(const TagData& data, std::wstring_view name) {
     const auto found = std::find_if(data.fields.begin(), data.fields.end(),
-        [name](const auto& field) { return WideAsciiEqual(field.name, name); });
+        [name](const auto& field) { return SameTagName(field.name, name); });
     return found == data.fields.end() ? std::wstring{} : found->value;
 }
 
 void SetField(TagData& data, std::wstring name, std::wstring value,
               bool replace = true) {
+    name = CanonicalTagName(name);
     const auto found = std::find_if(data.fields.begin(), data.fields.end(),
         [&name](const auto& field) {
-            return WideAsciiEqual(field.name, name);
+            return SameTagName(field.name, name);
         });
     if (found == data.fields.end()) {
         if (!value.empty())
@@ -368,6 +385,16 @@ std::wstring CanonicalField(std::string_view name) {
     if (AsciiEqual(name, "date") || AsciiEqual(name, "year"))
         return L"Date";
     if (AsciiEqual(name, "comment")) return L"Comment";
+    if (AsciiEqual(name, "albumartist") || AsciiEqual(name, "album artist") ||
+        AsciiEqual(name, "orchestra")) return L"AlbumArtist";
+    if (AsciiEqual(name, "lyrics") || AsciiEqual(name, "lyric")) return L"Lyrics";
+    if (AsciiEqual(name, "subtitle")) return L"Subtitle";
+    if (AsciiEqual(name, "copyright")) return L"Copyright";
+    if (AsciiEqual(name, "composer")) return L"Composer";
+    if (AsciiEqual(name, "conductor")) return L"Conductor";
+    if (AsciiEqual(name, "publisher")) return L"Publisher";
+    if (AsciiEqual(name, "encoder")) return L"Encoder";
+    if (AsciiEqual(name, "wwwuser")) return L"WWWUSER";
     return {};
 }
 
@@ -384,8 +411,12 @@ std::wstring ApeDisplayField(std::string_view name) {
 
 std::string FrameSemantic(std::string_view identifier) {
     if (identifier == "TIT2" || identifier == "TT2") return "Title";
+    if (identifier == "TIT3" || identifier == "TT3") return "Subtitle";
+    if (identifier == "TCOP" || identifier == "TCR") return "Copyright";
+    if (identifier == "TCOM" || identifier == "TCM") return "Composer";
     if (identifier == "TPE1" || identifier == "TP1") return "Artist";
     if (identifier == "TPE2" || identifier == "TP2") return "AlbumArtist";
+    if (identifier == "TPE3" || identifier == "TP3") return "Conductor";
     if (identifier == "TALB" || identifier == "TAL") return "Album";
     if (identifier == "TRCK" || identifier == "TRK") return "Tracknumber";
     if (identifier == "TCON" || identifier == "TCO") return "Genre";
@@ -393,6 +424,9 @@ std::string FrameSemantic(std::string_view identifier) {
         identifier == "TYE") return "Date";
     if (identifier == "COMM" || identifier == "COM") return "Comment";
     if (identifier == "USLT" || identifier == "ULT") return "Lyrics";
+    if (identifier == "TPUB" || identifier == "TPB") return "Publisher";
+    if (identifier == "TENC" || identifier == "TEN") return "Encoder";
+    if (identifier == "WXXX" || identifier == "WXX") return "WWWUSER";
     return {};
 }
 
@@ -433,6 +467,15 @@ void DecodeId3Frame(std::string_view identifier,
     if (payload.empty()) return;
     const unsigned char encoding = payload[0];
     const auto semantic = FrameSemantic(identifier);
+    if (semantic == "WWWUSER") {
+        const auto text = payload.subspan(1);
+        const size_t separator = FindEncodedTerminator(text, encoding);
+        if (separator < text.size()) {
+            const auto url = text.subspan(separator + EncodedTerminatorSize(encoding));
+            SetField(data, L"WWWUSER", DecodeLatin1(url), false);
+        }
+        return;
+    }
     if (!semantic.empty() && semantic != "Comment" && semantic != "Lyrics") {
         SetField(data, std::wstring(semantic.begin(), semantic.end()),
                  DecodeText(encoding, payload.subspan(1)), false);
@@ -546,6 +589,7 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
             return tag;
         offset = static_cast<size_t>(skip);
     }
+    TagData user_text;
     const size_t header_size = major == 2 ? 6U : 10U;
     while (offset + header_size <= payload.size()) {
         const size_t identifier_size = major == 2 ? 3U : 4U;
@@ -581,18 +625,22 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
         const bool encoded_frame = major != 2 &&
             ((major == 3 && (payload[offset + 9] & 0xc0U) != 0) ||
              (major == 4 && (payload[offset + 9] & 0x0eU) != 0));
-        if (major == 4 && (payload[offset + 9] & 0x0eU) != 0)
+        if (encoded_frame)
             tag.rewrite_safe = false;
         const auto frame_payload =
             std::span<const unsigned char>(payload).subspan(
                 offset + header_size, frame_size);
         if (!encoded_frame) {
-            DecodeId3Frame(identifier, frame_payload, tag.data);
+            // Native frames take precedence over old TXXX aliases, regardless
+            // of their physical order.  Saving removes both representations.
+            DecodeId3Frame(identifier, frame_payload,
+                identifier == "TXXX" || identifier == "TXX" ? user_text : tag.data);
             frame.metadata_name = Id3UserTextName(identifier, frame_payload);
         }
         tag.frames.push_back(std::move(frame));
         offset = end;
     }
+    MergeMissing(tag.data, user_text);
     return tag;
 }
 
@@ -682,9 +730,8 @@ std::optional<ApeTag> ReadApeAt(File file, std::uint64_t footer_end) {
     return tag;
 }
 
-std::wstring TrimFixed(std::span<const unsigned char> value) {
-    while (!value.empty() && (value.back() == 0 || value.back() == ' '))
-        value = value.first(value.size() - 1);
+std::wstring DecodeLegacyTagText(std::span<const unsigned char> value) {
+    value = value.first(static_cast<size_t>(std::find(value.begin(), value.end(), 0) - value.begin()));
     if (value.empty()) return {};
     // ID3v1 files produced by the Chinese-era player commonly use the active
     // ANSI code page.  Prefer valid UTF-8, otherwise preserve that behavior.
@@ -699,6 +746,12 @@ std::wstring TrimFixed(std::span<const unsigned char> value) {
         reinterpret_cast<const char*>(value.data()),
         static_cast<int>(value.size()), result.data(), count);
     return result;
+}
+
+std::wstring TrimFixed(std::span<const unsigned char> value) {
+    while (!value.empty() && (value.back() == 0 || value.back() == ' '))
+        value = value.first(value.size() - 1);
+    return DecodeLegacyTagText(value);
 }
 
 TagData ReadId3v1(std::span<const unsigned char, 128> tag) {
@@ -720,6 +773,59 @@ TagData ReadId3v1(std::span<const unsigned char, 128> tag) {
     return data;
 }
 
+struct Lyrics3Tag {
+    std::uint64_t physical_start{};
+    TagData data;
+};
+
+std::optional<size_t> ReadDecimal(std::span<const unsigned char> text) {
+    size_t value{};
+    for (const auto digit : text) {
+        if (digit < '0' || digit > '9' ||
+            value > (std::numeric_limits<size_t>::max() - (digit - '0')) / 10)
+            return std::nullopt;
+        value = value * 10 + digit - '0';
+    }
+    return value;
+}
+
+template<class File>
+std::optional<Lyrics3Tag> ReadLyrics3At(File file, std::uint64_t end) {
+    // 004DA9F2: six decimal length bytes followed by LYRICS200.  Check every
+    // boundary before accepting the block as a removable tag rather than audio.
+    if (end < 26) return std::nullopt;
+    std::array<unsigned char, 15> footer{};
+    if (!ReadAt(file, end - footer.size(), footer) ||
+        std::memcmp(footer.data() + 6, "LYRICS200", 9) != 0) return std::nullopt;
+    const auto size = ReadDecimal(std::span(footer).first(6));
+    if (!size || *size < 11 || *size > end - footer.size()) return std::nullopt;
+    Bytes bytes;
+    const auto start = end - footer.size() - *size;
+    if (!ReadRange(file, start, *size, bytes) ||
+        std::memcmp(bytes.data(), "LYRICSBEGIN", 11) != 0) return std::nullopt;
+    Lyrics3Tag tag;
+    tag.physical_start = start;
+    size_t offset = 11;
+    while (offset < bytes.size()) {
+        if (bytes.size() - offset < 8) return std::nullopt;
+        const std::string_view key(reinterpret_cast<const char*>(bytes.data() + offset), 3);
+        const auto length = ReadDecimal(std::span(bytes).subspan(offset + 3, 5));
+        offset += 8;
+        if (!length || *length > bytes.size() - offset) return std::nullopt;
+        const auto value = std::span<const unsigned char>(bytes).subspan(offset, *length);
+        const auto name = key == "ETT" ? L"Title" : key == "EAR" ? L"Artist" :
+            key == "EAL" ? L"Album" : key == "INF" ? L"Comment" :
+            key == "LYR" ? L"Lyrics" : L"";
+        if (*name) {
+            // The original detects UTF-8 for LYR and otherwise uses ACP.
+            // Preserve lyric whitespace; fixed ID3v1 padding rules do not apply.
+            SetField(tag.data, name, DecodeLegacyTagText(value), false);
+        }
+        offset += *length;
+    }
+    return tag;
+}
+
 struct FileLayout {
     std::uint64_t file_size{};
     std::uint64_t body_begin{};
@@ -727,6 +833,7 @@ struct FileLayout {
     Id3Tag id3v2;
     ApeTag ape;
     TagData id3v1;
+    TagData lyrics3;
     bool has_id3v1{};
 };
 
@@ -745,31 +852,34 @@ bool ReadMp3Layout(File file, FileLayout& layout) {
     layout.body_end = layout.file_size;
 
     std::array<unsigned char, 128> id3v1_bytes{};
-    std::uint64_t tail_without_v1 = layout.file_size;
-    if (layout.file_size >= id3v1_bytes.size() &&
-        HasId3v1At(file, layout.file_size - id3v1_bytes.size(), id3v1_bytes)) {
-        layout.has_id3v1 = true;
-        layout.id3v1 = ReadId3v1(id3v1_bytes);
-        tail_without_v1 -= id3v1_bytes.size();
-        layout.body_end = tail_without_v1;
-    }
-    if (const auto ape = ReadApeAt(file, tail_without_v1)) {
-        layout.ape = *ape;
-        layout.body_end = std::min(layout.body_end, ape->physical_start);
-    } else if (tail_without_v1 != layout.file_size) {
-        // no second layout to inspect
-    } else if (const auto trailing_ape = ReadApeAt(file, layout.file_size)) {
-        layout.ape = *trailing_ape;
-        layout.body_end = trailing_ape->physical_start;
-        if (trailing_ape->physical_start >= id3v1_bytes.size() &&
-            HasId3v1At(file,
-                       trailing_ape->physical_start - id3v1_bytes.size(),
-                       id3v1_bytes)) {
+    // Peel each recognized tail in physical order.  Both APE/Lyrics3/TAG and
+    // TAG/APE occur in real files; treating Lyrics3 as audio leaves stale text
+    // behind after the user deletes a field.
+    bool has_lyrics3{};
+    for (unsigned pass = 0; pass < 3; ++pass) {
+        if (!layout.has_id3v1 && layout.body_end >= id3v1_bytes.size() &&
+            HasId3v1At(file, layout.body_end - id3v1_bytes.size(), id3v1_bytes)) {
             layout.has_id3v1 = true;
             layout.id3v1 = ReadId3v1(id3v1_bytes);
-            layout.body_end =
-                trailing_ape->physical_start - id3v1_bytes.size();
+            layout.body_end -= id3v1_bytes.size();
+            continue;
         }
+        if (!layout.ape.present) {
+            if (const auto ape = ReadApeAt(file, layout.body_end)) {
+                layout.ape = *ape;
+                layout.body_end = ape->physical_start;
+                continue;
+            }
+        }
+        if (!has_lyrics3) {
+            if (const auto lyrics = ReadLyrics3At(file, layout.body_end)) {
+                has_lyrics3 = true;
+                layout.lyrics3 = lyrics->data;
+                layout.body_end = lyrics->physical_start;
+                continue;
+            }
+        }
+        break;
     }
     return layout.body_begin <= layout.body_end;
 }
@@ -783,9 +893,10 @@ TagData MergeMp3Tags(const FileLayout& layout,
     for (int shift = 24; shift >= 0; shift -= 8) {
         switch (priority >> static_cast<unsigned>(shift) & 0xffU) {
         case 1: MergeMissing(merged, layout.id3v1); break;
+        case 2: MergeMissing(merged, layout.lyrics3); break;
         case 4: MergeMissing(merged, layout.ape.data); break;
         case 8: MergeMissing(merged, layout.id3v2.data); break;
-        default: break; // Lyrics3 (2) is retained in the body, not rewritten.
+        default: break;
         }
     }
     return merged;
@@ -1142,6 +1253,30 @@ void AppendUserTextFrame(Bytes& frames, unsigned char major,
     frames.insert(frames.end(), payload.begin(), payload.end());
 }
 
+void AppendUserUrlFrame(Bytes& frames, unsigned char major,
+                        std::wstring_view value, unsigned char encoding) {
+    if (value.empty()) return;
+    Bytes payload{encoding};
+    payload.insert(payload.end(), EncodedTerminatorSize(encoding), 0);
+    // The description has the selected encoding; the URL itself does not.
+    const auto url = EncodeText(value, 0);
+    payload.insert(payload.end(), url.begin(), url.end());
+    frames.insert(frames.end(), {'W', 'X', 'X', 'X'});
+    if (major == 4) AppendSynchsafe(frames, static_cast<std::uint32_t>(payload.size()));
+    else AppendBe32(frames, static_cast<std::uint32_t>(payload.size()));
+    frames.insert(frames.end(), {0, 0});
+    frames.insert(frames.end(), payload.begin(), payload.end());
+}
+
+bool IsNativeId3Field(std::wstring_view name) {
+    static constexpr std::wstring_view names[]{
+        L"Title", L"Subtitle", L"Copyright", L"Composer", L"Artist",
+        L"AlbumArtist", L"Conductor", L"Album", L"Tracknumber", L"Date",
+        L"Publisher", L"Genre", L"Encoder", L"Comment", L"Lyrics", L"WWWUSER"};
+    return std::any_of(std::begin(names), std::end(names),
+        [name](const auto candidate) { return SameTagName(name, candidate); });
+}
+
 bool IsStandardField(std::wstring_view name) {
     static constexpr std::wstring_view names[]{
         L"Title", L"Artist", L"Album", L"Tracknumber", L"Genre",
@@ -1192,8 +1327,9 @@ Bytes BuildId3v2(const Id3Tag& previous, const TagData& fields,
     bool retained_picture{};
     for (const auto& frame : previous.frames) {
         if (!frame.semantic.empty()) continue;
+        if (IsNativeId3Field(frame.metadata_name)) continue;
         if (!frame.metadata_name.empty() && std::any_of(modified.begin(), modified.end(),
-            [&frame](const auto& name) { return WideAsciiEqual(name, frame.metadata_name); })) continue;
+            [&frame](const auto& name) { return SameTagName(name, frame.metadata_name); })) continue;
         const bool picture = frame.identifier == "APIC" ||
                              frame.identifier == "PIC";
         if (picture && cover_action != BuiltinCoverAction::unchanged)
@@ -1205,9 +1341,15 @@ Bytes BuildId3v2(const Id3Tag& previous, const TagData& fields,
     }
     AppendTextFrame(frames, major, "TIT2", GetField(fields, L"Title"),
                     encoding);
+    AppendTextFrame(frames, major, "TIT3", GetField(fields, L"Subtitle"), encoding);
+    AppendTextFrame(frames, major, "TCOP", GetField(fields, L"Copyright"), encoding);
+    AppendTextFrame(frames, major, "TCOM", GetField(fields, L"Composer"), encoding);
     AppendTextFrame(frames, major, "TPE1", GetField(fields, L"Artist"),
                     encoding);
     AppendTextFrame(frames, major, "TPE2", GetField(fields, L"AlbumArtist"), encoding);
+    AppendTextFrame(frames, major, "TPE3", GetField(fields, L"Conductor"), encoding);
+    AppendTextFrame(frames, major, "TPUB", GetField(fields, L"Publisher"), encoding);
+    AppendTextFrame(frames, major, "TENC", GetField(fields, L"Encoder"), encoding);
     AppendTextFrame(frames, major, "TALB", GetField(fields, L"Album"),
                     encoding);
     AppendTextFrame(frames, major, "TRCK", GetField(fields, L"Tracknumber"),
@@ -1220,9 +1362,9 @@ Bytes BuildId3v2(const Id3Tag& previous, const TagData& fields,
         encoding);
     AppendCommentFrame(frames, major, GetField(fields, L"Comment"), encoding);
     AppendCommentFrame(frames, major, GetField(fields, L"Lyrics"), encoding, "USLT");
+    AppendUserUrlFrame(frames, major, GetField(fields, L"WWWUSER"), encoding);
     for (const auto& field : fields.fields) {
-        if (field.value.empty() || IsStandardField(field.name) ||
-            WideAsciiEqual(field.name, L"AlbumArtist") || WideAsciiEqual(field.name, L"Lyrics") ||
+        if (field.value.empty() || IsNativeId3Field(field.name) ||
             std::any_of(retained_names.begin(), retained_names.end(),
                 [&field](const auto& name) {
                     return WideAsciiEqual(name, field.name);
@@ -1234,14 +1376,9 @@ Bytes BuildId3v2(const Id3Tag& previous, const TagData& fields,
 
     std::uint64_t target_total = 10ULL + frames.size();
     if (policy.id3v2_padding) {
-        const bool has_metadata = std::any_of(fields.fields.begin(),
-            fields.fields.end(), [](const auto& field) {
-                return !field.value.empty();
-            });
-        // 004DCA1E chooses 0x800 for a nonempty media-info vector and 0x400
-        // otherwise, then never shrinks an existing ID3v2 allocation.
+        // 004DCA1E calls 004D9979 (lyrics/lyric), not an arbitrary-field test.
         target_total = std::max<std::uint64_t>(
-            target_total, has_metadata ? 0x800U : 0x400U);
+            target_total, !GetField(fields, L"Lyrics").empty() ? 0x800U : 0x400U);
         if (previous.present)
             target_total = std::max(target_total, previous.total_size);
     }
@@ -1305,7 +1442,7 @@ Bytes BuildApe(const ApeTag& previous, const TagData& fields,
         const bool text = item.raw.size() >= 8 && ((ReadLe32(item.raw.data() + 4) >> 1U) & 3U) == 0;
         const auto name = ApeDisplayField(item.key);
         if (text && std::any_of(modified.begin(), modified.end(),
-            [&name](const auto& changed) { return WideAsciiEqual(changed, name); })) continue;
+            [&name](const auto& changed) { return SameTagName(changed, name); })) continue;
         if (item.cover && cover_action != BuiltinCoverAction::unchanged)
             continue;
         items.insert(items.end(), item.raw.begin(), item.raw.end());
@@ -1354,12 +1491,22 @@ void EncodeFixedAnsi(std::span<unsigned char> destination,
                      std::wstring_view value) {
     std::fill(destination.begin(), destination.end(),
               static_cast<unsigned char>(0));
-    if (value.empty()) return;
-    const int count = WideCharToMultiByte(CP_ACP, 0, value.data(),
-        static_cast<int>(std::min<size_t>(value.size(), INT_MAX)),
-        reinterpret_cast<char*>(destination.data()),
-        static_cast<int>(destination.size()), nullptr, nullptr);
-    static_cast<void>(count);
+    // A too-small output buffer makes WideCharToMultiByte fail; it does not
+    // truncate.  Copy complete encoded characters into the fixed-width field.
+    size_t written{};
+    for (size_t index = 0; index < value.size();) {
+        const size_t units = value[index] >= 0xd800 && value[index] <= 0xdbff &&
+            index + 1 < value.size() && value[index + 1] >= 0xdc00 &&
+            value[index + 1] <= 0xdfff ? 2 : 1;
+        std::array<char, 8> encoded{};
+        const int count = WideCharToMultiByte(CP_ACP, 0, value.data() + index,
+            static_cast<int>(units), encoded.data(), static_cast<int>(encoded.size()),
+            nullptr, nullptr);
+        if (count <= 0 || static_cast<size_t>(count) > destination.size() - written) break;
+        std::memcpy(destination.data() + written, encoded.data(), count);
+        written += count;
+        index += units;
+    }
 }
 
 Bytes BuildId3v1(const TagData& fields) {
@@ -1398,6 +1545,38 @@ Bytes BuildId3v1(const TagData& fields) {
             break;
         }
     }
+    return output;
+}
+
+std::optional<Bytes> BuildLyrics3(std::wstring_view lyrics) {
+    if (lyrics.empty()) return Bytes{};
+    if (lyrics.size() > INT_MAX) return std::nullopt;
+    // 004DC39E moves Lyrics to a Lyrics3 LYR field when ID3v1 is selected.
+    // Keep representable ACP bytes, but use the original reader's UTF-8
+    // detection when ACP would replace characters with question marks.
+    BOOL substituted{};
+    const int size = WideCharToMultiByte(CP_ACP, 0, lyrics.data(),
+        static_cast<int>(lyrics.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return std::nullopt;
+    Bytes text(static_cast<size_t>(size));
+    const UINT page = GetACP();
+    if (!WideCharToMultiByte(page, 0, lyrics.data(), static_cast<int>(lyrics.size()),
+            reinterpret_cast<char*>(text.data()), size, nullptr,
+            page == CP_UTF8 ? nullptr : &substituted)) return std::nullopt;
+    if (substituted) text = EncodeUtf8(lyrics);
+    if (text.empty() || text.size() > 99999) return std::nullopt;
+    const auto decimal = [](Bytes& output, size_t value, size_t width) {
+        const auto begin = output.size();
+        output.resize(begin + width, '0');
+        while (width) { output[begin + --width] = static_cast<unsigned char>('0' + value % 10); value /= 10; }
+    };
+    constexpr std::string_view prefix = "LYRICSBEGININD00003110LYR";
+    Bytes output(prefix.begin(), prefix.end());
+    decimal(output, text.size(), 5);
+    output.insert(output.end(), text.begin(), text.end());
+    decimal(output, output.size(), 6);
+    constexpr std::string_view suffix = "LYRICS200";
+    output.insert(output.end(), suffix.begin(), suffix.end());
     return output;
 }
 
@@ -1454,33 +1633,42 @@ std::filesystem::path CreateSiblingTemporary(
 
 HRESULT ReplaceWithTags(const std::filesystem::path& path, HANDLE source,
                         const FileLayout& layout, const Bytes& id3v2,
-                        const Bytes& ape, const Bytes& id3v1) {
+                        const Bytes& ape, const Bytes& lyrics3, const Bytes& id3v1) {
     UniqueHandle output;
     const auto temporary = CreateSiblingTemporary(path, output);
     if (temporary.empty()) return HRESULT_FROM_WIN32(GetLastError());
     bool okay = WriteAll(output.Get(), id3v2) &&
         CopyRange(source, output.Get(), layout.body_begin,
                   layout.body_end - layout.body_begin) &&
-        WriteAll(output.Get(), ape) && WriteAll(output.Get(), id3v1) &&
+        WriteAll(output.Get(), ape) && WriteAll(output.Get(), lyrics3) &&
+        WriteAll(output.Get(), id3v1) &&
         FlushFileBuffers(output.Get());
+    const DWORD write_error = okay ? ERROR_SUCCESS : GetLastError();
     output.Reset();
     if (!okay) {
-        const DWORD error = GetLastError();
         DeleteFileW(temporary.c_str());
-        return HRESULT_FROM_WIN32(error ? error : ERROR_WRITE_FAULT);
+        return HRESULT_FROM_WIN32(write_error ? write_error : ERROR_WRITE_FAULT);
     }
     const DWORD attributes = GetFileAttributesW(path.c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES)
         SetFileAttributesW(temporary.c_str(),
             attributes & ~FILE_ATTRIBUTE_READONLY);
-    if (!ReplaceFileW(path.c_str(), temporary.c_str(), nullptr,
-            REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr)) {
-        if (!MoveFileExW(temporary.c_str(), path.c_str(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-            const DWORD error = GetLastError();
+    DWORD replace_error{};
+    for (unsigned attempt = 0; ; ++attempt) {
+        if (ReplaceFileW(path.c_str(), temporary.c_str(), nullptr,
+                REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr) ||
+            MoveFileExW(temporary.c_str(), path.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) break;
+        replace_error = GetLastError();
+        // A recently created/replaced file can be held briefly by another
+        // reader. Keep the completed sibling and retry only transient access
+        // errors, without reopening or rewriting the original audio data.
+        if (attempt == 4 || (replace_error != ERROR_SHARING_VIOLATION &&
+            replace_error != ERROR_LOCK_VIOLATION && replace_error != ERROR_ACCESS_DENIED)) {
             DeleteFileW(temporary.c_str());
-            return HRESULT_FROM_WIN32(error);
+            return HRESULT_FROM_WIN32(replace_error);
         }
+        Sleep(20U * (attempt + 1U));
     }
     if (attributes != INVALID_FILE_ATTRIBUTES)
         SetFileAttributesW(path.c_str(), attributes);
@@ -1525,18 +1713,16 @@ HRESULT WriteMp3(const std::filesystem::path& path,
 
     std::uint32_t write_type = policy.write_type & 0x0dU;
     if (write_type == 0) return E_INVALIDARG;
-    const bool has_metadata = std::any_of(fields.fields.begin(),
+    const bool has_gain = std::any_of(fields.fields.begin(),
         fields.fields.end(), [](const auto& field) {
-            return !field.value.empty();
+            return !field.value.empty() && field.name.size() >= 11 &&
+                WideAsciiEqual(std::wstring_view(field.name).substr(0, 11), L"replaygain_");
         });
-    // 004D9B56 (004D9C09..004D9C28) forces APEv2 when nonempty metadata
-    // cannot be represented by the requested ID3v1-only write.
-    if (has_metadata && (write_type & 8U) == 0) write_type |= 4U;
-    // A picture cannot be represented by ID3v1.  The original built-in MP3
-    // writer promotes that policy to its APEv2-capable transaction just as it
-    // does for extended text metadata.
-    if (cover_action != BuiltinCoverAction::unchanged &&
-        (write_type & (8U | 4U)) == 0)
+    const auto lyrics = GetField(fields, L"Lyrics");
+    // 004D9B56 tests replaygain_ and lyrics/lyric, not arbitrary metadata.
+    if ((has_gain || !lyrics.empty()) && (write_type & 8U) == 0) write_type |= 4U;
+    // Preserve the existing cover-capable fallback independently of text.
+    if (!fields.cover.empty() && (write_type & (8U | 4U)) == 0)
         write_type |= 4U;
     if ((write_type & 8U) != 0 && layout.id3v2.present &&
         (!layout.id3v2.rewrite_safe || layout.id3v2.major == 2))
@@ -1544,8 +1730,15 @@ HRESULT WriteMp3(const std::filesystem::path& path,
 
     Bytes id3v2;
     Bytes ape;
+    Bytes lyrics3;
     Bytes id3v1;
     try {
+        if ((write_type & 1U) && !lyrics.empty()) {
+            auto encoded = BuildLyrics3(lyrics);
+            if (!encoded) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+            lyrics3 = std::move(*encoded);
+            SetField(fields, L"Lyrics", L"");
+        }
         if (write_type & 8U)
             id3v2 = BuildId3v2(layout.id3v2, fields, policy, cover_action, modified);
         if (write_type & 4U)
@@ -1556,7 +1749,7 @@ HRESULT WriteMp3(const std::filesystem::path& path,
     }
     if ((write_type & 8U) && id3v2.empty()) return E_OUTOFMEMORY;
     if ((write_type & 4U) && ape.empty()) return E_OUTOFMEMORY;
-    return ReplaceWithTags(path, source.Get(), layout, id3v2, ape, id3v1);
+    return ReplaceWithTags(path, source.Get(), layout, id3v2, ape, lyrics3, id3v1);
 }
 
 bool ExtensionIs(const std::filesystem::path& path,

@@ -1099,6 +1099,7 @@ private:
     lyrics::Lyrics lyrics_;
     bool lyric_document_modified_{};
     bool lyric_save_in_progress_{};
+    bool file_info_write_in_progress_{};
     std::optional<playlist::Track> lyric_document_track_;
     std::unique_ptr<LyricUploadData> lyric_upload_pending_;
     std::filesystem::path lyric_path_;

@@ -6,6 +6,7 @@
 #include "file_info_probe_client.h"
 #include "file_info_mp3_policy.h"
 #include "file_info_editing.h"
+#include "file_info_write_verification.h"
 #include "options_buttons.h"
 #include "../audio/tag_genres.h"
 #include "modern_file_dialog.h"
@@ -23,6 +24,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -183,6 +185,8 @@ struct FileInfoContext : std::enable_shared_from_this<FileInfoContext> {
     bool saving{};
     bool closing{};
     bool advanced_mode{};
+    std::function<void(const std::vector<std::filesystem::path>&, bool)> begin_file_access;
+    std::function<void()> end_file_access;
 
     ~FileInfoContext() {
         if (cover_bitmap) DeleteObject(cover_bitmap);
@@ -496,7 +500,12 @@ void SetRecordField(FileInfoRecord& record, std::string_view name,
     if (record.subtrack > 0 && _wcsicmp(record.path.extension().c_str(), L".cue") == 0 &&
         !audio::CueSheet::IsWritableField(SafeWide(name))) return;
     auto fields = RecordFields(record);
-    detail::SetFileInfoField(fields, name, value);
+    std::string canonical(name);
+    if (record.media_type == "MP3" || record.media_type == "mp3" ||
+        record.codec.find(L"MPEG") != std::wstring::npos) {
+        canonical = SafeUtf8(detail::FileInfoMpegTagName(SafeWide(name)));
+    }
+    detail::SetFileInfoField(fields, canonical, value);
     record.metadata.clear();
     for (const auto& field : fields)
         record.metadata.emplace_back(field.first, SafeUtf8(field.second));
@@ -932,10 +941,16 @@ void ApplyReadResult(FileInfoContext& context, FileInfoReadResult result) {
     UpdateSheetState(context);
 }
 
-void BeginRead(const std::shared_ptr<FileInfoContext>& context) {
+void BeginRead(const std::shared_ptr<FileInfoContext>& context, bool force_reload = false) {
     if (!context || context->closing || context->loading || context->saving)
         return;
     FinishFileInfoCell(*context, false);
+    if (force_reload && context->begin_file_access) {
+        std::vector<std::filesystem::path> paths;
+        for (const auto row : context->rows)
+            if (row < context->tracks.size()) paths.push_back(context->tracks[row].path);
+        context->begin_file_access(paths, false);
+    }
     if (context->read_worker.joinable()) context->read_worker.join();
     context->loaded = false;
     context->loading = true;
@@ -1100,6 +1115,16 @@ void BeginSave(
         context->closing) return;
 
     context->saving = true;
+    if (context->begin_file_access) {
+        std::vector<std::filesystem::path> paths;
+        for (size_t i = 0; i < context->drafts.size(); ++i) {
+            const auto& draft = context->drafts[i];
+            if (changes.contains(draft.row) || (draft.cover_writable &&
+                i < context->originals.size() && draft.cover != context->originals[i].cover))
+                paths.push_back(draft.path);
+        }
+        context->begin_file_access(paths, true);
+    }
     context->navigation_after_save = navigation_after_save;
     UpdateSheetState(*context);
     const auto tracks = context->tracks;
@@ -1206,6 +1231,7 @@ void ApplyWriteResult(FileInfoContext& context,
         context.touched_rows.insert(item.row);
     }
     const int navigation = std::exchange(context.navigation_after_save, 0);
+    if (context.end_file_access) context.end_file_access();
     if (FAILED(result.error)) {
         MessageBoxW(context.sheet, context.strings.save_failure.c_str(),
                     FormatFileInfoTitle(context).c_str(),
@@ -1937,7 +1963,7 @@ LRESULT CALLBACK FileInfoSheetSubclass(HWND window, UINT message,
             return 0;
         }
         if (command == kFileInfoReload) {
-            BeginRead(shared);
+            BeginRead(shared, true);
             return 0;
         }
         if (command == kFileInfoPrevious) {
@@ -1989,6 +2015,7 @@ LRESULT CALLBACK FileInfoSheetSubclass(HWND window, UINT message,
 
 void PlayerWindow::ShowPlaylistProperties(
     const playlist::Track* explicit_playback_track) {
+    if (file_info_write_in_progress_) return;
     const bool explicit_track = explicit_playback_track != nullptr;
     const size_t visible_count = explicit_track ? 1 : VisiblePlaylistTrackCount();
     const HWND owner = explicit_track ? window_ : playlist_window_;
@@ -2028,6 +2055,76 @@ void PlayerWindow::ShowPlaylistProperties(
         }
     }
     context->rows = std::move(rows);
+
+    struct ResumeState {
+        std::shared_ptr<audio::AudioEngine> engine;
+        playlist::Track track;
+        std::chrono::milliseconds position{};
+        bool paused{};
+    };
+    auto resume = std::make_shared<ResumeState>();
+    context->begin_file_access = [this, resume](const auto& paths, bool writing) {
+        if (writing) {
+            file_info_write_in_progress_ = true;
+            // An outgoing crossfade may still hold a file selected for editing.
+            for (const auto& engine : fading_audio_) engine->Stop();
+            fading_audio_.clear();
+        }
+        const auto* opened = OpenedTrack();
+        if (!opened) return;
+        const auto matches = [&paths](const std::filesystem::path& path) {
+            return std::any_of(paths.begin(), paths.end(), [&path](const auto& target) {
+                std::error_code error;
+                return _wcsicmp(path.c_str(), target.c_str()) == 0 ||
+                    std::filesystem::equivalent(path, target, error);
+            });
+        };
+        bool affected = matches(opened->path);
+        if (!affected && opened->subtrack > 0 &&
+            _wcsicmp(opened->path.extension().c_str(), L".cue") == 0) {
+            try {
+                const auto cue = audio::CueSheet::Load(opened->path);
+                if (const auto* track = cue.FindTrack(opened->subtrack))
+                    for (const auto& candidate : cue.AudioCandidates(*track))
+                        affected = affected || matches(candidate);
+            } catch (const std::exception&) {}
+        }
+        if (!affected) return;
+        const auto state = audio_->State();
+        if (writing && (state == audio::PlaybackState::playing ||
+                        state == audio::PlaybackState::paused)) {
+            resume->engine = audio_;
+            resume->track = *opened;
+            resume->position = audio_->Position();
+            resume->paused = state == audio::PlaybackState::paused;
+        }
+        // Isolated writers cannot reuse the in-process reader as 004AD25D
+        // does. Release matching live handles before starting the child. An
+        // explicit Reload keeps the original 0043376F stop behavior.
+        CancelWaveTrackChange();
+        pending_natural_play_ = pending_failed_advance_ = false;
+        playback_was_active_ = playback_source_open_ = false;
+        audio_->Stop();
+        for (const auto& engine : fading_audio_) engine->Stop();
+        fading_audio_.clear();
+        RefreshPlaybackUi();
+    };
+    context->end_file_access = [this, resume] {
+        file_info_write_in_progress_ = false;
+        auto engine = std::exchange(resume->engine, {});
+        const auto* opened = OpenedTrack();
+        const auto* requested = HasPlaybackTrack()
+            ? &PlaybackPlaylist().Tracks()[*current_] : opened;
+        if (!engine || engine != audio_ || !opened ||
+            opened->path != resume->track.path || opened->subtrack != resume->track.subtrack ||
+            !requested || requested->path != resume->track.path ||
+            requested->subtrack != resume->track.subtrack ||
+            audio_->State() != audio::PlaybackState::stopped || close_after_skin_window_fade_) return;
+        if (PlayCurrent()) {
+            audio_->RestoreAfterOutputRestart(resume->position, resume->paused);
+            RefreshPlaybackUi();
+        }
+    };
 
     std::wstring executable(MAX_PATH, L'\0');
     DWORD executable_length = GetModuleFileNameW(
@@ -2139,6 +2236,7 @@ void PlayerWindow::ShowPlaylistProperties(
         context->save_worker.request_stop();
         context->save_worker.join();
     }
+    if (context->end_file_access) context->end_file_access();
     {
         const std::scoped_lock lock(context->pending_mutex);
         context->pending_read.reset();

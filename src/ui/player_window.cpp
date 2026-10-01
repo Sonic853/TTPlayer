@@ -3316,6 +3316,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         ApplyOptionsChangeMask(static_cast<UINT>(wparam), lparam);
         return 0;
     case WM_COMMAND:
+        if (file_info_write_in_progress_) return 0;
         if (HIWORD(wparam) == THBN_CLICKED) {
             HandleTaskbarPlaybackClick(wparam);
             return 0;
@@ -3508,7 +3509,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             // A save-policy MessageBox pumps messages. Defer completions and
             // track navigation until it returns, so neither a downloaded lyric
             // nor natural EOF can replace the document being saved.
-            if (lyric_save_in_progress_) return 0;
+            if (lyric_save_in_progress_ || file_info_write_in_progress_) return 0;
             // StopWithFade publishes the logical stopped state before its
             // physical volume ramp completes. Do not mistake that close-only
             // transition for natural EOF and start another playlist item.
@@ -3585,7 +3586,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         return 0;
     case WM_CLOSE:
         if (close_after_skin_window_fade_) return 0;
-        if (lyric_save_in_progress_) return 0;
+        if (lyric_save_in_progress_ || file_info_write_in_progress_) return 0;
         // Explicit Exit (also routed from Alt+F4) uses a private nonzero
         // wParam; caption/skin close keeps zero and may hide without stopping.
         if (wparam == 0 && settings_.general.minimize_to_tray == 2) {
@@ -5620,6 +5621,7 @@ void PlayerWindow::ShowContextMenu(POINT screen_point, HWND origin) {
 }
 
 bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
+    if (file_info_write_in_progress_) return true;
     if (OpenProjectLink(window_, command)) return true;
     // The original player's command map chains to the equalizer object
     // (00453D7E), including when its own window is hidden or has no skin.
@@ -6859,7 +6861,7 @@ void PlayerWindow::CancelWaveTrackChange() {
 }
 
 void PlayerWindow::PollWaveTrackChange() {
-    if (!pending_wave_track_change_ || lyric_save_in_progress_ ||
+    if (!pending_wave_track_change_ || lyric_save_in_progress_ || file_info_write_in_progress_ ||
         close_after_skin_window_fade_ || !random_navigation_requests_.empty()) return;
     if (!audio_->TryReapStopped() && GetTickCount64() < wave_track_change_deadline_) return;
     // Removing/replacing the requested row during the fade must not open a
@@ -6907,7 +6909,7 @@ bool PlayerWindow::PrepareTrackChange(bool same_item) {
 }
 
 bool PlayerWindow::PlayCurrent() {
-    if (lyric_save_in_progress_) return false;
+    if (lyric_save_in_progress_ || file_info_write_in_progress_) return false;
     if (!random_navigation_dispatch_) random_navigation_requests_.clear();
     media_library_startup_pending_ = false;
     // Both explicit and automatic requests use the same nonmodal notice.
@@ -7138,7 +7140,7 @@ void PlayerWindow::SelectTrackFrom(size_t playlist_index, size_t index,
                                    bool start_playback) {
     if (playlist_index >= playlists_.Size() ||
         index >= playlists_.At(playlist_index).Tracks().size()) return;
-    if (lyric_save_in_progress_) return;
+    if (lyric_save_in_progress_ || file_info_write_in_progress_) return;
     FinishLyricDocument();
     media_library_startup_pending_ = false;
     ClearAudioError();
@@ -7397,7 +7399,7 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
 }
 
 void PlayerWindow::Stop() {
-    if (lyric_save_in_progress_) return;
+    if (lyric_save_in_progress_ || file_info_write_in_progress_) return;
     SetSliderStatus({});
     CancelWaveTrackChange();
     FinishLyricDocument(false);

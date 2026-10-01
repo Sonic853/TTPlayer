@@ -76,7 +76,7 @@ void PlayerWindow::PromptExtensionCorrection() {
     if (!settings_.general.prompt_extension_correction) { extension_corrections_.clear(); return; }
     if (extension_correction_open_ || extension_corrections_.empty() ||
         !window_ || !IsWindowEnabled(window_) || close_after_skin_window_fade_ ||
-        lyric_save_in_progress_ || options_window_) return;
+        lyric_save_in_progress_ || file_info_write_in_progress_ || options_window_) return;
     auto correction=std::move(extension_corrections_.front());
     extension_corrections_.pop_front();
     const auto playback_state=audio_->State();

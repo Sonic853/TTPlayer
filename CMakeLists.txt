@@ -743,6 +743,7 @@ target_link_libraries(playlist_network_commands_tests PRIVATE ttplayer_core)
 
 add_executable(file_info_probe_protocol_tests
   tests/file_info_probe_protocol_tests.cpp
+  src/platform/windows_features.cpp
   src/ui/file_info_probe_client.cpp)
 target_include_directories(file_info_probe_protocol_tests PRIVATE src/ui include)
 target_compile_definitions(file_info_probe_protocol_tests PRIVATE

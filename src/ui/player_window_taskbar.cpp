@@ -61,7 +61,7 @@ void PlayerWindow::HandleTaskbarPlaybackClick(WPARAM wparam) {
 void PlayerWindow::HandleSystemMediaCommand(SystemMediaControls::Command command, int64_t position_ms) {
     // Recheck on the window thread: an input may have arrived during a decoder
     // change, stop fade, or a nested save-lyrics dialog.
-    if (lyric_save_in_progress_ || close_after_skin_window_fade_ ||
+    if (lyric_save_in_progress_ || file_info_write_in_progress_ || close_after_skin_window_fade_ ||
         (audio_->StopFadePending() && !pending_wave_track_change_)) return;
     const auto state = audio_->State();
     if (state == audio::PlaybackState::opening) return;

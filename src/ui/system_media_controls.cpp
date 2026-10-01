@@ -53,7 +53,7 @@ struct ExtraTags {
 
     void Read(std::wstring_view name, std::wstring_view value) {
         const auto key = TagKey(name);
-        if (key == L"albumartist" || key == L"wmalbumartist" || key == L"tpe2" || key == L"tp2") {
+        if (key == L"albumartist" || key == L"orchestra" || key == L"wmalbumartist" || key == L"tpe2" || key == L"tp2") {
             if (!album_artist || album_artist->empty()) album_artist = TagText(value);
         } else if (key == L"genre" || key == L"genres" || key == L"wmgenre" || key == L"tcon" || key == L"tco") {
             has_genres = true;

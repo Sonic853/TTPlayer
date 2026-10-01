@@ -2,6 +2,7 @@
 #include "ttplayer/app/file_info_worker.h"
 #include "../ui/file_info_cover_policy.h"
 #include "../ui/file_info_probe_protocol.h"
+#include "../ui/file_info_write_verification.h"
 #include "../ui/playlist_info_session_protocol.h"
 
 #include "ttplayer/audio/archive_member.h"
@@ -54,7 +55,8 @@ std::wstring MetadataValue(
     return found == entries.end() ? std::wstring{} : found->value;
 }
 
-void MergeMetadata(std::vector<ttplayer::plugins::MetadataEntry>& entries,
+template<class Entries>
+void MergeMetadata(Entries& entries,
                    std::wstring name, std::wstring value) {
     if (name.empty() || value.empty()) return;
     const auto found = std::find_if(entries.begin(), entries.end(),
@@ -401,7 +403,7 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
         result.fields.assign(request.fields.size(), S_OK);
         for (size_t i = 0; i < request.fields.size(); ++i) {
             const auto& field = request.fields[i];
-            const std::wstring name(field.name.begin(), field.name.end());
+            const auto name = ttplayer::core::Utf8ToWide(field.name);
             if (!audio::CueSheet::IsWritableField(name)) {
                 result.fields[i] = E_ACCESSDENIED;
                 result.status = E_ACCESSDENIED;
@@ -420,6 +422,25 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
             result.status = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
             for (auto& status : result.fields) if (SUCCEEDED(status)) status = result.status;
         }
+        ui::detail::FileInfoProbeReadResult actual;
+        auto verification_request = request;
+        try {
+            const auto sheet = audio::CueSheet::Load(logical_path);
+            if (const auto* track = sheet.FindTrack(subtrack)) {
+                actual.status = S_OK;
+                for (const auto& [name, value] : track->metadata)
+                    actual.metadata.push_back({name, value});
+                // Removing a track PERFORMER restores the sheet PERFORMER.
+                // Verify that effective value instead of treating inheritance
+                // as a failed deletion (WriteTrackMetadata removes the line).
+                for (auto& field : verification_request.fields)
+                    if (_stricmp(field.name.c_str(), "Artist") == 0 && field.value.empty())
+                        field.value = sheet.Performer();
+            } else actual.status = E_INVALIDARG;
+        } catch (const std::exception&) {
+            actual.status = HRESULT_FROM_WIN32(ERROR_READ_FAULT);
+        }
+        ui::detail::VerifyFileInfoWrite(verification_request, actual, result);
         return ui::detail::WriteFileInfoProbeWriteResult(output, result) ? 0 : 4;
     }
 
@@ -445,6 +466,9 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
         result.status = written.status;
         result.fields = std::move(written.fields);
         result.cover_status = written.cover_status;
+        ttplayer::ui::detail::FileInfoProbeReadResult actual;
+        actual.status = TryBuiltinRead(logical_path, request.mp3, actual, false);
+        ttplayer::ui::detail::VerifyFileInfoWrite(request, actual, result, true);
         completed = true;
     }
     const HRESULT loaded = completed ? S_OK : manager.Load(addin_directory);
@@ -491,6 +515,20 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
             }
             // Several readers commit their tag transaction from Release.
             reader.reset();
+            ttplayer::ui::detail::FileInfoProbeReadResult actual;
+            auto verification = manager.OpenReaderForMetadata(logical_path, &opened);
+            if (verification) {
+                PopulateReaderResult(*verification, actual, true);
+                // Some readers expose a writable key through GetValue without
+                // enumerating it. Query requested keys on the fresh instance.
+                for (const auto& field : request.fields) {
+                    const auto value = verification->MetadataValue(field.name.c_str());
+                    if (value) MergeMetadata(actual.metadata,
+                        ttplayer::core::Utf8ToWide(field.name), *value);
+                }
+                verification.reset();
+            } else actual.status = FAILED(opened) ? opened : E_NOINTERFACE;
+            ttplayer::ui::detail::VerifyFileInfoWrite(request, actual, result);
             completed = true;
         }
     }

@@ -2312,7 +2312,7 @@ void PlayerWindow::SelectMediaLibraryPlaybackTrack(size_t index,
                                                     bool start_playback) {
     if (!media_library_playback_active_ ||
         index >= media_library_playback_.Tracks().size()) return;
-    if (lyric_save_in_progress_) return;
+    if (lyric_save_in_progress_ || file_info_write_in_progress_) return;
     FinishLyricDocument();
     ClearAudioError();
     playing_playlist_index_.reset();
