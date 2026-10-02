@@ -8,6 +8,7 @@
 #include "file_info_probe_client.h"
 
 #include "ttplayer/core/text.h"
+#include "ttplayer/audio/builtin_file_info.h"
 #include "ttplayer/ui/dialog_history_policy.h"
 #include "ttplayer/ui/playlist_catalog_reorder.h"
 #include "ttplayer/ui/playlist_drag_completion.h"
@@ -1437,7 +1438,11 @@ bool RemoveReplayGainTags(const plugins::PluginManager* library,
     // stream.  A playback-only reader makes the shipped FLAC add-in return
     // STG_E_ACCESSDENIED from metadata slot 6 and leaves both tags intact.
     const auto reader = library->OpenReaderForMetadata(path, &result);
-    if (!reader) return false;
+    if (!reader) {
+        audio::BuiltinFileInfo info;
+        return SUCCEEDED(audio::ReadBuiltinMpegFileInfo(path, {}, info)) &&
+            SUCCEEDED(audio::WriteBuiltinMpegReplayGain(path, {}, {}));
+    }
     const HRESULT gain = reader->SetMetadataValueDirect(
         "replaygain_track_gain", std::wstring_view{});
     const HRESULT peak = reader->SetMetadataValueDirect(
@@ -5720,7 +5725,9 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
         }
         static_cast<void>(ShowPlaylistReplayGainScanner(
             playlist_window_, ResourceModule(), ttpcomm_module_,
-            sound_library_, std::move(tracks), settings_.playback.skip_scan_gain));
+            sound_library_, std::move(tracks), settings_.playback.skip_scan_gain,
+            settings_.playback.scan_gain_threads,
+            [this](unsigned count) { settings_.playback.scan_gain_threads = count; }));
         return true;
     }
     if (command == kPlaylistReplayGainRemove) {

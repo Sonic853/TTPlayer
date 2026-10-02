@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <windows.h>
 #include <mmreg.h>
@@ -74,5 +75,12 @@ HRESULT CreateStandardContent(IStream* stream, DWORD write_type,
     std::span<const BuiltinTagWriteField> fields,
     BuiltinCoverAction cover_action = BuiltinCoverAction::unchanged,
     std::span<const unsigned char> cover = {}) noexcept;
+
+// Update only these two fields in existing ID3v2/APEv2 tags; untagged MPEG
+// gets APEv2 as in 004D9B56. Preserve audio and all unrelated tag payloads.
+// Empty values remove the fields. Validates MPEG content, not the suffix.
+[[nodiscard]] HRESULT WriteBuiltinMpegReplayGain(
+    const std::filesystem::path& path, std::wstring_view gain,
+    std::wstring_view peak) noexcept;
 
 } // namespace ttplayer::audio

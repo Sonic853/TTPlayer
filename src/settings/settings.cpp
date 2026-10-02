@@ -984,6 +984,7 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         s.playback.auto_gain=IntAttr(n,L"AutoGain",0)!=0;
         s.playback.auto_scan_gain=IntAttr(n,L"AutoScanGain",0)!=0;
         s.playback.skip_scan_gain=IntAttr(n,L"SkipScanGain",0)!=0;
+        s.playback.scan_gain_threads=static_cast<unsigned>(std::clamp(IntAttr(n,L"ScanGainThreads",2),1,4));
     }
     if (auto node=SelectOwned(doc,L"/ttplayer/Device")) {
         auto* const n=node.Get();
@@ -1775,6 +1776,7 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"AutoGain",settings.playback.auto_gain ? 1 : 0);
         SetAttribute(element,L"AutoScanGain",settings.playback.auto_scan_gain ? 1 : 0);
         SetAttribute(element,L"SkipScanGain",settings.playback.skip_scan_gain ? 1 : 0);
+        SetAttribute(element,L"ScanGainThreads",static_cast<int>(std::clamp(settings.playback.scan_gain_threads,1U,4U)));
     }
     if(auto* element=EnsureElement(document,L"Device")) {
         auto element_owner=AdoptCom(element);

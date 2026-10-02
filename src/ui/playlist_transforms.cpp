@@ -23,6 +23,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
+#include <map>
 #include <cwchar>
 #include <limits>
 #include <memory>
@@ -44,6 +45,7 @@ constexpr UINT kConvertProgressDialog = 221;
 constexpr int kScanList = 0x428;
 constexpr int kScanStatus = 0x41c;
 constexpr int kScanButton = 0x88b;
+constexpr int kScanConcurrency = 0xe960;
 constexpr UINT kScanRefresh = WM_APP + 0x2a0;
 constexpr UINT kConvertComplete = WM_APP + 0x2a1;
 constexpr UINT kConvertRowComplete = WM_APP + 0x2a2;
@@ -91,7 +93,7 @@ WORD OfflinePcmTag(const WAVEFORMATEX& format) noexcept {
     return format.wFormatTag;
 }
 
-enum class RowState { waiting, scanning, completed, skipped, error };
+enum class RowState { waiting, scanning, writing, completed, skipped, cancelled, error };
 
 struct ScanDialogState {
     HMODULE resources{};
@@ -107,9 +109,12 @@ struct ScanDialogState {
     bool closing{}; // UI thread only; retain the singleton until the worker exits.
     std::wstring pause_text, resume_text;
     std::thread worker;
-    std::atomic_size_t active{};
-    std::atomic_uint progress_percent{};
+    size_t active_jobs{}; // protected with rows by mutex
+    std::vector<unsigned> progress_percent;
+    std::atomic_uint concurrency{2};
+    std::function<void(unsigned)> concurrency_changed;
     std::atomic_bool finished{};
+    std::atomic_bool refresh_pending{};
     std::atomic_bool had_error{};
     std::atomic<HWND> dialog{};
     std::stop_source cancellation;
@@ -201,6 +206,7 @@ HMODULE RetainModule(HMODULE module) noexcept {
 void PostScanRefresh(ScanDialogState& state, bool completed = false) noexcept {
     const HWND dialog = state.dialog.load(std::memory_order_acquire);
     if (dialog) {
+        if (!completed && state.refresh_pending.exchange(true)) return;
         // Carry the state identity so a stale post cannot mutate a newer scan
         // dialog if Windows recycles the old HWND after an early close.
         PostMessageW(dialog, kScanRefresh,
@@ -252,17 +258,23 @@ void RefreshDialog(HWND dialog, ScanDialogState& state) {
     auto statuses = Split(LoadText(state.resources, 0x8160));
     while (statuses.size() < 3) statuses.emplace_back();
     std::vector<RowState> rows;
+    std::vector<unsigned> progress;
+    size_t active{};
     {
         const std::scoped_lock lock(state.mutex);
         rows = state.rows;
+        progress = state.progress_percent;
+        active = state.active_jobs;
     }
     if (list) {
         for (size_t index{}; index < rows.size(); ++index) {
             std::wstring text;
             switch (rows[index]) {
             case RowState::scanning:
-                text = std::to_wstring(state.progress_percent.load()) + L"%";
+                text = std::to_wstring(progress[index]) + L"%";
                 break;
+            case RowState::writing: text = i18n::Text(L"正在保存"); break;
+            case RowState::cancelled: text = i18n::Text(L"已取消"); break;
             case RowState::completed: text = statuses[0]; break;
             case RowState::skipped: text = statuses[1]; break;
             case RowState::error: text = statuses[2]; break;
@@ -271,11 +283,12 @@ void RefreshDialog(HWND dialog, ScanDialogState& state) {
             ListView_SetItemText(list, static_cast<int>(index), 1, text.data());
         }
     }
-    const size_t active = state.active.load();
-    const size_t ordinal = state.tracks.empty()
-        ? 0 : std::min(active + 1, state.tracks.size());
-    auto status = FormatProgress(
-        state.resources, 0x8162, ordinal, state.tracks.size());
+    size_t completed{};
+    for (const auto row : rows)
+        if (row != RowState::waiting && row != RowState::scanning && row != RowState::writing)
+            ++completed;
+    auto status = i18n::Text(L"已处理") + L" " + std::to_wstring(completed) + L" / " +
+        std::to_wstring(rows.size()) + L"   " + i18n::Text(L"进行中") + L" " + std::to_wstring(active);
     SetDlgItemTextW(dialog, kScanStatus, status.c_str());
     if (state.finished.load()) {
         SetDlgItemTextW(dialog, kScanButton,
@@ -283,60 +296,195 @@ void RefreshDialog(HWND dialog, ScanDialogState& state) {
     }
 }
 
-void RunScan(ScanDialogLifetime lifetime, std::stop_token stop) {
-    auto* state = lifetime.get();
-    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    try {
-        for (size_t index{}; index < state->tracks.size(); ++index) {
-            if (!state->Checkpoint()) break;
-            state->active.store(index);
-            state->progress_percent.store(0);
-            {
-                const std::scoped_lock lock(state->mutex);
-                state->rows[index] = RowState::scanning;
-            }
-            PostScanRefresh(*state);
+// Coalesce repeated playlist references, but not distinct hard-link names:
+// a tag writer may replace one pathname and thereby split the hard link.
+std::wstring ScanTrackKey(const playlist::Track& track) {
+    std::error_code error;
+    auto key = std::filesystem::absolute(track.path, error).lexically_normal().wstring();
+    if (error) key = track.path.wstring();
+    CharLowerBuffW(key.data(), static_cast<DWORD>(key.size()));
+    return key + L"|" + std::to_wstring(track.subtrack);
+}
 
-            audio::ReplayGainScanResult result;
-            result = audio::ScanReplayGainTrack(
-                *state->library, state->ttpcomm, state->tracks[index].path,
-                state->skip_existing, stop,
-                [state](std::uint64_t current, std::uint64_t total) {
-                    if (total) {
-                        const auto percent = static_cast<unsigned>(
-                            std::min<std::uint64_t>(current * 100U / total, 100U));
-                        if (state->progress_percent.exchange(percent) != percent)
-                            PostScanRefresh(*state);
-                    }
-                }, state->tracks[index].subtrack,
-                [state] { return state->Checkpoint(); });
-            {
-                const std::scoped_lock lock(state->mutex);
-                state->diagnostics[index] = std::move(result.diagnostic);
-                if (result.status == audio::ReplayGainScanStatus::completed)
-                    state->rows[index] = RowState::completed;
-                else if (result.status == audio::ReplayGainScanStatus::skipped ||
-                         result.status == audio::ReplayGainScanStatus::cancelled)
-                    state->rows[index] = RowState::skipped;
-                else {
-                    state->rows[index] = RowState::error;
-                    state->had_error.store(true);
+void RunScan(ScanDialogLifetime lifetime, std::stop_token stop) {
+    auto& state = *lifetime;
+    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    struct Job {
+        std::vector<size_t> rows;
+        audio::ReplayGainScanResult result;
+        bool committed{};
+    };
+    std::vector<Job> jobs;
+    std::vector<size_t> pending;
+    std::unique_ptr<audio::ReplayGainScanConcurrency> policy;
+    std::vector<std::thread> workers;
+    size_t next{}, alive{};
+    const auto finish_row = [&](const Job& job, RowState row) {
+        for (auto index : job.rows) {
+            state.rows[index] = row;
+            if (row != RowState::scanning && row != RowState::writing)
+                state.diagnostics[index] = job.result.diagnostic;
+        }
+    };
+    try {
+        std::map<std::wstring, size_t> unique;
+        for (size_t index{}; index < state.tracks.size() && !stop.stop_requested(); ++index) {
+            const auto [entry, inserted] = unique.emplace(ScanTrackKey(state.tracks[index]), jobs.size());
+            if (inserted) jobs.emplace_back();
+            jobs[entry->second].rows.push_back(index);
+        }
+        policy = std::make_unique<audio::ReplayGainScanConcurrency>(*state.library, state.ttpcomm);
+        pending.reserve(4);
+        const auto run = [&] {
+            const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            try { for (;;) {
+                size_t job_index;
+                {
+                    std::unique_lock lock(state.mutex);
+                    state.condition.wait(lock, [&] {
+                        return stop.stop_requested() || next == jobs.size() ||
+                            (!state.paused && state.active_jobs < state.concurrency.load());
+                    });
+                    if (stop.stop_requested() || next == jobs.size()) break;
+                    job_index = next++;
+                    ++state.active_jobs;
+                    finish_row(jobs[job_index], RowState::scanning);
+                }
+                PostScanRefresh(state);
+                auto& job = jobs[job_index];
+                const auto& track = state.tracks[job.rows.front()];
+                try {
+                    job.result = audio::AnalyzeReplayGainTrack(*state.library, state.ttpcomm,
+                        track.path, state.skip_existing, stop,
+                        [&](std::uint64_t current, std::uint64_t total) {
+                            if (!total) return;
+                            const auto percent = static_cast<unsigned>(std::min(100.0,
+                                static_cast<double>(current) * 100.0 / static_cast<double>(total)));
+                            bool changed{};
+                            {
+                                const std::scoped_lock lock(state.mutex);
+                                for (auto row : job.rows) {
+                                    changed |= state.progress_percent[row] != percent;
+                                    state.progress_percent[row] = percent;
+                                }
+                            }
+                            if (changed) PostScanRefresh(state);
+                        }, track.subtrack, [&] { return state.Checkpoint(); }, policy.get());
+                } catch (...) {
+                    job.result.status = audio::ReplayGainScanStatus::decode_error;
+                    job.result.result = E_FAIL;
+                }
+                {
+                    std::unique_lock lock(state.mutex);
+                    pending.push_back(job_index);
+                    state.condition.notify_all();
+                    // At most one pending measurement per worker; no unbounded
+                    // writer queue even for huge selections and slow plug-ins.
+                    state.condition.wait(lock, [&] { return job.committed || stop.stop_requested(); });
                 }
             }
-            state->progress_percent.store(100);
-            PostScanRefresh(*state);
+            } catch (...) { state.had_error.store(true); state.Cancel(); }
+            if (SUCCEEDED(com)) CoUninitialize();
+            { const std::scoped_lock lock(state.mutex); --alive; }
+            state.condition.notify_all();
+        };
+        workers.reserve(4);
+        for (unsigned lane{}; lane < std::min<size_t>(4, jobs.size()); ++lane) {
+            { const std::scoped_lock lock(state.mutex); ++alive; }
+            try { workers.emplace_back(run); }
+            catch (...) {
+                { const std::scoped_lock lock(state.mutex); --alive; }
+                if (workers.empty()) throw;
+                break; // Continue with the workers that could be created.
+            }
         }
+        // The coordinator is the batch writer. Playback's writer uses the same
+        // audio-layer gate, before loading a CUE snapshot or opening metadata.
+        for (;;) {
+            size_t index;
+            {
+                std::unique_lock lock(state.mutex);
+                state.condition.wait(lock, [&] { return !pending.empty() || alive == 0; });
+                if (pending.empty()) break;
+                index = pending.front(); pending.erase(pending.begin());
+                if (jobs[index].result.status == audio::ReplayGainScanStatus::completed)
+                    finish_row(jobs[index], RowState::writing);
+            }
+            PostScanRefresh(state);
+            auto& job = jobs[index];
+            const auto& track = state.tracks[job.rows.front()];
+            if (job.result.status == audio::ReplayGainScanStatus::completed) {
+                try {
+                    job.result = audio::CommitReplayGainTrack(*state.library, track.path, job.result,
+                        audio::ReplayGainCommitPolicy::manual_scan_clear_read_only, stop, track.subtrack,
+                        [&] { return state.Checkpoint(); });
+                } catch (...) {
+                    job.result.status = audio::ReplayGainScanStatus::write_error;
+                    job.result.result = E_FAIL;
+                }
+            }
+            RowState row = RowState::error;
+            switch (job.result.status) {
+            case audio::ReplayGainScanStatus::completed: row = RowState::completed; break;
+            case audio::ReplayGainScanStatus::skipped: row = RowState::skipped; break;
+            case audio::ReplayGainScanStatus::cancelled: row = RowState::cancelled; break;
+            default: state.had_error.store(true); break;
+            }
+            {
+                const std::scoped_lock lock(state.mutex);
+                finish_row(job, row); job.committed = true;
+                --state.active_jobs;
+            }
+            state.condition.notify_all();
+            PostScanRefresh(state);
+        }
+        // Join before policy/jobs (captured by reference) leave their scope.
+        for (auto& worker : workers) worker.join();
     } catch (...) {
-        // A reader/allocation failure must not escape a std::thread and abort
-        // the process, or leave cancellation waiting for a completion message.
-        const std::scoped_lock lock(state->mutex);
-        const auto index = state->active.load();
-        if (index < state->rows.size()) state->rows[index] = RowState::error;
-        state->had_error.store(true);
+        state.had_error.store(true);
+        state.Cancel();
+        for (auto& worker : workers) if (worker.joinable()) worker.join();
+    }
+    {
+        const std::scoped_lock lock(state.mutex);
+        state.active_jobs = 0;
+        for (auto& row : state.rows)
+            if (row == RowState::waiting || row == RowState::scanning || row == RowState::writing)
+                row = state.had_error.load() ? RowState::error : RowState::cancelled;
     }
     if (SUCCEEDED(initialized)) CoUninitialize();
-    state->finished.store(true);
-    PostScanRefresh(*state, true);
+    state.finished.store(true);
+    PostScanRefresh(state, true);
+}
+
+void AddScanConcurrencyControl(HWND dialog, ScanDialogState& state) {
+    RECT list{}; GetWindowRect(GetDlgItem(dialog, kScanList), &list);
+    MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&list), 2);
+    RECT units{0, 0, 160, 18}; MapDialogRect(dialog, &units);
+    const int row_height = units.bottom;
+    for (HWND child = GetWindow(dialog, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
+        RECT rect{}; GetWindowRect(child, &rect);
+        MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&rect), 2);
+        if (rect.top >= list.bottom)
+            SetWindowPos(child, nullptr, rect.left, rect.top + row_height, 0, 0,
+                         SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    RECT window{}; GetWindowRect(dialog, &window);
+    SetWindowPos(dialog, nullptr, 0, 0, window.right - window.left,
+                 window.bottom - window.top + row_height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    const HWND label = CreateWindowExW(0, L"STATIC", i18n::Literal(L"同时扫描："), WS_CHILD | WS_VISIBLE,
+        list.left, list.bottom + 6, units.right / 3, row_height, dialog, nullptr, nullptr, nullptr);
+    const HWND combo = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+        CBS_DROPDOWNLIST | WS_VSCROLL, list.left + units.right / 3, list.bottom + 3,
+        units.right / 3, row_height * 7, dialog,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kScanConcurrency)), nullptr, nullptr);
+    const WPARAM font = SendMessageW(dialog, WM_GETFONT, 0, 0);
+    SendMessageW(label, WM_SETFONT, font, FALSE); SendMessageW(combo, WM_SETFONT, font, FALSE);
+    for (unsigned count = 1; count <= 4; ++count) {
+        const auto text = std::to_wstring(count);
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+    }
+    SendMessageW(combo, CB_SETCURSEL, state.concurrency.load() - 1, 0);
 }
 
 INT_PTR CALLBACK ScanDialogProc(HWND dialog, UINT message,
@@ -355,6 +503,8 @@ INT_PTR CALLBACK ScanDialogProc(HWND dialog, UINT message,
         state->dialog.store(dialog, std::memory_order_release);
         state->rows.assign(state->tracks.size(), RowState::waiting);
         state->diagnostics.resize(state->tracks.size());
+        state->progress_percent.resize(state->tracks.size());
+        AddScanConcurrencyControl(dialog, *state);
         const auto captions = Split(WindowCaption(GetDlgItem(dialog, kScanButton)));
         state->pause_text = captions.empty() ? L"" : captions[0];
         state->resume_text = captions.size() > 1 ? captions[1] : state->pause_text;
@@ -382,6 +532,7 @@ INT_PTR CALLBACK ScanDialogProc(HWND dialog, UINT message,
     case kScanRefresh:
         if (!state || reinterpret_cast<ScanDialogState*>(wparam) != state)
             return TRUE;
+        state->refresh_pending.store(false);
         RefreshDialog(dialog, *state);
         if (lparam == 1 && state->finished.load() &&
             (state->closing || !state->had_error.load())) {
@@ -391,6 +542,16 @@ INT_PTR CALLBACK ScanDialogProc(HWND dialog, UINT message,
         }
         return TRUE;
     case WM_COMMAND:
+        if (LOWORD(wparam) == kScanConcurrency && HIWORD(wparam) == CBN_SELCHANGE && state && !state->closing) {
+            const auto selected = SendDlgItemMessageW(dialog, kScanConcurrency, CB_GETCURSEL, 0, 0);
+            if (selected >= 0 && selected < 4) {
+                const auto count = static_cast<unsigned>(selected + 1);
+                state->concurrency.store(count);
+                if (state->concurrency_changed) state->concurrency_changed(count);
+                state->condition.notify_all();
+            }
+            return TRUE;
+        }
         if (LOWORD(wparam) == IDCANCEL) {
             SendMessageW(dialog, WM_CLOSE, 0, 0);
             return TRUE;
@@ -418,6 +579,7 @@ INT_PTR CALLBACK ScanDialogProc(HWND dialog, UINT message,
             state->Cancel();
             if (!state->finished.load()) {
                 EnableWindow(GetDlgItem(dialog, kScanButton), FALSE);
+                EnableWindow(GetDlgItem(dialog, kScanConcurrency), FALSE);
                 EnableWindow(GetDlgItem(dialog, IDCANCEL), FALSE);
                 // Keep pumping messages until the reader and writer have
                 // closed. Reopening brings this same cancelling dialog up.
@@ -1886,7 +2048,8 @@ void ClosePlaylistConverter(HWND owner) {
 bool ShowPlaylistReplayGainScanner(
     HWND owner, HMODULE resources, HMODULE ttpcomm,
     const plugins::PluginManager* library,
-    std::vector<playlist::Track> tracks, bool skip_existing) {
+    std::vector<playlist::Track> tracks, bool skip_existing,
+    unsigned concurrency, std::function<void(unsigned)> concurrency_changed) {
     if (g_scan_dialog && IsWindow(g_scan_dialog)) {
         ShowWindow(g_scan_dialog, SW_RESTORE);
         BringWindowToTop(g_scan_dialog);
@@ -1913,6 +2076,8 @@ bool ShowPlaylistReplayGainScanner(
         state->library = retained_library;
         state->tracks = std::move(tracks);
         state->skip_existing = skip_existing;
+        state->concurrency.store(std::clamp(concurrency, 1U, 4U));
+        state->concurrency_changed = std::move(concurrency_changed);
         holder = new ScanDialogLifetime(state);
         g_scan_lifetime = state;
     } catch (...) {

@@ -2,7 +2,13 @@
 
 #include "ttplayer/plugins/plugin_manager.h"
 #include "ttplayer/audio/audio_engine.h"
+#include "ttplayer/audio/builtin_file_info.h"
 #include "ttplayer/audio/cue_sheet.h"
+#include "ttplayer/audio/format_probe.h"
+#include "ttplayer/platform/optional_windows_api.h"
+#include "ttplayer/update/update.h"
+#include <map>
+#include <cwctype>
 #include <system_error>
 
 #include <algorithm>
@@ -13,6 +19,7 @@
 #include <limits>
 #include <locale>
 #include <memory>
+#include <mfapi.h>
 #include <mmreg.h>
 #include <mutex>
 #include <objbase.h>
@@ -24,6 +31,22 @@
 
 namespace ttplayer::audio {
 namespace {
+
+// Shared by manual analysis using unverified readers and every ReplayGain
+// metadata transaction, including playback's deferred writer. No UI thread waits.
+std::timed_mutex& ReplayGainLegacyGate() {
+    static std::timed_mutex gate;
+    return gate;
+}
+
+bool EnterReplayGainGate(std::unique_lock<std::timed_mutex>& lock,
+                        std::stop_token stop, const ReplayGainCheckpoint& checkpoint) {
+    while (!stop.stop_requested() && (!checkpoint || checkpoint())) {
+        if (lock.try_lock_for(std::chrono::milliseconds(50)))
+            return !stop.stop_requested();
+    }
+    return false;
+}
 
 using SupportsRate = BOOL(__cdecl*)(DWORD);
 using CreateAnalyzer = void*(__cdecl*)();
@@ -343,6 +366,79 @@ void ReleaseCommitKey(const std::wstring& key) noexcept {
 
 } // namespace
 
+ReplayGainScanConcurrency::ReplayGainScanConcurrency(
+    const plugins::PluginManager& library, HMODULE ttpcomm) {
+    try {
+        wchar_t filename[32768]{};
+        const DWORD count = GetModuleFileNameW(ttpcomm, filename, 32768);
+        analyzer_verified_ = count && count < 32768 && update::Sha256(filename) ==
+            "e349ef73e8a1d35b2c5debd2ddaeb5cc2513a90647766b7339d2605b34483b33";
+        std::map<std::filesystem::path, bool> modules;
+        for (const auto& format : library.ReaderFormats()) {
+            auto [entry, inserted] = modules.try_emplace(format.module_path, false);
+            if (inserted) {
+                try {
+                    const auto hash = update::Sha256(format.module_path);
+                    // Local FLAC / Vorbis builds: multi-instance PCM
+                    // and gain parity are covered by the parallel regression.
+                    entry->second = hash == "e2833c023377787fa9705d52215d3a02b7f5a742bdda4012f9d639c2e1f64dbd" ||
+                                    hash == "ee58d0603a5c4c7596219590d5e92e12748187b395e14dc1275256e0904dcdc5";
+                } catch (...) { }
+            }
+            formats_.push_back({format.pattern, entry->second});
+        }
+    } catch (...) { analyzer_verified_ = false; }
+}
+
+bool ReplayGainScanConcurrency::AllowsFile(const std::filesystem::path& path) const {
+    auto extension = AudioExtensionHint(path);
+    if (FAILED(ProbeAudioFormatHint(path, extension))) return false;
+    // The same FLAC DLL also advertises TTA; that decoder was not verified.
+    if (extension != L".flac" && extension != L".fla" &&
+        extension != L".ogg" && extension != L".oga") return false;
+    const auto needle = L"*" + extension;
+    bool found{};
+    for (const auto& format : formats_) {
+        bool matches = format.pattern.empty();
+        size_t begin{};
+        while (!matches && begin <= format.pattern.size()) {
+            const auto end = format.pattern.find(L';', begin);
+            auto item = std::wstring_view(format.pattern).substr(begin,
+                end == std::wstring::npos ? end : end - begin);
+            while (!item.empty() && iswspace(item.front())) item.remove_prefix(1);
+            while (!item.empty() && iswspace(item.back())) item.remove_suffix(1);
+            matches = _wcsicmp(std::wstring(item).c_str(), needle.c_str()) == 0 ||
+                      item == L"*.*";
+            if (end == std::wstring::npos) break;
+            begin = end + 1;
+        }
+        if (matches) {
+            if (!format.verified) return false;
+            found = true;
+        }
+    }
+    return found;
+}
+
+bool ReplayGainScanConcurrency::Allows(const std::filesystem::path& path, int subtrack) const {
+    if (!analyzer_verified_) return false;
+    try {
+        if (subtrack > 0 && _wcsicmp(path.extension().c_str(), L".cue") == 0) {
+            const auto sheet = CueSheet::Load(path);
+            const auto* track = sheet.FindTrack(subtrack);
+            if (!track) return false;
+            bool found{};
+            for (const auto& candidate : sheet.AudioCandidates(*track)) {
+                if (!std::filesystem::exists(candidate)) continue;
+                if (!AllowsFile(candidate)) return false;
+                found = true;
+            }
+            return found;
+        }
+        return AllowsFile(path);
+    } catch (...) { return false; }
+}
+
 bool LegacyReplayGainAvailable(HMODULE ttpcomm) noexcept {
     return ttpcomm &&
         GetProcAddress(ttpcomm, MAKEINTRESOURCEA(100)) &&
@@ -353,7 +449,7 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
     std::stop_token stop, ReplayGainProgress progress, int subtrack,
-    ReplayGainCheckpoint checkpoint) {
+    ReplayGainCheckpoint checkpoint, const ReplayGainScanConcurrency* concurrency) {
     if (!LegacyReplayGainAvailable(ttpcomm))
         return Error(ReplayGainScanStatus::unsupported, E_NOINTERFACE,
                      L"ttpcomm ReplayGain ordinals 100/101 are unavailable");
@@ -364,20 +460,33 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
         return Error(ReplayGainScanStatus::cancelled,
                      HRESULT_FROM_WIN32(ERROR_CANCELLED), L"cancelled");
 
+    std::unique_lock<std::timed_mutex> legacy_lock(ReplayGainLegacyGate(), std::defer_lock);
+    if ((!concurrency || !concurrency->Allows(path, subtrack)) &&
+        !EnterReplayGainGate(legacy_lock, stop, checkpoint))
+        return Error(ReplayGainScanStatus::cancelled,
+                     HRESULT_FROM_WIN32(ERROR_CANCELLED), L"cancelled before decoder open");
+
     HRESULT opened{};
     std::wstring diagnostic;
     const bool cue = subtrack > 0 && _wcsicmp(path.extension().c_str(), L".cue") == 0;
+    // 004A4E8C uses the common reader/decoder factory, including the host's
+    // MPEG and PCM readers. MF must outlive any system source opened here.
+    struct MediaLifetime {
+        HRESULT result{E_FAIL};
+        void Start() { result = platform::MFStartup(MF_VERSION, MFSTARTUP_LITE); }
+        ~MediaLifetime() { if (SUCCEEDED(result)) platform::MFShutdown(); }
+    } media;
     std::unique_ptr<DecodedAudioSource> segment;
     std::unique_ptr<plugins::LegacyReaderSession> reader;
-    if (cue) {
+    if (!cue) reader = library.OpenReader(path, &opened, &diagnostic);
+    if (!reader) {
+        if (!cue && IsTerminalAudioOpenError(opened))
+            return Error(ReplayGainScanStatus::decode_error, opened, std::move(diagnostic));
+        media.Start();
         segment = CreateDecodedAudioSource(path, subtrack, &library, ttpcomm);
         if (!segment->Open(path, {})) return Error(ReplayGainScanStatus::decode_error,
             segment->ErrorResult(), segment->Error());
-    } else reader = library.OpenReader(path, &opened, &diagnostic);
-    if (!reader && !segment)
-        return Error(ReplayGainScanStatus::unsupported, opened,
-                     diagnostic.empty() ? L"no decoder opened the source"
-                                        : std::move(diagnostic));
+    }
     if (skip_existing && (segment ? ExistingGain(segment->Metadata())
                                   : ExistingGain(*reader))) {
         auto result = Error(ReplayGainScanStatus::skipped, S_FALSE,
@@ -398,6 +507,7 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
     std::vector<std::byte> bytes;
     std::vector<double> samples;
     std::uint64_t decoded_frames{};
+    unsigned empty_reads{};
     bool end{};
     do {
         if (stop.stop_requested() || (checkpoint && !checkpoint()))
@@ -406,9 +516,11 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
         const HRESULT read = segment ? (segment->Read(16384, bytes, end) ? S_OK : E_FAIL)
             : reader->Read(std::max<DWORD>(reader->SuggestedBufferBytes(), 4096U), bytes, end);
         if (FAILED(read))
-            return Error(ReplayGainScanStatus::decode_error, read,
-                         L"legacy reader Read failed");
+            return Error(ReplayGainScanStatus::decode_error,
+                         segment ? segment->ErrorResult() : read,
+                         segment ? segment->Error() : L"legacy reader Read failed");
         if (!bytes.empty()) {
+            empty_reads = 0;
             DWORD frames{};
             if (!ConvertSamples(bytes, format, samples, &frames))
                 return Error(ReplayGainScanStatus::unsupported,
@@ -421,9 +533,14 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
             decoded_frames += frames;
             if (progress) progress(decoded_frames, expected_frames);
         }
-        if (bytes.empty() && !end)
-            return Error(ReplayGainScanStatus::decode_error, E_UNEXPECTED,
-                         L"decoder returned an empty non-terminal block");
+        if (bytes.empty() && !end) {
+            // 004E3CF3 can consume compressed input without producing PCM
+            // in the same turn (AAC/ASF). Only persistent stalls are errors.
+            if (++empty_reads >= 1024)
+                return Error(ReplayGainScanStatus::decode_error, E_UNEXPECTED,
+                             L"decoder repeatedly returned no audio frames");
+            Sleep(1);
+        }
     } while (!end);
     if (decoded_frames == 0)
         return Error(ReplayGainScanStatus::decode_error, E_UNEXPECTED,
@@ -448,7 +565,7 @@ ReplayGainScanResult CommitReplayGainTrack(
     const std::filesystem::path& path,
     const ReplayGainScanResult& analysis,
     ReplayGainCommitPolicy policy,
-    std::stop_token stop, int subtrack) {
+    std::stop_token stop, int subtrack, ReplayGainCheckpoint checkpoint) {
     if (analysis.status != ReplayGainScanStatus::completed)
         return analysis;
     if (!std::isfinite(analysis.gain_db) || !std::isfinite(analysis.peak) ||
@@ -462,6 +579,11 @@ ReplayGainScanResult CommitReplayGainTrack(
         cancelled.diagnostic = L"cancelled";
         return cancelled;
     }
+
+    std::unique_lock<std::timed_mutex> write_lock(ReplayGainLegacyGate(), std::defer_lock);
+    if (!EnterReplayGainGate(write_lock, stop, checkpoint))
+        return Error(ReplayGainScanStatus::cancelled,
+                     HRESULT_FROM_WIN32(ERROR_CANCELLED), L"cancelled before metadata write");
 
     // The manual completion path 004A50B5 -> 004C80AC permanently removes
     // FILE_ATTRIBUTE_READONLY.  The live finalizer 004B1A5C does not, so it
@@ -515,6 +637,15 @@ ReplayGainScanResult CommitReplayGainTrack(
     std::wstring diagnostic;
     auto metadata = library.OpenReaderForMetadata(path, &opened, &diagnostic);
     if (!metadata) {
+        BuiltinFileInfo info;
+        if (!IsTerminalAudioOpenError(opened) &&
+            SUCCEEDED(ReadBuiltinMpegFileInfo(path, {}, info))) {
+            const HRESULT written = WriteBuiltinMpegReplayGain(
+                path, FormatGain(analysis.gain_db), FormatPeak(analysis.peak));
+            if (SUCCEEDED(written)) return analysis;
+            opened = written;
+            diagnostic = L"writing built-in MPEG ReplayGain tags";
+        }
         auto error = Error(ReplayGainScanStatus::write_error, opened,
             diagnostic.empty() ? L"opening source metadata writer"
                                : std::move(diagnostic));
@@ -540,6 +671,21 @@ ReplayGainScanResult CommitReplayGainTrack(
     // released rather than in SetValue itself.
     metadata.reset();
 
+    // A legacy metadata setter can return S_OK while ignoring an unknown
+    // field (observed with ASF). Verify persistence instead of marking the
+    // row complete merely because both calls returned success.
+    auto saved = library.OpenReaderForInspection(path, &opened, &diagnostic);
+    const auto gain = saved ? saved->MetadataValue("replaygain_track_gain") : std::nullopt;
+    const auto peak = saved ? saved->MetadataValue("replaygain_track_peak") : std::nullopt;
+    if (!gain || !peak || *gain != FormatGain(analysis.gain_db) ||
+        *peak != FormatPeak(analysis.peak)) {
+        auto error = analysis;
+        error.status = ReplayGainScanStatus::write_error;
+        error.result = FAILED(opened) ? opened : STG_E_WRITEFAULT;
+        error.diagnostic = L"ReplayGain tags were not persisted by the metadata writer";
+        return error;
+    }
+
     auto result = analysis;
     result.diagnostic.clear();
     return result;
@@ -559,7 +705,7 @@ ReplayGainScanResult ScanReplayGainTrack(
                      HRESULT_FROM_WIN32(ERROR_CANCELLED), L"cancelled");
     return CommitReplayGainTrack(
         library, path, analysis,
-        ReplayGainCommitPolicy::manual_scan_clear_read_only, stop, subtrack);
+        ReplayGainCommitPolicy::manual_scan_clear_read_only, stop, subtrack, checkpoint);
 }
 
 struct PlaybackReplayGainAnalyzer::Impl {

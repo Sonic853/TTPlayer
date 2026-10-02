@@ -1572,14 +1572,17 @@ public:
             !manager || path.empty() ||
             AudioEngine::IsNetworkMediaLocation(path) ||
             path.native().find(L'|') != std::wstring::npos ||
-            _wcsicmp(path.extension().c_str(), L".cda") == 0 ||
-            (subtrack == 0 && !manager->HasReaderForPath(path))) {
+            _wcsicmp(path.extension().c_str(), L".cda") == 0) {
             return false;
         }
         const DWORD attributes = GetFileAttributesW(path.c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES ||
             (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
             return false;
+        if (subtrack == 0 && !manager->HasReaderForPath(path)) {
+            BuiltinFileInfo info;
+            if (FAILED(ReadBuiltinMpegFileInfo(path, {}, info))) return false;
+        }
         library_ = manager->RetainForBackground();
         if (!library_) return false;
         path_ = path;

@@ -76,7 +76,8 @@ void ClosePlaylistConverter(HWND owner);
 bool ShowPlaylistReplayGainScanner(
     HWND owner, HMODULE resources, HMODULE ttpcomm,
     const plugins::PluginManager* library,
-    std::vector<playlist::Track> tracks, bool skip_existing);
+    std::vector<playlist::Track> tracks, bool skip_existing,
+    unsigned concurrency = 2, std::function<void(unsigned)> concurrency_changed = {});
 
 bool TranslatePlaylistReplayGainScannerMessage(MSG& message);
 void ClosePlaylistReplayGainScanner(HWND owner);

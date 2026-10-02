@@ -110,6 +110,7 @@ struct PlaybackSettings {
     bool auto_gain{};
     bool auto_scan_gain{};
     bool skip_scan_gain{};
+    unsigned scan_gain_threads{2};
 };
 struct DeviceSettings {
     std::wstring device_type{L"{DEF00000-9C6D-47ED-AAF1-4DDA8F2B5C03}"};

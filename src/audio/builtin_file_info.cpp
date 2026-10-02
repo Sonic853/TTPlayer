@@ -579,14 +579,16 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
     }
     size_t offset{};
     if (header[5] & 0x40U) {
-        if (payload.size() < 4) return tag;
+        if (payload.size() < 4) { tag.rewrite_safe = false; return tag; }
         const auto extended = major == 4
             ? ReadSynchsafe(payload.data()) : ReadBe32(payload.data());
         const std::uint64_t skip = major == 3
             ? 4ULL + extended : static_cast<std::uint64_t>(extended);
         if (extended == std::numeric_limits<std::uint32_t>::max() ||
-            skip > payload.size())
+            skip > payload.size()) {
+            tag.rewrite_safe = false;
             return tag;
+        }
         offset = static_cast<size_t>(skip);
     }
     TagData user_text;
@@ -603,8 +605,10 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
         if (!std::all_of(identifier.begin(), identifier.end(), [](char value) {
                 return (value >= 'A' && value <= 'Z') ||
                        (value >= '0' && value <= '9');
-            }))
+            })) {
+            tag.rewrite_safe = false;
             break;
+        }
         const std::uint32_t frame_size = major == 2
             ? static_cast<std::uint32_t>(payload[offset + 3]) << 16U |
                   static_cast<std::uint32_t>(payload[offset + 4]) << 8U |
@@ -612,8 +616,10 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
             : major == 4 ? ReadSynchsafe(payload.data() + offset + 4)
                          : ReadBe32(payload.data() + offset + 4);
         if (frame_size == std::numeric_limits<std::uint32_t>::max() ||
-            frame_size > payload.size() - offset - header_size)
+            frame_size > payload.size() - offset - header_size) {
+            tag.rewrite_safe = false;
             break;
+        }
         const size_t end = offset + header_size + frame_size;
         Id3Frame frame;
         frame.identifier = identifier;
@@ -640,6 +646,9 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
         tag.frames.push_back(std::move(frame));
         offset = end;
     }
+    if (!std::all_of(payload.begin() + static_cast<ptrdiff_t>(offset), payload.end(),
+                    [](unsigned char byte) { return byte == 0; }))
+        tag.rewrite_safe = false;
     MergeMissing(tag.data, user_text);
     return tag;
 }
@@ -1752,6 +1761,68 @@ HRESULT WriteMp3(const std::filesystem::path& path,
     return ReplaceWithTags(path, source.Get(), layout, id3v2, ape, lyrics3, id3v1);
 }
 
+HRESULT WriteMpegReplayGain(const std::filesystem::path& path,
+                            std::wstring_view gain, std::wstring_view peak) {
+    UniqueHandle source(CreateFileW(path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!source) return HRESULT_FROM_WIN32(GetLastError());
+    FileLayout layout;
+    if (!ReadMp3Layout(source.Get(), layout) || !FindMpegHeader(source.Get(), layout))
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    if (layout.id3v2.present &&
+        (!layout.id3v2.rewrite_safe || layout.id3v2.major == 2))
+        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+
+    const auto is_gain = [](std::wstring_view name) {
+        return WideAsciiEqual(name, L"replaygain_track_gain") ||
+               WideAsciiEqual(name, L"replaygain_track_peak");
+    };
+    Bytes id3;
+    if (layout.id3v2.present) {
+        // A scan must not apply the property dialog's tag conversion policy.
+        // Keep every unrelated frame, including private data, lyrics and APIC.
+        Bytes frames;
+        for (const auto& frame : layout.id3v2.frames) {
+            if (!is_gain(frame.metadata_name))
+                frames.insert(frames.end(), frame.raw.begin(), frame.raw.end());
+        }
+        AppendUserTextFrame(frames, layout.id3v2.major, L"replaygain_track_gain", gain, 0);
+        AppendUserTextFrame(frames, layout.id3v2.major, L"replaygain_track_peak", peak, 0);
+        const auto size = std::max<std::uint64_t>(frames.size(), layout.id3v2.total_size - 10);
+        if (size > kMaximumTagBytes) return E_OUTOFMEMORY;
+        frames.resize(static_cast<size_t>(size), 0);
+        id3 = {'I', 'D', '3', layout.id3v2.major, 0, 0};
+        AppendSynchsafe(id3, static_cast<std::uint32_t>(frames.size()));
+        id3.insert(id3.end(), frames.begin(), frames.end());
+    }
+
+    Bytes ape;
+    if (layout.ape.present || (!layout.id3v2.present && (!gain.empty() || !peak.empty()))) {
+        // Keep each original item raw; don't merge other tag families into it.
+        auto previous = layout.ape;
+        std::erase_if(previous.items, [&](const auto& item) {
+            return is_gain(ApeDisplayField(item.key));
+        });
+        for (auto& item : previous.items) item.semantic.clear();
+        TagData changed;
+        SetField(changed, L"replaygain_track_gain", std::wstring(gain));
+        SetField(changed, L"replaygain_track_peak", std::wstring(peak));
+        ape = BuildApe(previous, changed, BuiltinCoverAction::unchanged);
+        if (ape.empty()) return E_OUTOFMEMORY;
+    }
+    Bytes before, after;
+    const auto start = layout.ape.present ? layout.ape.physical_start : layout.body_end;
+    const auto end = layout.ape.present ? layout.ape.footer_end : layout.body_end;
+    if (!ReadRange(source.Get(), layout.body_end, start - layout.body_end, before) ||
+        !ReadRange(source.Get(), end, layout.file_size - end, after))
+        return STG_E_READFAULT;
+    // The untouched tail includes ID3v1 and Lyrics3, in their original order.
+    before.insert(before.end(), ape.begin(), ape.end());
+    before.insert(before.end(), after.begin(), after.end());
+    return ReplaceWithTags(path, source.Get(), layout, id3, before, {}, {});
+}
+
 bool ExtensionIs(const std::filesystem::path& path,
                  std::wstring_view extension) {
     const auto actual = path.extension().wstring();
@@ -2118,6 +2189,14 @@ HRESULT ReadBuiltinFileInfo(const std::filesystem::path& path,
     } catch (...) {
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     }
+}
+
+HRESULT WriteBuiltinMpegReplayGain(const std::filesystem::path& path,
+                                  std::wstring_view gain,
+                                  std::wstring_view peak) noexcept {
+    try { return WriteMpegReplayGain(path, gain, peak); }
+    catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+    catch (...) { return HRESULT_FROM_WIN32(ERROR_INVALID_DATA); }
 }
 
 BuiltinTagWriteResult WriteBuiltinFileInfo(

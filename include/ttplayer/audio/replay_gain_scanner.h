@@ -50,6 +50,19 @@ using ReplayGainProgress =
 // A UI may wait here while paused; false requests cooperative cancellation.
 using ReplayGainCheckpoint = std::function<bool()>;
 
+// Snapshot verified reader binaries once per batch. Unknown/replaced plug-ins
+// retain serial scanning; matching a filename or extension is not sufficient.
+class ReplayGainScanConcurrency {
+public:
+    ReplayGainScanConcurrency(const plugins::PluginManager& library, HMODULE ttpcomm);
+    [[nodiscard]] bool Allows(const std::filesystem::path& path, int subtrack) const;
+private:
+    struct Format { std::wstring pattern; bool verified{}; };
+    std::vector<Format> formats_;
+    bool analyzer_verified_{};
+    [[nodiscard]] bool AllowsFile(const std::filesystem::path& path) const;
+};
+
 // Ordinals 100/101 are the exact sample-rate predicate and ReplayGain object
 // used by CScanGainDlg::CWorkThread::Run (004A5251).  This query only verifies
 // that the two entry points exist; individual rates are checked when a reader
@@ -64,14 +77,16 @@ using ReplayGainCheckpoint = std::function<bool()>;
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
     std::stop_token stop = {}, ReplayGainProgress progress = {}, int subtrack = 0,
-    ReplayGainCheckpoint checkpoint = {});
+    ReplayGainCheckpoint checkpoint = {},
+    const ReplayGainScanConcurrency* concurrency = nullptr);
 
 [[nodiscard]] ReplayGainScanResult CommitReplayGainTrack(
     const plugins::PluginManager& library,
     const std::filesystem::path& path,
     const ReplayGainScanResult& analysis,
     ReplayGainCommitPolicy policy,
-    std::stop_token stop = {}, int subtrack = 0);
+    std::stop_token stop = {}, int subtrack = 0,
+    ReplayGainCheckpoint checkpoint = {});
 
 // FUN_004B107E creates ordinal 101 beside the playback processor and
 // FUN_004B1950 feeds it the already-decoded double PCM before ReplayGain/EQ.
