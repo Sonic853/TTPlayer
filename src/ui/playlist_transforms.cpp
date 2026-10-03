@@ -1,4 +1,5 @@
 #include "ttplayer/i18n/i18n.h"
+#include "ttplayer/audio/legacy_equalizer.h"
 #include "options_buttons.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/platform/optional_windows_api.h"
@@ -815,9 +816,9 @@ public:
         if (convert.equalizer && equalizer && equalizer->profile != -2) {
             if (!ttpcomm_) return Fail(i18n::Literal(L"ttpcomm equalizer is unavailable"));
             equalizer_ = Create(ttpcomm_, 103);
-            if (!equalizer_ || !EqInitialize(
+            if (!equalizer_ || !audio::InitializeLegacyEqualizer(
                     equalizer_, format_.nSamplesPerSec, format_.nChannels) ||
-                !EqSet(equalizer_, equalizer->current.data()))
+                !audio::SetLegacyEqualizer(equalizer_, equalizer->current))
                 return Fail(i18n::Literal(L"ttpcomm equalizer initialization failed"));
         }
         if (convert.surround && equalizer && equalizer->surround != 0) {
@@ -995,23 +996,6 @@ private:
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    static bool EqInitialize(void* object, DWORD rate, WORD channels) noexcept {
-        __try {
-            auto table = *static_cast<void***>(object);
-            return reinterpret_cast<unsigned char (__thiscall*)(
-                void*, DWORD, WORD)>(table[1])(object, rate, channels) != 0;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-    }
-
-    static bool EqSet(void* object, const int* values) noexcept {
-        __try {
-            auto table = *static_cast<void***>(object);
-            reinterpret_cast<void (__thiscall*)(void*, const int*)>(
-                table[2])(object, values);
-            return true;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-    }
-
     static bool EqProcess(void* object, double* samples, int* count) noexcept {
         __try {
             auto table = *static_cast<void***>(object);
@@ -1023,11 +1007,11 @@ private:
         } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     }
 
-    static bool SurroundInitialize(void* object, DWORD rate, WORD channels,
+    static bool SurroundInitialize(void* object, DWORD rate, DWORD channels,
                                    int amount) noexcept {
         __try {
             auto table = *static_cast<void***>(object);
-            reinterpret_cast<void (__thiscall*)(void*, DWORD, WORD, int)>(
+            reinterpret_cast<void (__thiscall*)(void*, DWORD, DWORD, int)>(
                 table[1])(object, rate, channels, amount);
             return true;
         } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }

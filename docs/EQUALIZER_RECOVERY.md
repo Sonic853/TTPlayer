@@ -1,5 +1,12 @@
 # Equalizer recovery
 
+> 2026-10-03 follow-up: [Original equalizer implementation analysis](ORIGINAL_EQUALIZER_IMPLEMENTATION_ANALYSIS.md)
+> identified and fixed the DSP parameter order and refined the
+> `Current` / `Custom` / `ProfileLast` transitions below. Playback and offline
+> conversion now share the adapter: XML is preamp-first, while ordinal 103
+> requires ten bands followed by preamp. See section 11 of that analysis for
+> the local, XP and Win7 PCM/state regression results.
+
 2026-09-23: the main-window and equalizer popups now share preset population,
 check states and command dispatch. See [shared menu audit](SHARED_MENU_PARITY.md)
 for the missing `00461BAE -> 004299CD` path and the related lyric/menu fixes.
@@ -161,10 +168,13 @@ audio engine, matching the original `-100..100` playback balance.
 The executable's thirteen ten-band arrays (recommended profile zero plus
 twelve named categories) were recovered from the table at VA `0053B260`.
 Selecting a preset replaces only the ten bands and retains
-preamp. A user band change selects custom profile `-1` and copies `Current` to
-`Custom`. Disable stores `ProfileLast` and selects `-2`; re-enable restores the
+preamp. In the original scroll handler, an already-custom profile copies
+`Current` to `Custom`; the first notification from a preset instead selects
+custom profile `-1` and records `ProfileLast`. Subsequent notifications may then
+copy the values. Disable stores `ProfileLast` and selects `-2`; re-enable restores the
 stored profile. Reset zeros all eleven values and selects custom unless the EQ
-is disabled. Commands `0x7E2F/0x7E30` load and save the native
+is disabled; both the original reset handler and the corrected rebuild leave
+`Custom` available for recall. Commands `0x7E2F/0x7E30` load and save the native
 `ttplayer_eq/Equalizer Custom` profile shape.
 
 `EqualizerWnd`, `EqualizerVisible`, `Profile`, `ProfileLast`, `Surround`,

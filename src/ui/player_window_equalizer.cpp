@@ -327,12 +327,19 @@ LRESULT PlayerWindow::HandleEqualizerMessage(UINT message, WPARAM wparam,
                 (!vertical && wparam != VK_LEFT && wparam != VK_RIGHT))
                 return 0;
             const bool increase = wparam == VK_RIGHT || wparam == VK_UP;
+            const int slider = equalizer_focused_slider_;
+            const int minimum = slider == kEqSliderBalance ? -10 :
+                slider == kEqSliderSurround ? 0 : -12;
+            const int maximum = slider == kEqSliderBalance ? 10 :
+                slider == kEqSliderSurround ? 16 : 12;
+            const int value = std::clamp(EqualizerSliderValue(slider) +
+                (increase ? 1 : -1), minimum, maximum);
+            // 00452413 sends no notification when a key hits the limit.
+            if (value == EqualizerSliderValue(slider)) return 0;
             // FUN_00452413 reports keyboard changes as SB_THUMBPOSITION,
             // which restores rather than replaces the main status text.
             SetEqualizerTrackingStatus(equalizer_focused_slider_, false);
-            SetEqualizerSliderValue(equalizer_focused_slider_,
-                EqualizerSliderValue(equalizer_focused_slider_) +
-                    (increase ? 1 : -1), true);
+            SetEqualizerSliderValue(slider, value, true);
             return 0;
         }
         break;
@@ -833,21 +840,27 @@ void PlayerWindow::SetEqualizerSliderValue(int slider, int value,
         audio_->SetBalance(settings_.player.balance);
     } else if (slider == kEqSliderSurround) {
         settings_.equalizer.surround = std::clamp(value, 0, 16);
-        ApplyEqualizer();
     } else if (slider == kEqSliderPreamp ||
                (slider >= kEqSliderFirstBand && slider <= kEqSliderLastBand)) {
         if (settings_.equalizer.profile == -2) return;
         const size_t index = slider == kEqSliderPreamp ? 0U :
             static_cast<size_t>(slider - kEqSliderFirstBand + 1);
         settings_.equalizer.current[index] = std::clamp(value, -12, 12);
-        if (user_change) {
-            if (settings_.equalizer.profile != -1)
-                settings_.equalizer.profile_last = settings_.equalizer.profile;
-            settings_.equalizer.profile = -1;
-            settings_.equalizer.custom = settings_.equalizer.current;
-        }
-        ApplyEqualizer();
+    } else {
+        return;
     }
+    if (user_change) {
+        // 00429DDB applies this common state transition to balance/surround
+        // notifications too. The first notification from a preset selects
+        // Custom; only a subsequent notification copies Current to Custom.
+        if (settings_.equalizer.profile == -1) {
+            settings_.equalizer.custom = settings_.equalizer.current;
+        } else if (settings_.equalizer.profile != -2) {
+            settings_.equalizer.profile_last = settings_.equalizer.profile;
+            settings_.equalizer.profile = -1;
+        }
+    }
+    ApplyEqualizer();
     if (equalizer_window_) InvalidateRect(equalizer_window_, nullptr, FALSE);
 }
 
@@ -901,6 +914,10 @@ void PlayerWindow::SetEqualizerSliderFromPoint(int slider, POINT point,
                                  maximum - minimum, interval);
     }
     const int previous = EqualizerSliderValue(slider);
+    value = std::clamp(value, minimum, maximum);
+    // 00452326 notifies only after the mapped value changes. A mouse move
+    // within the same step must not advance the Profile/Custom state machine.
+    if (tracking && value == previous) return;
     SetEqualizerSliderValue(slider, value, true);
     if (tracking) {
         // FUN_00452326 sends SB_THUMBTRACK only when mapping changed value.
@@ -987,14 +1004,12 @@ bool PlayerWindow::HandleEqualizerCommand(UINT command) {
                   kEqualizerPresets[profile].bands.end(),
                   settings_.equalizer.current.begin() + 1);
         settings_.equalizer.profile = static_cast<int>(profile);
-        settings_.equalizer.profile_last = static_cast<int>(profile);
         ApplyEqualizer();
     } else if (command == kEqCommandFlat) {
         return HandleEqualizerCommand(kEqCommandPresetFirst);
     } else if (command == kEqCommandCustom) {
         settings_.equalizer.current = settings_.equalizer.custom;
         settings_.equalizer.profile = -1;
-        settings_.equalizer.profile_last = -1;
         ApplyEqualizer();
     } else if (command == kEqCommandEnable) {
         if (settings_.equalizer.profile == -2) {
@@ -1013,7 +1028,8 @@ bool PlayerWindow::HandleEqualizerCommand(UINT command) {
         ApplyEqualizer();
     } else if (command == kEqCommandReset) {
         settings_.equalizer.current.fill(0);
-        settings_.equalizer.custom = settings_.equalizer.current;
+        // 0042A0DC clears Current only; selecting Custom can still recall the
+        // saved curve until a subsequent custom-slider notification saves it.
         if (settings_.equalizer.profile != -2) {
             settings_.equalizer.profile_last = settings_.equalizer.profile;
             settings_.equalizer.profile = -1;
@@ -1045,7 +1061,6 @@ bool PlayerWindow::HandleEqualizerCommand(UINT command) {
             settings_.equalizer.custom = values;
             settings_.equalizer.current = values;
             settings_.equalizer.profile = -1;
-            settings_.equalizer.profile_last = -1;
             ApplyEqualizer();
         } else {
             static_cast<void>(WriteEqualizerProfileFile(

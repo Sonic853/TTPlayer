@@ -1,5 +1,6 @@
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/audio_engine.h"
+#include "ttplayer/audio/legacy_equalizer.h"
 #include "ttplayer/audio/builtin_file_info.h"
 #include "ttplayer/audio/directshow_source.h"
 #include "ttplayer/audio/format_probe.h"
@@ -1653,13 +1654,13 @@ public:
             if (eq_) DestroyObject(eq_);
             eq_ = nullptr;
         } else if (ttpcomm_module_) {
-            bool initialized = true;
-            if (!eq_) {
-                eq_ = CreateObject(ttpcomm_module_, 103);
-                initialized = eq_ && EqInitialize(eq_, format_.nSamplesPerSec,
-                                                  format_.nChannels);
-            }
-            if (eq_ && (!initialized || !EqSet(eq_, options.equalizer_values.data()))) {
+            if (!eq_) eq_ = CreateObject(ttpcomm_module_, 103);
+            // FUN_004B182C initializes the format before each update. This
+            // refreshes coefficients without discarding buffered samples;
+            // seeking clears history separately through Reset().
+            if (eq_ && (!InitializeLegacyEqualizer(
+                            eq_, format_.nSamplesPerSec, format_.nChannels) ||
+                        !SetLegacyEqualizer(eq_, options.equalizer_values))) {
                 DestroyObject(eq_);
                 eq_ = nullptr;
             }
@@ -1900,23 +1901,6 @@ private:
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    static bool EqInitialize(void* object, DWORD rate, WORD channels) noexcept {
-        __try {
-            auto table = *static_cast<void***>(object);
-            return reinterpret_cast<unsigned char (__thiscall*)(
-                void*, DWORD, WORD)>(table[1])(object, rate, channels) != 0;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-    }
-
-    static bool EqSet(void* object, const int* values) noexcept {
-        __try {
-            auto table = *static_cast<void***>(object);
-            reinterpret_cast<void (__thiscall*)(void*, const int*)>(
-                table[2])(object, values);
-            return true;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-    }
-
     static bool EqProcess(void* object, double* samples, int* count) noexcept {
         __try {
             auto table = *static_cast<void***>(object);
@@ -1935,11 +1919,11 @@ private:
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    static bool SurroundInitialize(void* object, DWORD rate, WORD channels,
+    static bool SurroundInitialize(void* object, DWORD rate, DWORD channels,
                                    int amount) noexcept {
         __try {
             auto table = *static_cast<void***>(object);
-            reinterpret_cast<void (__thiscall*)(void*, DWORD, WORD, int)>(
+            reinterpret_cast<void (__thiscall*)(void*, DWORD, DWORD, int)>(
                 table[1])(object, rate, channels, amount);
             return true;
         } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
