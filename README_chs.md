@@ -21,6 +21,7 @@
 15. 增加 AAC 编码的额外拓展 [TTPlayerAAC](https://github.com/Sonic853/TTPlayerAAC)
 16. 增加多语言支持 [TTPlayerI18n](https://github.com/Sonic853/TTPlayerI18n)
 17. 新增 [GitHub / Gitee 软件更新](docs/RELEASE_UPDATE_IMPLEMENTATION.md)：默认使用 Gitee，自动检查默认关闭；支持独立更新器下载、校验、备份及替换程序。
+18. 增加 OGG 编码的额外拓展 [TTPlayerOGG](https://github.com/Sonic853/TTPlayerOGG)
 
 ## 构建
 
