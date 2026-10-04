@@ -1233,7 +1233,8 @@ void ApplyWriteResult(FileInfoContext& context,
     const int navigation = std::exchange(context.navigation_after_save, 0);
     if (context.end_file_access) context.end_file_access();
     if (FAILED(result.error)) {
-        MessageBoxW(context.sheet, context.strings.save_failure.c_str(),
+        const auto message = detail::FileInfoSaveErrorText(context.strings.save_failure, result.error);
+        MessageBoxW(context.sheet, message.c_str(),
                     FormatFileInfoTitle(context).c_str(),
                     MB_OK | MB_ICONERROR);
         UpdateSheetState(context);

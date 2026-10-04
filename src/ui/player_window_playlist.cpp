@@ -1447,7 +1447,8 @@ bool RemoveReplayGainTags(const plugins::PluginManager* library,
         "replaygain_track_gain", std::wstring_view{});
     const HRESULT peak = reader->SetMetadataValueDirect(
         "replaygain_track_peak", std::wstring_view{});
-    return SUCCEEDED(gain) && SUCCEEDED(peak);
+    const HRESULT committed = reader->CommitMetadata();
+    return SUCCEEDED(gain) && SUCCEEDED(peak) && SUCCEEDED(committed);
 }
 } // namespace
 

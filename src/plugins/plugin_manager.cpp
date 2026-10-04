@@ -1170,6 +1170,8 @@ struct LegacyReaderSession::Impl {
     std::filesystem::path module_path;
     std::vector<MetadataEntry> metadata_entries;
     std::vector<unsigned char> thumbnail;
+    bool metadata_committed{};
+    HRESULT metadata_commit_result{S_OK};
 
     ~Impl() {
         // The decoder can still hold a temporary reference to the staging
@@ -1191,7 +1193,7 @@ HRESULT LegacyReaderSession::Read(size_t requested_bytes,
                                   bool& end_of_stream) noexcept {
     output.clear();
     end_of_stream = false;
-    if (!impl_ || !impl_->reader) return E_UNEXPECTED;
+    if (!impl_ || !impl_->reader || impl_->metadata_committed) return E_UNEXPECTED;
 
     constexpr size_t maximum = 64U * 1024U * 1024U;
     if (impl_->decoder) {
@@ -1293,7 +1295,7 @@ HRESULT LegacyReaderSession::Read(size_t requested_bytes,
 }
 
 HRESULT LegacyReaderSession::Seek(DWORD& position_ms) noexcept {
-    if (!impl_ || !impl_->reader) return E_UNEXPECTED;
+    if (!impl_ || !impl_->reader || impl_->metadata_committed) return E_UNEXPECTED;
     const HRESULT result = InvokeReaderSeek(impl_->reader, &position_ms);
     if (FAILED(result) || !impl_->decoder) return result;
     return impl_->decoder->Reset();
@@ -1356,6 +1358,7 @@ const std::vector<unsigned char>& LegacyReaderSession::Thumbnail() const noexcep
 HRESULT LegacyReaderSession::ReplaceThumbnails(
     std::span<const ThumbnailData> thumbnails) noexcept {
     if (!impl_ || !impl_->thumbnail_object) return E_NOINTERFACE;
+    if (impl_->metadata_committed) return E_UNEXPECTED;
     // Reader slot 4 capability bit 2 is the metadata-write flag; bit 4 is the
     // independent ISoundThumbnail write flag tested at 004AD696.
     if ((impl_->capabilities & 4U) == 0) return E_ACCESSDENIED;
@@ -1439,6 +1442,7 @@ std::optional<std::wstring> LegacyReaderSession::MetadataValue(
 HRESULT LegacyReaderSession::SetMetadataValue(
     std::string_view name, std::wstring_view value) noexcept {
     if (!impl_ || !impl_->metadata) return E_NOINTERFACE;
+    if (impl_->metadata_committed) return E_UNEXPECTED;
     // Reader slot 4 capability bit 2 is the exact write guard used by
     // FUN_004ADD9C before metadata slot 6.
     if ((impl_->capabilities & 4U) == 0) return E_ACCESSDENIED;
@@ -1455,6 +1459,7 @@ HRESULT LegacyReaderSession::SetMetadataValue(
 HRESULT LegacyReaderSession::SetMetadataValueDirect(
     std::string_view name, std::wstring_view value) noexcept {
     if (!impl_ || !impl_->metadata) return E_NOINTERFACE;
+    if (impl_->metadata_committed) return E_UNEXPECTED;
     try {
         const std::string terminated_name(name);
         const std::wstring terminated_value(value);
@@ -1463,6 +1468,21 @@ HRESULT LegacyReaderSession::SetMetadataValueDirect(
     } catch (...) {
         return E_OUTOFMEMORY;
     }
+}
+
+HRESULT LegacyReaderSession::CommitMetadata() noexcept {
+    if (!impl_ || !impl_->reader) return E_UNEXPECTED;
+    if (impl_->metadata_committed) return impl_->metadata_commit_result;
+    void* commit{};
+    const HRESULT queried = InvokeQueryInterface(
+        impl_->reader, kMetadataCommitInterface, &commit);
+    if (queried == E_NOINTERFACE) return S_FALSE;
+    if (FAILED(queried)) return queried;
+    if (!commit) return E_UNEXPECTED;
+    impl_->metadata_committed = true;
+    impl_->metadata_commit_result = InvokeNoArgument(commit, 3);
+    Release(commit);
+    return impl_->metadata_commit_result;
 }
 
 struct LegacyDecoderSession::Impl {

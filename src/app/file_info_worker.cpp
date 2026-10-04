@@ -513,7 +513,17 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
                 }
                 if (SUCCEEDED(result.status)) result.status = result.cover_status;
             }
-            // Several readers commit their tag transaction from Release.
+            // New readers can acknowledge the actual disk transaction. Old
+            // readers return S_FALSE and still commit on their final Release.
+            const HRESULT committed = reader->CommitMetadata();
+            if (FAILED(committed)) {
+                result.status = committed;
+                for (auto& status : result.fields)
+                    if (SUCCEEDED(status)) status = committed;
+                if (request.cover_action !=
+                        ttplayer::ui::detail::FileInfoProbeCoverAction::unchanged &&
+                    SUCCEEDED(result.cover_status)) result.cover_status = committed;
+            }
             reader.reset();
             ttplayer::ui::detail::FileInfoProbeReadResult actual;
             auto verification = manager.OpenReaderForMetadata(logical_path, &opened);

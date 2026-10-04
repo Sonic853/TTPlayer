@@ -8,6 +8,22 @@
 
 namespace ttplayer::ui::detail {
 
+inline std::wstring FileInfoSaveErrorText(std::wstring_view prefix, HRESULT error) {
+    wchar_t description[512]{};
+    const DWORD code = HRESULT_FACILITY(error) == FACILITY_WIN32
+        ? HRESULT_CODE(error) : static_cast<DWORD>(error);
+    FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, code, 0, description, static_cast<DWORD>(std::size(description)), nullptr);
+    std::wstring message(prefix);
+    std::wstring reason(description);
+    while (!reason.empty() && (reason.back() == L'\r' || reason.back() == L'\n' || reason.back() == L' '))
+        reason.pop_back();
+    if (!reason.empty()) message += L"\n\n" + reason;
+    wchar_t number[32]{};
+    swprintf_s(number, L" (0x%08lX)", static_cast<unsigned long>(error));
+    return message + number;
+}
+
 inline bool FileInfoTagNameEqual(std::wstring_view left, std::wstring_view right) {
     if (left.size() != right.size()) return false;
     for (size_t i = 0; i < left.size(); ++i) {

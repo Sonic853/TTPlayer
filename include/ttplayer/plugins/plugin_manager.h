@@ -19,6 +19,11 @@ namespace ttplayer::plugins {
 HRESULT CreateLegacyFileStream(const wchar_t* path, DWORD mode,
                               IStream** output) noexcept;
 
+// Optional new interface, never appended to an original Reader/Metadata vtable.
+// IUnknown slots 0..2, HRESULT __stdcall Commit() at slot 3; terminal, single attempt.
+inline constexpr GUID kMetadataCommitInterface{
+    0x3ab643c1, 0xd8a4, 0x4d49, {0x9c,0xbb,0xef,0x19,0x6b,0x04,0xb6,0xe7}};
+
 // One entry in the sound-reader registry built by CSoundLibrary_Initialize.
 // The description is supplied by the successfully instantiated reader
 // creator; it is not read directly from the DLL's string table.
@@ -122,6 +127,10 @@ public:
     // ReplayGain comment updates through this slot.
     HRESULT SetMetadataValueDirect(std::string_view name,
                                    std::wstring_view value) noexcept;
+    // S_FALSE: old plugin, release the session then verify by reopening.
+    // Otherwise returns the explicit save result. A supporting session is
+    // terminal afterwards, including on failure; retry with a fresh reader.
+    HRESULT CommitMetadata() noexcept;
 
 private:
     struct Impl;

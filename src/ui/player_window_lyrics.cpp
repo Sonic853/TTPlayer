@@ -3692,6 +3692,8 @@ bool PlayerWindow::WriteEmbeddedLyrics(std::wstring_view text,
         // capability-bit guard (FLAC can report bit 4 clear yet write tags).
         result = reader->SetMetadataValueDirect("Lyrics", deleting ? std::wstring_view{} : text);
         if (SUCCEEDED(result)) reader->SetMetadataValueDirect("Lyric", {});
+        const HRESULT committed = reader->CommitMetadata();
+        if (SUCCEEDED(result) && FAILED(committed)) result = committed;
         reader.reset(); // Some AddIns flush tags on final reader Release.
     }
     if (FAILED(result)) {

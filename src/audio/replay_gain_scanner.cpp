@@ -667,8 +667,15 @@ ReplayGainScanResult CommitReplayGainTrack(
         error.decoded_frames = analysis.decoded_frames;
         return error;
     }
-    // Several private metadata implementations flush while their reader is
-    // released rather than in SetValue itself.
+    const HRESULT committed = metadata->CommitMetadata();
+    if (FAILED(committed)) {
+        auto error = analysis;
+        error.status = ReplayGainScanStatus::write_error;
+        error.result = committed;
+        error.diagnostic = L"committing ReplayGain tags to disk";
+        return error;
+    }
+    // Old private metadata implementations still flush on final Release.
     metadata.reset();
 
     // A legacy metadata setter can return S_OK while ignoring an unknown
