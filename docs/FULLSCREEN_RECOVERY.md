@@ -43,6 +43,40 @@ retained, including a legitimate zero-height lyric surface at `LrcSize*=0`.
 Stopping playback still synchronously leaves full screen. Cross-process
 deactivation leaves the detached surfaces in place.
 
+## Lyric fullscreen visibility fix (2026-10-06)
+
+Two real-EXE failures were reproduced with an isolated silent WAV/LRC:
+
+- `TransparentFS=1` followed the original `0046228D -> 0044ABB1 ->
+  0044E090` desktop branch. The last routine selects `HWND_BOTTOM` when its
+  second argument is nonzero. The reconstructed lyric HWND was visible and
+  work-area sized, but other applications covered it after the player hid.
+  Transparent lyrics-only fullscreen now uses `HWND_TOPMOST`, like opaque
+  fullscreen, while retaining `rcWork` and keeping the taskbar accessible.
+  This foreground visibility is an intentional change from the original
+  background placement; it does not disable the saved transparency option.
+- A `WM_SIZE` on the hidden lyric host called `LayoutLyricControls` and moved
+  the already-detached popup into normal client coordinates. The reproduction
+  shrank a 1920 x 1200 fullscreen surface to 296 x 252 in normal mode and
+  394 x 21 in mini mode. Host layout now leaves detached lyric geometry to
+  `UpdateFullScreenLayout`. Restoration first clears the detached flag, so
+  normal/mini layout still runs when the control is reattached.
+
+Local regressions live in `tests/ui/lyric_fullscreen_visibility_tests.inc`
+(real player HWNDs, normal/mini, transparent/opaque, mode changes, host layout
+notifications and double-click restoration) and
+`tests/ui/fullscreen_visibility_probe.py` (the Release EXE with isolated
+fixtures, window hit testing and opaque lyric pixel checks). Test artifacts
+remain under `tests`; they are not part of the release package or Actions.
+
+Validation: the Release build `2026.10.06p1` passed
+`lyric_main_menu_tests`, `fullscreen_lyric_drag_tests` and
+`fullscreen_lyric_render_tests` (including actual DWM alpha composition).
+The standalone EXE probe passed all four normal/mini and opaque/transparent
+combinations, including transitions from combined and visual-only fullscreen.
+The XP/Win7 static import audit passed; these changes were not run in the
+XP/Win7 virtual machines during this verification.
+
 ## Full-screen lyric configuration
 
 The rebuilt settings reader/writer now preserves the independent values used

@@ -2203,7 +2203,12 @@ void PlayerWindow::UpdateFullScreenLayout() {
         if (settings_.lyric.fullscreen_transparent &&
             LayeredWindowsAvailable()) {
             fullscreen_lyric_desktop_mode_ = true;
-            DetachLyricControl(monitor.rcWork, HWND_BOTTOM);
+            // 0044E090 used HWND_BOTTOM for transparent work-area lyrics.
+            // That puts this fullscreen command behind other applications
+            // (and modern desktop hosts) immediately after hiding the player.
+            // Keep the work area / taskbar policy, but show the lyric surface
+            // above applications just like the opaque fullscreen variant.
+            DetachLyricControl(monitor.rcWork, HWND_TOPMOST);
             RedrawWindow(GetDesktopWindow(), nullptr, nullptr,
                 RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
         } else {

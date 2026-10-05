@@ -1586,7 +1586,9 @@ void PlayerWindow::LayoutLyricControls() {
         move(lyric_ontop_, skin_->Lyric().ontop);
         move(lyric_desklrc_, skin_->Lyric().desklrc);
     }
-    if (lyric_control_) {
+    // WM_SIZE/settings refreshes can still reach the hidden LyricWnd. Once
+    // detached, only UpdateFullScreenLayout owns this control's geometry.
+    if (lyric_control_ && !fullscreen_lyric_detached_) {
         RECT bounds = LyricTextBounds();
         if (text_only) {
             RECT client{};

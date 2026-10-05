@@ -126,7 +126,7 @@ void PlayerWindow::UpdateFullScreenLyricInput() {
     UINT flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW;
     if (above == fullscreen_lyric_input_) flags |= SWP_NOZORDER;
     // Stay immediately above lyrics, not above every other application. This
-    // also respects the HWND_BOTTOM desktop-background fullscreen variant.
+    // keeps the transparent work-area variant in the same lyric window stack.
     SetWindowPos(fullscreen_lyric_input_, above ? above : HWND_TOP,
         bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top, flags);
 }
