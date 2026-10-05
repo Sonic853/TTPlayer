@@ -617,6 +617,8 @@ private:
     void ShowFullScreenLyricContextMenu(POINT screen_point);
     void PrepareLyricMenu(HMENU menu, bool fullscreen_popup = false) const;
     void PrepareFullScreenLyricMenu(HMENU menu) const;
+    void PrepareLyricDoubleClickMenu(HMENU menu) const;
+    bool HandleLyricDoubleClick(HWND origin);
     void PrepareLyricEditorMenu(HMENU menu) const;
     bool HandleLyricCommand(UINT command);
     bool EnterLyricEditor();

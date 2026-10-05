@@ -493,7 +493,8 @@ BOOL WINAPI PlayerWindow::HandleSkinPluginContentInput(void* context,const TtpSk
         if(!dragging && !over_lyric) return TRUE;
         break;
     case WM_LBUTTONDBLCLK:
-        return over_content; // Only menus/frame controls may change content.
+        if (over_lyric) self.HandleLyricDoubleClick(window);
+        return over_content; // Visual content retains its existing mouse behaviour.
     case WM_MOUSEWHEEL:
         if(!over_lyric) return FALSE;
         // A lyric wheel never falls through to the DLL's volume adjustment.

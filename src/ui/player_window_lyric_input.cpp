@@ -45,12 +45,14 @@ LRESULT CALLBACK PlayerWindow::FullScreenLyricInputProc(
     }
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
     case WM_NCHITTEST:
-        return self && self->fullscreen_lyric_detached_ && self->ActiveLyricDragAllowed()
+        return self && self->fullscreen_lyric_detached_ &&
+            (self->ActiveLyricDragAllowed() || self->settings_.lyric.double_click_fullscreen)
             ? HTCLIENT : HTTRANSPARENT;
     default: break;
     }
     if (self && self->fullscreen_lyric_detached_ && self->lyric_control_ &&
-        IsWindow(self->lyric_control_) && self->ActiveLyricDragAllowed()) {
+        IsWindow(self->lyric_control_) &&
+        (self->ActiveLyricDragAllowed() || self->settings_.lyric.double_click_fullscreen)) {
         switch (message) {
         case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
         case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
@@ -90,7 +92,8 @@ void PlayerWindow::UpdateFullScreenLyricInput() {
     if (!fullscreen_lyric_detached_ || !lyric_control_ || !IsWindow(lyric_control_) ||
         !IsWindowVisible(lyric_control_) || !IsWindowEnabled(lyric_control_) ||
         (GetWindowLongPtrW(lyric_control_, GWL_STYLE) & WS_CHILD) ||
-        !settings_.lyric.fullscreen_transparent || !ActiveLyricDragAllowed() ||
+        !settings_.lyric.fullscreen_transparent ||
+        (!ActiveLyricDragAllowed() && !settings_.lyric.double_click_fullscreen) ||
         !InputOnlyCompositionAvailable()) {
         DestroyFullScreenLyricInput();
         return;
@@ -103,6 +106,7 @@ void PlayerWindow::UpdateFullScreenLyricInput() {
         const HINSTANCE instance = instance_ ? instance_ : GetModuleHandleW(nullptr);
         WNDCLASSEXW type{sizeof(type)};
         if (!GetClassInfoExW(instance, kFullScreenLyricInputClass, &type)) {
+            type.style = CS_DBLCLKS;
             type.lpfnWndProc = FullScreenLyricInputProc;
             type.hInstance = instance;
             type.hCursor = LoadCursorW(nullptr, IDC_ARROW);

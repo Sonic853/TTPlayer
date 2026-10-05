@@ -173,6 +173,7 @@ struct VisualSettings {
 // values 1..3 select the independent Goom/Spectrum/BlurScope profile.
 // Extensions: 4 album background, 5 Baidu pulse, 6 Baidu ripple.
 struct FullScreenSettings {
+    int last_mode{3}; // 1 lyrics, 2 visual, 3 lyrics + visual; never the exit state.
     int visual_type{1};
     std::array<int, 7> position_relation{0, 1, 0, 1, 1, 1, 1};
     std::array<int, 7> lyric_size{2, 2, 2, 2, 10, 10, 10};
@@ -363,6 +364,7 @@ struct LyricSettings {
     bool fullscreen_transparent{};
     bool fullscreen_auto_font{true};
     bool fullscreen_drag_lyric{true};
+    bool double_click_fullscreen{};
     LOGFONTW fullscreen_font{};
     bool fullscreen_font_valid{};
     COLORREF fullscreen_text_color{RGB(0,128,192)};

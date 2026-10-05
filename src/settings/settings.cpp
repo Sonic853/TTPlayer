@@ -1021,6 +1021,7 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
     }
     if (auto node=SelectOwned(doc,L"/ttplayer/FullScreen")) {
         auto* const n=node.Get();
+        s.fullscreen.last_mode=std::clamp(IntAttr(n,L"LastMode",3),1,3);
         s.fullscreen.visual_type=std::clamp(
             IntAttr(n,L"VisualType",s.fullscreen.visual_type),0,6);
         s.fullscreen.album_fallback_image=StringAttr(n,L"AlbumFallbackImage");
@@ -1157,6 +1158,7 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         s.lyric.charset=IntAttr(n,L"CharSet",0);
         s.lyric.scroll_mode=IntAttr(n,L"ScrollMode",0);
         s.lyric.mini_scroll_mode=IntAttr(n,L"ScrollMode2",1);
+        s.lyric.double_click_fullscreen=IntAttr(n,L"DoubleClickFullScreen",0)!=0;
         s.lyric.fullscreen_scroll_mode=IntAttr(n,L"ScrollModeFS",0);
         s.lyric.fullscreen_text_align=IntAttr(n,L"TextAlignFS",1);
         s.lyric.fullscreen_row_interval=IntAttr(n,L"RowIntervalFS",4);
@@ -1829,6 +1831,7 @@ void SaveWindowState(const std::filesystem::path& path,
     }
     if(auto* element=EnsureElement(document,L"FullScreen")) {
         auto element_owner=AdoptCom(element);
+        SetAttribute(element,L"LastMode",std::clamp(settings.fullscreen.last_mode,1,3));
         SetAttribute(element,L"VisualType",
                      std::clamp(settings.fullscreen.visual_type,0,6));
         SetAttribute(element,L"AlbumFallbackImage",settings.fullscreen.album_fallback_image);
@@ -1914,6 +1917,7 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"CharSet",settings.lyric.charset);
         SetAttribute(element,L"ScrollMode",settings.lyric.scroll_mode);
         SetAttribute(element,L"ScrollMode2",settings.lyric.mini_scroll_mode);
+        SetAttribute(element,L"DoubleClickFullScreen",settings.lyric.double_click_fullscreen ? 1 : 0);
         SetAttribute(element,L"ScrollModeFS",settings.lyric.fullscreen_scroll_mode);
         SetAttribute(element,L"TextAlignFS",settings.lyric.fullscreen_text_align);
         SetAttribute(element,L"RowIntervalFS",settings.lyric.fullscreen_row_interval);

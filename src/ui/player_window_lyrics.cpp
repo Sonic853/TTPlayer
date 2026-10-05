@@ -386,6 +386,18 @@ std::wstring NormalizeEditorNewlines(std::wstring text) {
 
 } // namespace
 
+bool PlayerWindow::HandleLyricDoubleClick(HWND origin) {
+    if (!settings_.lyric.double_click_fullscreen || lyric_editor_ ||
+        fullscreen_mode_ == 2) return false;
+    // Cancel any pending lyric seek / skin drag before reparenting controls.
+    lyric_line_dragging_ = false;
+    lyric_line_drag_offset_ = 0;
+    if (skin_drag_window_ == origin) EndSkinMouseCapture();
+    if (GetCapture() == origin) ReleaseCapture();
+    SetFullScreenMode(fullscreen_mode_ == 0 ? settings_.fullscreen.last_mode : 0, origin);
+    return true;
+}
+
 LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
                                                 WPARAM wparam, LPARAM lparam, bool content_surface) {
     const int identifier = GetDlgCtrlID(control);
@@ -474,6 +486,9 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
             InvalidateRect(control, nullptr, FALSE);
         }
         return 0;
+    case WM_LBUTTONDBLCLK:
+        if (text_control && HandleLyricDoubleClick(control)) return 0;
+        break;
     case WM_LBUTTONDOWN:
         if (text_control) {
             const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -757,6 +772,9 @@ LRESULT PlayerWindow::HandleLyricMessage(UINT message, WPARAM wparam,
         }
         break;
     }
+    case WM_LBUTTONDBLCLK:
+        if (HandleLyricDoubleClick(lyric_window_)) return 0;
+        break;
     case WM_LBUTTONDOWN: {
         const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         BeginSkinBackgroundDrag(lyric_window_, point, LyricDragHitTest(point));
@@ -3928,6 +3946,32 @@ void PlayerWindow::PrepareLyricMenu(HMENU menu, bool fullscreen_popup) const {
     CheckCommand(menu, kCmdFullscreenLyrics, fullscreen_mode_ == 1);
     CheckCommand(menu, kCmdFullscreenVisual, fullscreen_mode_ == 2);
     CheckCommand(menu, kCmdFullscreenAll, fullscreen_mode_ == 3);
+    // Fullscreen's legacy positional deletions must happen before insertion.
+    if (!fullscreen_popup) PrepareLyricDoubleClickMenu(menu);
+}
+
+void PlayerWindow::PrepareLyricDoubleClickMenu(HMENU menu) const {
+    // The main popup also has its own fullscreen submenu. Locate the lyric
+    // branch first so its shared preparation cannot insert a second root item.
+    // GetMenuItemID returns -1 for a popup after the submenu is attached;
+    // enumerate MIIM_ID below instead of searching for its command ID.
+    const HMENU parent = FindCommandMenu(menu, kCmdLyricCopy);
+    if (!parent) return;
+    if (!FindCommandMenu(parent, kCmdLyricDoubleClickFullscreen)) {
+        for (int position = 0; position < GetMenuItemCount(parent); ++position) {
+            MENUITEMINFOW item{sizeof(item)};
+            item.fMask = MIIM_ID;
+            if (!GetMenuItemInfoW(parent, position, TRUE, &item) ||
+                item.wID != kMenuFullscreen) continue;
+            const auto label = LoadResourceText(GetModuleHandleW(nullptr),
+                IDS_LYRIC_DOUBLE_CLICK_FULLSCREEN);
+            InsertMenuW(parent, position + 1, MF_BYPOSITION | MF_STRING,
+                kCmdLyricDoubleClickFullscreen, label.c_str());
+            break;
+        }
+    }
+    CheckCommand(parent, kCmdLyricDoubleClickFullscreen,
+        settings_.lyric.double_click_fullscreen);
 }
 
 void PlayerWindow::PrepareFullScreenLyricMenu(HMENU menu) const {
@@ -3972,6 +4016,7 @@ void PlayerWindow::PrepareFullScreenLyricMenu(HMENU menu) const {
                     kCmdVisualDream + index, label.c_str());
     }
     InsertMenuW(menu, 6, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+    PrepareLyricDoubleClickMenu(menu);
 }
 
 void PlayerWindow::PrepareLyricEditorMenu(HMENU menu) const {
@@ -4013,6 +4058,11 @@ void PlayerWindow::PrepareLyricEditorMenu(HMENU menu) const {
 }
 
 bool PlayerWindow::HandleLyricCommand(UINT command) {
+    if (command == kCmdLyricDoubleClickFullscreen) {
+        settings_.lyric.double_click_fullscreen = !settings_.lyric.double_click_fullscreen;
+        UpdateFullScreenLyricInput();
+        return true;
+    }
     if (command >= 0x805c && command <= 0x806f) {
         const auto index = command - 0x805c;
         if (!lyric_editor_ && index < kLyricCharsets.size()) {

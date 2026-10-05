@@ -2166,7 +2166,7 @@ void PlayerWindow::PopulateFullScreenMonitorMenu(HMENU menu) {
 bool PlayerWindow::HandleFullScreenCommand(UINT command, HWND origin) {
     if (command >= kCmdFullscreenToggle && command <= kCmdFullscreenAll) {
         if (command == kCmdFullscreenToggle)
-            SetFullScreenMode(fullscreen_mode_ == 0 ? 3 : 0, origin);
+            SetFullScreenMode(fullscreen_mode_ == 0 ? settings_.fullscreen.last_mode : 0, origin);
         else if (command == kCmdFullscreenExit)
             SetFullScreenMode(0);
         else
@@ -2278,6 +2278,7 @@ void PlayerWindow::SetFullScreenMode(int mode, HWND origin, int visual_type_over
         (settings_.visual.type == 0 || (mode == 2 && settings_.visual.type == 4)))
         settings_.visual.type = 1;
     fullscreen_mode_ = mode;
+    settings_.fullscreen.last_mode = mode;
     if (entering) {
         // FUN_0046228D hides/minimizes CPlayerWnd before either child obtains
         // its non-empty saved full-screen rectangle.  Thus the synchronous
