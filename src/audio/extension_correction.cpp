@@ -1,4 +1,5 @@
 #include "ttplayer/audio/extension_correction.h"
+#include "ttplayer/audio/format_probe.h"
 
 #include <algorithm>
 #include <array>
@@ -48,6 +49,7 @@ std::optional<std::pair<std::wstring, std::wstring>> Detect(Bytes b,
         return std::pair<std::wstring, std::wstring>{suffix, name};
     };
     if (b.size() < 16) return {};
+    if (IsWebmContainerHeader(b)) return choose(L".webm",L"WebM",{L".weba"});
     // Prefer the outer container: AAC in MP4 is not a raw .aac file, and
     // MPEG compressed audio in RIFF is still a .wav file.
     if ((Is(b,0,"RIFF") || Is(b,0,"RF64") || Is(b,0,"BW64")) && Is(b,8,"WAVE"))

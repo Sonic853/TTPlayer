@@ -1617,14 +1617,15 @@ void PlayerWindow::StartVisualWorker() {
             const auto audio = audio_;
             lock.unlock();
             if (stop.stop_requested()) return;
+            const HWND content_window=content_visual_window_.load(std::memory_order_acquire);
             const bool content_enabled=plugin_content_visual_enabled_.load(std::memory_order_acquire) &&
-                lyric_window_ && IsWindowVisible(lyric_window_);
+                content_window && IsWindowVisible(content_window);
             if ((visual_worker_enabled_.load(std::memory_order_acquire) || content_enabled) &&
                 audio->State() == audio::PlaybackState::playing) {
                 const auto samples=audio->Visualization();
                 if(content_enabled && plugin_content_runtime_) {
                     plugin_content_runtime_->Update(samples);
-                    InvalidateRect(lyric_window_,nullptr,FALSE);
+                    InvalidateRect(content_window,nullptr,FALSE);
                 }
                 if(!visual_worker_enabled_.load(std::memory_order_acquire)) continue;
                 // CPlayerWnd::Run invokes FUN_00457B11 on this worker.  It
@@ -1689,8 +1690,10 @@ void PlayerWindow::ApplySkinVisualSettings() {
 void PlayerWindow::UpdateVisualWindowLayout() {
     if (!window_) return;
     plugin_content_visual_type_=-1;
-    if(!external_skin_ || !external_skin_->Handles(lyric_window_) || fullscreen_mode_!=0)
-        plugin_content_visual_enabled_.store(false,std::memory_order_release);
+    // Painting the currently visible content surface re-enables its worker.
+    // Clear it during ownership/layout transitions (including fullscreen).
+    plugin_content_visual_enabled_.store(false,std::memory_order_release);
+    if(const HWND content=content_visual_window_.load(std::memory_order_acquire))InvalidateRect(content,nullptr,FALSE);
     const bool plugin_embedded=external_skin_ && !fullscreen_visual_detached_;
     visual_plugin_embedded_.store(plugin_embedded,std::memory_order_release);
     if(plugin_embedded && visual_window_) ShowWindow(visual_window_,SW_HIDE);
@@ -1803,6 +1806,7 @@ void PlayerWindow::UpdateVisualFrame() {
         if(playlist_window_) InvalidateRect(playlist_window_,nullptr,FALSE);
         if(external_skin_->Handles(lyric_window_)) InvalidateRect(lyric_window_,nullptr,FALSE);
     }
+    if(const HWND content=content_visual_window_.load(std::memory_order_acquire))InvalidateRect(content,nullptr,FALSE);
 }
 
 BOOL WINAPI PlayerWindow::QuerySkinPluginSpectrum(void* context,TtpSkinSpectrumFrame* frame) {
@@ -1863,8 +1867,15 @@ BOOL WINAPI PlayerWindow::PaintSkinPluginContent(void* context,HDC dc,const RECT
         RECT visual{},lyric{};
         bool overlay=false;
         self.SkinPluginContentRects(*bounds,mode,visual_type,visual,lyric,overlay);
-        const bool have_visual=mode!=TTP_SKIN_CONTENT_LYRICS && !IsRectEmpty(&visual) && visual_type!=0;
-        self.plugin_content_visual_enabled_.store(have_visual,std::memory_order_release);
+        const bool have_visual=!self.lyric_editor_ && mode!=TTP_SKIN_CONTENT_LYRICS && !IsRectEmpty(&visual) && visual_type!=0;
+        HWND content_window=self.lyric_editor_?self.lyric_window_:self.lyric_control_;
+        if(self.external_skin_) {
+            TtpSkinContent main{sizeof(main),self.window_};
+            if(self.external_skin_->ContentState(main) && !IsRectEmpty(&main.bounds))content_window=self.window_;
+            else if(self.external_skin_->Handles(self.lyric_window_))content_window=self.lyric_window_;
+        }
+        self.content_visual_window_.store(content_window,std::memory_order_release);
+        self.plugin_content_visual_enabled_.store(have_visual && !self.fullscreen_mode_,std::memory_order_release);
         if(have_visual && self.plugin_content_runtime_) {
             auto settings=self.settings_.visual;
             settings.type=static_cast<int>(visual_type);

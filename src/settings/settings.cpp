@@ -1159,6 +1159,8 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         s.lyric.scroll_mode=IntAttr(n,L"ScrollMode",0);
         s.lyric.mini_scroll_mode=IntAttr(n,L"ScrollMode2",1);
         s.lyric.double_click_fullscreen=IntAttr(n,L"DoubleClickFullScreen",0)!=0;
+        s.lyric.window_content_mode=std::clamp(IntAttr(n,L"WindowContentMode",1),1,3);
+        s.lyric.window_visual_type=std::clamp(IntAttr(n,L"WindowVisualType",1),0,6);
         s.lyric.fullscreen_scroll_mode=IntAttr(n,L"ScrollModeFS",0);
         s.lyric.fullscreen_text_align=IntAttr(n,L"TextAlignFS",1);
         s.lyric.fullscreen_row_interval=IntAttr(n,L"RowIntervalFS",4);
@@ -1918,6 +1920,8 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"ScrollMode",settings.lyric.scroll_mode);
         SetAttribute(element,L"ScrollMode2",settings.lyric.mini_scroll_mode);
         SetAttribute(element,L"DoubleClickFullScreen",settings.lyric.double_click_fullscreen ? 1 : 0);
+        SetAttribute(element,L"WindowContentMode",std::clamp(settings.lyric.window_content_mode,1,3));
+        SetAttribute(element,L"WindowVisualType",std::clamp(settings.lyric.window_visual_type,0,6));
         SetAttribute(element,L"ScrollModeFS",settings.lyric.fullscreen_scroll_mode);
         SetAttribute(element,L"TextAlignFS",settings.lyric.fullscreen_text_align);
         SetAttribute(element,L"RowIntervalFS",settings.lyric.fullscreen_row_interval);

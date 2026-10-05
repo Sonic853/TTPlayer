@@ -120,6 +120,13 @@ private:
     HMENU CreateSkinPluginContentMenu(const TtpSkinContent&, std::vector<UINT>&);
     void ShowSkinPluginContentMenu(bool keyboard);
     void HandleSkinPluginContentMenuCommand(UINT, TtpSkinContent);
+    [[nodiscard]] bool NativeLyricContentActive() const noexcept;
+    [[nodiscard]] TtpSkinContent NativeLyricContentState(HWND surface) const;
+    void PaintNativeLyricContent(HDC dc);
+    void SetNativeLyricContent(int mode, int visual_type = -1);
+    bool HandleNativeLyricContentCommand(UINT command);
+    HMENU CreateNativeLyricContentMenu() const;
+    static void MoveContentOptionsToBottom(HMENU menu);
     HWND plugin_content_drag_window_{};
     HWND plugin_content_window_{};
     HWND LyricEditorParent() const;
@@ -928,6 +935,7 @@ private:
     bool plugin_content_combined_{};
     int plugin_content_fullscreen_saved_type_{-1};
     std::atomic_bool plugin_content_visual_enabled_{};
+    std::atomic<HWND> content_visual_window_{};
     std::jthread visual_worker_;
     std::condition_variable_any visual_worker_condition_;
     std::mutex visual_worker_mutex_;

@@ -400,6 +400,17 @@ bool PlayerWindow::HandleLyricDoubleClick(HWND origin) {
 
 LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
                                                 WPARAM wparam, LPARAM lparam, bool content_surface) {
+    if(control==lyric_control_ && !content_surface && NativeLyricContentActive()) {
+        // Re-enter only for the lyric portion, using the same hit testing and
+        // drag/capture rules as WSZ/WAL content. Layout uses parent coordinates
+        // and is handled separately by LayoutLyricControls/Editor.
+        if(message!=WM_SIZE) {
+            const auto content=NativeLyricContentState(control);
+            MSG event{};event.hwnd=control;event.message=message;event.wParam=wparam;event.lParam=lparam;
+            LRESULT result{};
+            if(HandleSkinPluginContentInput(this,&content,&event,&result))return result;
+        }
+    }
     const int identifier = GetDlgCtrlID(control);
     const bool text_control = content_surface || control == lyric_control_ ||
         identifier == kLyricControlId;
@@ -424,7 +435,8 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
     case WM_PAINT: {
         PAINTSTRUCT paint{};
         const HDC dc = BeginPaint(control, &paint);
-        PaintLyricControl(control, dc);
+        if(control==lyric_control_ && NativeLyricContentActive())PaintNativeLyricContent(dc);
+        else PaintLyricControl(control, dc);
         EndPaint(control, &paint);
         return 0;
     }
@@ -941,7 +953,7 @@ bool PlayerWindow::ActiveLyricKaraokeMode() const noexcept {
 bool PlayerWindow::ActiveLyricTransparent() const noexcept {
     return fullscreen_lyric_detached_
         ? settings_.lyric.fullscreen_transparent
-        : settings_.lyric.transparent;
+        : settings_.lyric.transparent && !NativeLyricContentActive();
 }
 
 COLORREF PlayerWindow::ActiveLyricTextColor() const noexcept {
@@ -1335,6 +1347,7 @@ void PlayerWindow::ApplyAutoLyricWidth() {
     // 00449A8F: normal/mini lyric popup only. Fullscreen has AutoFontFS;
     // external skin providers own their window geometry and resize limits.
     if (!settings_.lyric.auto_width || fullscreen_lyric_detached_ ||
+        (NativeLyricContentActive() && settings_.lyric.window_content_mode==TTP_SKIN_CONTENT_VISUAL) ||
         !lyric_window_ || !lyric_control_ || !lyric_font_ ||
         !skin_ || !skin_->Lyric().valid ||
         (settings_.lyric.auto_width_only_vertical && ActiveLyricScrollMode() != 0))
@@ -1566,7 +1579,7 @@ void PlayerWindow::LayoutLyricControls() {
     // FUN_004495C8 has a third layout in addition to normal and mini mode:
     // Transparent+TransSkin parks the chrome and expands LyricCtrl over the
     // complete client. The colour-keyed parent then leaves only glyphs.
-    const bool text_only = settings_.lyric.transparent &&
+    const bool text_only = ActiveLyricTransparent() &&
                            settings_.lyric.transparent_skin;
     if (mini_mode_ || text_only) {
         // The three normal chrome buttons remain real/visible child HWNDs in
@@ -1586,7 +1599,7 @@ void PlayerWindow::LayoutLyricControls() {
         move(lyric_ontop_, skin_->Lyric().ontop);
         move(lyric_desklrc_, skin_->Lyric().desklrc);
     }
-    if (lyric_control_) {
+    if (lyric_control_ && !fullscreen_lyric_detached_) {
         RECT bounds = LyricTextBounds();
         if (text_only) {
             RECT client{};
@@ -1646,7 +1659,7 @@ void PlayerWindow::PaintLyricWindow(HDC dc) const {
     if (skin_ && skin_->Lyric().valid) {
         const auto& layout = skin_->Lyric();
         const COLORREF background_color = ActiveLyricBackgroundColor();
-        const bool text_only = settings_.lyric.transparent &&
+        const bool text_only = ActiveLyricTransparent() &&
                                settings_.lyric.transparent_skin;
         if (text_only) {
             // FUN_00449313 omits both normal chrome and mini borders when
@@ -1689,6 +1702,10 @@ void PlayerWindow::PaintLyricWindow(HDC dc) const {
             DeleteObject(light);
             DeleteObject(dark);
         }
+    }
+    if(lyric_editor_ && NativeLyricContentActive()) {
+        const auto content=NativeLyricContentState(lyric_window_);
+        PaintSkinPluginContent(const_cast<PlayerWindow*>(this),canvas,&content.bounds,content.mode,content.visual_type);
     }
     BitBlt(dc, 0, 0, width, height, canvas, 0, 0, SRCCOPY);
     SelectObject(canvas, old_buffer);
@@ -2715,15 +2732,9 @@ bool PlayerWindow::EnterLyricEditor() {
 
     const HWND editor_parent=LyricEditorParent();
 
-    // Main-menu editing must expose the editor even when a provider's video
-    // window was showing only a visualization. Keep combined mode intact.
-    if(external_skin_ && external_skin_->Handles(editor_parent)) {
-        TtpSkinContent content{sizeof(content),editor_parent};
-        if(external_skin_->ContentState(content) && content.mode==TTP_SKIN_CONTENT_VISUAL) {
-            content.mode=TTP_SKIN_CONTENT_LYRICS;
-            external_skin_->ContentState(content,true);
-        }
-    }
+    // Editing temporarily covers the entire content surface. Retain its mode
+    // and effect so returning to display restores the previous presentation.
+    plugin_content_visual_enabled_.store(false,std::memory_order_release);
 
     // FUN_0044CB58 creates the editor only after RichEdit20W is available.
     // Keep the module loaded for exactly the lifetime of the editor controls.
@@ -2915,13 +2926,15 @@ void PlayerWindow::LayoutLyricEditor(const RECT* content_bounds) {
     for(HWND child:{lyric_editor_,lyric_editor_toolbar_})
         if(child && GetParent(child)!=editor_parent)SetParent(child,editor_parent);
     RECT bounds = LyricTextBounds();
-    if (settings_.lyric.transparent && settings_.lyric.transparent_skin) {
+    if (ActiveLyricTransparent() && settings_.lyric.transparent_skin) {
         GetClientRect(editor_parent, &bounds);
     }
     TtpSkinContent content{sizeof(content),editor_parent};
     if(!content_bounds && external_skin_ && external_skin_->ContentState(content)) {
-        RECT visual{};bool overlay{};
-        SkinPluginContentRects(content.bounds,content.mode,content.visual_type,visual,bounds,overlay);
+        bounds=content.bounds;
+    } else if(!content_bounds && NativeLyricContentActive()) {
+        content=NativeLyricContentState(editor_parent);
+        bounds=content.bounds;
     }
     if(content_bounds) bounds=*content_bounds;
     for(HWND child:{lyric_editor_,lyric_editor_toolbar_})if(child)ShowWindow(child,IsRectEmpty(&bounds)?SW_HIDE:SW_SHOWNOACTIVATE);
@@ -3806,12 +3819,10 @@ void PlayerWindow::ShowLyricContextMenu(POINT screen_point) {
         plugin_content_menu_point_=screen_point;plugin_content_menu_point_valid_=true;
         ShowSkinPluginContentMenu(false);return;
     }
-    HMENU menu = DetachFirstPopup(
-        i18n::LoadMenu(ResourceModule(), MAKEINTRESOURCEW(
-            lyric_editor_ ? kMenuLyricEditor : kMenuLyricDisplay)));
+    std::vector<UINT> provider_commands;
+    const auto content=NativeLyricContentState(lyric_window_);
+    HMENU menu=CreateSkinPluginContentMenu(content,provider_commands);
     if (!menu) return;
-    if (lyric_editor_) PrepareLyricEditorMenu(menu);
-    else PrepareLyricMenu(menu);
     context_menu_open_ = true;
     const HWND owner = lyric_window_;
     SetForegroundWindow(owner);
@@ -3822,8 +3833,7 @@ void PlayerWindow::ShowLyricContextMenu(POINT screen_point) {
     EndPopupMenuStyle();
     DestroyMenu(menu);
     context_menu_open_ = false;
-    if (command && !HandleLyricCommand(command))
-        HandleContextCommand(command, owner);
+    if (command) HandleSkinPluginContentMenuCommand(command,content);
     PostMessageW(owner, WM_NULL, 0, 0);
 }
 
@@ -4058,6 +4068,7 @@ void PlayerWindow::PrepareLyricEditorMenu(HMENU menu) const {
 }
 
 bool PlayerWindow::HandleLyricCommand(UINT command) {
+    if(HandleNativeLyricContentCommand(command))return true;
     if (command == kCmdLyricDoubleClickFullscreen) {
         settings_.lyric.double_click_fullscreen = !settings_.lyric.double_click_fullscreen;
         UpdateFullScreenLyricInput();

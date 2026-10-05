@@ -6042,6 +6042,7 @@ void PlayerWindow::ApplySkinWindowAlpha(HWND target, BYTE alpha) {
     COLORREF color_key{};
     DWORD flags = LWA_ALPHA;
     if (target == lyric_window_ && settings_.lyric.transparent &&
+        !NativeLyricContentActive() &&
         !(external_skin_ && external_skin_->Handles(lyric_window_))) {
         // Match the actual painter, including optional mini-only skin colours.
         color_key = ActiveLyricBackgroundColor();

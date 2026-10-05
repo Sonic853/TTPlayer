@@ -365,6 +365,8 @@ struct LyricSettings {
     bool fullscreen_auto_font{true};
     bool fullscreen_drag_lyric{true};
     bool double_click_fullscreen{};
+    int window_content_mode{1}; // Native lyric window: lyrics / visual / combined.
+    int window_visual_type{1};
     LOGFONTW fullscreen_font{};
     bool fullscreen_font_valid{};
     COLORREF fullscreen_text_color{RGB(0,128,192)};

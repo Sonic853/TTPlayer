@@ -131,6 +131,7 @@ add_library(ttplayer_core
   src/ui/modern_file_dialog.cpp
   src/ui/player_control_packet.cpp
   src/ui/player_window_lyrics.cpp
+  src/ui/player_window_lyric_content.cpp
   src/ui/lyric_association_dialog.cpp
   src/ui/lyric_upload_window.cpp
     src/ui/player_window_lyric_search.cpp

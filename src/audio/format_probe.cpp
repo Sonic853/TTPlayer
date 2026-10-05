@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cstdint>
 
 namespace ttplayer::audio {
 namespace {
@@ -27,6 +28,35 @@ std::wstring Lower(std::wstring_view value) {
 }
 }
 
+bool IsWebmContainerHeader(std::span<const unsigned char> header) noexcept {
+    if (header.size() < 5 || header[0] != 0x1a || header[1] != 0x45 ||
+        header[2] != 0xdf || header[3] != 0xa3) return false;
+    size_t at = 4;
+    const auto read = [&](bool id, std::uint64_t& value) {
+        if (at >= header.size() || !header[at]) return false;
+        const unsigned first = header[at++]; unsigned mask = 128, n = 1;
+        while (!(first & mask)) { mask >>= 1; ++n; }
+        if (n > (id ? 4u : 8u) || n - 1 > header.size() - at) return false;
+        value = id ? first : first & (mask - 1);
+        for (unsigned i = 1; i < n; ++i) value = (value << 8) | header[at++];
+        return id || value != ((std::uint64_t(1) << (7 * n)) - 1);
+    };
+    std::uint64_t size{};
+    if (!read(false, size) || size > 4096 - at || size > header.size() - at) return false;
+    const size_t end = at + static_cast<size_t>(size);
+    bool webm{};
+    while (at < end) {
+        std::uint64_t id{}, length{};
+        if (!read(true, id) || !read(false, length) || at > end || length > end - at) return false;
+        if (id == 0x4282) {
+            if (webm || length != 4 || std::memcmp(header.data() + at, "webm", 4)) return false;
+            webm = true;
+        }
+        at += static_cast<size_t>(length);
+    }
+    return webm;
+}
+
 std::wstring AudioExtensionHint(const std::filesystem::path& path) {
     auto name = path.native();
     if (name.find(L"://") != std::wstring::npos) {
@@ -40,6 +70,7 @@ std::wstring RecoverAudioFormatHint(
     std::wstring_view extension, std::span<const unsigned char> header) {
     auto result = Lower(extension);
     if (header.size() < 16) return result;
+    if (IsWebmContainerHeader(header)) return result == L".weba" ? result : L".webm";
     if (std::memcmp(header.data(), "MAC", 3) == 0) return L".mac";
     if (std::memcmp(header.data(), "MP+", 3) == 0) return L".mpc";
     if (std::memcmp(header.data(), "TTA", 3) == 0) return L".tta";
@@ -63,9 +94,14 @@ HRESULT ProbeAudioFormatHint(const std::filesystem::path& path, std::wstring& ex
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return HRESULT_FROM_WIN32(GetLastError());
-    std::array<unsigned char, 16> header{};
+    std::array<unsigned char, 4096> header{};
     DWORD count{};
-    const BOOL read = ReadFile(file, header.data(), static_cast<DWORD>(header.size()), &count, nullptr);
+    BOOL read = ReadFile(file, header.data(), 16, &count, nullptr);
+    if (read && count == 16 && header[0] == 0x1a && header[1] == 0x45 && header[2] == 0xdf && header[3] == 0xa3) {
+        DWORD extra{};
+        read = ReadFile(file, header.data() + count, static_cast<DWORD>(header.size()) - count, &extra, nullptr);
+        count += extra;
+    }
     const HRESULT status = read ? S_OK : HRESULT_FROM_WIN32(GetLastError());
     CloseHandle(file);
     if (SUCCEEDED(status)) extension = RecoverAudioFormatHint(extension, {header.data(), count});
@@ -79,9 +115,18 @@ HRESULT ProbeAudioFormatHint(IStream* stream, std::wstring& extension) {
     HRESULT status = stream->Seek(zero, STREAM_SEEK_CUR, &saved);
     if (FAILED(status)) return status;
     status = stream->Seek(zero, STREAM_SEEK_SET, nullptr);
-    std::array<unsigned char, 16> header{};
+    std::array<unsigned char, 4096> header{};
     ULONG count{};
-    if (SUCCEEDED(status)) status = stream->Read(header.data(), static_cast<ULONG>(header.size()), &count);
+    ULONG wanted = 16;
+    while (SUCCEEDED(status) && count < wanted) {
+        ULONG got{};
+        status = stream->Read(header.data() + count, wanted - count, &got);
+        if (got > wanted - count) { status = STG_E_READFAULT; break; }
+        count += got;
+        if (!got) break;
+        if (count == 16 && header[0] == 0x1a && header[1] == 0x45 && header[2] == 0xdf && header[3] == 0xa3)
+            wanted = static_cast<ULONG>(header.size());
+    }
     LARGE_INTEGER previous{};
     previous.QuadPart = static_cast<LONGLONG>(saved.QuadPart);
     const HRESULT restored = stream->Seek(previous, STREAM_SEEK_SET, nullptr);

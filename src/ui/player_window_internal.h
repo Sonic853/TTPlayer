@@ -208,6 +208,11 @@ constexpr UINT kCmdFullscreenAll = 0x7dea;
 // Separate from native commands and dynamic track/skin menu IDs.
 constexpr UINT kMenuFullscreenMonitor = 0xb600;
 constexpr UINT kCmdLyricDoubleClickFullscreen = 0xb601;
+constexpr UINT kCmdLyricContentFirst = 0xb680;
+constexpr UINT kCmdLyricContentLast = kCmdLyricContentFirst + 2;
+constexpr UINT kCmdLyricContentFullscreen = 0xb683;
+constexpr UINT kCmdLyricContentEffectFirst = 0xb690;
+constexpr UINT kCmdLyricContentEffectLast = kCmdLyricContentEffectFirst + 6;
 constexpr UINT kCmdFullscreenMonitorFirst = 0xb610;
 constexpr UINT kCmdFullscreenMonitorLast = 0xb64f;
 constexpr UINT kCmdMinimize = 32211; // 0x7dd3, SC_MINIMIZE

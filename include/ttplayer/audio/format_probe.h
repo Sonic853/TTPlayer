@@ -14,6 +14,9 @@ namespace ttplayer::audio {
 [[nodiscard]] std::wstring AudioExtensionHint(const std::filesystem::path& path);
 [[nodiscard]] std::wstring RecoverAudioFormatHint(
     std::wstring_view extension, std::span<const unsigned char> header);
+// WebM extension: inspect a complete bounded EBML header and its DocType.
+// An EBML signature alone must not reclassify arbitrary Matroska files.
+[[nodiscard]] bool IsWebmContainerHeader(std::span<const unsigned char> header) noexcept;
 // Both overloads preserve the actual filename. The IStream overload preserves
 // its caller's position, including on short reads and failed probes.
 [[nodiscard]] HRESULT ProbeAudioFormatHint(

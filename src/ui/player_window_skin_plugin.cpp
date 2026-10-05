@@ -429,7 +429,8 @@ BOOL WINAPI PlayerWindow::HandleSkinPluginContentInput(void* context,const TtpSk
     if(!context || !content || content->size<sizeof(*content) || !event || !result ||
        content->mode<1 || content->mode>3 || content->visual_type>6) return FALSE;
     auto& self=*static_cast<PlayerWindow*>(context);
-    if(event->hwnd!=content->window || (content->window!=self.lyric_window_ && content->window!=self.window_)) return FALSE;
+    const bool native=content->window==self.lyric_control_ && self.NativeLyricContentActive();
+    if(event->hwnd!=content->window || (!native && content->window!=self.lyric_window_ && content->window!=self.window_)) return FALSE;
     *result=0;
     const UINT message=event->message;
     const HWND window=content->window;
@@ -444,8 +445,8 @@ BOOL WINAPI PlayerWindow::HandleSkinPluginContentInput(void* context,const TtpSk
     if(message==WM_SIZE) {
         cancel();
         if(self.lyric_editor_ && GetParent(self.lyric_editor_)==window) {
-            self.LayoutLyricEditor(&lyric);
-            const int show=IsRectEmpty(&lyric)?SW_HIDE:SW_SHOWNOACTIVATE;
+            self.LayoutLyricEditor(&content->bounds);
+            const int show=IsRectEmpty(&content->bounds)?SW_HIDE:SW_SHOWNOACTIVATE;
             ShowWindow(self.lyric_editor_,show);
             if(self.lyric_editor_toolbar_) ShowWindow(self.lyric_editor_toolbar_,show);
         }
@@ -507,15 +508,19 @@ BOOL WINAPI PlayerWindow::HandleSkinPluginContentInput(void* context,const TtpSk
         if (over_lyric) self.HandleLyricDoubleClick(window);
         return over_content; // Visual content retains its existing mouse behaviour.
     case WM_MOUSEWHEEL:
-        if(!over_lyric) return FALSE;
+        if(!over_lyric) return native; // Native child must not shift hidden lyrics.
         // A lyric wheel never falls through to the DLL's volume adjustment.
         if(!self.settings_.lyric.mouse_wheel_adjust) return TRUE;
         break;
     case WM_SETCURSOR:
+        if(native && !over_lyric && reinterpret_cast<HWND>(event->wParam)==window && LOWORD(event->lParam)==HTCLIENT) {
+            SetCursor(LoadCursorW(nullptr,IDC_ARROW));*result=TRUE;return TRUE;
+        }
         if((!dragging && !over_lyric) || reinterpret_cast<HWND>(event->wParam)!=window ||
            LOWORD(event->lParam)!=HTCLIENT) return FALSE;
         break;
     case WM_KEYDOWN:
+        if(native && IsRectEmpty(&lyric))return TRUE;
         if(window!=self.lyric_window_ && self.plugin_content_window_!=window)return FALSE;
         if(IsRectEmpty(&lyric) || (event->wParam!=VK_UP && event->wParam!=VK_DOWN &&
            event->wParam!=VK_LEFT && event->wParam!=VK_RIGHT && event->wParam!=VK_ESCAPE)) return FALSE;
@@ -551,7 +556,7 @@ void RemapContentMenu(HMENU menu,std::vector<UINT>& commands) {
 HMENU PlayerWindow::CreateSkinPluginContentMenu(const TtpSkinContent& content,std::vector<UINT>& commands) {
     commands.clear();
     HMENU popup{};
-    if(content.mode==TTP_SKIN_CONTENT_VISUAL) popup=CreateVisualContextMenu(false,0,content.visual_type);
+    if(!lyric_editor_ && content.mode==TTP_SKIN_CONTENT_VISUAL) popup=CreateVisualContextMenu(false,0,content.visual_type);
     else {
         popup=DetachFirstPopup(i18n::LoadMenu(ResourceModule(),MAKEINTRESOURCEW(
             lyric_editor_?kMenuLyricEditor:kMenuLyricDisplay)));
@@ -564,21 +569,30 @@ HMENU PlayerWindow::CreateSkinPluginContentMenu(const TtpSkinContent& content,st
         }
     }
     if(!popup) return nullptr;
-    if(const HMENU provider=external_skin_->Menu(content.window)) {
-        RemapContentMenu(provider,commands);
+    const bool plugin=external_skin_ && external_skin_->Handles(content.window);
+    if(const HMENU provider=plugin?external_skin_->Menu(content.window):CreateNativeLyricContentMenu()) {
+        if(plugin)RemapContentMenu(provider,commands);
         AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
         AppendMenuW(popup,MF_POPUP,reinterpret_cast<UINT_PTR>(provider),i18n::Literal(L"显示内容"));
     }
+    if(!plugin && NativeLyricContentActive())EnableCommand(popup,kCmdLyricTransparent,false);
+    MoveContentOptionsToBottom(popup);
     return popup;
 }
 
 void PlayerWindow::HandleSkinPluginContentMenuCommand(UINT command,TtpSkinContent content) {
+    const bool plugin=external_skin_ && external_skin_->Handles(content.window);
     if(command>=kCmdVisualFirst && command<=kCmdVisualLast) {
         content.visual_type=command-kCmdVisualFirst;
-        external_skin_->ContentState(content,true);
+        if(plugin)external_skin_->ContentState(content,true);
+        else SetNativeLyricContent(content.mode,content.visual_type);
     } else if(command>=kCmdFullscreenLyrics && command<=kCmdFullscreenAll) {
-        HandleSkinPluginCommand(TTP_SKIN_CONTENT_FULLSCREEN,
+        if(plugin)HandleSkinPluginCommand(TTP_SKIN_CONTENT_FULLSCREEN,
             (command-kCmdFullscreenLyrics+1)|(content.visual_type<<8));
+        else if(!file_info_write_in_progress_ && audio_->State()==audio::PlaybackState::playing) {
+            if(!fullscreen_mode_)plugin_content_fullscreen_saved_type_=settings_.visual.type;
+            SetFullScreenMode(command-kCmdFullscreenLyrics+1,content.window,content.visual_type);
+        }
     } else if(!HandleLyricCommand(command)) HandleContextCommand(command,content.window);
 }
 
