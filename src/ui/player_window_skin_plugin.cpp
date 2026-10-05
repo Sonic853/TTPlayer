@@ -304,13 +304,15 @@ uint32_t WINAPI PlayerWindow::QuerySkinPluginSelection(void* context,uint32_t ro
 }
 void WINAPI PlayerWindow::PostSkinPluginCommand(void* context,uint32_t command,int32_t value) {
     const auto* self=static_cast<PlayerWindow*>(context);
-    if(self && self->window_) PostMessageW(self->window_,RegisterWindowMessageW(TTP_SKIN_COMMAND_MESSAGE),command,value);
+    if(self && self->window_ && !self->file_info_write_in_progress_)
+        PostMessageW(self->window_,RegisterWindowMessageW(TTP_SKIN_COMMAND_MESSAGE),command,value);
 }
 BOOL WINAPI PlayerWindow::PostSkinPluginPlaylistContext(void* context,const TtpSkinPlaylistContext* event) {
     if(!context || !event || event->size<sizeof(*event))return FALSE;
     auto& self=*static_cast<PlayerWindow*>(context);
     if(!self.window_ || !self.external_skin_ || !self.external_skin_->Handles(event->window) ||
        (event->window!=self.window_ && event->window!=self.playlist_window_))return FALSE;
+    if(self.file_info_write_in_progress_)return TRUE;
     try {
         self.skin_plugin_playlist_contexts_.push_back(*event);
         if(PostMessageW(self.window_,RegisterWindowMessageW(TTP_SKIN_COMMAND_MESSAGE),TTP_SKIN_LIST_CONTEXT,0))return TRUE;
@@ -452,6 +454,15 @@ BOOL WINAPI PlayerWindow::HandleSkinPluginContentInput(void* context,const TtpSk
     if(message==WM_CAPTURECHANGED || message==WM_CANCELMODE ||
        (message==WM_SHOWWINDOW && !event->wParam) || (message==WM_ENABLE && !event->wParam)) {
         cancel();return FALSE;
+    }
+    if(self.file_info_write_in_progress_) {
+        switch(message) {
+        case WM_LBUTTONDOWN:case WM_LBUTTONUP:case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDOWN:case WM_RBUTTONUP:case WM_CONTEXTMENU:
+        case WM_MOUSEMOVE:case WM_MOUSEWHEEL:case WM_KEYDOWN:
+            cancel();return TRUE;
+        default:break;
+        }
     }
     if(window!=self.lyric_window_ && self.lyric_editor_ && GetParent(self.lyric_editor_)==window) {
         if(message==WM_COMMAND && reinterpret_cast<HWND>(event->lParam)==self.lyric_editor_) {
@@ -599,6 +610,13 @@ void PlayerWindow::ShowSkinPluginContentMenu(bool keyboard) {
 }
 
 void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
+    // Also reject commands queued before the tag writer entered its modal loop.
+    // Context events have a separate FIFO; consume the matching payload too.
+    if(file_info_write_in_progress_) {
+        if(command==TTP_SKIN_LIST_CONTEXT && !skin_plugin_playlist_contexts_.empty())
+            skin_plugin_playlist_contexts_.pop_front();
+        return;
+    }
     if(!external_skin_ || close_after_skin_window_fade_) return;
     switch(command) {
     case TTP_SKIN_PLAY: InvokeSkinAction(L"play");break;
@@ -633,7 +651,8 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     case TTP_SKIN_VOLUME_DELTA: AdjustPlaybackVolume(std::clamp(value,-100,100));break;
     case TTP_SKIN_VOLUME_END: SetVolumeTrackingStatus(false);break;
     case TTP_SKIN_BALANCE:
-        settings_.player.balance=std::clamp(value,-100,100);audio_->SetBalance(settings_.player.balance);break;
+        settings_.player.balance=std::clamp(value,-100,100);audio_->SetBalance(settings_.player.balance);
+        UpdateEqualizerUserProfile();ApplyEqualizer();break;
     case TTP_SKIN_SEEK:
         // The DLL previews while dragging and commits only on release, just
         // like the native progress control. Do not start a seek transition.

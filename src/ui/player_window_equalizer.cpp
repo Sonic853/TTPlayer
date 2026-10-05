@@ -849,19 +849,21 @@ void PlayerWindow::SetEqualizerSliderValue(int slider, int value,
     } else {
         return;
     }
-    if (user_change) {
-        // 00429DDB applies this common state transition to balance/surround
-        // notifications too. The first notification from a preset selects
-        // Custom; only a subsequent notification copies Current to Custom.
-        if (settings_.equalizer.profile == -1) {
-            settings_.equalizer.custom = settings_.equalizer.current;
-        } else if (settings_.equalizer.profile != -2) {
-            settings_.equalizer.profile_last = settings_.equalizer.profile;
-            settings_.equalizer.profile = -1;
-        }
-    }
+    if (user_change) UpdateEqualizerUserProfile();
     ApplyEqualizer();
     if (equalizer_window_) InvalidateRect(equalizer_window_, nullptr, FALSE);
+}
+
+void PlayerWindow::UpdateEqualizerUserProfile() {
+    // 00429DDB applies this common state transition to balance/surround
+    // notifications too. The first notification from a preset selects
+    // Custom; only a subsequent notification copies Current to Custom.
+    if (settings_.equalizer.profile == -1) {
+        settings_.equalizer.custom = settings_.equalizer.current;
+    } else if (settings_.equalizer.profile != -2) {
+        settings_.equalizer.profile_last = settings_.equalizer.profile;
+        settings_.equalizer.profile = -1;
+    }
 }
 
 void PlayerWindow::SetEqualizerSliderFromPoint(int slider, POINT point,

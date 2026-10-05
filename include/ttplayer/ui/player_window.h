@@ -689,6 +689,7 @@ private:
     void CaptureEqualizerControl(int control);
     void ReleaseEqualizerCapture();
     void SetEqualizerSliderValue(int slider, int value, bool user_change);
+    void UpdateEqualizerUserProfile();
     void SetEqualizerSliderFromPoint(int slider, POINT point, bool tracking);
     void ApplyEqualizer();
     void InvokeEqualizerControl(int control, POINT screen_point);
