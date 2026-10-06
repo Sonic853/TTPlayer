@@ -38,7 +38,7 @@ Copy-Item -LiteralPath $updater -Destination $package
 $https = Join-Path $output 'AddIn/ttp_https.dll'
 $component = Get-Content -LiteralPath (Join-Path $output 'https-component.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $httpsHash = (Get-FileHash -LiteralPath $https -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($component.repository -cne 'https://github.com/Sonic853/TTPlayerHttps' -or
+if ($component.repository -cne 'https://github.com/TTPlayerRebuild/TTPlayerHttps' -or
     $component.sha256 -cne $httpsHash -or
     $component.inventories -notcontains '5.1.2600.txt' -or $component.inventories -notcontains '6.1.7600.txt') {
     throw 'Download and verify the HTTPS release component before packaging.'

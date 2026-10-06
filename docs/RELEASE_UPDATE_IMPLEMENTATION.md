@@ -22,7 +22,7 @@ SHA256SUMS.txt
 
 两个 EXE 必须一起复制到原播放器目录，并合并包内的 `AddIn` 文件夹。发行包仍依赖原播放器的运行资源；它不是全新安装所需的完整资源包。旧设计文档中的现代版 / XP 版双包划分已不适用于当前构建。
 
-Actions 调用 `cmake/download_https_component.py`，从 [TTPlayerHttps 最新正式版](https://github.com/Sonic853/TTPlayerHttps/releases/latest) 下载精确匹配标签的 `ttp_https-版本号.zip`，校验 GitHub 提供的 ZIP SHA-256、包内 DLL 摘要及 XP / Win7 静态导入后，暂存到构建输出的 `AddIn` 目录。下载或校验失败即停止打包，不复用旧 DLL。组件自己的版本号独立于播放器，所选标签、下载地址和摘要记录在 Action 的 `build-info.json` 中；测试代码不会入包。
+Actions 调用 `cmake/download_https_component.py`，从 [TTPlayerHttps 最新正式版](https://github.com/TTPlayerRebuild/TTPlayerHttps/releases/latest) 下载精确匹配标签的 `ttp_https-版本号.zip`，校验 GitHub 提供的 ZIP SHA-256、包内 DLL 摘要及 XP / Win7 静态导入后，暂存到构建输出的 `AddIn` 目录。下载或校验失败即停止打包，不复用旧 DLL。组件自己的版本号独立于播放器，所选标签、下载地址和摘要记录在 Action 的 `build-info.json` 中；测试代码不会入包。
 
 ## 检查和通知
 

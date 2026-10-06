@@ -13,8 +13,8 @@ from pathlib import Path
 
 from check_legacy_imports import exports, inspect
 
-REPOSITORY = 'https://github.com/Sonic853/TTPlayerHttps'
-API = 'https://api.github.com/repos/Sonic853/TTPlayerHttps/releases/latest'
+REPOSITORY = 'https://github.com/TTPlayerRebuild/TTPlayerHttps'
+API = 'https://api.github.com/repos/TTPlayerRebuild/TTPlayerHttps/releases/latest'
 LIMIT = 16 * 1024 * 1024
 
 
