@@ -4719,6 +4719,21 @@ void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_poin
     } else {
         PreparePlaylistMenu(menu);
     }
+    // Remove the retired reporting entry after resource-position trimming and
+    // before owner-draw records are created, for every context-menu variant.
+    if (const HMENU report_menu = FindCommandMenu(menu, kPlaylistReportOnline)) {
+        for (int index = 0; index < GetMenuItemCount(report_menu); ++index) {
+            if (GetMenuItemID(report_menu, index) != kPlaylistReportOnline) continue;
+            if (DeleteMenu(report_menu, index, MF_BYPOSITION) && index > 0) {
+                const UINT before = GetMenuState(report_menu, index - 1, MF_BYPOSITION);
+                const UINT after = GetMenuState(report_menu, index, MF_BYPOSITION);
+                if (before != UINT(-1) && after != UINT(-1) &&
+                    (before & MF_SEPARATOR) && (after & MF_SEPARATOR))
+                    DeleteMenu(report_menu, index, MF_BYPOSITION);
+            }
+            break;
+        }
+    }
     BeginPopupMenuStyle(menu);
     const UINT command = TrackPlayerPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
         screen_point.x, screen_point.y, 0, playlist_window_, nullptr);
