@@ -16,6 +16,24 @@ git submodule update --init --recursive -- tests
 
 ## GitHub Actions
 
+### GitHub API 认证
+
+在仓库 **Settings → Secrets and variables → Actions** 配置 `GH_TOKEN` Secret。
+工作流将 `${{ secrets.GH_TOKEN }}` 传给需要访问 GitHub API 的步骤：版本分配、
+HTTPS 组件下载、两组插件包下载、Gitee CLI 的 GitHub Release 查询和 GitHub 发布。
+缺少令牌时在构建开始即提示，避免这些请求意外使用匿名配额。
+令牌需能读取上游公开 Release；勾选 GitHub 发布时还需对播放器仓库创建 Release／上传附件的权限。
+
+HTTPS 下载脚本现在会为 API 请求添加 `Authorization: Bearer`；此前该步骤没有注入令牌，
+脚本也没有读取令牌，是已确认的匿名请求遗漏。附件下载不携带令牌，跨站重定向移除认证头，
+令牌不写入构建产物和来源清单。`GH_TOKEN` 与 `GITEE_TOKEN`、`GITEE_TOKEN_UPDATER` 独立。
+
+本地验证覆盖 API 认证头、附件不携带认证、跨站重定向、403 不回退匿名、工作流令牌注入
+及缺失令牌的提前检查；原 HTTPS 组件打包校验和 Actionlint 通过。测试使用虚构令牌，
+仅位于 `tests/github_api_auth` 和 `tests/update`，不在 Actions 运行；未重新触发远程发布。
+
+### 构建与发布
+
 本地 `rebuild` 是独立 Git 仓库；它在 GitHub 上就是仓库根目录。
 工作流位于 `.github/workflows/manual-build.yml`，不配置 push/PR 自动触发，
 默认只构建；可勾选 **Release a Version (GitHub)** 或 **Publish Release to Gitee**
@@ -31,7 +49,7 @@ flowchart LR
 ```
 
 `Build player` 在编译前分配最终版本号，再写入通用 EXE 并打包；勾选 Gitee 时
-在此构建一次 CLI，用于查询已有版本并随 Artifact 传递。
+在此下载上游最新正式版 CLI，用于查询已有版本并随 Artifact 传递。
 `Prepare Release` 校验构建版本及附件、生成说明，通过同一份 Artifact 交给两个发布任务。
 `GitHub Release`、`Gitee Release` 分别按对应勾选项运行，同时勾选时并行发布，
 各自显示成功或失败状态；其中一个发布失败不会阻止另一个发布任务。
@@ -127,12 +145,18 @@ cmake -S . -B build "-DTTPLAYER_BUILD_VERSION="
 发布命令显式传入该 SHA，避免 Release 标签与二进制所用源码不一致；工作流不
 推送源码，也不自动改用 Gitee 分支的最新提交。Gitee 缺少该提交时，需先完成同步。
 
-工作流使用 [gitee-release-cli-rust](https://github.com/Sonic853/gitee-release-cli-rust)，
-固定源码提交 `9993cd79d512e16c6586384cd83acbeaaf15a723`。仅勾选 Gitee 时检出并
-构建 CLI；此提交未包含 `Cargo.lock`，故先生成依赖锁文件，再以 `--locked`
-构建 `gitee-release-rs`，不运行 CLI 测试。令牌通过环境变量注入，不放在命令参数中。
+工作流使用 [gitee-release-cli-rust 最新正式版](https://github.com/Sonic853/gitee-release-cli-rust/releases/latest)
+提供的 `gitee-release-rs.exe`。仅勾选 Gitee 时调用
+[`download_gitee_cli.ps1`](../cmake/download_gitee_cli.ps1)，通过 GitHub `/releases/latest`
+动态确定版本，下载 Windows 执行文件；不固定版本，不再检出 CLI 源码或运行 Cargo。
+下载前检查附件来源和大小，下载后核对 GitHub 提供的 SHA-256，并用 `--version` 检查启动。
+GitHub Token 只用于查询 API；Gitee 发布令牌仍通过环境变量注入，不放在命令参数中。
 
-根据 CLI 的[创建与附件接口](https://github.com/Sonic853/gitee-release-cli-rust/blob/9993cd79d512e16c6586384cd83acbeaaf15a723/docs/rust-cli.md)，
+同一次工作流只解析一次最新版本。版本、Release／附件 ID、下载地址、大小和摘要记录在
+`artifact/cli/gitee-cli.json`，与 EXE 和校验脚本一起通过 Artifact 传递；准备任务和
+Gitee 发布任务使用 `-VerifyOnly` 再次验证，不重新下载，以保证版本查询与发布使用同一份 CLI。
+这些构建工具不会进入播放器 ZIP、两个插件 ZIP 或最终的四个 Release 附件。
+
 先创建 Release，校验返回的 ID 和 tag，再使用该 ID 上传播放器 ZIP、两组插件 ZIP 与 `SHA256SUMS.txt` 共四个附件。创建或任一上传失败都会使任务失败，不会自动删除
 已经成功发布的版本或覆盖旧附件。日志会记录成功创建的 Release ID，便于补传
 缺失附件；重新运行整套发布流程会分配下一个可用版本号。
@@ -147,15 +171,22 @@ cmake -S . -B build "-DTTPLAYER_BUILD_VERSION="
 2026-09-25 合并构建后，本地通过 actionlint、12 项日期／配置用例、35 项模拟发布用例
 和 1 项实际 ZIP 打包用例；未执行线上发布。早期三附件 HTTP 集成记录属于合并前流程。
 
+2026-10-06 改为下载预编译 CLI 后，已实际查询最新 Release 并下载、校验执行文件，
+检查 `--version` 及 tag/release list、release create、asset upload 的参数兼容性。
+本地 57 项下载断言覆盖未来版本自动跟随、重试、摘要、来源记录及跨任务复核；
+工作流语法和 GitHub／Gitee 四附件模拟发布通过。测试位于 `tests/gitee_cli_download`
+和 `tests/addin_bundles`，不进入 Actions。本次未调用远程发布接口。
+
 工作流必须先存在于默认分支，手动运行入口才会显示，见
 [GitHub 手动运行工作流说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。
 
 使用 `windows-2025-vs2026`、Visual Studio 2026、Win32/x86；不构建 x64，
 因为现有 DLL/AddIn ABI 为 32 位。构建任务只有 `contents: read` 权限，
-只有 `GitHub Release` 任务使用 `contents: write`，通过内置 `GITHUB_TOKEN` 发布。
+只有 `GitHub Release` 任务声明 `contents: write`，发布 CLI 使用仓库 Secret `GH_TOKEN`。
 `Prepare Release` 和 `Gitee Release` 保持 `contents: read`。
 官方 checkout/upload-artifact/download-artifact 动作固定到提交 SHA。GitHub 发布使用
-内置令牌；Gitee 发布读取上文的两个 secrets。
+仓库 Secret `GH_TOKEN`；Gitee 发布读取上文的两个 Gitee secrets。工作流的 `permissions`
+只控制内置令牌，不会扩展自定义 `GH_TOKEN` 的权限。
 
 `windows-2025` 已迁移到 VS 2026 镜像，因此不能再配合写死的
 `Visual Studio 17 2022` 生成器。工作流明确选择 VS 2026 镜像和

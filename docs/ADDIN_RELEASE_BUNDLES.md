@@ -68,7 +68,7 @@ ExtraAddIn 的 `i18n` 目录也放在 EXE 旁，用于多语言插件读取翻�
 7. 为两个 ZIP 内的文件重新生成 SHA-256；外部 Release 清单同时校验播放器及两个插件 ZIP。
    准备任务和两个发布任务均在上传前复核三个 ZIP。
 
-网络错误和临时服务错误最多重试 3 次。Actions 使用内置 `github.token` 读取公开 GitHub API，
+网络错误和临时服务错误最多重试 3 次。Actions 通过 `${{ secrets.GH_TOKEN }}` 注入 `GH_TOKEN` 环境变量，认证读取 GitHub API，
 Token 只发给 GitHub API，不进入 ZIP、日志、来源记录或附件下载请求，跨站重定向时移除认证头。
 
 来源保存在 Actions Artifact 的 `addin-bundles.json`，同时嵌入 `build-info.json`。

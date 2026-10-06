@@ -52,14 +52,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Validate release configuration and capture Beijing date
+      - name: Validate release configuration, GitHub token and capture Beijing date
         id: release_date
         env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           PUBLISH_RELEASE: ${{ inputs.release_a_version }}
           PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
         run: |
           if ($env:BUILD_CONFIGURATION -ne 'Release') {
             throw 'The universal player requires the Release build configuration.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
+            throw 'Configure the GH_TOKEN Actions secret for authenticated GitHub API requests.'
           }
           $releaseDate = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString(
             'yyyy.MM.dd', [Globalization.CultureInfo]::InvariantCulture)
@@ -76,34 +80,22 @@ jobs:
             throw 'Gitee publication requires the GITEE_REPO and GITEE_TOKEN secrets.'
           }
 
-      - name: Checkout Gitee release CLI
+      - name: Download and verify latest Gitee release CLI
         if: inputs.release_to_gitee
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: Sonic853/gitee-release-cli-rust
-          ref: 9993cd79d512e16c6586384cd83acbeaaf15a723
-          path: gitee-release-cli
-          persist-credentials: false
-          sparse-checkout: |
-            rust
-
-      - name: Build Gitee release CLI
-        if: inputs.release_to_gitee
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
-          # This upstream revision does not include Cargo.lock. Resolve once,
-          # then keep that dependency set fixed for the executable build.
-          cargo generate-lockfile --manifest-path gitee-release-cli/Cargo.toml
-          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve Gitee CLI dependencies.' }
-          cargo build --release --locked --bin gitee-release-rs --manifest-path gitee-release-cli/Cargo.toml
-          if ($LASTEXITCODE -ne 0) { throw 'Gitee release CLI build failed.' }
-          $cli = (Resolve-Path -LiteralPath gitee-release-cli/target/release/gitee-release-rs.exe).Path
+          ./cmake/download_gitee_cli.ps1 -OutputDirectory build/gitee-release-cli
+          $cli = (Resolve-Path -LiteralPath build/gitee-release-cli/gitee-release-rs.exe).Path
+          & $cli --version
+          if ($LASTEXITCODE -ne 0) { throw 'The downloaded Gitee release CLI could not start.' }
           "GITEE_RELEASE_CLI=$cli" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Allocate final version before compilation
         id: version
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           PUBLISH_RELEASE: ${{ inputs.release_a_version }}
           PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
           GITEE_REPO: ${{ inputs.release_to_gitee && secrets.GITEE_REPO || '' }}
@@ -153,6 +145,8 @@ jobs:
         run: cmake --build build --config "$env:BUILD_CONFIGURATION" --target ttplayer_rebuild --parallel 4
 
       - name: Download and verify latest HTTPS component
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: >-
           python cmake/download_https_component.py --output "build/$env:BUILD_CONFIGURATION"
           --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt
@@ -182,6 +176,8 @@ jobs:
           if ($env:PUBLISH_GITEE -eq 'true') {
             New-Item -ItemType Directory -Path artifact/cli -Force | Out-Null
             Copy-Item -LiteralPath $env:GITEE_RELEASE_CLI -Destination artifact/cli/gitee-release-rs.exe
+            Copy-Item -LiteralPath build/gitee-release-cli/gitee-cli.json,cmake/download_gitee_cli.ps1 -Destination artifact/cli
+            ./artifact/cli/download_gitee_cli.ps1 -OutputDirectory artifact/cli -VerifyOnly
           }
           [ordered]@{
             commit = $env:GITHUB_SHA
@@ -204,7 +200,7 @@ jobs:
       - name: Download, verify and package latest add-ins for release
         if: inputs.release_a_version || inputs.release_to_gitee
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           PACKAGE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -290,7 +286,10 @@ jobs:
           $publishGitee = $env:PUBLISH_GITEE -eq 'true'
           if (-not ($publishGitHub -or $publishGitee)) { throw 'No publication destination selected.' }
           if ($publishGitee -and -not (Test-Path -LiteralPath artifact/cli/gitee-release-rs.exe -PathType Leaf)) {
-            throw 'The built Gitee release CLI is missing from the artifact.'
+            throw 'The downloaded Gitee release CLI is missing from the artifact.'
+          }
+          if ($publishGitee) {
+            ./artifact/cli/download_gitee_cli.ps1 -OutputDirectory artifact/cli -VerifyOnly
           }
           $info = Get-Content -LiteralPath artifact/build-info.json -Raw | ConvertFrom-Json
           if ($info.commit -ne $env:GITHUB_SHA -or $info.configuration -ne 'Release' -or
@@ -373,7 +372,7 @@ jobs:
 
       - name: Publish GitHub Release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
           $release = Get-Content -LiteralPath artifact/release-info.json -Raw | ConvertFrom-Json
@@ -422,7 +421,7 @@ jobs:
         env:
           GITEE_REPO: ${{ secrets.GITEE_REPO }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-        # The pinned CLI was built once in the build job.
+        # Reuse the verified upstream executable downloaded by the build job.
         run: |
           $ErrorActionPreference = 'Stop'
           $release = Get-Content -LiteralPath artifact/release-info.json -Raw | ConvertFrom-Json
@@ -446,6 +445,7 @@ jobs:
               [string]::IsNullOrWhiteSpace($env:GITEE_TOKEN)) {
             throw 'Gitee publication requires the GITEE_REPO and GITEE_TOKEN secrets.'
           }
+          ./artifact/cli/download_gitee_cli.ps1 -OutputDirectory artifact/cli -VerifyOnly
           $env:GITEE_RELEASE_CLI = (Resolve-Path -LiteralPath artifact/cli/gitee-release-rs.exe).Path
           function Invoke-GiteeCli([string[]]$Arguments) {
             # Credentials stay in the environment, never in command arguments.

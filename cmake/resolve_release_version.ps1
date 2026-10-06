@@ -23,7 +23,7 @@ if ($PublishGitHub -or $PublishGitee) {
         if ([string]::IsNullOrWhiteSpace($env:GITEE_REPO) -or
             [string]::IsNullOrWhiteSpace($env:GITEE_TOKEN) -or
             [string]::IsNullOrWhiteSpace($env:GITEE_RELEASE_CLI)) {
-            throw 'Gitee publication requires its repository, token and built CLI.'
+            throw 'Gitee publication requires its repository, token and verified CLI.'
         }
         foreach ($kind in @('tag', 'release')) {
             # Credentials remain in the CLI environment, never command arguments.

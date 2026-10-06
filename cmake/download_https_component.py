@@ -3,10 +3,12 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import re
 import struct
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -20,16 +22,26 @@ LIMIT = 16 * 1024 * 1024
 
 class HttpsRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not newurl.startswith('https://'):
+        target = urllib.parse.urlsplit(newurl)
+        if target.scheme != 'https' or target.username or target.password:
             raise ValueError('HTTPS component download redirected to an insecure URL')
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if target.netloc != urllib.parse.urlsplit(req.full_url).netloc:
+            redirected.remove_header('Authorization')
+        return redirected
 
 
-def download(url, limit):
-    request = urllib.request.Request(url, headers={
+def download(url, limit, *, api=False):
+    headers = {
         'User-Agent': 'TTPlayerRebuild-build', 'Accept': 'application/vnd.github+json',
         'Accept-Encoding': 'identity',
-    })
+    }
+    if api:
+        if url != API:
+            raise ValueError('Unexpected HTTPS component API URL')
+        if os.environ.get('GH_TOKEN'):
+            headers['Authorization'] = 'Bearer ' + os.environ['GH_TOKEN']
+    request = urllib.request.Request(url, headers=headers)
     for attempt in range(3):
         try:
             with urllib.request.build_opener(HttpsRedirect()).open(request, timeout=60) as response:
@@ -42,6 +54,9 @@ def download(url, limit):
                 if length is not None and int(length) != len(data):
                     raise ValueError('Truncated HTTPS release response')
                 return data
+        except urllib.error.HTTPError as error:
+            if error.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                raise
         except (urllib.error.URLError, TimeoutError):
             if attempt == 2:
                 raise
@@ -96,7 +111,7 @@ def main():
     args = parser.parse_args()
     if {p.name for p in args.exports} != {'5.1.2600.txt', '6.1.7600.txt'}:
         raise ValueError('Both XP and Win7 export inventories are required')
-    release = json.loads(download(API, 2 * 1024 * 1024))
+    release = json.loads(download(API, 2 * 1024 * 1024, api=True))
     dll, metadata = unpack(release, None)
     folder = args.output / 'AddIn'
     folder.mkdir(parents=True, exist_ok=True)
