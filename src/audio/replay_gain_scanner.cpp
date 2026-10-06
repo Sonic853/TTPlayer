@@ -1,3 +1,4 @@
+#include "ttplayer/audio/disc_media.h"
 #include "ttplayer/audio/replay_gain_scanner.h"
 
 #include "ttplayer/plugins/plugin_manager.h"
@@ -478,9 +479,10 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
     } media;
     std::unique_ptr<DecodedAudioSource> segment;
     std::unique_ptr<plugins::LegacyReaderSession> reader;
-    if (!cue) reader = library.OpenReader(path, &opened, &diagnostic);
+    const bool cda = _wcsicmp(path.extension().c_str(), L".cda") == 0;
+    if (!cue && !cda) reader = library.OpenReader(path, &opened, &diagnostic);
     if (!reader) {
-        if (!cue && IsTerminalAudioOpenError(opened))
+        if (!cue && !cda && IsTerminalAudioOpenError(opened))
             return Error(ReplayGainScanStatus::decode_error, opened, std::move(diagnostic));
         media.Start();
         segment = CreateDecodedAudioSource(path, subtrack, &library, ttpcomm);
@@ -553,6 +555,7 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
 
     ReplayGainScanResult result;
     result.status = ReplayGainScanStatus::completed;
+    if (cda && segment) result.source_identity = segment->SourceIdentity();
     result.gain_db = gain;
     result.peak = peak;
     result.decoded_frames = decoded_frames;
@@ -585,6 +588,22 @@ ReplayGainScanResult CommitReplayGainTrack(
         return Error(ReplayGainScanStatus::cancelled,
                      HRESULT_FROM_WIN32(ERROR_CANCELLED), L"cancelled before metadata write");
 
+    if (_wcsicmp(path.extension().c_str(), L".cda") == 0) {
+        try {
+            const auto disc = ReadDiscLayout(path);
+            if (analysis.source_identity.empty() || disc.Fingerprint() != analysis.source_identity)
+                return Error(ReplayGainScanStatus::write_error, HRESULT_FROM_WIN32(ERROR_MEDIA_CHANGED),
+                             L"CD changed after ReplayGain analysis; no metadata written");
+            WriteDiscMetadata(disc, {{CdaTrackNumber(path), {
+                {L"replaygain_track_gain", FormatGain(analysis.gain_db)},
+                {L"replaygain_track_peak", FormatPeak(analysis.peak)}}}});
+            return analysis;
+        } catch (const std::system_error& e) {
+            return Error(ReplayGainScanStatus::write_error, HRESULT_FROM_WIN32(e.code().value()), L"writing CDDB ReplayGain");
+        } catch (...) {
+            return Error(ReplayGainScanStatus::write_error, E_FAIL, L"writing CDDB ReplayGain");
+        }
+    }
     // The manual completion path 004A50B5 -> 004C80AC permanently removes
     // FILE_ATTRIBUTE_READONLY.  The live finalizer 004B1A5C does not, so it
     // must reject a read-only source rather than silently changing it.

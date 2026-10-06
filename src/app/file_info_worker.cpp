@@ -1,3 +1,4 @@
+﻿#include "ttplayer/audio/disc_media.h"
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/app/file_info_worker.h"
 #include "../ui/file_info_cover_policy.h"
@@ -194,6 +195,42 @@ std::unique_ptr<ttplayer::plugins::LegacyReaderSession> OpenReader(
     }
 }
 
+ttplayer::ui::detail::FileInfoProbeReadResult ReadCdaMetadata(const std::filesystem::path& logical_path) {
+    using namespace ttplayer;
+    ui::detail::FileInfoProbeReadResult result;
+    try {
+        audio::DiscLayout disc;
+        unsigned number{}, frames{};
+        try {
+            disc = audio::ReadDiscLayout(logical_path);
+            number = audio::CdaTrackNumber(logical_path);
+            const auto& track = audio::FindDiscTrack(disc, number);
+            frames = track.end - track.start;
+        } catch (const std::exception&) {
+            const auto descriptor = audio::ReadCdaDescriptor(logical_path);
+            number = descriptor.number; frames = descriptor.frames;
+            disc.serial = descriptor.serial; disc.complete = false;
+            disc.tracks.push_back({number, descriptor.start + 150, descriptor.start + frames + 150, false});
+        }
+        result.status = S_OK; result.capabilities = 0x0a;
+        result.source_identity = disc.Fingerprint();
+        if (disc.complete && audio::IsDiscMetadataWritable(disc)) result.capabilities |= 4;
+        result.format = {WAVE_FORMAT_PCM, 2, 44100, 176400, 4, 16, 0};
+        result.codec = L"CD|CD Audio"; result.encoded_bits_per_second = 1411200;
+        result.duration_ms = static_cast<DWORD>((uint64_t(frames) * 1000 + 37) / 75);
+        audio::CueMetadata metadata;
+        try { metadata = audio::ReadDiscMetadata(disc)[number]; } catch (...) {}
+        if (audio::DiscField(metadata, L"Title").empty())
+            metadata.emplace_back(L"Title", L"Track " + std::to_wstring(number));
+        if (audio::DiscField(metadata, L"Tracknumber").empty())
+            metadata.emplace_back(L"Tracknumber", std::to_wstring(number));
+        metadata.emplace_back(L"CDDBSerialNumber", std::to_wstring(disc.serial));
+        for (const auto& [name,value] : metadata) result.metadata.push_back({name,value});
+    } catch (const std::system_error& e) { result.status = HRESULT_FROM_WIN32(e.code().value()); }
+      catch (...) { result.status = HRESULT_FROM_WIN32(ERROR_INVALID_DATA); }
+    return result;
+}
+
 int ReadFileInfo(const std::filesystem::path& addin_directory,
                  const std::filesystem::path& logical_path,
                  const std::filesystem::path& ttpcomm_path,
@@ -204,6 +241,8 @@ int ReadFileInfo(const std::filesystem::path& addin_directory,
     if (!ttplayer::ui::detail::ReadFileInfoProbeReadRequest(
             request_path, request))
         return 3;
+    if (_wcsicmp(logical_path.extension().c_str(), L".cda") == 0)
+        return ttplayer::ui::detail::WriteFileInfoProbeReadResult(output, ReadCdaMetadata(logical_path)) ? 0 : 4;
     HMODULE ttpcomm{};
     ttplayer::audio::ArchiveMemberPath archive;
     if (ttplayer::audio::ParseArchiveMemberPath(logical_path.native(), archive))
@@ -265,6 +304,8 @@ ttplayer::ui::detail::FileInfoProbeReadResult ReadPlaylistMetadata(
     bool include_cover = false) {
     using namespace ttplayer;
     ui::detail::FileInfoProbeReadResult result;
+    if (_wcsicmp(logical_path.extension().c_str(), L".cda") == 0)
+        return ReadCdaMetadata(logical_path);
     if (_wcsicmp(logical_path.extension().c_str(), L".cue") == 0) {
         try {
             audio::ArchiveMemberPath member;
@@ -396,6 +437,35 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
         return ttplayer::ui::detail::WriteFileInfoProbeWriteResult(output, result) ? 0 : 4;
     }
 
+    if (_wcsicmp(logical_path.extension().c_str(), L".cda") == 0) {
+        using namespace ttplayer;
+        result.fields.assign(request.fields.size(), S_OK);
+        try {
+            if (request.cover_action != ui::detail::FileInfoProbeCoverAction::unchanged)
+                throw std::system_error(ERROR_NOT_SUPPORTED, std::system_category());
+            const auto disc = audio::ReadDiscLayout(logical_path);
+            if (request.source_identity.empty() || request.source_identity != disc.Fingerprint())
+                throw std::system_error(ERROR_MEDIA_CHANGED, std::system_category());
+            const auto number = audio::CdaTrackNumber(logical_path);
+            audio::CueMetadata fields;
+            for (const auto& field : request.fields) {
+                const auto name = core::Utf8ToWide(field.name);
+                if (!audio::IsDiscMetadataField(name)) throw std::system_error(ERROR_INVALID_PARAMETER, std::system_category());
+                fields.emplace_back(name, field.value);
+            }
+            // Revalidate before touching the local cache; a copied CDA file is not a mounted CD.
+            audio::WriteDiscMetadata(disc, {{number, fields}});
+            const auto actual = audio::ReadDiscMetadata(disc).at(number);
+            for (const auto& [name,value] : fields)
+                if (audio::DiscField(actual, name.c_str()) != value)
+                    throw std::system_error(ERROR_WRITE_FAULT, std::system_category());
+            result.status = S_OK;
+        } catch (const std::system_error& e) { result.status = HRESULT_FROM_WIN32(e.code().value()); }
+          catch (...) { result.status = HRESULT_FROM_WIN32(ERROR_INVALID_DATA); }
+        if (FAILED(result.status)) result.fields.assign(request.fields.size(), result.status);
+        if (request.cover_action != ui::detail::FileInfoProbeCoverAction::unchanged) result.cover_status = E_NOTIMPL;
+        return ui::detail::WriteFileInfoProbeWriteResult(output, result) ? 0 : 4;
+    }
     if (_wcsicmp(logical_path.extension().c_str(), L".cue") == 0) {
         using namespace ttplayer;
         result.status = S_OK;

@@ -176,6 +176,8 @@ public:
     [[nodiscard]] virtual std::wstring Error() const = 0;
     [[nodiscard]] virtual HRESULT ErrorResult() const { return E_FAIL; }
     [[nodiscard]] virtual AudioMetadata Metadata() const { return {}; }
+    // Removable sources identify the medium actually opened, for deferred writes.
+    [[nodiscard]] virtual std::wstring SourceIdentity() const { return {}; }
     // CPlayerWnd retains an outgoing reader only when (capabilities & 9) == 0.
     // Native file readers can overlap; wrappers must forward the inner gate.
     [[nodiscard]] virtual bool CanOverlapPlayback() const { return true; }

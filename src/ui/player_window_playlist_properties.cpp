@@ -82,6 +82,7 @@ struct FileInfoStrings {
 };
 
 struct FileInfoRecord {
+    std::wstring source_identity;
     size_t row{};
     std::filesystem::path path;
     int subtrack{};
@@ -353,6 +354,7 @@ FileInfoRecord ReadFileInfoRecord(
         nullptr, mp3_policy, record.subtrack);
     if (!probe || FAILED(probe->status) || stop.stop_requested()) return record;
     record.reader_opened = true;
+    record.source_identity = probe->source_identity;
     audio::ArchiveMemberPath archive_member;
     record.writable = (probe->capabilities & 4U) != 0 &&
         !audio::ParseArchiveMemberPath(record.path.native(), archive_member);
@@ -1041,6 +1043,8 @@ bool MakeFilesWritable(FileInfoContext& context) {
     for (const size_t row : context.rows) {
         if (row >= context.tracks.size()) continue;
         const auto& path = context.tracks[row].path;
+        // CDA tags go to the local CDDB cache, never to the read-only CD.
+        if (_wcsicmp(path.extension().c_str(), L".cda") == 0) continue;
         audio::ArchiveMemberPath member;
         if (LooksLikeNetworkPath(path.native()) ||
             audio::ParseArchiveMemberPath(path.native(), member)) continue;
@@ -1066,7 +1070,8 @@ std::optional<detail::FileInfoProbeWriteResult> RunFileInfoWriteProbe(
     const detail::FileInfoFields& changes,
     detail::FileInfoProbeCoverAction cover_action,
     const std::vector<unsigned char>& cover,
-    const detail::FileInfoProbeMp3Policy& mp3_policy, int subtrack) {
+    const detail::FileInfoProbeMp3Policy& mp3_policy, int subtrack,
+    const std::wstring& source_identity) {
     const auto request_path = detail::ProbeTemporaryFile();
     const auto output_path = detail::ProbeTemporaryFile();
     if (request_path.empty() || output_path.empty()) {
@@ -1075,6 +1080,7 @@ std::optional<detail::FileInfoProbeWriteResult> RunFileInfoWriteProbe(
         return std::nullopt;
     }
     detail::FileInfoProbeWriteRequest request;
+    request.source_identity = source_identity;
     request.mp3 = mp3_policy;
     request.fields.reserve(changes.size());
     for (const auto& [field, value] : changes) {
@@ -1156,7 +1162,8 @@ void BeginSave(
             if (fields.empty() && action == detail::FileInfoProbeCoverAction::unchanged) continue;
             const auto written = RunFileInfoWriteProbe(
                 stop, helper, addin_directory, tracks[row].path,
-                ttpcomm_path, fields, action, draft.cover, mp3_policy, tracks[row].subtrack);
+                ttpcomm_path, fields, action, draft.cover, mp3_policy, tracks[row].subtrack,
+                draft.source_identity);
             if (!written) {
                 if (!stop.stop_requested() && SUCCEEDED(result->error))
                     result->error = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
@@ -1210,11 +1217,15 @@ void ApplyWriteResult(FileInfoContext& context,
         auto& track = context.tracks[item.row];
         for (const auto& [field, value] : item.values) {
             MergeTrackMetadata(track, field, value);
-            if (track.subtrack > 0 && _wcsicmp(track.path.extension().c_str(), L".cue") == 0 &&
-                AsciiEquals(field, "Album")) {
+            const bool cue_album = track.subtrack > 0 && _wcsicmp(track.path.extension().c_str(), L".cue") == 0;
+            const bool cd_album = _wcsicmp(track.path.extension().c_str(), L".cda") == 0;
+            if (((cue_album || cd_album) && AsciiEquals(field, "Album")) ||
+                (cue_album && AsciiEquals(field, "AlbumArtist"))) {
                 for (size_t i = 0; i < context.tracks.size(); ++i) {
                     auto& sibling = context.tracks[i];
-                    if (sibling.subtrack > 0 && _wcsicmp(sibling.path.c_str(), track.path.c_str()) == 0) {
+                    if ((cue_album && sibling.subtrack > 0 && _wcsicmp(sibling.path.c_str(), track.path.c_str()) == 0) ||
+                        (cd_album && _wcsicmp(sibling.path.extension().c_str(), L".cda") == 0 &&
+                         _wcsicmp(sibling.path.root_name().c_str(), track.path.root_name().c_str()) == 0)) {
                         MergeTrackMetadata(sibling, field, value);
                         context.touched_rows.insert(i);
                     }

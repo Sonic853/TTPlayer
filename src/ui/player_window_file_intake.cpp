@@ -1,3 +1,4 @@
+#include "ttplayer/audio/disc_media.h"
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/player_window.h"
@@ -221,32 +222,14 @@ std::vector<std::filesystem::path> EnumeratePattern(
 std::vector<std::filesystem::path> DiscMediaPaths(
     const std::filesystem::path& root) {
     std::vector<std::filesystem::path> result;
-    const auto name = root.root_name().wstring();
-    if (name.size() == 2 && name[1] == L':') {
-        std::wstring device = L"\\\\.\\";
-        device += static_cast<wchar_t>(towupper(name[0]));
-        device += L":";
-        const ScopedKernelHandle handle(CreateFileW(
-            device.c_str(), GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (handle.value != INVALID_HANDLE_VALUE) {
-            CDROM_TOC toc{};
-            DWORD returned{};
-            if (DeviceIoControl(handle.value, IOCTL_CDROM_READ_TOC, nullptr, 0,
-                                &toc, sizeof(toc), &returned, nullptr) &&
-                toc.FirstTrack != 0 && toc.LastTrack >= toc.FirstTrack) {
-                for (unsigned track = toc.FirstTrack;
-                     track <= toc.LastTrack; ++track) {
-                    const size_t index = track - toc.FirstTrack;
-                    if ((toc.TrackData[index].Control & 4U) != 0) continue;
-                    wchar_t filename[32]{};
-                    swprintf_s(filename, L"Track%02u.cda", track);
-                    result.push_back(root / filename);
-                }
-            }
+    try {
+        for (const auto& track : audio::ReadDiscLayout(root).tracks) {
+            if (track.data) continue;
+            wchar_t filename[32]{};
+            swprintf_s(filename, L"Track%02u.cda", track.number);
+            result.push_back(root / filename);
         }
-    }
+    } catch (const std::exception&) {}
     // FUN_0047D023 falls back to the shell's synthetic CDA files and then
     // VCD MPEGAV/*.dat when the TOC reader produced no playable item.
     if (result.empty()) result = EnumeratePattern(root, L"*.cda");

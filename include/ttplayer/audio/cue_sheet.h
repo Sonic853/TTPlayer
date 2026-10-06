@@ -24,6 +24,7 @@ struct CueTrack {
     std::wstring file_reference;
     std::optional<std::uint64_t> index00;
     bool has_index01{};
+    std::uint64_t pregap{}, postgap{};
     CueMetadata metadata;
     size_t first_line{};
     size_t last_line{};
@@ -53,6 +54,9 @@ public:
     // Merge only requested fields into this snapshot. Refuse stale snapshots,
     // archive members and read-only files; replace a flushed sibling file.
     void WriteTrackMetadata(int subtrack, const CueMetadata& fields) const;
+    // All edits are validated against one snapshot and committed in one replacement.
+    void WriteDiscMetadata(const std::vector<std::pair<int, CueMetadata>>& tracks) const;
+    [[nodiscard]] bool HasDataTracks() const noexcept { return has_data_tracks_; }
     [[nodiscard]] static bool IsWritableField(std::wstring_view name) noexcept;
     [[nodiscard]] const std::wstring& Title() const noexcept { return title_; }
     [[nodiscard]] const std::wstring& Performer() const noexcept {
@@ -72,6 +76,7 @@ private:
     // 0 UTF-8, 1 UTF-8 BOM, 2 UTF-16 LE, 3 UTF-16 BE, 4 system ANSI.
     int encoding_{};
     bool from_memory_{};
+    bool has_data_tracks_{};
 };
 
 } // namespace ttplayer::audio

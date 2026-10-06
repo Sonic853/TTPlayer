@@ -730,6 +730,13 @@ private:
     bool HandlePlaylistSendToCommand(UINT command);
     bool HandlePlaylistCommand(UINT command);
     bool HandleLegacyPlaylistNetworkCommand(UINT command);
+    void QueryDiscInformation(const std::filesystem::path& path, bool automatic = false);
+    void QueueAutomaticDiscQuery(const playlist::Track& track);
+    void RunAutomaticDiscQuery();
+    bool disc_query_active_{};
+    std::optional<std::filesystem::path> pending_disc_query_;
+    std::set<std::wstring> queried_discs_;
+
     void ShowPlaylistProperties(
         const playlist::Track* explicit_playback_track = nullptr);
     void BeginPlaylistListEdit(size_t index);

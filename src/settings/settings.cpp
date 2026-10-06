@@ -1254,6 +1254,9 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         if(const auto attribute=Attribute(n,L"FreedbServer");
            attribute.vt!=VT_EMPTY)
             value.freedb_server=static_cast<const wchar_t*>(_bstr_t(attribute));
+        if (value.freedb_server.empty() || value.freedb_server.find(L"freedb.") != std::wstring::npos ||
+            value.freedb_server.find(L"cddb.cgi") != std::wstring::npos)
+            value.freedb_server = L"https://musicbrainz.org/ws/2/";
         if(const auto attribute=Attribute(n,L"CacheFolder");
            attribute.vt!=VT_EMPTY)
             value.cache_folder=static_cast<const wchar_t*>(_bstr_t(attribute));

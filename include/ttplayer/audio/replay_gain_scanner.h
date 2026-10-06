@@ -25,6 +25,7 @@ enum class ReplayGainScanStatus {
 };
 
 struct ReplayGainScanResult {
+    std::wstring source_identity; // Actual opened CD; checked again before cache writes.
     ReplayGainScanStatus status{ReplayGainScanStatus::decode_error};
     double gain_db{};
     double peak{};

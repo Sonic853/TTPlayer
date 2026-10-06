@@ -2,6 +2,8 @@
 
 日期：2026-09-27。
 
+> 状态更新（2026-10-06）：本文是实施前分析，文中的“当前”“缺失”及对照表指当时源码。CDA 的共用 TOC 校验、缓冲、定位、DTS 探测与解码桥接、CDDB、属性及 MusicBrainz 已完成本次代码恢复。最新完成项、测试结果和未验证范围见 [实施记录](CDA_MUSICBRAINZ_IMPLEMENTATION.md)。
+
 ## 1. 结论与证据范围
 
 原版 CDA 包含 **光驱数字读取、轨道 reader、DTS-CD 探测、元数据和 CDDB 缓存**。
@@ -293,6 +295,9 @@ reader 自身不能从普通音频扇区直接取得歌手、专辑、歌名。
 对应主对象 `+0x790` dirty 字段，并不是覆盖主对象的轨道号。
 
 ### 7.4 FreeDB
+
+2026-10-06 补充了[完整 freedb 流程与 MusicBrainz 替代分析](FREEDB_MUSICBRAINZ_ANALYSIS.md)，
+包括原版 DiscID 时间项差异、CUE 帧精度、结果选择、保存和旧系统 HTTPS 接入要求。
 
 - `0043840A` 取 TOC 的 MSF 地址，设备失败时从 CDA 描述取得时间。
 - `004380DC`、`004380F3` 做时间数字和及 DiscID 组合计算；局部缓存键不使用此值。

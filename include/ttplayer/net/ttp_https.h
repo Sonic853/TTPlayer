@@ -84,6 +84,28 @@ typedef struct ttp_https_api_v3 {
     int (__cdecl *download)(const ttp_https_download_request *, char *error, size_t error_size);
 } ttp_https_api_v3;
 
+/* ABI 4 adds structured HTTP GET without changing ABI 1/2/3 structures.
+   Header values are ASCII without control characters, at most 512 bytes.
+   Transport success returns HTTP errors (404/429/503 etc.) in http_status. */
+#define TTP_HTTPS_HTTP_ABI_VERSION 4u
+typedef struct ttp_https_http_request {
+    uint32_t size;
+    ttp_https_request request;
+    const char *user_agent;
+    const char *accept;
+} ttp_https_http_request;
+typedef struct ttp_https_http_response {
+    uint32_t size;
+    ttp_https_response response;
+    uint32_t http_status;
+    const char *retry_after;
+} ttp_https_http_response;
+typedef struct ttp_https_api_v4 {
+    ttp_https_api_v3 base;
+    int (__cdecl *get_http)(const ttp_https_http_request *, ttp_https_http_response *, char *, size_t);
+    void (__cdecl *release_http)(ttp_https_http_response *);
+} ttp_https_api_v4;
+
 /* All pointers in the response remain valid until release(). No C++ objects,
    exceptions or CRT ownership cross the ABI. Independent calls may run in
    parallel. Keep the DLL loaded until every call and response is finished. */

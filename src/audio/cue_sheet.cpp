@@ -1,4 +1,4 @@
-#include "ttplayer/audio/cue_sheet.h"
+﻿#include "ttplayer/audio/cue_sheet.h"
 
 #include <algorithm>
 #include <cctype>
@@ -170,13 +170,13 @@ std::optional<std::uint64_t> ParseIndex(std::wstring_view value) {
     return result <= INT_MAX ? std::optional(result) : std::nullopt;
 }
 
-void SetField(CueMetadata& fields, std::wstring name, std::wstring value) {
+void SetField(CueMetadata& fields, std::wstring name, std::wstring value, bool keep_empty = false) {
     const auto found = std::find_if(fields.begin(), fields.end(),
         [&](const auto& item) { return EqualsAscii(item.first, name.c_str()); });
     if (found != fields.end()) {
-        if (value.empty()) fields.erase(found);
+        if (value.empty() && !keep_empty) fields.erase(found);
         else found->second = std::move(value);
-    } else if (!value.empty()) fields.emplace_back(std::move(name), std::move(value));
+    } else if (!value.empty() || keep_empty) fields.emplace_back(std::move(name), std::move(value));
 }
 
 std::wstring GetField(const CueMetadata& fields, const wchar_t* name) {
@@ -246,6 +246,7 @@ CueSheet CueSheet::Parse(std::span<const unsigned char> bytes,
     std::wstring current_file;
     std::optional<CueTrack> current;
     bool in_track{};
+    CueMetadata global_metadata;
     const auto finish = [&] {
         if (current && !current->file_reference.empty() &&
             (current->has_index01 || current->index00)) {
@@ -281,7 +282,7 @@ CueSheet CueSheet::Parse(std::span<const unsigned char> bytes,
                 current->file_reference = current_file;
                 current->audio_path = ResolveArchiveCueFile(source_path, current_file);
                 current->first_line = sheet.lines_.size();
-            }
+            } else sheet.has_data_tracks_ = true;
         } else if (EqualsAscii(command, L"TITLE") && current) {
             SetField(current->metadata, L"Title", CueValue(argument));
         } else if (EqualsAscii(command, L"TITLE") && !in_track) {
@@ -289,9 +290,17 @@ CueSheet CueSheet::Parse(std::span<const unsigned char> bytes,
         } else if (EqualsAscii(command, L"PERFORMER")) {
             if (current) SetField(current->metadata, L"Artist", CueValue(argument));
             else if (!in_track) sheet.performer_ = CueValue(argument);
+        } else if (EqualsAscii(command, L"REM") && !in_track) {
+            const auto [key, value] = SplitCommand(argument);
+            if (!key.empty()) SetField(global_metadata, std::wstring(key), CueValue(value));
         } else if (EqualsAscii(command, L"REM") && current) {
             const auto [key, value] = SplitCommand(argument);
-            if (!key.empty()) SetField(current->metadata, std::wstring(key), CueValue(value));
+            if (!key.empty()) SetField(current->metadata, std::wstring(key), CueValue(value), true);
+        } else if ((EqualsAscii(command, L"PREGAP") || EqualsAscii(command, L"POSTGAP")) && current) {
+            if (const auto frame = ParseIndex(argument)) {
+                if (EqualsAscii(command, L"PREGAP")) current->pregap = *frame;
+                else current->postgap = *frame;
+            }
         } else if (EqualsAscii(command, L"INDEX") && current) {
             int index_number{};
             wchar_t time[64]{};
@@ -315,6 +324,11 @@ CueSheet CueSheet::Parse(std::span<const unsigned char> bytes,
     finish();
     for (size_t index = 0; index < sheet.tracks_.size(); ++index) {
         auto& track = sheet.tracks_[index];
+        for (const auto& [name,value] : global_metadata)
+            if (std::none_of(track.metadata.begin(), track.metadata.end(),
+                [&](const auto& field) { return EqualsAscii(field.first, name.c_str()); }))
+                SetField(track.metadata, name, value);
+        SetField(track.metadata, L"AlbumArtist", sheet.performer_);
         track.title = GetField(track.metadata, L"Title");
         track.performer = GetField(track.metadata, L"Artist");
         if (track.performer.empty()) track.performer = sheet.performer_;
@@ -386,11 +400,14 @@ bool CueSheet::IsWritableField(std::wstring_view name) noexcept {
 }
 
 void CueSheet::WriteTrackMetadata(int subtrack, const CueMetadata& fields) const {
+    WriteDiscMetadata({{subtrack, fields}});
+}
+
+void CueSheet::WriteDiscMetadata(const std::vector<std::pair<int, CueMetadata>>& edits) const {
     ArchiveMemberPath archive;
     if (from_memory_ || ParseArchiveMemberPath(source_path_.native(), archive))
         CueIoError(ERROR_ACCESS_DENIED);
-    const auto* track = FindTrack(subtrack);
-    if (!track) CueIoError(ERROR_INVALID_PARAMETER);
+    if (edits.empty()) return;
     // Serialize our property and background ReplayGain writers across
     // processes. A waiting writer still has to pass the snapshot comparison.
     auto lock_key = std::filesystem::absolute(source_path_).lexically_normal().wstring();
@@ -410,6 +427,25 @@ void CueSheet::WriteTrackMetadata(int subtrack, const CueMetadata& fields) const
     if (attributes == INVALID_FILE_ATTRIBUTES) CueIoError(GetLastError());
     if (attributes & FILE_ATTRIBUTE_READONLY) CueIoError(ERROR_ACCESS_DENIED);
     auto lines = lines_;
+    const auto newline = [&]() -> std::wstring {
+        for (const auto& line : lines) if (!line.ending.empty()) return line.ending;
+        return L"\r\n";
+    }();
+    std::vector<bool> removed(lines.size());
+    std::vector<std::wstring> before(lines.size() + 1);
+    size_t global_end{};
+    while (global_end < lines.size()) {
+        const auto [cmd, arg] = SplitCommand(lines[global_end].text);
+        if (EqualsAscii(cmd, L"TRACK")) break;
+        ++global_end;
+    }
+    CueMetadata disc_edits;
+    std::vector<int> edited_tracks;
+    for (const auto& [subtrack, fields] : edits) {
+    const auto* track = FindTrack(subtrack);
+    if (!track || std::find(edited_tracks.begin(), edited_tracks.end(), subtrack) != edited_tracks.end())
+        CueIoError(ERROR_INVALID_PARAMETER);
+    edited_tracks.push_back(subtrack);
     CueMetadata changes;
     for (const auto& [key, value] : fields) {
         if (!IsWritableField(key) || value.find_first_of(L"\r\n\"") != std::wstring::npos ||
@@ -421,33 +457,40 @@ void CueSheet::WriteTrackMetadata(int subtrack, const CueMetadata& fields) const
         if (found == changes.end()) changes.emplace_back(key, value);
         else found->second = value;
     }
-    const auto newline = [&]() -> std::wstring {
-        for (const auto& line : lines) if (!line.ending.empty()) return line.ending;
-        return L"\r\n";
-    }();
-    std::vector<bool> removed(lines.size());
-    std::vector<std::wstring> before(lines.size() + 1);
-    size_t global_end{};
-    while (global_end < lines.size()) {
-        const auto [cmd, arg] = SplitCommand(lines[global_end].text);
-        if (EqualsAscii(cmd, L"FILE") || EqualsAscii(cmd, L"TRACK")) break;
-        ++global_end;
-    }
     for (const auto& [key, value] : changes) {
+        const bool album_artist = EqualsAscii(key, L"AlbumArtist");
         const bool album = EqualsAscii(key, L"Album");
+        if (album || album_artist) {
+            const auto previous = std::find_if(disc_edits.begin(), disc_edits.end(),
+                [&](const auto& field) { return EqualsAscii(field.first, key.c_str()); });
+            if (previous != disc_edits.end()) {
+                if (previous->second != value) CueIoError(ERROR_INVALID_PARAMETER);
+                continue;
+            }
+            disc_edits.emplace_back(key,value);
+        }
         const bool artist = EqualsAscii(key, L"Artist");
         const bool title = EqualsAscii(key, L"Title");
-        const auto first = album ? 0 : track->first_line + 1;
-        const auto last = album ? global_end : track->last_line;
-        const std::wstring prefix = album ? L"TITLE " : artist ? L"    PERFORMER " :
+        const auto first = (album || album_artist) ? 0 : track->first_line + 1;
+        const auto last = (album || album_artist) ? global_end : track->last_line;
+        const std::wstring prefix = album ? L"TITLE " : album_artist ? L"PERFORMER " : artist ? L"    PERFORMER " :
             title ? L"    TITLE " : L"    REM " + key + L" ";
-        const std::wstring replacement = value.empty() ? std::wstring{} : prefix + L"\"" + value + L"\"";
+        // An explicit empty REM shadows an inherited disc field for this track.
+        bool shadows_global{};
+        if (value.empty() && !album && !album_artist && !artist && !title) {
+            for (size_t i = 0; i < global_end; ++i) {
+                const auto [cmd, arg] = SplitCommand(lines[i].text);
+                const auto [rem, ignored] = SplitCommand(arg);
+                if (EqualsAscii(cmd, L"REM") && EqualsAscii(rem, key.c_str())) shadows_global = true;
+            }
+        }
+        const std::wstring replacement = value.empty() && !shadows_global ? std::wstring{} : prefix + L"\"" + value + L"\"";
         bool written{};
         for (size_t i = first; i < last; ++i) {
             const auto [cmd, arg] = SplitCommand(lines[i].text);
             const auto [rem, rem_value] = SplitCommand(arg);
             const bool matches = (album || title) && EqualsAscii(cmd, L"TITLE") ||
-                artist && EqualsAscii(cmd, L"PERFORMER") ||
+                (artist || album_artist) && EqualsAscii(cmd, L"PERFORMER") ||
                 (!album && EqualsAscii(cmd, L"REM") && EqualsAscii(rem, key.c_str()));
             if (!matches) continue;
             if (written || replacement.empty()) removed[i] = true;
@@ -455,6 +498,7 @@ void CueSheet::WriteTrackMetadata(int subtrack, const CueMetadata& fields) const
         }
         if (!written && !replacement.empty()) before[first] += replacement + newline;
         // Removing a per-track artist restores the global PERFORMER fallback.
+    }
     }
     std::wstring text;
     for (size_t i = 0; i <= lines.size(); ++i) {

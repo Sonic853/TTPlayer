@@ -73,6 +73,11 @@ add_library(ttplayer_core
   src/audio/asio_sink.cpp
   src/audio/audio_engine.cpp
   src/audio/builtin_file_info.cpp
+  src/audio/disc_lookup.cpp
+  src/net/http.cpp
+  src/ui/disc_lookup_dialog.cpp
+  src/audio/cda_source.cpp
+  src/audio/disc_media.cpp
   src/audio/cue_sheet.cpp
   src/audio/directshow_source.cpp
   src/audio/file_encoder.cpp
@@ -165,7 +170,7 @@ target_compile_definitions(ttplayer_core PRIVATE UNICODE _UNICODE NOMINMAX WIN32
 target_compile_options(ttplayer_core PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_core PUBLIC
   ttplayer_wtl_headers
-  winmm ole32 oleaut32 comsuppw uuid strmiids msimg32 shell32 shlwapi comctl32 comdlg32
+  advapi32 winmm ole32 oleaut32 comsuppw uuid strmiids msimg32 shell32 shlwapi comctl32 comdlg32
   windowscodecs gdiplus dsound setupapi dwmapi uxtheme
   mfplat mfreadwrite mfuuid propsys winhttp
 )

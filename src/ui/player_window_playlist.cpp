@@ -1,3 +1,4 @@
+#include "ttplayer/audio/disc_media.h"
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_window.h"
@@ -1432,7 +1433,15 @@ std::vector<wchar_t> ShellPathList(
 
 bool RemoveReplayGainTags(const plugins::PluginManager* library,
                           const std::filesystem::path& path) {
-    if (!library || path.empty() || LooksLikeUrl(path.wstring())) return false;
+    if (path.empty() || LooksLikeUrl(path.wstring())) return false;
+    if (_wcsicmp(path.extension().c_str(), L".cda") == 0) {
+        try {
+            audio::WriteDiscMetadata(audio::ReadDiscLayout(path), {{audio::CdaTrackNumber(path),
+                {{L"replaygain_track_gain", L""}, {L"replaygain_track_peak", L""}}}});
+            return true;
+        } catch (...) { return false; }
+    }
+    if (!library) return false;
     HRESULT result{};
     // FUN_00484009 obtains the metadata interface from a writable file
     // stream.  A playback-only reader makes the shipped FLAC add-in return
@@ -4529,6 +4538,10 @@ void PlayerWindow::PreparePlaylistMenu(HMENU menu) const {
         has_selection && sound_library_ != nullptr &&
         (!playlist_metadata_working_ ||
          !playlist_metadata_working_->load(std::memory_order_acquire)));
+    MENUITEMINFOW disc_query_label{sizeof(disc_query_label)};
+    disc_query_label.fMask = MIIM_STRING;
+    disc_query_label.dwTypeData = const_cast<wchar_t*>(L"查询曲目信息 (MusicBrainz)...");
+    SetMenuItemInfoW(menu, kPlaylistFreeDb, FALSE, &disc_query_label);
     EnableCommand(menu, kPlaylistFreeDb,
         has_selection && focused_track &&
         SupportsLegacyFreeDbQuery(*focused_track));

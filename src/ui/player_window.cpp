@@ -2851,6 +2851,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
     }
     static const UINT taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     static const UINT taskbar_button_created = RegisterWindowMessageW(L"TaskbarButtonCreated");
+    if (message == kMsgDiscLookup) { RunAutomaticDiscQuery(); return 0; }
     if (message == kMsgPlaylistInfoReady)
         return ApplyPlaylistInfoResult(lparam);
     if (message == kMsgExtensionCorrection) {
@@ -7083,6 +7084,15 @@ bool PlayerWindow::PlayCurrent() {
     RefreshPlaybackUi();
     ShowPlaybackOpenTip();
     CheckExtensionCorrection(requested_track.path, requested_track.subtrack);
+    if (_wcsicmp(requested_track.path.extension().c_str(), L".cda") == 0) {
+        auto disc_track = requested_track;
+        disc_track.artist = core::WideToUtf8(metadata.artist);
+        disc_track.album = core::WideToUtf8(metadata.album);
+        disc_track.metadata.clear();
+        for (const auto& [name, value] : metadata.entries)
+            disc_track.metadata.emplace_back(core::WideToUtf8(name), core::WideToUtf8(value));
+        QueueAutomaticDiscQuery(disc_track);
+    }
     return true;
 }
 

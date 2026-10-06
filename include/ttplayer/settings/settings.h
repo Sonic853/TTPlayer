@@ -277,7 +277,7 @@ struct NetworkSettings {
     std::wstring proxy_password;
     bool freedb_auto_query{true};
     bool show_info_when_fail{true};
-    std::wstring freedb_server{L"http://freedb.freedb.org/~cddb/cddb.cgi"};
+    std::wstring freedb_server{L"https://musicbrainz.org/ws/2/"};
     std::filesystem::path cache_folder;
     std::vector<std::wstring> server_list;
     bool accept_recommendation_list{true};

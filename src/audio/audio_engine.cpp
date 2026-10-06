@@ -8,6 +8,8 @@
 #include "ttplayer/audio/playback_clock.h"
 #include "ttplayer/audio/archive_member.h"
 #include "ttplayer/audio/cue_sheet.h"
+#include "ttplayer/audio/cda_source.h"
+#include "ttplayer/core/text.h"
 #include "ttplayer/audio/native_output_contract.h"
 #include "ttplayer/audio/asio_sink.h"
 #include "ttplayer/audio/kernel_streaming_sink.h"
@@ -976,164 +978,6 @@ private:
     std::wstring error_;
 };
 
-class CdaSource final : public DecodedAudioSource {
-public:
-    bool CanOverlapPlayback() const override { return false; }
-    ~CdaSource() override {
-        if (drive_ != INVALID_HANDLE_VALUE) CloseHandle(drive_);
-    }
-
-    bool Open(const std::filesystem::path& path,
-              const PlaybackOptions&) override {
-        const auto root = path.root_name().wstring();
-        const auto filename = path.filename().wstring();
-        if (root.size() != 2 || root[1] != L':' || filename.size() < 10 ||
-            _wcsnicmp(filename.c_str(), L"track", 5) != 0 ||
-            _wcsicmp(path.extension().c_str(), L".cda") != 0) {
-            error_ = L"Invalid CDA path (expected X:\\TrackNN.cda)";
-            return false;
-        }
-        wchar_t* end{};
-        const long track = wcstol(filename.c_str() + 5, &end, 10);
-        if (track <= 0 || !end || _wcsicmp(end, L".cda") != 0) {
-            error_ = L"Invalid CDA track number";
-            return false;
-        }
-
-        std::wstring device = L"\\\\.\\";
-        device += static_cast<wchar_t>(towupper(root[0]));
-        device += L":";
-        drive_ = CreateFileW(device.c_str(), GENERIC_READ,
-                             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (drive_ == INVALID_HANDLE_VALUE)
-            return FailWin32(L"CreateFile(CD drive)");
-
-        CDROM_TOC toc{};
-        DWORD returned{};
-        if (!DeviceIoControl(drive_, IOCTL_CDROM_READ_TOC, nullptr, 0,
-                             &toc, sizeof(toc), &returned, nullptr))
-            return FailWin32(L"IOCTL_CDROM_READ_TOC");
-        if (track < toc.FirstTrack || track > toc.LastTrack) {
-            error_ = L"CDA track is outside the disc TOC";
-            return false;
-        }
-        const size_t index = static_cast<size_t>(track - toc.FirstTrack);
-        if ((toc.TrackData[index].Control & 4U) != 0) {
-            error_ = L"The selected CD track contains data, not CD-DA audio";
-            return false;
-        }
-        start_lba_ = AddressToLba(toc.TrackData[index].Address);
-        end_lba_ = AddressToLba(toc.TrackData[index + 1].Address);
-        if (end_lba_ <= start_lba_) {
-            error_ = L"Invalid CD track extent in TOC";
-            return false;
-        }
-        current_lba_ = start_lba_;
-
-        wave_format_.wFormatTag = WAVE_FORMAT_PCM;
-        wave_format_.nChannels = 2;
-        wave_format_.nSamplesPerSec = 44100;
-        wave_format_.nAvgBytesPerSec = 176400;
-        wave_format_.nBlockAlign = 4;
-        wave_format_.wBitsPerSample = 16;
-        display_format_.format_tag = WAVE_FORMAT_PCM;
-        display_format_.channels = 2;
-        display_format_.sample_rate = 44100;
-        display_format_.bytes_per_second = 176400;
-        display_format_.block_align = 4;
-        display_format_.bits_per_sample = 16;
-        display_format_.codec_name = L"CD-DA";
-        duration_ = std::chrono::milliseconds(
-            static_cast<int64_t>(end_lba_ - start_lba_) * 2352 * 1000 /
-            wave_format_.nAvgBytesPerSec);
-        metadata_.title = L"Track " + std::to_wstring(track);
-        return true;
-    }
-
-    bool Read(size_t requested_bytes, std::vector<std::byte>& output,
-              bool& end_of_stream) override {
-        output.clear();
-        end_of_stream = current_lba_ >= end_lba_;
-        if (end_of_stream) return true;
-        constexpr DWORD sector_bytes = 2352;
-        DWORD sectors = static_cast<DWORD>(std::max<size_t>(
-            1, (requested_bytes + sector_bytes - 1) / sector_bytes));
-        sectors = std::min<DWORD>(24, sectors);
-        sectors = std::min<DWORD>(sectors,
-            static_cast<DWORD>(end_lba_ - current_lba_));
-        DWORD returned{};
-        DWORD attempted = sectors;
-        for (;;) {
-            output.resize(static_cast<size_t>(attempted) * sector_bytes);
-            RAW_READ_INFO request{};
-            // This is the unusual unit required by IOCTL_CDROM_RAW_READ and
-            // used by FUN_004DEE53: the byte offset is LBA*2048 even for
-            // 2352-byte CDDA output sectors.
-            request.DiskOffset.QuadPart =
-                static_cast<LONGLONG>(current_lba_) * 2048;
-            request.SectorCount = attempted;
-            request.TrackMode = CDDA;
-            if (DeviceIoControl(drive_, IOCTL_CDROM_RAW_READ, &request,
-                                sizeof(request), output.data(),
-                                static_cast<DWORD>(output.size()), &returned,
-                                nullptr)) break;
-            // FUN_004E778B starts at 24 sectors and backs off by four while
-            // the request is at least eight sectors. Some drives reject the
-            // larger raw transfer even though four-sector reads work.
-            if (attempted < 8) {
-                output.clear();
-                return FailWin32(L"IOCTL_CDROM_RAW_READ");
-            }
-            attempted -= 4;
-        }
-        returned -= returned % wave_format_.nBlockAlign;
-        output.resize(returned);
-        const DWORD completed = returned / sector_bytes;
-        current_lba_ += completed;
-        end_of_stream = current_lba_ >= end_lba_ || completed == 0;
-        return true;
-    }
-
-    bool Seek(std::chrono::milliseconds position) override {
-        const auto milliseconds = std::max<int64_t>(0, position.count());
-        const int64_t sector = milliseconds * 75 / 1000;
-        current_lba_ = start_lba_ + static_cast<LONG>(std::min<int64_t>(
-            sector, end_lba_ - start_lba_));
-        return true;
-    }
-
-    [[nodiscard]] const WAVEFORMATEX& OutputFormat() const override {
-        return wave_format_;
-    }
-    [[nodiscard]] AudioFormat DisplayFormat() const override { return display_format_; }
-    [[nodiscard]] std::chrono::milliseconds Duration() const override { return duration_; }
-    [[nodiscard]] std::wstring Error() const override { return error_; }
-    [[nodiscard]] AudioMetadata Metadata() const override { return metadata_; }
-
-private:
-    static LONG AddressToLba(const UCHAR address[4]) noexcept {
-        const LONG absolute =
-            (static_cast<LONG>(address[1]) * 60 + address[2]) * 75 + address[3];
-        return std::max<LONG>(0, absolute - 150);
-    }
-
-    bool FailWin32(std::wstring_view operation) {
-        error_ = HResultMessage(operation, HRESULT_FROM_WIN32(GetLastError()));
-        return false;
-    }
-
-    HANDLE drive_{INVALID_HANDLE_VALUE};
-    LONG start_lba_{};
-    LONG end_lba_{};
-    LONG current_lba_{};
-    WAVEFORMATEX wave_format_{};
-    AudioFormat display_format_{};
-    AudioMetadata metadata_;
-    std::chrono::milliseconds duration_{};
-    std::wstring error_;
-};
-
 // 005230E8 reader slots +0x38/+0x3c return E_NOTIMPL. MIDI's fixed format
 // descriptor must never send conversion/ReplayGain down a fake PCM path.
 class MidiNonPcmSource final : public DecodedAudioSource {
@@ -1268,7 +1112,7 @@ std::unique_ptr<DecodedAudioSource> MakeBaseSource(
     if (AudioEngine::IsNetworkMediaLocation(path))
         return std::make_unique<MediaFoundationSource>(ttpcomm);
     const auto extension = LowerExtension(path);
-    if (extension == L".cda") return std::make_unique<CdaSource>();
+    if (extension == L".cda") return CreateCdaSource(plugin_manager, ttpcomm);
     return std::make_unique<RecoveredFileSource>(plugin_manager, ttpcomm);
 }
 

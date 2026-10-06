@@ -4881,7 +4881,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         const HWND tab = GetDlgItem(dialog, 1181);
         if (tab) {
             for (int index = 0; index < 2; ++index) {
-                auto title = ResourceText(33262 + index);
+                auto title = index == 1 ? std::wstring(L"MusicBrainz") : ResourceText(33262 + index);
                 TCITEMW item{};
                 item.mask = TCIF_TEXT;
                 item.pszText = title.data();
@@ -4906,13 +4906,26 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                         settings_.network.proxy_username.c_str());
         SetDlgItemTextW(dialog, 2185,
                         settings_.network.proxy_password.c_str());
+        EnumChildWindows(dialog, [](HWND child, LPARAM) -> BOOL {
+            wchar_t type[32]{}, text[256]{};
+            GetClassNameW(child, type, 32); GetWindowTextW(child, text, 256);
+            if (!_wcsicmp(type, L"Button") && wcsstr(text, L"freedb.org"))
+                SetWindowTextW(child, L"MusicBrainz（获取 CD 的专辑和音轨信息）");
+            if (!_wcsicmp(type, L"Static") && wcsstr(text, L"freedb"))
+                SetWindowTextW(child, L"MusicBrainz 服务器:");
+            return TRUE;
+        }, 0);
+        SetDlgItemTextW(dialog, 2173, L"播放缺少信息的 CD 音轨时自动查询");
         SetChecked(dialog, 2173, settings_.network.freedb_auto_query);
         SetChecked(dialog, 2176, settings_.network.show_info_when_fail);
+        SetDlgItemTextW(dialog, 2176, L"自动查询失败时显示错误信息");
         const HWND freedb = GetDlgItem(dialog, 2177);
         if (freedb) {
-            for (const auto& server : settings_.network.server_list)
+            for (const auto& server : settings_.network.server_list) {
+                if (server.find(L"freedb.") != server.npos || server.find(L"cddb.cgi") != server.npos) continue;
                 SendMessageW(freedb, CB_ADDSTRING, 0,
-                             reinterpret_cast<LPARAM>(server.c_str()));
+                              reinterpret_cast<LPARAM>(server.c_str()));
+            }
             if (!settings_.network.freedb_server.empty() &&
                 SendMessageW(freedb, CB_FINDSTRINGEXACT,
                     static_cast<WPARAM>(-1),
