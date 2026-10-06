@@ -201,7 +201,30 @@ jobs:
             run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
 
-      - name: Upload player
+      - name: Download, verify and package latest add-ins for release
+        if: inputs.release_a_version || inputs.release_to_gitee
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python cmake/package_addin_bundles.py --version $env:PACKAGE_VERSION --output artifact `
+            --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt `
+            --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/6.1.7600.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Add-in download, verification or packaging failed.' }
+          $packages = @("TTPlayerRebuild-$env:PACKAGE_VERSION.zip",
+            "CodecAddIn-Rebuild-$env:PACKAGE_VERSION.zip", "ExtraAddIn-$env:PACKAGE_VERSION.zip")
+          $sums = foreach ($name in $packages) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          $sums | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
+          $info = Get-Content -LiteralPath artifact/build-info.json -Raw -Encoding utf8 | ConvertFrom-Json
+          $bundles = Get-Content -LiteralPath artifact/addin-bundles.json -Raw -Encoding utf8 | ConvertFrom-Json
+          $info | Add-Member -NotePropertyName addin_bundles -NotePropertyValue $bundles
+          $info | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
+
+      - name: Upload player and optional add-in bundles
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: TTPlayer-Windows-x86-${{ inputs.configuration }}-${{ github.run_number }}
@@ -255,6 +278,12 @@ jobs:
             5. 复制 TTPlayerRebuild.exe、TTPUpdater.exe 和 AddIn 文件夹到与 TTPlayer.exe 同一路径，合并 AddIn 文件夹。
             6. 启动 TTPlayerRebuild.exe
             7. 享受重建版千千静听。
+
+            可选插件包（独立下载，退出播放器后解压到同一安装目录）：
+            - CodecAddIn-Rebuild-{version}.zip：WebM、APE、FLAC、MP3/WMA 编码、OGG/Opus、AAC 插件，合并 AddIn 文件夹。
+            - ExtraAddIn-{version}.zip：Winamp 皮肤、MAKI 虚拟机、多语言插件，合并 AddIn 和 i18n 文件夹；i18n 放在播放器旁。
+            - 插件来自各自仓库本次构建解析到的最新正式 Release；插件自身版本独立于播放器，具体版本见下表。
+            - SHA256SUMS.txt 可校验上述三个 ZIP；插件包内另有各运行文件的校验清单。播放器自动更新器只更新播放器包。
         run: |
           $ErrorActionPreference = 'Stop'
           $publishGitHub = $env:PUBLISH_RELEASE -eq 'true'
@@ -268,12 +297,24 @@ jobs:
               $info.unified -ne $true -or $info.package_version -cne $env:RELEASE_VERSION) {
             throw 'The downloaded artifact does not match this Release build.'
           }
-          $packageName = "TTPlayerRebuild-$($info.package_version).zip"
-          $packageArchive = "artifact/$packageName"
-          $hash = (Get-FileHash -LiteralPath $packageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          $expectedHash = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw).Trim()
-          $actualHashes = "$hash  $packageName"
-          if (($expectedHash -replace "`r", '') -cne $actualHashes) { throw 'Player SHA-256 verification failed.' }
+          $packages = @("TTPlayerRebuild-$env:RELEASE_VERSION.zip",
+            "CodecAddIn-Rebuild-$env:RELEASE_VERSION.zip", "ExtraAddIn-$env:RELEASE_VERSION.zip")
+          $actualHashes = foreach ($name in $packages) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          $expectedHashes = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw -Encoding utf8).Trim() -replace "`r", ''
+          if ($expectedHashes -cne ($actualHashes -join "`n")) { throw 'Release package SHA-256 verification failed.' }
+          $bundles = $info.addin_bundles
+          if ($bundles.player_version -cne $env:RELEASE_VERSION -or @($bundles.bundles).Count -ne 2) {
+            throw 'Missing or mismatched add-in release metadata.'
+          }
+          foreach ($bundle in $bundles.bundles) {
+            if ($bundle.archive -cnotin $packages[1..2] -or
+                $bundle.sha256 -cne (Get-FileHash -LiteralPath (Join-Path artifact $bundle.archive) -Algorithm SHA256).Hash.ToLowerInvariant()) {
+              throw 'Add-in source metadata does not match the package.'
+            }
+          }
 
           # Already compiled with this exact version; do not rename or patch binaries.
           $version = $env:RELEASE_VERSION
@@ -285,6 +326,13 @@ jobs:
           $logUrl = if ($previous) { "$repoUrl/compare/$previous...$logTarget" }
                     else { "$repoUrl/commits/$logTarget" }
           $notes = "**完整更新日志**: $logUrl`n`n" + $env:RELEASE_INSTALL_NOTES.Replace('{version}', $version)
+          $notes += "`n`n### 插件版本`n`n| 插件包 | 插件 | 上游正式版本 |`n| --- | --- | --- |`n"
+          foreach ($bundle in $bundles.bundles) {
+            foreach ($component in $bundle.components) {
+              $link = "$($component.repository)/releases/tag/$($component.version)"
+              $notes += "| $($bundle.name) | $($component.dll) | [$($component.version)]($link) |`n"
+            }
+          }
           Write-Output "Preparing $version; changelog: $logUrl"
           $notes | Set-Content -LiteralPath artifact/release-notes.md -Encoding utf8
           [ordered]@{
@@ -335,14 +383,17 @@ jobs:
               $release.configuration -cne 'Release') {
             throw 'Prepared release does not match this build and version.'
           }
-          $packageName = "TTPlayerRebuild-$version.zip"
-          $packageArchive = "artifact/$packageName"
-          $hash = (Get-FileHash -LiteralPath $packageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          $expectedHash = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw).Trim() -replace "`r", ''
-          if ($expectedHash -cne "$hash  $packageName") {
+          $packages = @("TTPlayerRebuild-$version.zip", "CodecAddIn-Rebuild-$version.zip", "ExtraAddIn-$version.zip")
+          $actualHashes = foreach ($name in $packages) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          $expectedHashes = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw -Encoding utf8).Trim() -replace "`r", ''
+          if ($expectedHashes -cne ($actualHashes -join "`n")) {
             throw 'Prepared release SHA-256 verification failed.'
           }
-          gh release create "$version" $packageArchive artifact/SHA256SUMS.txt `
+          $attachments = @($packages | ForEach-Object { Join-Path artifact $_ }) + @('artifact/SHA256SUMS.txt')
+          gh release create "$version" @attachments `
             --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" `
             --title "$version" --notes-file artifact/release-notes.md
           if ($LASTEXITCODE -ne 0) { throw 'GitHub publication failed; existing releases are not overwritten.' }
@@ -371,7 +422,7 @@ jobs:
         env:
           GITEE_REPO: ${{ secrets.GITEE_REPO }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-        # The pinned CLI was built once in Prepare Release.
+        # The pinned CLI was built once in the build job.
         run: |
           $ErrorActionPreference = 'Stop'
           $release = Get-Content -LiteralPath artifact/release-info.json -Raw | ConvertFrom-Json
@@ -381,13 +432,16 @@ jobs:
               $release.configuration -cne 'Release') {
             throw 'Prepared release does not match this build and version.'
           }
-          $packageName = "TTPlayerRebuild-$version.zip"
-          $packageArchive = "artifact/$packageName"
-          $hash = (Get-FileHash -LiteralPath $packageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          $expectedHash = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw).Trim() -replace "`r", ''
-          if ($expectedHash -cne "$hash  $packageName") {
+          $packages = @("TTPlayerRebuild-$version.zip", "CodecAddIn-Rebuild-$version.zip", "ExtraAddIn-$version.zip")
+          $actualHashes = foreach ($name in $packages) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          $expectedHashes = (Get-Content -LiteralPath artifact/SHA256SUMS.txt -Raw -Encoding utf8).Trim() -replace "`r", ''
+          if ($expectedHashes -cne ($actualHashes -join "`n")) {
             throw 'Prepared release SHA-256 verification failed.'
           }
+          $attachments = @($packages | ForEach-Object { Join-Path artifact $_ }) + @('artifact/SHA256SUMS.txt')
           if ([string]::IsNullOrWhiteSpace($env:GITEE_REPO) -or
               [string]::IsNullOrWhiteSpace($env:GITEE_TOKEN)) {
             throw 'Gitee publication requires the GITEE_REPO and GITEE_TOKEN secrets.'
@@ -408,8 +462,8 @@ jobs:
               $releaseId -le 0 -or $created.tag_name -cne $version) {
             throw 'Gitee returned an invalid release ID or tag; no attachments were uploaded.'
           }
-          Write-Output "Created Gitee release $version (ID $releaseId). Uploading two attachments."
-          foreach ($asset in @($packageArchive, 'artifact/SHA256SUMS.txt')) {
+          Write-Output "Created Gitee release $version (ID $releaseId). Uploading four attachments."
+          foreach ($asset in $attachments) {
             $null = Invoke-GiteeCli -Arguments @('asset', 'upload', '--id', [string]$releaseId, $asset, '--timeout', '600')
           }
-          Write-Output "Gitee release $version (ID $releaseId) and both attachments published."
+          Write-Output "Gitee release $version (ID $releaseId) and all four attachments published."

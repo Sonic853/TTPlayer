@@ -55,8 +55,12 @@ flowchart LR
 GitHub tag/Release；勾选 Gitee 时还会分页读取 Gitee tag/Release，把两边已有
 版本一起计入占用范围。两个平台同时发布时使用同一个新版本号和相同附件。
 新标签始终指向本次构建提交，不移动旧标签、不覆盖已有 Release。
-通用构建只生成 Release。Release 附件为 `TTPlayerRebuild-版本号.zip` 与记录该 ZIP
+通用构建只生成 Release。Release 附件为 `TTPlayerRebuild-版本号.zip`、
+`CodecAddIn-Rebuild-版本号.zip`、`ExtraAddIn-版本号.zip`，以及记录三个 ZIP
 校验值的 `SHA256SUMS.txt`，不再额外构建或分发 XP-Win7 专用包。
+两组插件包仅在勾选 GitHub 或 Gitee 发布时生成；从各插件仓库最新正式 Release 下载，
+校验包内外 SHA-256、x86 架构与 XP／Win7 导入后打包。I18n 的翻译资源随 ExtraAddIn 分发。
+具体仓库、文件布局、来源记录和本地命令见 [Release 插件包](ADDIN_RELEASE_BUNDLES.md)。
 例如 `2026.09.05p1` 对应 `TTPlayerRebuild-2026.09.05p1.zip`。EXE 文件版本、产品版本、
 ZIP 名称、校验清单及正文说明保持一致；包内程序名仍为 `TTPlayerRebuild.exe`。
 **XP SP3／Win7／Win10／Win11 使用同一份 EXE**，由实际系统版本与组件可用性选择功能。
@@ -129,7 +133,7 @@ cmake -S . -B build "-DTTPLAYER_BUILD_VERSION="
 构建 `gitee-release-rs`，不运行 CLI 测试。令牌通过环境变量注入，不放在命令参数中。
 
 根据 CLI 的[创建与附件接口](https://github.com/Sonic853/gitee-release-cli-rust/blob/9993cd79d512e16c6586384cd83acbeaaf15a723/docs/rust-cli.md)，
-先创建 Release，校验返回的 ID 和 tag，再使用该 ID 上传通用 ZIP、`SHA256SUMS.txt`。创建或任一上传失败都会使任务失败，不会自动删除
+先创建 Release，校验返回的 ID 和 tag，再使用该 ID 上传播放器 ZIP、两组插件 ZIP 与 `SHA256SUMS.txt` 共四个附件。创建或任一上传失败都会使任务失败，不会自动删除
 已经成功发布的版本或覆盖旧附件。日志会记录成功创建的 Release ID，便于补传
 缺失附件；重新运行整套发布流程会分配下一个可用版本号。
 仅重跑失败的发布任务则继续使用原准备任务输出的版本及 Artifact，不重新分配版本。
@@ -198,7 +202,8 @@ TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一�
 不会编译相邻的 `gettext` 源码或复制其翻译目录；播放器安装包也不打包构建目录中
 遗留的 `ttp_i18n.dll` 和 `i18n` 文件。
 
-需要国际化时，另行构建或下载 `gettext` 的翻译包，将 `ttp_i18n.dll` 放入 EXE 目录下的
+需要国际化时，可下载同一播放器 Release 的 `ExtraAddIn-版本号.zip`，或另行构建／下载
+`gettext` 的翻译包，将 `ttp_i18n.dll` 放入 EXE 目录下的
 `AddIn`，将 `i18n` 放在 EXE 旁边。语言文件直接位于 `i18n/<语言>/ttplayer.po` 或 `.mo`，
 有效 MO 优先。通用版使用该 DLL；没有它时仍使用原始资源及自建文本。
 

@@ -105,6 +105,7 @@ add_library(ttplayer_core
   src/platform/optional_windows_api.cpp
   src/platform/windows_features.cpp
   src/plugins/plugin_manager.cpp
+  src/plugins/nero_config_layout.cpp
   src/settings/file_association.cpp
   src/settings/settings.cpp
   src/settings/runtime_settings.cpp

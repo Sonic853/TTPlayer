@@ -119,6 +119,12 @@ features are selected at runtime. The player EXE does not require the modern VC+
 original add-ins can still require their own VC++ 2012 x86 runtime.
 See [unified build changes and system feature matrix](docs/UNIFIED_WINDOWS_BUILD.md).
 
+Release runs also provide `CodecAddIn-Rebuild-<version>.zip` (six codec add-ins)
+and `ExtraAddIn-<version>.zip` (Winamp skins, MAKI, and translations), downloaded
+from each component's latest stable GitHub release. Both GitHub and Gitee receive
+the same bundles. Close the player, merge `AddIn`, and place `i18n` beside the EXE.
+See [release add-in bundles](docs/ADDIN_RELEASE_BUNDLES.md) for contents and verification.
+
 Build the complete local recovery workspace from a Visual Studio developer shell:
 
 ```powershell

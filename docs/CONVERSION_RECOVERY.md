@@ -151,6 +151,12 @@ XML 共 29 个预设，已提供的 LAME ZIP 可补齐其中 5 个。其余 24 �
 Nero 大于 48 kHz 输入的 `8BDA0602` 是原 `ttp_aac` 的明确拒绝，两版本窗口测试
 均为“出错”；需要用户勾选重采样至 44.1/48 kHz，不能把这一支持范围说成已扩展。
 
+## Nero 左侧副屏配置窗口（2026-10-06）
+
+已修复旧 `Aac.dll` 把负屏幕右边界截断为 0、导致配置窗口横向拉长的问题。
+原版与重建版调用链、实际错误公式、宿主兼容处理以及三块真实显示器上的验证，见
+[NERO_CONFIG_MULTIMONITOR_FIX.md](NERO_CONFIG_MULTIMONITOR_FIX.md)。
+
 ## 已验证与边界
 
 宿主机 Release 构建，30 项 CTest。新增 `conversion_recovery_tests` 验证：

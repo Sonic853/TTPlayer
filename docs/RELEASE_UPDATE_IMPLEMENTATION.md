@@ -26,6 +26,11 @@ Actions 调用 `cmake/download_https_component.py`，从 [TTPlayerHttps 最新�
 
 ## 检查和通知
 
+Release 另外提供 `CodecAddIn-Rebuild-版本号.zip` 和 `ExtraAddIn-版本号.zip`，
+外部 `SHA256SUMS.txt` 同时记录三个 ZIP。更新器按精确的 `TTPlayerRebuild-版本号.zip`
+文件名选择附件及对应校验行；插件包供用户单独安装，见 [Release 插件包](ADDIN_RELEASE_BUNDLES.md)。
+2026-10-06 已使用生产解析代码验证 GitHub／Gitee 的四附件、三条校验记录场景。
+
 读取 GitHub / Gitee 的 Release API，解析 `tag_name`，只接受严格的 `yyyy.MM.dd`、`yyyy.MM.ddpN` 日期版本。比较 `(年, 月, 日, 修订号)`，因此 `p10 > p2`，跨日比较也不会出现拼接数字或浮点精度问题。
 
 忽略草稿、预发行、非法日期、缺少附件、重复附件、超大附件；必须同时存在版本名称匹配的播放器 ZIP 与 `SHA256SUMS.txt`。不是仅发现一个 Git Tag 就提示可安装。分页具有条数、次数和重复页上限。

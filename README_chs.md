@@ -22,6 +22,10 @@
 16. 增加多语言支持 [TTPlayerI18n](https://github.com/TTPlayerRebuild/TTPlayerI18n)
 17. 新增 [GitHub / Gitee 软件更新](docs/RELEASE_UPDATE_IMPLEMENTATION.md)：默认使用 Gitee，自动检查默认关闭；支持独立更新器下载、校验、备份及替换程序。
 18. 增加 OGG 编码的额外拓展 [TTPlayerOGG](https://github.com/TTPlayerRebuild/TTPlayerOGG)
+19. 增加 WebM 编码的额外拓展 [TTPlayerWebM](https://github.com/TTPlayerRebuild/TTPlayerWebM)
+20. 增加 APE 编码的额外拓展 [TTPlayerAPE](https://github.com/TTPlayerRebuild/TTPlayerAPE)
+21. 增加 FLAC 编码的额外拓展 [TTPlayerFLAC](https://github.com/TTPlayerRebuild/TTPlayerFLAC)
+22. 重写 Enc 编码并更新编码库 [TTPlayerEnc](https://github.com/TTPlayerRebuild/TTPlayerEnc)
 
 ## 构建
 
@@ -30,6 +34,11 @@ Actions 输出 `TTPlayerRebuild-版本号.zip`，不再拆分现代版与旧系�
 [XP / Win7 兼容说明](docs/LEGACY_WINDOWS.md)。
 
 Actions 会从 [TTPlayerHttps 最新正式版](https://github.com/TTPlayerRebuild/TTPlayerHttps/releases/latest) 下载 HTTPS 组件，校验 ZIP、DLL 的 SHA-256 和 XP / Win7 导入兼容性，随包提供 `AddIn/ttp_https.dll`。手动安装时合并 `AddIn` 文件夹；自动更新器保留本机已有 HTTPS 组件。
+
+勾选发布到 GitHub 或 Gitee 时，Actions 还会下载各插件仓库的最新正式版，额外提供
+`CodecAddIn-Rebuild-版本号.zip`（6 个编解码插件）和 `ExtraAddIn-版本号.zip`（Winamp 皮肤、MAKI、多语言插件及翻译文件）。
+退出播放器后解压到播放器目录，合并 `AddIn`，将 `i18n` 放在 EXE 旁。
+插件清单、校验规则及构建说明见 [Release 插件包](docs/ADDIN_RELEASE_BUNDLES.md)。
 
 需要安装 Visual Studio 2026 的“使用 C++ 的桌面开发”组件和 CMake 4.2+。当前项目必须使用 Win32/x86，不能选择 x64。
 

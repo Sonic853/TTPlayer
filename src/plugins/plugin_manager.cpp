@@ -1,4 +1,5 @@
 #include "ttplayer/plugins/plugin_manager.h"
+#include "nero_config_layout.h"
 #include "ttplayer/audio/format_probe.h"
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/core/text.h"
@@ -2620,6 +2621,7 @@ HRESULT PluginManager::ConfigureEncoder(size_t index, HWND parent,
         factory.module_index, factory.enumeration_index,
         kEncoderCreatorCategory, factory.provider);
     if (!creator) return E_NOINTERFACE;
+    detail::NeroConfigLayoutScope nero_layout;
     const HRESULT result = InvokeEncoderConfigure(creator, parent);
     Release(creator);
     return result;
