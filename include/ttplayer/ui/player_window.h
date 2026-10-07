@@ -725,6 +725,8 @@ private:
     void InvokePlaylistToolbar(size_t button, POINT screen_point);
     void ShowPlaylistContextMenu(POINT screen_point, POINT client_point);
     void PreparePlaylistMenu(HMENU menu) const;
+    HMENU CreatePlaylistFilesMenu(std::optional<size_t> row) const;
+    static void FinalizePlaylistContextMenu(HMENU menu);
     void PreparePlaylistModeMenu(HMENU menu) const;
     void PopulatePlaylistSendToMenu(HMENU menu);
     bool HandlePlaylistSendToCommand(UINT command);

@@ -4645,6 +4645,47 @@ void PlayerWindow::PopulatePlaylistSendToMenu(HMENU menu) {
         });
 }
 
+HMENU PlayerWindow::CreatePlaylistFilesMenu(std::optional<size_t> row) const {
+    if (!row) return ConvertMenuBarToPopup(i18n::LoadMenu(ResourceModule(),
+        MAKEINTRESOURCEW(kMenuPlaylistToolbar)));
+    const UINT resource = playlist_selected_rows_.size() > 1
+        ? kMenuPlaylistItems : kMenuPlaylistItem;
+    HMENU menu = DetachFirstPopup(i18n::LoadMenu(ResourceModule(), MAKEINTRESOURCEW(resource)));
+    if (!menu) return nullptr;
+    SetMenuDefaultItem(menu, kPlaylistPlay, FALSE);
+    if (playlist_selected_rows_.size() == 1) {
+        if (const auto* track = VisiblePlaylistTrack(*row)) TrimSingleTrackMenu(menu, track->path);
+    } else if (std::all_of(playlist_selected_rows_.begin(), playlist_selected_rows_.end(),
+        [this](size_t index) {
+            const auto* track = VisiblePlaylistTrack(index);
+            return track && LooksLikeUrl(track->path.wstring());
+        })) {
+        // 00488FEF: remove Rename, Send To and their separator in menu 0x99.
+        DeleteMenu(menu, 11, MF_BYPOSITION);
+        DeleteMenu(menu, 11, MF_BYPOSITION);
+        DeleteMenu(menu, 11, MF_BYPOSITION);
+    }
+    return menu;
+}
+
+void PlayerWindow::FinalizePlaylistContextMenu(HMENU menu) {
+    // Run after position-based resource trimming and before owner-draw setup.
+    // Both native and provider-owned lists must retire this obsolete service.
+    if (const HMENU report_menu = FindCommandMenu(menu, kPlaylistReportOnline)) {
+        for (int index = 0; index < GetMenuItemCount(report_menu); ++index) {
+            if (GetMenuItemID(report_menu, index) != kPlaylistReportOnline) continue;
+            if (DeleteMenu(report_menu, index, MF_BYPOSITION) && index > 0) {
+                const UINT before = GetMenuState(report_menu, index - 1, MF_BYPOSITION);
+                const UINT after = GetMenuState(report_menu, index, MF_BYPOSITION);
+                if (before != UINT(-1) && after != UINT(-1) &&
+                    (before & MF_SEPARATOR) && (after & MF_SEPARATOR))
+                    DeleteMenu(report_menu, index, MF_BYPOSITION);
+            }
+            break;
+        }
+    }
+}
+
 void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_point) {
     playlist_send_to_catalog_.Clear();
     playlist_context_list_.reset();
@@ -4655,31 +4696,7 @@ void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_poin
         if (playlist_track_control_) SetFocus(playlist_track_control_);
         // Selection/caret come from native NM_RCLICK before this menu opens.
         // Re-selecting here loses native Ctrl/Shift right-click semantics.
-        const UINT resource = playlist_selected_rows_.size() > 1
-            ? kMenuPlaylistItems : kMenuPlaylistItem;
-        menu = DetachFirstPopup(i18n::LoadMenu(ResourceModule(), MAKEINTRESOURCEW(resource)));
-        if (menu) {
-            SetMenuDefaultItem(menu, kPlaylistPlay, FALSE);
-            if (playlist_selected_rows_.size() == 1) {
-                if (const auto* visible_track = VisiblePlaylistTrack(*track))
-                    TrimSingleTrackMenu(menu, visible_track->path);
-            } else {
-                const bool all_urls = std::all_of(
-                    playlist_selected_rows_.begin(),
-                    playlist_selected_rows_.end(), [this](size_t row) {
-                        const auto* track = VisiblePlaylistTrack(row);
-                        return track && LooksLikeUrl(track->path.wstring());
-                    });
-                if (all_urls) {
-                    // 00488FEF removes positions 11 (Rename), 11 again
-                    // (Send To after the first removal), and the separator
-                    // which then occupies position 11 in menu resource 0x99.
-                    DeleteMenu(menu, 11, MF_BYPOSITION);
-                    DeleteMenu(menu, 11, MF_BYPOSITION);
-                    DeleteMenu(menu, 11, MF_BYPOSITION);
-                }
-            }
-        }
+        menu = CreatePlaylistFilesMenu(track);
     } else if (const auto list = PlaylistListAt(client_point)) {
         if (playlist_list_control_) SetFocus(playlist_list_control_);
         playlist_context_list_ = *list;
@@ -4708,8 +4725,7 @@ void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_poin
     if (!menu) {
         // FUN_00488FEF's iItem == -1 branch turns the seven top-level popups
         // from menu 0x8B into one context popup.
-        menu = ConvertMenuBarToPopup(i18n::LoadMenu(ResourceModule(),
-            MAKEINTRESOURCEW(kMenuPlaylistToolbar)));
+        menu = CreatePlaylistFilesMenu(std::nullopt);
         converted_blank_menu = menu != nullptr;
     }
     if (!menu) return;
@@ -4732,21 +4748,7 @@ void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_poin
     } else {
         PreparePlaylistMenu(menu);
     }
-    // Remove the retired reporting entry after resource-position trimming and
-    // before owner-draw records are created, for every context-menu variant.
-    if (const HMENU report_menu = FindCommandMenu(menu, kPlaylistReportOnline)) {
-        for (int index = 0; index < GetMenuItemCount(report_menu); ++index) {
-            if (GetMenuItemID(report_menu, index) != kPlaylistReportOnline) continue;
-            if (DeleteMenu(report_menu, index, MF_BYPOSITION) && index > 0) {
-                const UINT before = GetMenuState(report_menu, index - 1, MF_BYPOSITION);
-                const UINT after = GetMenuState(report_menu, index, MF_BYPOSITION);
-                if (before != UINT(-1) && after != UINT(-1) &&
-                    (before & MF_SEPARATOR) && (after & MF_SEPARATOR))
-                    DeleteMenu(report_menu, index, MF_BYPOSITION);
-            }
-            break;
-        }
-    }
+    FinalizePlaylistContextMenu(menu);
     BeginPopupMenuStyle(menu);
     const UINT command = TrackPlayerPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
         screen_point.x, screen_point.y, 0, playlist_window_, nullptr);

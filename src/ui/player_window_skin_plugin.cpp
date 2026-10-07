@@ -322,18 +322,20 @@ BOOL WINAPI PlayerWindow::PostSkinPluginPlaylistContext(void* context,const TtpS
 }
 void PlayerWindow::ShowSkinPluginPlaylistMenu(int32_t row,HWND owner,POINT point) {
     playlist_send_to_catalog_.Clear();
-    HMENU menu=row<0
-        ? ConvertMenuBarToPopup(LoadMenuW(ResourceModule(),MAKEINTRESOURCEW(kMenuPlaylistToolbar)))
-        : DetachPopup(LoadMenuW(ResourceModule(),MAKEINTRESOURCEW(
-            playlist_selected_rows_.size()>1?kMenuPlaylistItems:kMenuPlaylistItem)),0);
+    playlist_context_list_.reset();
+    const bool on_track=row>=0 && static_cast<size_t>(row)<VisiblePlaylistTrackCount();
+    HMENU menu=CreatePlaylistFilesMenu(on_track?std::optional<size_t>(row):std::nullopt);
     if(menu) {
-        PreparePlaylistMenu(menu);BeginPopupMenuStyle(menu);
+        if(on_track)PreparePlaylistMenu(menu);
+        else EnableCommand(menu,kPlaylistDeleteFiles,!settings_.playlist.disable_delete_file);
+        FinalizePlaylistContextMenu(menu);BeginPopupMenuStyle(menu);
         const UINT selected=TrackPlayerPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,
             point.x,point.y,0,owner,nullptr);
         EndPopupMenuStyle();DestroyMenu(menu);
         if(selected && !HandlePlaylistCommand(selected))HandleContextCommand(selected);
     }
     playlist_send_to_catalog_.Clear();
+    playlist_context_list_.reset();
 }
 BOOL WINAPI PlayerWindow::HandleSkinPluginDrag(void* context,const TtpSkinDrag* event) {
     if (!context || !event || event->size < sizeof(*event)) return FALSE;

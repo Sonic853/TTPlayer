@@ -288,7 +288,7 @@ jobs:
             2. 打开开始菜单。
             3. 打开所有程序——千千静听——右键千千静听程序图标。
             4. 在菜单选择“打开文件位置”
-            5. 复制 TTPlayerRebuild.exe、TTPUpdater.exe 和 AddIn 文件夹到与 TTPlayer.exe 同一路径，合并 AddIn 文件夹。
+            5. 复制 TTPlayerRebuild.exe、TTPUpdater.exe、ttpcomm.dll 和 AddIn 文件夹到与 TTPlayer.exe 同一路径，合并 AddIn 文件夹。
             6. 启动 TTPlayerRebuild.exe
             7. 享受重建版千千静听。
 
