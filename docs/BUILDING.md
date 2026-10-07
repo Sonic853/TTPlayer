@@ -16,11 +16,20 @@ git submodule update --init --recursive -- tests
 
 ## GitHub Actions
 
+### 默认使用最新 TTPCOMM
+
+手动构建的 `ttpcomm_version` 默认值为 `latest`；省略或留空也使用
+TTPlayerComm 的最新正式 Release。仍可填写日期版本（例如 `2026.10.08p1`）固定核心版本。
+普通构建、GitHub 发布和 Gitee 发布均下载并打包 `ttpcomm.dll`，下载失败或校验失败时停止构建。
+
+下载沿用 ZIP/DLL SHA256、导出 ABI 和 XP／Win7 导入校验，实际核心版本及摘要记入
+`build-info.json`。`latest` 指已发布的正式版本，不包含草稿、预发布或尚未发布的源码修改。
+
 ### GitHub API 认证
 
 在仓库 **Settings → Secrets and variables → Actions** 配置 `GH_TOKEN` Secret。
 工作流将 `${{ secrets.GH_TOKEN }}` 传给需要访问 GitHub API 的步骤：版本分配、
-HTTPS 组件下载、两组插件包下载、Gitee CLI 的 GitHub Release 查询和 GitHub 发布。
+HTTPS／TTPCOMM 组件下载、两组插件包下载、Gitee CLI 的 GitHub Release 查询和 GitHub 发布。
 缺少令牌时在构建开始即提示，避免这些请求意外使用匿名配额。
 令牌需能读取上游公开 Release；勾选 GitHub 发布时还需对播放器仓库创建 Release／上传附件的权限。
 
