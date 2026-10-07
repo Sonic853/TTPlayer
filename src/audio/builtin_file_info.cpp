@@ -23,6 +23,7 @@
 #include <shlobj.h>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 #include <windows.h>
@@ -219,6 +220,22 @@ std::wstring DecodeLatin1(std::span<const unsigned char> value) {
     return result;
 }
 
+std::wstring DecodeAnsi(std::span<const unsigned char> value) {
+    // 004DB2F0: encoding 0 -> ttpcomm ordinal 61 -> 00408544(CP_ACP).
+    // Many legacy Chinese ID3 tags contain GBK despite the Latin-1 label.
+    value = value.first(static_cast<size_t>(
+        std::find(value.begin(), value.end(), 0) - value.begin()));
+    if (value.empty() || value.size() > INT_MAX) return {};
+    const auto* text = reinterpret_cast<const char*>(value.data());
+    const int length = static_cast<int>(value.size());
+    const int count = MultiByteToWideChar(CP_ACP, 0, text, length, nullptr, 0);
+    if (count <= 0) return DecodeLatin1(value);
+    std::wstring result(static_cast<size_t>(count), L'\0');
+    if (MultiByteToWideChar(CP_ACP, 0, text, length, result.data(), count) != count)
+        return DecodeLatin1(value);
+    return result;
+}
+
 std::wstring DecodeUtf8(std::span<const unsigned char> value) {
     if (value.empty()) return {};
     const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
@@ -265,7 +282,7 @@ std::wstring DecodeText(unsigned char encoding,
     if (encoding == 0 || encoding == 3)
         while (!value.empty() && value.back() == 0) value = value.first(value.size() - 1);
     switch (encoding) {
-    case 0: return DecodeLatin1(value);
+    case 0: return DecodeAnsi(value);
     case 1: return DecodeUtf16(value, false);
     case 2: return DecodeUtf16(value, true);
     case 3: return DecodeUtf8(value);
@@ -300,14 +317,30 @@ Bytes EncodeUtf8(std::wstring_view value) {
     return result;
 }
 
+Bytes EncodeLatin1(std::wstring_view value) {
+    Bytes result;
+    result.reserve(value.size());
+    for (const wchar_t character : value)
+        result.push_back(character <= 0xff
+            ? static_cast<unsigned char>(character)
+            : static_cast<unsigned char>('?'));
+    return result;
+}
+
 Bytes EncodeText(std::wstring_view value, unsigned char encoding) {
     Bytes result;
     if (encoding == 0) {
-        result.reserve(value.size());
-        for (const wchar_t character : value)
-            result.push_back(character <= 0xff
-                ? static_cast<unsigned char>(character)
-                : static_cast<unsigned char>('?'));
+        // 004DC59D -> 0040175C(CP_ACP). Keep the legacy read/write pair
+        // symmetric; truncating wchar_t to Latin-1 destroys Chinese tags.
+        if (value.empty() || value.size() > INT_MAX) return {};
+        const int length = static_cast<int>(value.size());
+        const int count = WideCharToMultiByte(CP_ACP, 0, value.data(), length,
+            nullptr, 0, nullptr, nullptr);
+        if (count <= 0) throw std::system_error(GetLastError(), std::system_category());
+        result.resize(static_cast<size_t>(count));
+        if (WideCharToMultiByte(CP_ACP, 0, value.data(), length,
+                reinterpret_cast<char*>(result.data()), count, nullptr, nullptr) != count)
+            throw std::system_error(GetLastError(), std::system_category());
     } else if (encoding == 3) {
         result = EncodeUtf8(value);
     } else {
@@ -746,15 +779,7 @@ std::wstring DecodeLegacyTagText(std::span<const unsigned char> value) {
     // ANSI code page.  Prefer valid UTF-8, otherwise preserve that behavior.
     auto result = DecodeUtf8(value);
     if (!result.empty()) return result;
-    const int count = MultiByteToWideChar(CP_ACP, 0,
-        reinterpret_cast<const char*>(value.data()),
-        static_cast<int>(value.size()), nullptr, 0);
-    if (count <= 0) return DecodeLatin1(value);
-    result.resize(static_cast<size_t>(count));
-    MultiByteToWideChar(CP_ACP, 0,
-        reinterpret_cast<const char*>(value.data()),
-        static_cast<int>(value.size()), result.data(), count);
-    return result;
+    return DecodeAnsi(value);
 }
 
 std::wstring TrimFixed(std::span<const unsigned char> value) {
@@ -1202,7 +1227,7 @@ HRESULT ReadShellFallback(const std::filesystem::path& path,
 }
 
 unsigned char EffectiveId3Encoding(std::uint32_t configured) noexcept {
-    // Exact 004DC59D mapping: 0 -> Latin-1, 3 -> UTF-8, every other nonzero
+    // 004DC59D: 0 -> legacy ANSI (UI label Latin-1), 3 -> UTF-8, other nonzero
     // persisted value -> UTF-16.  In particular historical value 2 is not
     // silently reinterpreted as UTF-8 merely because the combo selects its
     // third visible row.
@@ -1267,8 +1292,9 @@ void AppendUserUrlFrame(Bytes& frames, unsigned char major,
     if (value.empty()) return;
     Bytes payload{encoding};
     payload.insert(payload.end(), EncodedTerminatorSize(encoding), 0);
-    // The description has the selected encoding; the URL itself does not.
-    const auto url = EncodeText(value, 0);
+    // Only the description has the selected text encoding. ID3 URLs always
+    // use Latin-1 bytes, independent of the legacy ANSI text compatibility.
+    const auto url = EncodeLatin1(value);
     payload.insert(payload.end(), url.begin(), url.end());
     frames.insert(frames.end(), {'W', 'X', 'X', 'X'});
     if (major == 4) AppendSynchsafe(frames, static_cast<std::uint32_t>(payload.size()));
