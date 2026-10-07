@@ -1,3 +1,5 @@
+#include <ttpcomm/client.h>
+#include <ttpcomm/pcm.h>
 #include "ttplayer/audio/pcm_output_transform.h"
 
 #include <algorithm>
@@ -13,106 +15,13 @@
 namespace ttplayer::audio {
 namespace {
 
-struct InputEncoding {
-    bool supported{};
-    bool floating_point{};
-    WORD valid_bits{};
-    DWORD channel_mask{};
-};
-
-bool IsWaveSubtype(const GUID& subtype, WORD tag) noexcept {
-    static constexpr std::array<std::uint8_t, 8> tail{
-        0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
-    return subtype.Data1 == tag && subtype.Data2 == 0 &&
-           subtype.Data3 == 0x0010 &&
-           std::equal(tail.begin(), tail.end(), subtype.Data4);
-}
-
+using InputEncoding = ttpcomm::pcm::Encoding;
 InputEncoding DescribeInput(const WAVEFORMATEX& format) noexcept {
-    InputEncoding result;
-    if (format.nChannels == 0 || format.nSamplesPerSec == 0 ||
-        format.nBlockAlign == 0 || format.wBitsPerSample == 0) {
-        return result;
-    }
-    const size_t container_bytes = (format.wBitsPerSample + 7U) / 8U;
-    if (container_bytes * format.nChannels != format.nBlockAlign) {
-        return result;
-    }
-    result.valid_bits = format.wBitsPerSample;
-    if (format.wFormatTag == WAVE_FORMAT_PCM) {
-        result.supported = format.wBitsPerSample == 8 ||
-                           format.wBitsPerSample == 16 ||
-                           format.wBitsPerSample == 24 ||
-                           format.wBitsPerSample == 32;
-        return result;
-    }
-    if (format.wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
-        result.floating_point = true;
-        result.supported = format.wBitsPerSample == 32 ||
-                           format.wBitsPerSample == 64;
-        return result;
-    }
-    if (format.wFormatTag != WAVE_FORMAT_EXTENSIBLE ||
-        format.cbSize < sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
-        return result;
-    }
-
-    // The caller supplies the complete cbSize-qualified object.  This is the
-    // same 18+22-byte contract inspected by FUN_004C8492 before it selects a
-    // decoder/output subtype.
-    const auto& extended =
-        reinterpret_cast<const WAVEFORMATEXTENSIBLE&>(format);
-    result.channel_mask = extended.dwChannelMask;
-    result.valid_bits = extended.Samples.wValidBitsPerSample == 0
-        ? format.wBitsPerSample : extended.Samples.wValidBitsPerSample;
-    if (IsWaveSubtype(extended.SubFormat, WAVE_FORMAT_PCM)) {
-        result.supported = (format.wBitsPerSample == 8 ||
-                            format.wBitsPerSample == 16 ||
-                            format.wBitsPerSample == 24 ||
-                            format.wBitsPerSample == 32) &&
-                           result.valid_bits != 0 &&
-                           result.valid_bits <= format.wBitsPerSample &&
-                           (format.wBitsPerSample != 8 ||
-                            result.valid_bits == 8);
-    } else if (IsWaveSubtype(extended.SubFormat, WAVE_FORMAT_IEEE_FLOAT)) {
-        result.floating_point = true;
-        result.supported = (format.wBitsPerSample == 32 ||
-                            format.wBitsPerSample == 64) &&
-                           result.valid_bits == format.wBitsPerSample;
-    }
-    return result;
+    return ttpcomm::pcm::Describe(format);
 }
-
-double DecodeSample(const std::uint8_t* value,
-                    const WAVEFORMATEX& format,
-                    bool floating_point,
-                    WORD valid_bits) noexcept {
-    if (floating_point &&
-        format.wBitsPerSample == 32) {
-        float number{};
-        std::memcpy(&number, value, sizeof(number));
-        return std::isfinite(number) ? static_cast<double>(number) * 0.5 : 0.0;
-    }
-    if (floating_point &&
-        format.wBitsPerSample == 64) {
-        double number{};
-        std::memcpy(&number, value, sizeof(number));
-        return std::isfinite(number) ? number * 0.5 : 0.0;
-    }
-    if (format.wBitsPerSample == 8)
-        return (static_cast<int>(*value) - 128) / 256.0;
-    const size_t bytes = format.wBitsPerSample / 8U;
-    std::uint64_t raw{};
-    for (size_t index = 0; index < bytes; ++index)
-        raw |= static_cast<std::uint64_t>(value[index]) << (index * 8U);
-    const unsigned container_bits = format.wBitsPerSample;
-    const std::uint64_t sign = std::uint64_t{1} << (container_bits - 1U);
-    std::int64_t number = static_cast<std::int64_t>(
-        (raw ^ sign) - sign);
-    if (valid_bits < container_bits)
-        number >>= container_bits - valid_bits;
-    return static_cast<double>(number) /
-           std::ldexp(1.0, static_cast<int>(valid_bits));
+double DecodeSample(const std::uint8_t* value, const WAVEFORMATEX& format,
+                    bool floating, WORD bits) noexcept {
+    return ttpcomm::pcm::DecodeSample(value, format.wBitsPerSample, floating, bits, ttpcomm::pcm::Domain::half);
 }
 
 // CDither::Initialize (004AAC63) and CDither::Quantize (004AAEC1) use a
@@ -229,6 +138,7 @@ struct PcmOutputTransform::Impl {
     WORD input_valid_bits{};
     DWORD input_channel_mask{};
     std::wstring error;
+    ttpcomm::client::ModuleReference module_reference;
     void* resampler{};
     bool input_ended{};
     int dither_selector{};
@@ -240,41 +150,21 @@ struct PcmOutputTransform::Impl {
 
 #if defined(_MSC_VER) && defined(_M_IX86)
     static void Destroy(void* object) noexcept {
-        if (!object) return;
-        __try {
-            auto table = *static_cast<void***>(object);
-            reinterpret_cast<void (__thiscall*)(void*, int)>(table[0])(
-                object, 1);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        ttpcomm::client::Destroy(object);
     }
 
     static bool Initialize(void* object, DWORD input_rate, DWORD output_rate,
                            WORD channels, bool high_quality) noexcept {
-        __try {
-            auto table = *static_cast<void***>(object);
-            return reinterpret_cast<unsigned char (__thiscall*)(
-                void*, DWORD, DWORD, WORD, unsigned char)>(table[1])(
-                    object, input_rate, output_rate, channels,
-                    high_quality ? 1 : 0) != 0;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        return ttpcomm::client::InitializeResampler(object, input_rate, output_rate, channels, high_quality);
     }
 
     static int Process(void* object, const double* input, int input_samples,
                        double* output, int output_capacity) noexcept {
-        __try {
-            auto table = *static_cast<void***>(object);
-            return reinterpret_cast<int (__thiscall*)(
-                void*, const double*, int, double*, int)>(table[2])(
-                    object, input, input_samples, output, output_capacity);
-        } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+        return ttpcomm::client::Resample(object, input, input_samples, output, output_capacity);
     }
 
     static void ResetObject(void* object) noexcept {
-        if (!object) return;
-        __try {
-            auto table = *static_cast<void***>(object);
-            reinterpret_cast<void (__thiscall*)(void*)>(table[3])(object);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        ttpcomm::client::Reset(object, 3);
     }
 #endif
 
@@ -480,17 +370,9 @@ bool PcmOutputTransform::Open(const WAVEFORMATEX& input,
         impl_->error = L"ttpcomm.dll is required for configured SSRC output";
         return false;
     }
-    const auto factory = reinterpret_cast<void* (__cdecl*)(int)>(
-        GetProcAddress(ttpcomm_module, MAKEINTRESOURCEA(102)));
-    if (!factory) {
-        impl_->error = L"ttpcomm.dll ordinal 102 is unavailable";
-        return false;
-    }
-    __try {
-        impl_->resampler = factory(std::clamp(options.ssrc_mode, 0, 2));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        impl_->resampler = nullptr;
-    }
+    impl_->module_reference = ttpcomm::client::ModuleReference(ttpcomm_module);
+    impl_->resampler = ttpcomm::client::CreateResampler(
+        impl_->module_reference.get(), std::clamp(options.ssrc_mode, 0, 2));
     if (!impl_->resampler || !Impl::Initialize(
             impl_->resampler, input.nSamplesPerSec, rate, input.nChannels,
             options.ssrc_mode == 1)) {

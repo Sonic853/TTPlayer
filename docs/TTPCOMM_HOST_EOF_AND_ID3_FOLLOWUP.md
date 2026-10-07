@@ -61,3 +61,12 @@
 仍保留已记录的安全处理、raw DEFLATE 部分边界状态差异、MPEG/SSRC 浮点容差、历史未初始化内存确定化。压缩等特殊编码 ID3 的直接写回、加密帧、ID3v2.2 整标签压缩及所有历史畸形标签的宿主全流程尚未完整恢复。物理设备矩阵、其它输出后端、全部 DSP 和皮肤的长期 UI 组合未穷尽。
 
 Windows 10 按用户要求由 Win11 代测。测试源码不加入发行包或 Actions，未提交或发布，原版根目录 DLL 未覆盖。
+
+
+## 2026-10-08：公共实现整合
+
+播放器现通过 `third_party/ttpcomm-sdk` 固定快照复用 `ttpcomm` 项目的 ABI 调用、PCM、ID3/封面、ZIP、Base64/UTF-8 和流派表。快照由 `ttpcomm/cmake/sync_sdk.py` 生成，CMake 校验摘要；旧 DLL 缺少能力查询时仍走原版接口。
+
+本轮补齐重建核心的 RG 并行能力协商和五文件组合更新包识别，保持插件单独核验、自动更新只替换 EXE 的策略。没有将文件写入事务、中文标签编码规则或两种 FFT 数值模式强行合并。
+
+详细设计、迁移清单和 XP/Win7/Win11 测试结果记录在相邻 `ttpcomm/docs/RECONSTRUCTION_STATUS.md` 第 9 节。发行版为 `2026.10.08p1`；测试仅位于 `rebuild/tests/ttpcomm_rebuild`，不加入 Actions 或运行包。

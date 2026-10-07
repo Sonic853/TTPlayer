@@ -1,3 +1,4 @@
+#include <ttpcomm/zip.h>
 #include "ttplayer/skin/skin_package.h"
 
 #include "ttpcomm_api.h"
@@ -18,11 +19,11 @@
 
 namespace ttplayer::skin {
 namespace {
-uint16_t U16(const unsigned char* p){ return static_cast<uint16_t>(p[0] | (p[1]<<8)); }
-uint32_t U32(const unsigned char* p){ return static_cast<uint32_t>(p[0] | (p[1]<<8) | (p[2]<<16) | (p[3]<<24)); }
+uint16_t U16(const unsigned char* p){ return ttpcomm::bytes::Le16(p); }
+uint32_t U32(const unsigned char* p){ return ttpcomm::bytes::Le32(p); }
 
 bool ContainsRange(size_t size, size_t offset, size_t length) noexcept {
-    return offset <= size && length <= size - offset;
+    return ttpcomm::bytes::Contains(size, offset, length);
 }
 
 template <typename Function>
@@ -57,28 +58,21 @@ SkinPackage SkinPackage::OpenResource(HMODULE module, const wchar_t* name,
 
 SkinPackage SkinPackage::Parse(std::vector<unsigned char> data,
                                std::filesystem::path path) {
-    if (data.size()<22) throw std::runtime_error("skin is not a ZIP package");
-    size_t eocd=data.size()-22; while (eocd>0 && U32(data.data()+eocd)!=0x06054b50) --eocd;
-    if (U32(data.data()+eocd)!=0x06054b50) throw std::runtime_error("ZIP directory not found");
+    const auto directory_end = ttpcomm::zip::FindDirectoryEnd({data.data(), data.size()},
+        ttpcomm::zip::EndPolicy::legacy_skin);
+    if (!directory_end) throw std::runtime_error("ZIP directory not found");
+    const size_t eocd = *directory_end;
     const uint16_t count=U16(data.data()+eocd+10); size_t offset=U32(data.data()+eocd+16);
     SkinPackage skin;
     skin.path_ = std::move(path);
     skin.data_ = std::move(data);
     const auto& archive = skin.data_;
     for (uint16_t i=0;i<count;++i) {
-        if (!ContainsRange(archive.size(), offset, 46) ||
-            U32(archive.data()+offset)!=0x02014b50)
-            throw std::runtime_error("invalid ZIP directory");
-        const auto name_size=U16(archive.data()+offset+28), extra=U16(archive.data()+offset+30), comment=U16(archive.data()+offset+32);
-        const size_t record_size = 46U + static_cast<size_t>(name_size) +
-            static_cast<size_t>(extra) + static_cast<size_t>(comment);
-        if (!ContainsRange(archive.size(), offset, record_size))
-            throw std::runtime_error("invalid ZIP directory record");
-        skin.entries_.push_back({
-            std::string(reinterpret_cast<const char*>(archive.data()+offset+46),name_size),
-            U32(archive.data()+offset+20), U32(archive.data()+offset+24),
-            U32(archive.data()+offset+42), U16(archive.data()+offset+10)});
-        offset += record_size;
+        const auto record = ttpcomm::zip::ReadCentral({archive.data(), archive.size()}, offset);
+        if (!record) throw std::runtime_error("invalid ZIP directory record");
+        skin.entries_.push_back({std::string(record->name), record->packed, record->size,
+            record->local, record->method});
+        offset += record->record_size;
     }
     return skin;
 }

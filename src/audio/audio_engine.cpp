@@ -1,3 +1,5 @@
+#include <ttpcomm/client.h>
+#include <ttpcomm/pcm.h>
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/audio_engine.h"
 #include "ttplayer/audio/legacy_equalizer.h"
@@ -1475,7 +1477,7 @@ public:
                             bool analyze_replay_gain)
         : format_(format), replay_gain_(metadata.replay_gain_db,
                                        metadata.replay_peak),
-          ttpcomm_module_(ttpcomm_module),
+          module_reference_(ttpcomm_module), ttpcomm_module_(module_reference_.get()),
           winamp_dsp_(winamp_dsp) {
         // The source retains the complete extensible object for format
         // negotiation; this internal scalar copy records only the underlying
@@ -1569,14 +1571,7 @@ public:
         // (16-bit /32768). AnalyzePcm above deliberately bypasses this local
         // scaling; 004B1950's +/-0.5 values are nonlinear branch thresholds.
         if (replay_gain_.Scale() != 1.0) {
-            for (auto& sample : samples) {
-                double value = sample * replay_gain_.Scale();
-                if (value > 0.5)
-                    value = (std::tan((value - 0.5) * 2.0) + 1.0) * 0.5;
-                else if (value < -0.5)
-                    value = std::tan((value + 0.5) * 2.0) * 0.5 - 0.5;
-                sample = value;
-            }
+            ttpcomm::pcm::ApplyGainHalf(samples, replay_gain_.Scale());
         }
 #if defined(_MSC_VER) && defined(_M_IX86)
         int count = static_cast<int>(std::min<size_t>(
@@ -1653,156 +1648,42 @@ public:
 private:
     bool Decode(const std::vector<std::byte>& bytes,
                 std::vector<double>& samples) const {
-        const size_t sample_bytes = (format_.wBitsPerSample + 7U) / 8U;
-        if (sample_bytes == 0 || bytes.size() % sample_bytes != 0) return false;
-        samples.resize(bytes.size() / sample_bytes);
-        const auto* input = reinterpret_cast<const uint8_t*>(bytes.data());
-        for (size_t index = 0; index < samples.size(); ++index) {
-            const uint8_t* value = input + index * sample_bytes;
-            if (format_.wFormatTag == WAVE_FORMAT_IEEE_FLOAT &&
-                format_.wBitsPerSample == 32) {
-                float number{};
-                std::memcpy(&number, value, sizeof(number));
-                samples[index] = static_cast<double>(number) * 0.5;
-            } else if (format_.wFormatTag == WAVE_FORMAT_IEEE_FLOAT &&
-                       format_.wBitsPerSample == 64) {
-                double number{};
-                std::memcpy(&number, value, sizeof(number));
-                samples[index] = number * 0.5;
-            } else if (format_.wFormatTag == WAVE_FORMAT_PCM &&
-                       format_.wBitsPerSample == 8) {
-                samples[index] = (static_cast<int>(value[0]) - 128) / 256.0;
-            } else if (format_.wFormatTag == WAVE_FORMAT_PCM &&
-                       format_.wBitsPerSample == 16) {
-                int16_t number{};
-                std::memcpy(&number, value, sizeof(number));
-                samples[index] = number / 65536.0;
-            } else if (format_.wFormatTag == WAVE_FORMAT_PCM &&
-                       format_.wBitsPerSample == 24) {
-                int32_t number = static_cast<int32_t>(value[0]) |
-                    (static_cast<int32_t>(value[1]) << 8) |
-                    (static_cast<int32_t>(value[2]) << 16);
-                if ((number & 0x800000) != 0) number |= ~0xffffff;
-                samples[index] = number / 16777216.0;
-            } else if (format_.wFormatTag == WAVE_FORMAT_PCM &&
-                       format_.wBitsPerSample == 32) {
-                int32_t number{};
-                std::memcpy(&number, value, sizeof(number));
-                samples[index] = number / 4294967296.0;
-            } else {
-                return false;
-            }
-        }
-        return true;
+        return ttpcomm::pcm::Decode(bytes.data(), bytes.size(), format_, samples, ttpcomm::pcm::Domain::half);
     }
 
     bool Encode(const std::vector<double>& samples,
                 std::vector<std::byte>& bytes) const {
-        const size_t sample_bytes = (format_.wBitsPerSample + 7U) / 8U;
-        bytes.resize(samples.size() * sample_bytes);
-        auto* output = reinterpret_cast<uint8_t*>(bytes.data());
-        for (size_t index = 0; index < samples.size(); ++index) {
-            uint8_t* value = output + index * sample_bytes;
-            double sample = std::isfinite(samples[index]) ? samples[index] : 0.0;
-            if (format_.wFormatTag == WAVE_FORMAT_IEEE_FLOAT &&
-                format_.wBitsPerSample == 32) {
-                const float number = static_cast<float>(std::clamp(sample * 2.0,
-                                                                   -1.0, 1.0));
-                std::memcpy(value, &number, sizeof(number));
-            } else if (format_.wFormatTag == WAVE_FORMAT_IEEE_FLOAT &&
-                       format_.wBitsPerSample == 64) {
-                const double number = std::clamp(sample * 2.0, -1.0, 1.0);
-                std::memcpy(value, &number, sizeof(number));
-            } else if (format_.wFormatTag == WAVE_FORMAT_PCM &&
-                       format_.wBitsPerSample == 8) {
-                const auto number = static_cast<int>(std::llround(
-                    std::clamp(sample, -0.5, 127.0 / 256.0) * 256.0 + 128.0));
-                value[0] = static_cast<uint8_t>(std::clamp(number, 0, 255));
-            } else if (format_.wFormatTag == WAVE_FORMAT_PCM &&
-                       format_.wBitsPerSample == 16) {
-                const auto number = static_cast<int16_t>(std::llround(
-                    std::clamp(sample, -0.5, 32767.0 / 65536.0) * 65536.0));
-                std::memcpy(value, &number, sizeof(number));
-            } else if (format_.wFormatTag == WAVE_FORMAT_PCM &&
-                       format_.wBitsPerSample == 24) {
-                const auto number = static_cast<int32_t>(std::llround(
-                    std::clamp(sample, -0.5, 8388607.0 / 16777216.0) *
-                    16777216.0));
-                value[0] = static_cast<uint8_t>(number);
-                value[1] = static_cast<uint8_t>(number >> 8);
-                value[2] = static_cast<uint8_t>(number >> 16);
-            } else if (format_.wFormatTag == WAVE_FORMAT_PCM &&
-                       format_.wBitsPerSample == 32) {
-                const auto number = static_cast<int32_t>(std::llround(
-                    std::clamp(sample, -0.5, 2147483647.0 / 4294967296.0) *
-                    4294967296.0));
-                std::memcpy(value, &number, sizeof(number));
-            } else {
-                return false;
-            }
-        }
-        return true;
+        return ttpcomm::pcm::EncodeHalf(samples, format_, bytes);
     }
 
 #if defined(_MSC_VER) && defined(_M_IX86)
     static void* CreateObject(HMODULE module, WORD ordinal) noexcept {
-        const auto entry = GetProcAddress(module, MAKEINTRESOURCEA(ordinal));
-        if (!entry) return nullptr;
-        __try {
-            return reinterpret_cast<void* (__cdecl*)()>(entry)();
-        } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+        return ttpcomm::client::Create(module, ordinal);
     }
 
     static void DestroyObject(void* object) noexcept {
-        if (!object) return;
-        __try {
-            auto table = *static_cast<void***>(object);
-            reinterpret_cast<void (__thiscall*)(void*, int)>(table[0])(object, 1);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        ttpcomm::client::Destroy(object);
     }
 
     static bool EqProcess(void* object, double* samples, int* count) noexcept {
-        __try {
-            auto table = *static_cast<void***>(object);
-            reinterpret_cast<void (__thiscall*)(void*, double*, int)>(
-                table[4])(object, samples, *count);
-            reinterpret_cast<void (__thiscall*)(void*, double*, int*)>(
-                table[5])(object, samples, count);
-            return true;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        return ttpcomm::client::Equalize(object, samples, count);
     }
 
     static void EqReset(void* object) noexcept {
-        __try {
-            auto table = *static_cast<void***>(object);
-            reinterpret_cast<void (__thiscall*)(void*)>(table[6])(object);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        ttpcomm::client::Reset(object, 6);
     }
 
     static bool SurroundInitialize(void* object, DWORD rate, DWORD channels,
                                    int amount) noexcept {
-        __try {
-            auto table = *static_cast<void***>(object);
-            reinterpret_cast<void (__thiscall*)(void*, DWORD, DWORD, int)>(
-                table[1])(object, rate, channels, amount);
-            return true;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        return ttpcomm::client::InitializeSurround(object, rate, channels, amount);
     }
 
     static bool SurroundProcess(void* object, double* samples, int count) noexcept {
-        __try {
-            auto table = *static_cast<void***>(object);
-            reinterpret_cast<void (__thiscall*)(void*, double*, int)>(
-                table[2])(object, samples, count);
-            return true;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        return ttpcomm::client::Surround(object, samples, count);
     }
 
     static void SurroundReset(void* object) noexcept {
-        __try {
-            auto table = *static_cast<void***>(object);
-            reinterpret_cast<void (__thiscall*)(void*)>(table[3])(object);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        ttpcomm::client::Reset(object, 3);
     }
 #endif
 
@@ -1811,6 +1692,7 @@ private:
     std::unique_ptr<PlaybackReplayGainAnalyzer> replay_gain_analyzer_;
     void* eq_{};
     void* surround_{};
+    ttpcomm::client::ModuleReference module_reference_;
     HMODULE ttpcomm_module_{};
     int surround_amount_{};
     WinampDspChain& winamp_dsp_;

@@ -1,3 +1,5 @@
+#include <ttpcomm/tags_zlib.h>
+#include <ttpcomm/client.h>
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_window.h"
@@ -114,18 +116,8 @@ RECT WindowRectForClientTarget(HWND window, RECT target) noexcept {
     return target;
 }
 
-uint32_t BigEndian32(const unsigned char* value) noexcept {
-    return (static_cast<uint32_t>(value[0]) << 24) |
-           (static_cast<uint32_t>(value[1]) << 16) |
-           (static_cast<uint32_t>(value[2]) << 8) |
-           static_cast<uint32_t>(value[3]);
-}
-
 uint32_t SyncSafe32(const unsigned char* value) noexcept {
-    return (static_cast<uint32_t>(value[0] & 0x7fU) << 21) |
-           (static_cast<uint32_t>(value[1] & 0x7fU) << 14) |
-           (static_cast<uint32_t>(value[2] & 0x7fU) << 7) |
-           static_cast<uint32_t>(value[3] & 0x7fU);
+    return ttpcomm::bytes::Synchsafe32(value);
 }
 
 bool ReadExact(std::ifstream& input, void* destination, size_t size) {
@@ -155,40 +147,12 @@ bool CoverPictureMimeMatches(std::string_view mime,
 
 std::vector<unsigned char> ParseFlacPictureBlock(
     const std::vector<unsigned char>& block, uint32_t* picture_type) {
-    size_t cursor{};
-    auto take32 = [&](uint32_t& result) {
-        if (cursor + 4 > block.size()) return false;
-        result = BigEndian32(block.data() + cursor);
-        cursor += 4;
-        return true;
-    };
-    uint32_t type{}, mime_length{}, description_length{};
-    if (!take32(type) || !take32(mime_length) ||
-        mime_length > block.size() - cursor) return {};
-    const std::string mime(
-        reinterpret_cast<const char*>(block.data() + cursor), mime_length);
-    cursor += mime_length;
-    if (!take32(description_length) ||
-        description_length > block.size() - cursor) return {};
-    cursor += description_length;
-    uint32_t width{}, height{}, depth{}, colors{};
-    if (!take32(width) || !take32(height) || !take32(depth) ||
-        !take32(colors)) return {};
-    static_cast<void>(colors);
-    // The original reader metadata path rejects malformed PICTURE records
-    // before CVisualCtrl sees their byte blob.  In particular, the reference
-    // FLAC carries a decodable JPEG but declares a zero-sized picture; the
-    // stock 5.7.9 player deliberately shows the skin background instead.
-    if (width == 0 || height == 0 || depth == 0) return {};
-    uint32_t data_length{};
-    if (!take32(data_length) || data_length == 0 ||
-        data_length > kMaximumPictureBytes ||
-        data_length > block.size() - cursor) return {};
-    const std::span<const unsigned char> data(block.data() + cursor,
-                                               data_length);
-    if (!CoverPictureMimeMatches(mime, data)) return {};
-    if (picture_type) *picture_type = type;
-    return {data.begin(), data.end()};
+    const auto picture = ttpcomm::tags::FlacPicture({block.data(), block.size()});
+    if (!picture || !picture->width || !picture->height || !picture->depth ||
+        picture->data.empty() || picture->data.size() > kMaximumPictureBytes ||
+        !CoverPictureMimeMatches(picture->mime, {picture->data.data(), picture->data.size()})) return {};
+    if (picture_type) *picture_type = picture->type;
+    return {picture->data.begin(), picture->data.end()};
 }
 
 std::vector<unsigned char> ReadFlacPicture(std::ifstream& input,
@@ -222,92 +186,41 @@ std::vector<unsigned char> ReadFlacPicture(std::ifstream& input,
     }
 }
 
-size_t SkipId3Description(std::span<const unsigned char> frame,
-                          size_t cursor, unsigned char encoding) {
-    if (encoding == 1 || encoding == 2) {
-        while (cursor + 1 < frame.size()) {
-            if (frame[cursor] == 0 && frame[cursor + 1] == 0)
-                return cursor + 2;
-            cursor += 2;
-        }
-    } else {
-        while (cursor < frame.size() && frame[cursor] != 0) ++cursor;
-        if (cursor < frame.size()) ++cursor;
-    }
-    return cursor;
-}
+
 
 std::vector<unsigned char> ParseId3Apic(
     std::span<const unsigned char> frame, unsigned int version,
     unsigned int* picture_type) {
-    if (frame.size() < 4) return {};
-    size_t cursor = 1;
-    std::string mime;
-    if (version == 2) {
-        if (cursor + 3 > frame.size()) return {};
-        const std::string_view format(
-            reinterpret_cast<const char*>(frame.data() + cursor), 3);
-        if (format == "JPG") mime = "image/jpeg";
-        else if (format == "PNG") mime = "image/png";
-        else if (format == "BMP") mime = "image/bmp";
-        else if (format == "GIF") mime = "image/gif";
-        else mime.assign(format);
-        cursor += 3;
-    } else {
-        const size_t mime_begin = cursor;
-        while (cursor < frame.size() && frame[cursor] != 0) ++cursor;
-        if (cursor == frame.size()) return {};
-        mime.assign(reinterpret_cast<const char*>(frame.data() + mime_begin),
-                    cursor - mime_begin);
-        ++cursor;
-    }
-    if (cursor >= frame.size()) return {};
-    const unsigned int type = frame[cursor++];
-    cursor = SkipId3Description(frame, cursor, frame[0]);
-    if (cursor >= frame.size() || frame.size() - cursor > kMaximumPictureBytes)
-        return {};
-    const std::span<const unsigned char> data(frame.data() + cursor,
-                                               frame.size() - cursor);
-    if (!CoverPictureMimeMatches(mime, data)) return {};
-    if (picture_type) *picture_type = type;
-    return {data.begin(), data.end()};
+    const auto picture = ttpcomm::tags::Id3Picture({frame.data(), frame.size()}, version);
+    if (!picture || picture->data.empty() || picture->data.size() > kMaximumPictureBytes ||
+        !CoverPictureMimeMatches(picture->mime, {picture->data.data(), picture->data.size()})) return {};
+    if (picture_type) *picture_type = picture->type;
+    return {picture->data.begin(), picture->data.end()};
 }
 
 std::vector<unsigned char> ReadId3Picture(std::ifstream& input,
                                           const unsigned char header[10],
                                           bool* picture_declared) {
-    const unsigned int version = header[3];
-    if (version < 2 || version > 4) return {};
+    const unsigned version = header[3];
     const uint32_t tag_size = SyncSafe32(header + 6);
-    if (tag_size == 0 || tag_size > kMaximumPictureBytes) return {};
+    if (version < 2 || version > 4 || !tag_size || tag_size > kMaximumPictureBytes) return {};
     std::vector<unsigned char> tag(tag_size);
     if (!ReadExact(input, tag.data(), tag.size())) return {};
-    size_t cursor{};
-    while (cursor < tag.size()) {
-        const size_t frame_header = version == 2 ? 6 : 10;
-        if (cursor + frame_header > tag.size() || tag[cursor] == 0) break;
-        const bool apic = version == 2
-            ? std::memcmp(tag.data() + cursor, "PIC", 3) == 0
-            : std::memcmp(tag.data() + cursor, "APIC", 4) == 0;
-        const uint32_t frame_size = version == 2
-            ? (static_cast<uint32_t>(tag[cursor + 3]) << 16) |
-              (static_cast<uint32_t>(tag[cursor + 4]) << 8) |
-              tag[cursor + 5]
-            : (version == 4 ? SyncSafe32(tag.data() + cursor + 4)
-                            : BigEndian32(tag.data() + cursor + 4));
-        cursor += frame_header;
-        if (frame_size == 0 || frame_size > tag.size() - cursor) break;
-        if (apic) {
-            if (picture_declared) *picture_declared = true;
-            unsigned int picture_type{};
-            auto picture = ParseId3Apic(
-                std::span<const unsigned char>(tag.data() + cursor,
-                                               frame_size),
-                version, &picture_type);
-            static_cast<void>(picture_type);
-            return picture;
-        }
-        cursor += frame_size;
+    const bool unsynchronized = (header[5] & 0x80U) != 0;
+    if (unsynchronized) tag = ttpcomm::tags::RemoveUnsynchronization({tag.data(), tag.size()});
+    const auto start = ttpcomm::tags::FrameStart({tag.data(), tag.size()}, version, header[5]);
+    if (!start) return {};
+    size_t cursor = *start;
+    ttpcomm::tags::Frame frame;
+    while (ttpcomm::tags::NextFrame({tag.data(), tag.size()}, version, cursor, frame) == ttpcomm::tags::FrameStatus::frame) {
+        if (frame.identifier != "APIC" && frame.identifier != "PIC") continue;
+        if (picture_declared) *picture_declared = true;
+        std::vector<unsigned char> storage;
+        uint64_t budget = kMaximumPictureBytes;
+        const auto decoded = ttpcomm::tags::DecodePayload(frame.payload, static_cast<unsigned char>(version),
+            static_cast<unsigned char>(frame.flags), unsynchronized, storage, budget);
+        if (!decoded) return {};
+        return ParseId3Apic({decoded->data(), decoded->size()}, version, nullptr);
     }
     return {};
 }
@@ -440,23 +353,12 @@ void* SafeSpectrumCreate(SpectrumFactory function) noexcept {
 }
 
 bool SafeSpectrumProcess(void* object, int16_t* buffer, int mode) noexcept {
-    __try {
-        if (!object || !buffer) return false;
-        auto** table = *reinterpret_cast<void***>(object);
-        if (!table || !table[1]) return false;
-        reinterpret_cast<SpectrumProcess>(table[1])(object, buffer, mode);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
+    return ttpcomm::client::Spectrum(object, buffer, mode);
+    }
 
 void SafeSpectrumDestroy(void* object) noexcept {
-    __try {
-        if (!object) return;
-        auto** table = *reinterpret_cast<void***>(object);
-        if (table && table[0])
-            reinterpret_cast<SpectrumDestroy>(table[0])(object, 1);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
+    ttpcomm::client::Destroy(object);
+    }
 #else
 void* SafeDreamCreate(DreamCreate, uint32_t, int) noexcept { return nullptr; }
 bool SafeDreamResize(DreamResize, void*, uint32_t, int) noexcept { return false; }
@@ -545,7 +447,9 @@ public:
         if (module_ == module) return;
         DestroyDream();
         DestroySpectrumProcessor();
-        module_ = module;
+        module_reference_ = ttpcomm::client::ModuleReference(module);
+        module_ = module_reference_.get();
+        module = module_;
         create_ = module ? reinterpret_cast<DreamCreate>(
             GetProcAddress(module, MAKEINTRESOURCEA(90))) : nullptr;
         resize_ = module ? reinterpret_cast<DreamResize>(
@@ -1474,6 +1378,7 @@ private:
         }
     }
 
+    ttpcomm::client::ModuleReference module_reference_;
     HMODULE module_{};
     PlayerVisualEffect player_effect_;
     COLORREF player_effect_color_{RGB(0, 255, 0)};

@@ -1,3 +1,4 @@
+#include <ttpcomm/zip.h>
 #include "ttplayer/update/update.h"
 #include <windows.h>
 #include <wincrypt.h>
@@ -25,7 +26,7 @@ void Write(const std::filesystem::path& file,const std::vector<unsigned char>& d
 void ValidateExe(const std::filesystem::path& file,const Version& expected,bool player) {
     if(FileVersion(file)!=expected) throw std::runtime_error("Package executable version does not match release");
     const auto bytes=Read(file,64*1024*1024);
-    auto u16=[&](size_t p)->unsigned {if(p+2>bytes.size()) throw std::runtime_error("Invalid PE image");return bytes[p]|unsigned(bytes[p+1])<<8;};
+    auto u16=[&](size_t p)->unsigned {if(p+2>bytes.size()) throw std::runtime_error("Invalid PE image");return ttpcomm::bytes::Le16(bytes.data()+p);};
     auto u32=[&](size_t p)->uint32_t {return u16(p)|uint32_t(u16(p+2))<<16;};
     if(u16(0)!=0x5a4d) throw std::runtime_error("Package is not an executable");
     const auto pe=u32(0x3c);
@@ -62,25 +63,27 @@ std::string Sha256(const std::filesystem::path& file) {
 }
 void ExtractPackage(const std::filesystem::path& zip,const std::filesystem::path& staging) {
     const auto bytes=Read(zip,64*1024*1024);
-    auto u16=[&](size_t p)->unsigned {if(p>bytes.size() || bytes.size()-p<2) throw std::runtime_error("Truncated ZIP");return bytes[p]|unsigned(bytes[p+1])<<8;};
+    auto u16=[&](size_t p)->unsigned {if(p>bytes.size() || bytes.size()-p<2) throw std::runtime_error("Truncated ZIP");return ttpcomm::bytes::Le16(bytes.data()+p);};
     auto u32=[&](size_t p)->uint32_t {return u16(p)|uint32_t(u16(p+2))<<16;};
-    if(bytes.size()<22) throw std::runtime_error("Invalid ZIP");
-    size_t end=bytes.size()-22;const size_t minimum=bytes.size()>65557 ? bytes.size()-65557 : 0;
-    for(;;) {if(u32(end)==0x06054b50 && end+22+u16(end+20)==bytes.size()) break;if(end==minimum) throw std::runtime_error("ZIP directory not found");--end;}
+    const auto directory_end=ttpcomm::zip::FindDirectoryEnd({bytes.data(),bytes.size()},ttpcomm::zip::EndPolicy::exact_eof);
+    if(!directory_end) throw std::runtime_error("ZIP directory not found");
+    const size_t end=*directory_end;
     const auto count=u16(end+10);const size_t directory=u32(end+16),directory_size=u32(end+12);
-    if(u16(end+4) || u16(end+6) || u16(end+8)!=count || count<2 || count>4 || directory>end || directory_size!=end-directory)
+    if(u16(end+4) || u16(end+6) || u16(end+8)!=count || count<2 || count>5 || directory>end || directory_size!=end-directory)
         throw std::runtime_error("Unsupported update ZIP directory");
     std::map<std::string,std::vector<unsigned char>> files;
     std::vector<std::pair<size_t,size_t>> ranges;
     size_t cursor=directory,total=0;
     for(unsigned i=0;i<count;++i) {
-        if(u32(cursor)!=0x02014b50) throw std::runtime_error("Invalid ZIP entry");
-        const auto flags=u16(cursor+8),method=u16(cursor+10),crc=u32(cursor+16);
-        const size_t packed=u32(cursor+20),size=u32(cursor+24),name_size=u16(cursor+28),extra=u16(cursor+30),comment=u16(cursor+32),local=u32(cursor+42);
-        if(cursor+46+name_size+extra+comment>end || size>64*1024*1024 || total>64*1024*1024-size ||
-            (flags&~0x0808U) || (method!=0 && method!=8) || u16(cursor+34)) throw std::runtime_error("Unsupported update ZIP entry");
-        const std::string name(reinterpret_cast<const char*>(bytes.data()+cursor+46),name_size);
-        if((name!="TTPlayerRebuild.exe" && name!="TTPUpdater.exe" && name!="AddIn/ttp_https.dll" && name!="SHA256SUMS.txt") || files.contains(name))
+        const auto entry=ttpcomm::zip::ReadCentral({bytes.data(),bytes.size()},cursor);
+        if(!entry) throw std::runtime_error("Invalid ZIP entry");
+        const unsigned flags=entry->flags,method=entry->method;
+        const auto crc=entry->crc;
+        const size_t packed=entry->packed,size=entry->size,name_size=entry->name.size(),local=entry->local;
+        if(cursor>end || entry->record_size>end-cursor || size>64*1024*1024 || total>64*1024*1024-size ||
+            (flags&~0x0808U) || (method!=0 && method!=8) || entry->disk) throw std::runtime_error("Unsupported update ZIP entry");
+        const std::string name(entry->name);
+        if((name!="TTPlayerRebuild.exe" && name!="TTPUpdater.exe" && name!="AddIn/ttp_https.dll" && name!="ttpcomm.dll" && name!="SHA256SUMS.txt") || files.contains(name))
             throw std::runtime_error("Unexpected or duplicate update ZIP path");
         if(name=="SHA256SUMS.txt" && size>65536) throw std::runtime_error("Excessive checksum file");
         if(local>=directory || u32(local)!=0x04034b50 || u16(local+6)!=flags || u16(local+8)!=method || u16(local+26)!=name_size)
@@ -101,7 +104,7 @@ void ExtractPackage(const std::filesystem::path& zip,const std::filesystem::path
             inflateEnd(&stream);if(!valid) throw std::runtime_error("Invalid ZIP deflate stream");
         }
         if(crc32(0,content.data(),static_cast<uInt>(content.size()))!=crc) throw std::runtime_error("ZIP CRC mismatch");
-        total+=size;files.emplace(name,std::move(content));cursor+=46+name_size+extra+comment;
+        total+=size;files.emplace(name,std::move(content));cursor+=entry->record_size;
     }
     if(cursor!=end || !files.contains("TTPlayerRebuild.exe") || !files.contains("SHA256SUMS.txt")) throw std::runtime_error("Incomplete update package");
     const auto& raw=files.at("SHA256SUMS.txt");const std::string sums(raw.begin(),raw.end());
@@ -112,9 +115,10 @@ void ExtractPackage(const std::filesystem::path& zip,const std::filesystem::path
         if(name=="AddIn/ttp_https.dll") std::filesystem::create_directory(staging/L"AddIn");
         Write(path,content);
         if(Sha256(path)!=ExpectedHash(sums,name)) throw std::runtime_error("Package file checksum mismatch");
-        // Bundled only for manual installation. Validate it, then discard it;
-        // automatic updates must preserve the user's installed HTTPS component.
-        if(name=="AddIn/ttp_https.dll") std::filesystem::remove(path);
+        // Optional components are for manual installation. Verify their hashes
+        // without loading them, then discard the staged copies. Automatic EXE
+        // updates preserve the installed original/rebuilt DLL and plugins.
+        if(name=="AddIn/ttp_https.dll" || name=="ttpcomm.dll") std::filesystem::remove(path);
     }
 }
 std::filesystem::path PreparePackage(Http& http,const Release& release,const std::filesystem::path& staging,const Cancel& cancel,const Progress& progress) {

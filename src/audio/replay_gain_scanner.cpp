@@ -1,3 +1,5 @@
+#include <ttpcomm/client.h>
+#include <ttpcomm/pcm.h>
 #include "ttplayer/audio/disc_media.h"
 #include "ttplayer/audio/replay_gain_scanner.h"
 
@@ -49,124 +51,18 @@ bool EnterReplayGainGate(std::unique_lock<std::timed_mutex>& lock,
     return false;
 }
 
-using SupportsRate = BOOL(__cdecl*)(DWORD);
-using CreateAnalyzer = void*(__cdecl*)();
-using DestroyAnalyzer = void(__thiscall*)(void*, BYTE);
-using InitializeAnalyzer = bool(__thiscall*)(void*, DWORD);
-using AnalyzeSamples = bool(__thiscall*)(void*, const double*, DWORD, DWORD);
-using FinishTrack = double(__thiscall*)(void*);
-using ReadPeak = double(__thiscall*)(void*);
-
-void** Vtable(void* object) noexcept {
-    return object ? *static_cast<void***>(object) : nullptr;
-}
-
-BOOL InvokeSupportsRate(FARPROC entry, DWORD rate) noexcept {
-    if (!entry) return FALSE;
-#if defined(_MSC_VER)
-    __try {
-        return reinterpret_cast<SupportsRate>(entry)(rate);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return FALSE;
-    }
-#else
-    return reinterpret_cast<SupportsRate>(entry)(rate);
-#endif
-}
-
-void* InvokeCreate(FARPROC entry) noexcept {
-    if (!entry) return nullptr;
-#if defined(_MSC_VER)
-    __try {
-        return reinterpret_cast<CreateAnalyzer>(entry)();
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
-#else
-    return reinterpret_cast<CreateAnalyzer>(entry)();
-#endif
-}
-
-bool InvokeInitialize(void* object, DWORD rate) noexcept {
-    auto table = Vtable(object);
-    if (!table || !table[1]) return false;
-#if defined(_MSC_VER)
-    __try {
-        return reinterpret_cast<InitializeAnalyzer>(table[1])(object, rate);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-#else
-    return reinterpret_cast<InitializeAnalyzer>(table[1])(object, rate);
-#endif
-}
-
-bool InvokeAnalyze(void* object, const double* samples, DWORD channels,
-                   DWORD frames) noexcept {
-    auto table = Vtable(object);
-    if (!table || !table[2] || !samples || channels == 0) return false;
-#if defined(_MSC_VER)
-    __try {
-        return reinterpret_cast<AnalyzeSamples>(table[2])(
-            object, samples, channels, frames);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-#else
-    return reinterpret_cast<AnalyzeSamples>(table[2])(
-        object, samples, channels, frames);
-#endif
-}
-
-bool InvokeFinish(void* object, double* gain, double* peak) noexcept {
-    auto table = Vtable(object);
-    if (!table || !table[3] || !table[4] || !gain || !peak) return false;
-#if defined(_MSC_VER)
-    __try {
-        // Slot 3 merges the current 12,000-bin histogram into the album
-        // histogram, resets the current-track filters and returns the track
-        // gain in ST(0). Slot 4 reads the absolute peak accumulated by slot 2.
-        *gain = reinterpret_cast<FinishTrack>(table[3])(object);
-        *peak = reinterpret_cast<ReadPeak>(table[4])(object);
-        return std::isfinite(*gain) && std::isfinite(*peak);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-#else
-    *gain = reinterpret_cast<FinishTrack>(table[3])(object);
-    *peak = reinterpret_cast<ReadPeak>(table[4])(object);
-    return std::isfinite(*gain) && std::isfinite(*peak);
-#endif
-}
-
-void InvokeDestroy(void* object) noexcept {
-    auto table = Vtable(object);
-    if (!table || !table[0]) return;
-#if defined(_MSC_VER)
-    __try {
-        reinterpret_cast<DestroyAnalyzer>(table[0])(object, 1);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-#else
-    reinterpret_cast<DestroyAnalyzer>(table[0])(object, 1);
-#endif
-}
-
 class Analyzer {
 public:
     Analyzer(HMODULE module, DWORD sample_rate) noexcept
-        : minimum_frames_((sample_rate + 19ULL) / 20ULL) {
-        if (!module) return;
-        const FARPROC supports = GetProcAddress(module, MAKEINTRESOURCEA(100));
-        const FARPROC create = GetProcAddress(module, MAKEINTRESOURCEA(101));
-        if (!InvokeSupportsRate(supports, sample_rate)) return;
-        object_ = InvokeCreate(create);
-        if (object_ && !InvokeInitialize(object_, sample_rate)) {
-            InvokeDestroy(object_);
+        : module_reference_(module), minimum_frames_((sample_rate + 19ULL) / 20ULL) {
+        if (!ttpcomm::client::ReplayGainSupportsRate(module_reference_.get(), sample_rate)) return;
+        object_ = ttpcomm::client::Create(module_reference_.get(), 101);
+        if (object_ && !ttpcomm::client::InitializeReplayGain(object_, sample_rate)) {
+            ttpcomm::client::Destroy(object_);
             object_ = nullptr;
         }
     }
-    ~Analyzer() { InvokeDestroy(object_); }
+    ~Analyzer() { ttpcomm::client::Destroy(object_); }
     Analyzer(const Analyzer&) = delete;
     Analyzer& operator=(const Analyzer&) = delete;
 
@@ -180,7 +76,7 @@ public:
             if (!std::isfinite(samples[i])) return false;
             peak = std::max(peak, std::abs(samples[i]));
         }
-        if (!InvokeAnalyze(object_, samples, channels, frames)) return false;
+        if (!ttpcomm::client::AnalyzeReplayGain(object_, samples, channels, frames)) return false;
         peak_ = peak;
         frames_ += frames;
         return true;
@@ -188,7 +84,7 @@ public:
     bool Finish(double* gain, double* peak) noexcept {
         // An empty 50 ms histogram also returns zero; it is not a valid
         // measured 0 dB result. Do not commit such incomplete measurements.
-        if (frames_ < minimum_frames_ || !InvokeFinish(object_, gain, peak))
+        if (frames_ < minimum_frames_ || !ttpcomm::client::FinishReplayGain(object_, gain, peak))
             return false;
         // 60004450 -> 60003B80 only measures the left analysis buffer.
         // Keep its loudness calculation, but measure source sample peak
@@ -198,6 +94,7 @@ public:
     }
 
 private:
+    ttpcomm::client::ModuleReference module_reference_;
     void* object_{};
     std::uint64_t minimum_frames_{};
     std::uint64_t frames_{};
@@ -223,78 +120,9 @@ bool ExistingGain(const AudioMetadata& metadata) {
 bool ConvertSamples(const std::vector<std::byte>& bytes,
                     const WAVEFORMATEX& format,
                     std::vector<double>& samples, DWORD* frames) {
-    if (!frames || format.nChannels == 0 || format.nBlockAlign == 0 ||
-        bytes.size() % format.nBlockAlign != 0)
-        return false;
-    const size_t frame_count = bytes.size() / format.nBlockAlign;
-    if (frame_count > std::numeric_limits<DWORD>::max() ||
-        frame_count > std::numeric_limits<size_t>::max() / format.nChannels)
-        return false;
-    const size_t sample_count = frame_count * format.nChannels;
-    samples.resize(sample_count);
-    const auto* source = reinterpret_cast<const unsigned char*>(bytes.data());
-    const size_t sample_bytes = (format.wBitsPerSample + 7U) / 8U;
-    if (sample_bytes == 0 ||
-        static_cast<size_t>(format.nChannels) * sample_bytes >
-            format.nBlockAlign)
-        return false;
-
-    if (format.wFormatTag == WAVE_FORMAT_IEEE_FLOAT &&
-        format.wBitsPerSample == 64) {
-        for (size_t frame{}; frame < frame_count; ++frame) {
-            for (size_t channel{}; channel < format.nChannels; ++channel) {
-                double value{};
-                std::memcpy(&value,
-                    source + frame * format.nBlockAlign + channel * 8, 8);
-                samples[frame * format.nChannels + channel] =
-                    std::isfinite(value) ? value : 0.0;
-            }
-        }
-    } else if (format.wFormatTag == WAVE_FORMAT_IEEE_FLOAT &&
-               format.wBitsPerSample == 32) {
-        for (size_t frame{}; frame < frame_count; ++frame) {
-            for (size_t channel{}; channel < format.nChannels; ++channel) {
-                float value{};
-                std::memcpy(&value,
-                    source + frame * format.nBlockAlign + channel * 4, 4);
-                samples[frame * format.nChannels + channel] =
-                    std::isfinite(value)
-                        ? static_cast<double>(value)
-                        : 0.0;
-            }
-        }
-    } else if (format.wFormatTag == WAVE_FORMAT_PCM) {
-        for (size_t frame{}; frame < frame_count; ++frame) {
-            for (size_t channel{}; channel < format.nChannels; ++channel) {
-                const auto* value = source + frame * format.nBlockAlign +
-                                    channel * sample_bytes;
-                double normalized{};
-                if (format.wBitsPerSample == 8) {
-                    normalized = (static_cast<int>(*value) - 128) / 128.0;
-                } else if (format.wBitsPerSample == 16) {
-                    std::int16_t integer{};
-                    std::memcpy(&integer, value, sizeof(integer));
-                    normalized = integer / 32768.0;
-                } else if (format.wBitsPerSample == 24) {
-                    std::int32_t integer = static_cast<std::int32_t>(value[0]) |
-                        (static_cast<std::int32_t>(value[1]) << 8) |
-                        (static_cast<std::int32_t>(value[2]) << 16);
-                    if ((integer & 0x00800000) != 0) integer |= ~0x00ffffff;
-                    normalized = integer / 8388608.0;
-                } else if (format.wBitsPerSample == 32) {
-                    std::int32_t integer{};
-                    std::memcpy(&integer, value, sizeof(integer));
-                    normalized = integer / 2147483648.0;
-                } else {
-                    return false;
-                }
-                samples[frame * format.nChannels + channel] = normalized;
-            }
-        }
-    } else {
-        return false;
-    }
-    *frames = static_cast<DWORD>(frame_count);
+    if (!frames || !format.nBlockAlign || bytes.size() / format.nBlockAlign > MAXDWORD) return false;
+    if (!ttpcomm::pcm::Decode(bytes.data(), bytes.size(), format, samples, ttpcomm::pcm::Domain::full, true)) return false;
+    *frames = static_cast<DWORD>(bytes.size() / format.nBlockAlign);
     return true;
 }
 
@@ -372,8 +200,9 @@ ReplayGainScanConcurrency::ReplayGainScanConcurrency(
     try {
         wchar_t filename[32768]{};
         const DWORD count = GetModuleFileNameW(ttpcomm, filename, 32768);
-        analyzer_verified_ = count && count < 32768 && update::Sha256(filename) ==
-            "e349ef73e8a1d35b2c5debd2ddaeb5cc2513a90647766b7339d2605b34483b33";
+        analyzer_verified_ = ttpcomm::client::HasCapability(ttpcomm, TTPCOMM_CAP_PARALLEL_REPLAYGAIN) ||
+            (count && count < 32768 && update::Sha256(filename) ==
+            "e349ef73e8a1d35b2c5debd2ddaeb5cc2513a90647766b7339d2605b34483b33");
         std::map<std::filesystem::path, bool> modules;
         for (const auto& format : library.ReaderFormats()) {
             auto [entry, inserted] = modules.try_emplace(format.module_path, false);

@@ -1,3 +1,4 @@
+#include <ttpcomm/tags_zlib.h>
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/builtin_file_info.h"
 #include "ttplayer/audio/format_probe.h"
@@ -481,19 +482,12 @@ struct Id3Tag {
 };
 
 size_t EncodedTerminatorSize(unsigned char encoding) noexcept {
-    return encoding == 1 || encoding == 2 ? 2U : 1U;
+    return ttpcomm::tags::TerminatorSize(encoding);
 }
 
 size_t FindEncodedTerminator(std::span<const unsigned char> value,
                              unsigned char encoding) noexcept {
-    if (encoding == 1 || encoding == 2) {
-        for (size_t index = 0; index + 1 < value.size(); index += 2) {
-            if (value[index] == 0 && value[index + 1] == 0) return index;
-        }
-        return value.size();
-    }
-    const auto found = std::find(value.begin(), value.end(), 0);
-    return static_cast<size_t>(found - value.begin());
+    return ttpcomm::tags::FindTerminator({value.data(), value.size()}, encoding);
 }
 
 void DecodeId3Frame(std::string_view identifier,
@@ -536,31 +530,11 @@ void DecodeId3Frame(std::string_view identifier,
                      text.subspan(skip)), false);
         return;
     }
-    if (identifier == "APIC") {
-        auto rest = payload.subspan(1);
-        const auto mime_end = std::find(rest.begin(), rest.end(), 0);
-        if (mime_end == rest.end()) return;
-        size_t offset = static_cast<size_t>(mime_end - rest.begin()) + 1;
-        if (offset >= rest.size()) return;
-        ++offset; // picture type
-        const auto description = rest.subspan(offset);
-        const size_t separator = FindEncodedTerminator(description, encoding);
-        offset += separator < description.size()
-            ? separator + EncodedTerminatorSize(encoding)
-            : description.size();
-        if (offset < rest.size() && data.cover.empty())
-            data.cover.assign(rest.begin() + static_cast<ptrdiff_t>(offset),
-                              rest.end());
-    } else if (identifier == "PIC") {
-        if (payload.size() < 5) return;
-        auto description = payload.subspan(5);
-        const size_t separator = FindEncodedTerminator(description, encoding);
-        const size_t offset = 5 + (separator < description.size()
-            ? separator + EncodedTerminatorSize(encoding)
-            : description.size());
-        if (offset < payload.size() && data.cover.empty())
-            data.cover.assign(payload.begin() + static_cast<ptrdiff_t>(offset),
-                              payload.end());
+    if ((identifier == "APIC" || identifier == "PIC") && data.cover.empty()) {
+        const auto picture = ttpcomm::tags::Id3Picture({payload.data(), payload.size()},
+            identifier == "PIC" ? 2 : 3);
+        if (picture && !picture->data.empty())
+            data.cover.assign(picture->data.begin(), picture->data.end());
     }
 }
 
@@ -575,15 +549,7 @@ std::wstring Id3UserTextName(std::string_view identifier,
 }
 
 Bytes RemoveUnsynchronization(std::span<const unsigned char> value) {
-    Bytes output;
-    output.reserve(value.size());
-    for (size_t index = 0; index < value.size(); ++index) {
-        output.push_back(value[index]);
-        if (value[index] == 0xffU && index + 1 < value.size() &&
-            value[index + 1] == 0U)
-            ++index;
-    }
-    return output;
+    return ttpcomm::tags::RemoveUnsynchronization({value.data(), value.size()});
 }
 
 // libid3tag frame.c / id3_util_decompress: v2.3 prefixes the inflated
@@ -594,53 +560,10 @@ std::optional<std::span<const unsigned char>> Id3DecodedPayload(
     std::span<const unsigned char> data, unsigned char major,
     unsigned char flags, bool tag_unsynchronized, Bytes& storage,
     std::uint64_t& inflate_budget) {
-    if (major == 2) return data;
-    const bool compressed = (flags & (major == 3 ? 0x80U : 0x08U)) != 0;
-    const bool encrypted = (flags & (major == 3 ? 0x40U : 0x04U)) != 0;
-    const bool grouped = (flags & (major == 3 ? 0x20U : 0x40U)) != 0;
-    if (encrypted || (flags & (major == 3 ? 0x1fU : 0xb0U)))
-        return std::nullopt;
-    std::uint32_t decoded_size{};
-    if (major == 3 && compressed) {
-        if (data.size() < 4) return std::nullopt;
-        decoded_size = ReadBe32(data.data());
-        data = data.subspan(4);
-    }
-    if (grouped) {
-        if (data.empty()) return std::nullopt;
-        data = data.subspan(1);
-    }
-    if (major == 4) {
-        if (compressed && !(flags & 0x01U)) return std::nullopt;
-        if (flags & 0x01U) {
-            if (data.size() < 4) return std::nullopt;
-            decoded_size = ReadSynchsafe(data.data());
-            if (decoded_size == UINT32_MAX) return std::nullopt;
-            data = data.subspan(4);
-        }
-        if ((flags & 0x02U) && !tag_unsynchronized) {
-            storage = RemoveUnsynchronization(data);
-            data = storage;
-        }
-    }
-    if (!compressed) return data;
-    if (decoded_size > inflate_budget) return std::nullopt;
-    // One spare byte detects a stream whose actual size exceeds the prefix.
-    Bytes inflated(static_cast<size_t>(decoded_size) + 1);
-    z_stream stream{};
-    stream.next_in = const_cast<Bytef*>(data.data());
-    stream.avail_in = static_cast<uInt>(data.size());
-    stream.next_out = inflated.data();
-    stream.avail_out = static_cast<uInt>(inflated.size());
-    if (inflateInit(&stream) != Z_OK) return std::nullopt;
-    const int status = inflate(&stream, Z_FINISH);
-    const bool complete = status == Z_STREAM_END && stream.total_out == decoded_size;
-    inflateEnd(&stream);
-    if (!complete) return std::nullopt;
-    inflated.resize(decoded_size);
-    inflate_budget -= decoded_size;
-    storage = std::move(inflated);
-    return std::span<const unsigned char>(storage);
+    const auto view = ttpcomm::tags::DecodePayload({data.data(), data.size()}, major,
+        flags, tag_unsynchronized, storage, inflate_budget);
+    if (!view) return std::nullopt;
+    return std::span<const unsigned char>(view->data(), view->size());
 }
 
 template<class File>
@@ -668,70 +591,39 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
         tag.rewrite_safe = false;
         payload = RemoveUnsynchronization(payload);
     }
-    size_t offset{};
-    if (header[5] & 0x40U) {
-        if (payload.size() < 4) { tag.rewrite_safe = false; return tag; }
-        const auto extended = major == 4
-            ? ReadSynchsafe(payload.data()) : ReadBe32(payload.data());
-        const std::uint64_t skip = major == 3
-            ? 4ULL + extended : static_cast<std::uint64_t>(extended);
-        if (extended == std::numeric_limits<std::uint32_t>::max() ||
-            skip > payload.size()) {
-            tag.rewrite_safe = false;
-            return tag;
-        }
-        offset = static_cast<size_t>(skip);
-    }
+    const auto start = ttpcomm::tags::FrameStart({payload.data(), payload.size()}, major, header[5]);
+    if (!start) { tag.rewrite_safe = false; return tag; }
+    size_t offset = *start;
     TagData user_text;
     std::uint64_t inflate_budget = kMaximumTagBytes;
-    const size_t header_size = major == 2 ? 6U : 10U;
-    while (offset + header_size <= payload.size()) {
-        const size_t identifier_size = major == 2 ? 3U : 4U;
-        if (std::all_of(payload.begin() + static_cast<ptrdiff_t>(offset),
-                payload.begin() + static_cast<ptrdiff_t>(offset + identifier_size),
-                [](unsigned char value) { return value == 0; }))
-            break;
-        std::string identifier(
-            reinterpret_cast<const char*>(payload.data() + offset),
-            identifier_size);
-        if (!std::all_of(identifier.begin(), identifier.end(), [](char value) {
-                return (value >= 'A' && value <= 'Z') ||
-                       (value >= '0' && value <= '9');
-            })) {
-            tag.rewrite_safe = false;
+    for (;;) {
+        const size_t begin = offset;
+        ttpcomm::tags::Frame parsed;
+        const auto status = ttpcomm::tags::NextFrame({payload.data(), payload.size()}, major, offset, parsed);
+        if (status != ttpcomm::tags::FrameStatus::frame) {
+            if (status == ttpcomm::tags::FrameStatus::invalid) tag.rewrite_safe = false;
             break;
         }
-        const std::uint32_t frame_size = major == 2
-            ? static_cast<std::uint32_t>(payload[offset + 3]) << 16U |
-                  static_cast<std::uint32_t>(payload[offset + 4]) << 8U |
-                  static_cast<std::uint32_t>(payload[offset + 5])
-            : major == 4 ? ReadSynchsafe(payload.data() + offset + 4)
-                         : ReadBe32(payload.data() + offset + 4);
-        if (frame_size == std::numeric_limits<std::uint32_t>::max() ||
-            frame_size > payload.size() - offset - header_size) {
-            tag.rewrite_safe = false;
-            break;
-        }
-        const size_t end = offset + header_size + frame_size;
+        const std::string identifier(parsed.identifier);
+        const size_t end = offset;
         Id3Frame frame;
         frame.identifier = identifier;
         frame.semantic = FrameSemantic(identifier);
-        frame.raw.assign(payload.begin() + static_cast<ptrdiff_t>(offset),
+        frame.raw.assign(payload.begin() + static_cast<ptrdiff_t>(begin),
                          payload.begin() + static_cast<ptrdiff_t>(end));
         // Keep the existing conservative write policy for encoded frames.
         // Reading a compressed frame must nevertheless expose its metadata,
         // as the original host's libid3tag path does.
         const bool encoded_frame = major != 2 &&
-            ((major == 3 && (payload[offset + 9] & 0xc0U) != 0) ||
-             (major == 4 && (payload[offset + 9] & 0x0eU) != 0));
+            ((major == 3 && (parsed.flags & 0xc0U) != 0) ||
+             (major == 4 && (parsed.flags & 0x0eU) != 0));
         if (encoded_frame)
             tag.rewrite_safe = false;
         const auto frame_payload =
-            std::span<const unsigned char>(payload).subspan(
-                offset + header_size, frame_size);
+            std::span<const unsigned char>(parsed.payload.data(), parsed.payload.size());
         Bytes decoded_storage;
         const auto decoded = Id3DecodedPayload(frame_payload, major,
-            major == 2 ? 0 : payload[offset + 9], (header[5] & 0x80U) != 0,
+            static_cast<unsigned char>(parsed.flags), (header[5] & 0x80U) != 0,
             decoded_storage, inflate_budget);
         if (decoded) {
             // Native frames take precedence over old TXXX aliases, regardless

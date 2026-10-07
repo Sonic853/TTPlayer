@@ -134,7 +134,8 @@ def main():
         exported = inspect_exports(temporary)
         expected = set(range(1,6)) | set(range(10,15)) | set(range(50,84)) | set(range(90,94)) | set(range(100,107)) | set(range(200,207)) | set(range(300,303)) | {400,401}
         named = {1:'ttpcomm_getversion',2:'_resetstkoflw',3:'srand48',4:'lrand48',5:'_set_security_error_handler'}
-        if set(exported) != expected or any(e['name'] != named.get(n,'') for n,e in exported.items()) or exported[12]['rva'] != exported[78]['rva']:
+        optional = {500: 'ttpcomm_query_extension'}
+        if not expected.issubset(exported) or set(exported) - expected - optional.keys() or any(e['name'] != (named | optional).get(n,'') for n,e in exported.items()) or exported[12]['rva'] != exported[78]['rva']:
             raise ValueError('TTPCOMM export ABI mismatch')
         imports = inspect(temporary)
         for inventory in args.exports:

@@ -162,7 +162,7 @@ add_library(ttplayer_core
   src/ui/window_drag.cpp
 )
 target_include_directories(ttplayer_core
-  PUBLIC include
+  PUBLIC include third_party/ttpcomm-sdk/include
   PRIVATE "${TTPLAYER_GENERATED_INCLUDE_DIR}"
 )
 add_dependencies(ttplayer_core ttplayer_build_date)
@@ -188,8 +188,9 @@ if(BUILD_TESTING)
   set_tests_properties(system_media_controls_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 endif()
 
-add_library(ttpcomm_api STATIC src/app/ttpcomm_api.c)
-target_include_directories(ttpcomm_api PUBLIC include)
+include(third_party/ttpcomm-sdk/cmake/verify.cmake)
+add_library(ttpcomm_api STATIC third_party/ttpcomm-sdk/src/ttpcomm_api.c)
+target_include_directories(ttpcomm_api PUBLIC include third_party/ttpcomm-sdk/include)
 target_compile_definitions(ttpcomm_api PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 
 add_executable(ttplayer_rebuild WIN32
