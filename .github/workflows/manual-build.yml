@@ -21,6 +21,11 @@ on:
         type: boolean
         required: false
         default: false
+      ttpcomm_version:
+        description: TTPCOMM release to include (latest or date version; blank keeps existing packaging)
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -152,6 +157,17 @@ jobs:
           --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt
           --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/6.1.7600.txt
 
+      - name: Download and verify selected TTPCOMM component
+        if: inputs.ttpcomm_version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          TTPCOMM_VERSION: ${{ inputs.ttpcomm_version }}
+        run: >-
+          python cmake/download_ttpcomm_component.py --output "build/$env:BUILD_CONFIGURATION"
+          --version "$env:TTPCOMM_VERSION"
+          --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt
+          --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/6.1.7600.txt
+
       - name: Prepare artifact
         env:
           PACKAGE_VERSION: ${{ steps.version.outputs.version }}
@@ -194,6 +210,7 @@ jobs:
             wtl = '10.01'
             release_size_optimization = $true
             https_component = Get-Content -LiteralPath (Join-Path $output 'https-component.json') -Raw | ConvertFrom-Json
+            ttpcomm_component = if (Test-Path -LiteralPath (Join-Path $output 'ttpcomm-component.json')) { Get-Content -LiteralPath (Join-Path $output 'ttpcomm-component.json') -Raw | ConvertFrom-Json } else { $null }
             run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
 
