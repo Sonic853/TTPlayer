@@ -117,7 +117,7 @@ typedef int (__cdecl *TtpUncompressFn)(unsigned char *, unsigned *,
 /* DSP / analysis factories and operations.  Object layouts remain opaque. */
 typedef void *(__fastcall *TtpDspCreate2DFn)(uint32_t width, int height);         /* @90 */
 typedef void  (__fastcall *TtpDspConfigure2DFn)(void *, uint32_t, int);           /* @91 */
-typedef int   (__fastcall *TtpDspProcessFn)(void *, float, int, int);             /* @92 */
+typedef const uint32_t *(__fastcall *TtpDspProcessFn)(void *, const int16_t *, const int16_t *, int);             /* @92 */
 typedef void  (__fastcall *TtpDspDestroyFn)(void *);                             /* @93 */
 typedef BOOL  (__cdecl    *TtpDspSupportsModeFn)(int);                           /* @100 */
 typedef void *(__stdcall  *TtpDspFactory101Fn)(void);                            /* @101 */
@@ -129,14 +129,14 @@ typedef BOOL    (__stdcall *CoolSbInitAppFn)(void);                             
 typedef BOOL    (__stdcall *CoolSbUninitAppFn)(void);                             /* @201 */
 typedef BOOL    (__stdcall *InitializeCoolSBFn)(HWND);                            /* @202 */
 typedef HRESULT (__stdcall *UninitializeCoolSBFn)(HWND);                          /* @203 */
-typedef BOOL    (__stdcall *CoolSbSetStyleExFn)(HWND, int, int, int);             /* @204, TTPlayer extension */
+typedef BOOL    (__stdcall *CoolSbSetMinThumbSizeExFn)(HWND, int, int, BOOL);     /* @204: minimum, proportional */
 typedef BOOL    (__stdcall *CoolSbSetSizeFn)(HWND, int, int, int);                /* @205 */
-typedef BOOL    (__stdcall *CoolSbSetMinThumbSizeFn)(HWND, int, UINT);            /* @206 */
+typedef BOOL    (__stdcall *CoolSbSetStyleFn)(HWND, int, UINT);                   /* @206: normal/flat/hot */
 
-typedef int    (__stdcall *TtpGetMachineIdLengthFn)(void);                        /* @300 */
+typedef int    (__cdecl *TtpGetMachineIdLengthFn)(char *, unsigned);                        /* @300 */
 typedef size_t (__cdecl   *TtpGetDiskSerialFn)(char *, size_t);                   /* @301 */
-typedef char * (__cdecl   *TtpMakeMachineTokenFn)(char *, int, unsigned char *);  /* @302 */
-typedef void   (__cdecl   *TtpDigestRawFn)(int, uint32_t, uint32_t *);             /* @401 */
+typedef int    (__cdecl   *TtpMakeMachineTokenFn)(char *, int, unsigned char *);  /* @302 */
+typedef void   (__cdecl   *TtpDigestRawFn)(const void *, uint32_t, void *);             /* @401 */
 typedef char * (__cdecl   *TtpDigestHexFn)(char const *, uint32_t, char *, int);   /* @400 */
 
 typedef struct TtpCommApi {
@@ -201,9 +201,9 @@ typedef struct TtpCommApi {
     CoolSbUninitAppFn coolsb_uninit_app;
     InitializeCoolSBFn initialize_coolsb;
     UninitializeCoolSBFn uninitialize_coolsb;
-    CoolSbSetStyleExFn coolsb_set_style_ex;
+    CoolSbSetMinThumbSizeExFn coolsb_set_min_thumb_size_ex;
     CoolSbSetSizeFn coolsb_set_size;
-    CoolSbSetMinThumbSizeFn coolsb_set_min_thumb_size;
+    CoolSbSetStyleFn coolsb_set_style;
 
     TtpGetMachineIdLengthFn get_machine_id_length;
     TtpGetDiskSerialFn get_disk_serial;

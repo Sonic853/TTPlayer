@@ -69,9 +69,9 @@ BOOL TtpComm_LoadApi(TtpCommApi *api, wchar_t const *dll_path)
     LOAD_ORD(coolsb_uninit_app, CoolSbUninitAppFn, 201);
     LOAD_ORD(initialize_coolsb, InitializeCoolSBFn, 202);
     LOAD_ORD(uninitialize_coolsb, UninitializeCoolSBFn, 203);
-    LOAD_ORD(coolsb_set_style_ex, CoolSbSetStyleExFn, 204);
+    LOAD_ORD(coolsb_set_min_thumb_size_ex, CoolSbSetMinThumbSizeExFn, 204);
     LOAD_ORD(coolsb_set_size, CoolSbSetSizeFn, 205);
-    LOAD_ORD(coolsb_set_min_thumb_size, CoolSbSetMinThumbSizeFn, 206);
+    LOAD_ORD(coolsb_set_style, CoolSbSetStyleFn, 206);
     LOAD_ORD(get_machine_id_length, TtpGetMachineIdLengthFn, 300);
     LOAD_ORD(get_disk_serial, TtpGetDiskSerialFn, 301);
     LOAD_ORD(make_machine_token, TtpMakeMachineTokenFn, 302);
