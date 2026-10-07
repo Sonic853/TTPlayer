@@ -38,6 +38,11 @@ public:
     bool Process(const std::vector<std::byte>& input,
                  std::vector<std::byte>& output,
                  bool end_of_stream = false);
+    // Already processed interleaved doubles in the internal half-scale domain
+    // (+/-0.5). Preserve EQ/ReplayGain precision until the final output encoder.
+    bool ProcessSamples(std::vector<double> samples,
+                        std::vector<std::byte>& output,
+                        bool end_of_stream = false);
     void Reset() noexcept;
 
     [[nodiscard]] WAVEFORMATEX OutputFormat() const noexcept;

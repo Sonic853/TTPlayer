@@ -230,6 +230,7 @@ struct PcmOutputTransform::Impl {
     DWORD input_channel_mask{};
     std::wstring error;
     void* resampler{};
+    bool input_ended{};
     int dither_selector{};
     size_t dither_filter{};
     size_t dither_taps{};
@@ -525,6 +526,26 @@ bool PcmOutputTransform::Process(const std::vector<std::byte>& input,
                                       impl_->input_floating_point,
                                       impl_->input_valid_bits);
 
+    return ProcessSamples(std::move(samples), output, end_of_stream);
+}
+
+bool PcmOutputTransform::ProcessSamples(std::vector<double> samples,
+                                       std::vector<std::byte>& output,
+                                       bool end_of_stream) {
+    output.clear();
+    if (!impl_ || impl_->output.nBlockAlign == 0) return false;
+    if (samples.size() % impl_->input.nChannels != 0 ||
+        samples.size() > static_cast<size_t>(INT_MAX)) {
+        impl_->error = L"The processor returned an invalid PCM block";
+        return false;
+    }
+    if (impl_->input_ended) {
+        if (samples.empty()) return true;
+        impl_->error = L"PCM input after end of stream requires Reset";
+        return false;
+    }
+    if (samples.empty() && !end_of_stream) return true;
+
 #if defined(_MSC_VER) && defined(_M_IX86)
     if (impl_->resampler) {
         const size_t input_frames = samples.size() / impl_->input.nChannels;
@@ -552,25 +573,33 @@ bool PcmOutputTransform::Process(const std::vector<std::byte>& input,
 
         if (end_of_stream) {
             std::vector<double> tail(4096U * impl_->output.nChannels);
-            const int tail_count = Impl::Process(
-                impl_->resampler, nullptr, 0, tail.data(),
-                static_cast<int>(tail.size()));
-            if (tail_count < 0 || static_cast<size_t>(tail_count) > tail.size()) {
-                impl_->error = L"ttpcomm.dll ordinal 102 failed while flushing";
-                return false;
+            // 004B1375 repeats the null-input ordinal-102 call until its
+            // queue is empty. This drains already produced PCM; it must not
+            // call Reset/Finish or submit synthetic zeros to the equalizer.
+            for (;;) {
+                const int tail_count = Impl::Process(
+                    impl_->resampler, nullptr, 0, tail.data(),
+                    static_cast<int>(tail.size()));
+                if (tail_count < 0 || static_cast<size_t>(tail_count) > tail.size() ||
+                    samples.size() > static_cast<size_t>(INT_MAX) - tail_count) {
+                    impl_->error = L"ttpcomm.dll ordinal 102 failed while draining";
+                    return false;
+                }
+                if (tail_count == 0) break;
+                samples.insert(samples.end(), tail.begin(), tail.begin() + tail_count);
             }
-            samples.insert(samples.end(), tail.begin(),
-                           tail.begin() + tail_count);
         }
     }
 #else
     static_cast<void>(end_of_stream);
 #endif
+    impl_->input_ended = end_of_stream;
     return impl_->Encode(samples, output);
 }
 
 void PcmOutputTransform::Reset() noexcept {
     if (!impl_) return;
+    impl_->input_ended = false;
 #if defined(_MSC_VER) && defined(_M_IX86)
     Impl::ResetObject(impl_->resampler);
 #endif

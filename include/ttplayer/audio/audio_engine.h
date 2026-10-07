@@ -241,6 +241,9 @@ public:
     }
     void SetTtpCommModule(HMODULE module) noexcept { ttpcomm_module_ = module; }
     void SetDspParentWindow(HWND window);
+    // Wake the window thread after the worker has released its source/output.
+    // The message is a request to inspect current state, not an EOF command.
+    void SetStateNotification(HWND window, UINT message);
     void SetDspStorageDirectory(const std::filesystem::path& directory);
     [[nodiscard]] bool ConfigureDsp(const std::filesystem::path& module);
     [[nodiscard]] bool IsDspActive(const std::filesystem::path& module) const;
@@ -334,6 +337,8 @@ private:
     uint64_t seek_revision_{}; // guarded by mutex_; also invalidates stale ACKs
     std::atomic<bool> stop_requested_{true};
     mutable std::mutex mutex_;
+    HWND state_notification_window_{};
+    UINT state_notification_message_{};
     std::condition_variable lyric_write_condition_;
     std::shared_ptr<LyricWriteRequest> lyric_write_request_;
     std::filesystem::path lyric_source_path_;

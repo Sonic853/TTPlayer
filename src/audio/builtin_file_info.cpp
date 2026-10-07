@@ -5,6 +5,7 @@
 #include <mfapi.h>
 #include "ttplayer/audio/midi_player.h"
 #include "tag_genres.h"
+#include <zlib.h>
 
 #include <algorithm>
 #include <array>
@@ -585,6 +586,63 @@ Bytes RemoveUnsynchronization(std::span<const unsigned char> value) {
     return output;
 }
 
+// libid3tag frame.c / id3_util_decompress: v2.3 prefixes the inflated
+// length before group identity; v2.4 places its syncsafe length after it.
+// Keep the stored frame bytes separate from the decoded view used by text,
+// lyrics and APIC. An encrypted or malformed frame is never treated as text.
+std::optional<std::span<const unsigned char>> Id3DecodedPayload(
+    std::span<const unsigned char> data, unsigned char major,
+    unsigned char flags, bool tag_unsynchronized, Bytes& storage,
+    std::uint64_t& inflate_budget) {
+    if (major == 2) return data;
+    const bool compressed = (flags & (major == 3 ? 0x80U : 0x08U)) != 0;
+    const bool encrypted = (flags & (major == 3 ? 0x40U : 0x04U)) != 0;
+    const bool grouped = (flags & (major == 3 ? 0x20U : 0x40U)) != 0;
+    if (encrypted || (flags & (major == 3 ? 0x1fU : 0xb0U)))
+        return std::nullopt;
+    std::uint32_t decoded_size{};
+    if (major == 3 && compressed) {
+        if (data.size() < 4) return std::nullopt;
+        decoded_size = ReadBe32(data.data());
+        data = data.subspan(4);
+    }
+    if (grouped) {
+        if (data.empty()) return std::nullopt;
+        data = data.subspan(1);
+    }
+    if (major == 4) {
+        if (compressed && !(flags & 0x01U)) return std::nullopt;
+        if (flags & 0x01U) {
+            if (data.size() < 4) return std::nullopt;
+            decoded_size = ReadSynchsafe(data.data());
+            if (decoded_size == UINT32_MAX) return std::nullopt;
+            data = data.subspan(4);
+        }
+        if ((flags & 0x02U) && !tag_unsynchronized) {
+            storage = RemoveUnsynchronization(data);
+            data = storage;
+        }
+    }
+    if (!compressed) return data;
+    if (decoded_size > inflate_budget) return std::nullopt;
+    // One spare byte detects a stream whose actual size exceeds the prefix.
+    Bytes inflated(static_cast<size_t>(decoded_size) + 1);
+    z_stream stream{};
+    stream.next_in = const_cast<Bytef*>(data.data());
+    stream.avail_in = static_cast<uInt>(data.size());
+    stream.next_out = inflated.data();
+    stream.avail_out = static_cast<uInt>(inflated.size());
+    if (inflateInit(&stream) != Z_OK) return std::nullopt;
+    const int status = inflate(&stream, Z_FINISH);
+    const bool complete = status == Z_STREAM_END && stream.total_out == decoded_size;
+    inflateEnd(&stream);
+    if (!complete) return std::nullopt;
+    inflated.resize(decoded_size);
+    inflate_budget -= decoded_size;
+    storage = std::move(inflated);
+    return std::span<const unsigned char>(storage);
+}
+
 template<class File>
 Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
     Id3Tag tag;
@@ -625,6 +683,7 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
         offset = static_cast<size_t>(skip);
     }
     TagData user_text;
+    std::uint64_t inflate_budget = kMaximumTagBytes;
     const size_t header_size = major == 2 ? 6U : 10U;
     while (offset + header_size <= payload.size()) {
         const size_t identifier_size = major == 2 ? 3U : 4U;
@@ -659,8 +718,9 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
         frame.semantic = FrameSemantic(identifier);
         frame.raw.assign(payload.begin() + static_cast<ptrdiff_t>(offset),
                          payload.begin() + static_cast<ptrdiff_t>(end));
-        // Compressed/encrypted frames are retained byte-for-byte but cannot
-        // be decoded as ordinary text.
+        // Keep the existing conservative write policy for encoded frames.
+        // Reading a compressed frame must nevertheless expose its metadata,
+        // as the original host's libid3tag path does.
         const bool encoded_frame = major != 2 &&
             ((major == 3 && (payload[offset + 9] & 0xc0U) != 0) ||
              (major == 4 && (payload[offset + 9] & 0x0eU) != 0));
@@ -669,12 +729,18 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
         const auto frame_payload =
             std::span<const unsigned char>(payload).subspan(
                 offset + header_size, frame_size);
-        if (!encoded_frame) {
+        Bytes decoded_storage;
+        const auto decoded = Id3DecodedPayload(frame_payload, major,
+            major == 2 ? 0 : payload[offset + 9], (header[5] & 0x80U) != 0,
+            decoded_storage, inflate_budget);
+        if (decoded) {
             // Native frames take precedence over old TXXX aliases, regardless
             // of their physical order.  Saving removes both representations.
-            DecodeId3Frame(identifier, frame_payload,
+            DecodeId3Frame(identifier, *decoded,
                 identifier == "TXXX" || identifier == "TXX" ? user_text : tag.data);
-            frame.metadata_name = Id3UserTextName(identifier, frame_payload);
+            frame.metadata_name = Id3UserTextName(identifier, *decoded);
+        } else {
+            tag.rewrite_safe = false;
         }
         tag.frames.push_back(std::move(frame));
         offset = end;

@@ -702,7 +702,15 @@ public:
         end_of_stream = bytes_read_ >= data_bytes_;
         if (end_of_stream) return true;
         const uint64_t remaining = data_bytes_ - bytes_read_;
-        size_t count = static_cast<size_t>(std::min<uint64_t>(remaining, requested_bytes));
+        // 004EA0EA advertises one aligned 1/24-second PCM packet. Keep this
+        // reader boundary independent of the device lookahead/file cache:
+        // 004B1B81 takes at most one input packet from the EQ output queue,
+        // so changing the packet size changes its final retained samples.
+        const size_t packet_bytes = std::max<size_t>(wave_format_.nBlockAlign,
+            wave_format_.nAvgBytesPerSec / 24 / wave_format_.nBlockAlign *
+                wave_format_.nBlockAlign);
+        size_t count = static_cast<size_t>(std::min<uint64_t>(
+            remaining, std::min(requested_bytes, packet_bytes)));
         count -= count % wave_format_.nBlockAlign;
         if (count == 0) count = static_cast<size_t>(std::min<uint64_t>(
             remaining, wave_format_.nBlockAlign));
@@ -1542,7 +1550,8 @@ public:
                winamp_dsp_.ActiveCount() != 0 || replay_gain_analyzer_;
     }
 
-    bool Process(std::vector<std::byte>& bytes, bool enable_dsp = true) {
+    bool Process(std::vector<std::byte>& bytes, bool enable_dsp = true,
+                 std::vector<double>* precise_output = nullptr) {
         if (!Active() || bytes.empty()) return true;
         std::vector<double> samples;
         if (!Decode(bytes, samples)) return false;
@@ -1597,6 +1606,13 @@ public:
                                 &diagnostics_);
             for (size_t index = 0; index < samples.size(); ++index)
                 samples[index] = pcm16[index] / 65536.0;
+        }
+        if (precise_output) {
+            // 004B1B81 -> 004B1BF4 keeps double PCM through EQ and SSRC.
+            // Quantizing back to the reader's bit depth here loses fractions
+            // before resampling/dither and clips peaks too early.
+            *precise_output = std::move(samples);
+            return true;
         }
         return Encode(samples, bytes);
     }
@@ -2109,6 +2125,12 @@ void AudioEngine::Configure(const PlaybackOptions& options) {
         RecordDiagnostic(std::move(diagnostic));
 }
 
+void AudioEngine::SetStateNotification(HWND window, UINT message) {
+    std::scoped_lock lock(mutex_);
+    state_notification_window_ = window;
+    state_notification_message_ = message;
+}
+
 void AudioEngine::SetDspParentWindow(HWND window) {
     std::unique_lock lock(mutex_);
     if (options_.dsp_parent_window == window) return;
@@ -2144,6 +2166,8 @@ std::shared_ptr<AudioEngine> AudioEngine::CreateSuccessor() const {
     next->balance_ = balance_;
     next->plugin_manager_ = plugin_manager_;
     next->ttpcomm_module_ = ttpcomm_module_;
+    next->state_notification_window_ = state_notification_window_;
+    next->state_notification_message_ = state_notification_message_;
     // DAT_00546C64 is shared for the application lifetime in the original.
     // Keep one DSP Init/Quit lifetime and serialize callbacks across tails.
     next->dsp_chain_ = dsp_chain_;
@@ -2298,6 +2322,16 @@ void AudioEngine::PlaybackWorker(std::filesystem::path path, int subtrack) {
         CancelSeekLocked();
     }
     SignalOpenComplete();
+    {
+        std::scoped_lock lock(mutex_);
+        // FUN_004AAC0F posts CSound notifications to the owning window.
+        // Do not wait for its 250 ms display timer to notice natural EOF.
+        // Posting only after cleanup also keeps a new track from competing
+        // with the outgoing source for files or an exclusive output device.
+        if (state_notification_window_ && state_notification_message_)
+            PostMessageW(state_notification_window_,
+                         state_notification_message_, 0, 0);
+    }
 }
 
 void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
@@ -2539,14 +2573,18 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 processors.Update(current);
                 direct_processor_revision = latest_revision;
             }
-            if (!native.empty() && !processors.Process(native, dsp_enabled_.load())) {
+            std::vector<double> processed;
+            const bool processing = !native.empty() && processors.Active();
+            if (processing && !processors.Process(native, dsp_enabled_.load(), &processed)) {
                 if (!stop_requested_)
                     SetError(L"The recovered audio processor chain failed");
                 return false;
             }
             for (auto& diagnostic : processors.TakeDiagnostics())
                 RecordDiagnostic(std::move(diagnostic));
-            if (!output_transform.Process(native, decoded, decoder_eof)) {
+            if (!(processing ? output_transform.ProcessSamples(
+                      std::move(processed), decoded, decoder_eof)
+                  : output_transform.Process(native, decoded, decoder_eof))) {
                 if (!stop_requested_) SetError(output_transform.Error());
                 return false;
             }
@@ -2960,15 +2998,18 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                         RecordDiagnostic(std::move(diagnostic));
                     processor_revision = latest_revision;
                 }
-                if (!decoded.empty() && !processors.Process(decoded, dsp_enabled_.load())) {
+                std::vector<double> processed;
+                const bool processing = !decoded.empty() && processors.Active();
+                if (processing && !processors.Process(decoded, dsp_enabled_.load(), &processed)) {
                     if (!stop_requested_)
                         SetError(L"The recovered audio processor chain failed");
                     return false;
                 }
                 if (!decoded.empty() || decoder_eof) {
                     std::vector<std::byte> converted;
-                    if (!output_transform.Process(decoded, converted,
-                                                  decoder_eof)) {
+                    if (!(processing ? output_transform.ProcessSamples(
+                              std::move(processed), converted, decoder_eof)
+                          : output_transform.Process(decoded, converted, decoder_eof))) {
                         if (!stop_requested_)
                             SetError(output_transform.Error());
                         return false;

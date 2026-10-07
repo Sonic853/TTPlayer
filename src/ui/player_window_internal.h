@@ -69,6 +69,8 @@ constexpr int kProgress = 1102;
 constexpr int kVolume = 1103;
 constexpr UINT_PTR kUiTimer = 1;
 constexpr UINT kUiRefreshIntervalMs = 250;
+constexpr UINT kMsgPlaybackStateChanged = WM_APP + 0x317;
+constexpr UINT_PTR kNaturalPlayTimer = 0x21b;
 // One completed private-reader metadata probe is marshalled back to the UI
 // thread with this message.  The original drains one queued CPlayItem from
 // its WM_NULL path at 00481759; a private message keeps the rebuilt decoder

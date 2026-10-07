@@ -2914,6 +2914,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         break;
     case WM_CREATE:
         audio_->SetDspParentWindow(window_);
+        audio_->SetStateNotification(window_, kMsgPlaybackStateChanged);
         CreateControls();
         visual_window_ = CreateWindowExW(0, kVisualWindowClass, nullptr,
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 0, 0, window_,
@@ -3463,7 +3464,21 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             true, ImportPlayback::force));
         return 0;
     }
+    case kMsgPlaybackStateChanged:
+        // A retired/fading engine can also post this wake-up. Inspect the
+        // current engine through the same guarded path as the fallback timer;
+        // never interpret a queued message itself as permission to advance.
+        wparam = kUiTimer;
+        [[fallthrough]];
     case WM_TIMER:
+        if (wparam == kNaturalPlayTimer) {
+            if (!pending_natural_play_) {
+                KillTimer(window_, kNaturalPlayTimer);
+                return 0;
+            }
+            if (GetTickCount64() < pending_natural_play_tick_) return 0;
+            wparam = kUiTimer;
+        }
         if (auto_shutdown_timer_ && wparam == auto_shutdown_timer_) {
             SYSTEMTIME now{};
             GetLocalTime(&now);
@@ -3558,6 +3573,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             if (pending_natural_play_ &&
                 GetTickCount64() >= pending_natural_play_tick_) {
                 pending_natural_play_ = false;
+                KillTimer(window_, kNaturalPlayTimer);
                 // The editor may have opened during the inter-track delay.
                 // Preserve the EOF editing guard if a queued transition
                 // predates the editor; it must not discard the new draft.
@@ -6977,6 +6993,10 @@ bool PlayerWindow::PlayCurrent() {
         pending_natural_play_ = true;
         pending_natural_play_tick_ = GetTickCount64() +
             TrackIntervalMilliseconds(settings_.playback.track_interval);
+        // Keep explicit track spacing independent of the display timer too.
+        // The common path still defers while an editor/save/close is active;
+        // kUiTimer remains the fallback if timer allocation fails.
+        SetTimer(window_, kNaturalPlayTimer, 10, nullptr);
         return true;
     }
     if (!PrepareTrackChange(same_item)) {
