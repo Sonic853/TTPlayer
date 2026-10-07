@@ -59,7 +59,12 @@ Release 另外提供 `CodecAddIn-Rebuild-版本号.zip` 和 `ExtraAddIn-版本�
 
 所有客户端请求均先匿名访问。若构建中包含专用只读 Token，仅在 Gitee 返回 401 / 403 / 404 时对 Gitee 请求重试，不把该 Token 发送至 GitHub。
 
-Actions 构建前运行 `cmake/prepare_update_access.py`：实际匿名请求 Gitee API、下载校验文件和完整 ZIP，并验证 SHA-256。匿名成功则生成空凭据；失败才读取用户已允许公开分发的 `GITEE_TOKEN_UPDATER`，并先验证带 Token 的访问。生成头文件位于构建目录，日志不打印 Token，头文件不进入发行附件。发布 Release 的 `GITEE_TOKEN` 与检查更新的 Token 分开。
+Actions 构建前运行 `cmake/prepare_update_access.py`：实际匿名请求 Gitee API、下载校验文件和完整 ZIP，并验证 SHA-256。匿名成功则生成空凭据；仅在 401/403/404 时尝试用户已允许公开分发的 `GITEE_TOKEN_UPDATER`，验证整条访问成功后才嵌入。生成头文件位于构建目录，日志不打印 Token，头文件不进入发行附件。发布 Release 的 `GITEE_TOKEN` 与检查更新的 Token 分开。
+
+2026-10-08 修复：增加分阶段诊断和网络重试，Action 使用 `--allow-unverified-public`。
+临时服务不可用、访问拒绝且回退失败、没有完整正式包时，明确告警并生成空凭据继续构建；
+完整性和内容错误仍失败。未通过验证的令牌不会被嵌入，旧头文件不会残留复用。
+详见 [Gitee 预检失败分析与修复](BUILDING.md#gitee-更新通道预检失败2026-10-08-修复)。
 
 2026-09-25 实测 GitHub、Gitee 的公开 API、摘要和 `TTPlayerRebuild-2026.09.24.zip` 均可匿名下载；两边 ZIP 均为 1,406,426 字节，SHA-256 一致：
 

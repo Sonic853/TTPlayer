@@ -132,10 +132,10 @@ jobs:
 
       # This repository is the local rebuild/ directory. Private reverse/
       # inputs, tests, runtime DLLs and personal settings are not in the checkout.
-      - name: Probe anonymous updater access
+      - name: Prepare updater access (public fallback on service unavailability)
         env:
           GITEE_TOKEN_UPDATER: ${{ secrets.GITEE_TOKEN_UPDATER }}
-        run: python cmake/prepare_update_access.py --output build/update_access.h
+        run: python cmake/prepare_update_access.py --output build/update_access.h --allow-unverified-public
 
       - name: Configure
         run: >-

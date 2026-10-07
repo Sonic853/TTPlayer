@@ -41,6 +41,46 @@ HTTPS 下载脚本现在会为 API 请求添加 `Authorization: Bearer`；此前
 及缺失令牌的提前检查；原 HTTPS 组件打包校验和 Actionlint 通过。测试使用虚构令牌，
 仅位于 `tests/github_api_auth` 和 `tests/update`，不在 Actions 运行；未重新触发远程发布。
 
+### Gitee 更新通道预检失败（2026-10-08 修复）
+
+`prepare_update_access.py` 在 Configure／Build 之前运行，用于决定播放器是否需要嵌入
+已允许公开分发的专用只读 `GITEE_TOKEN_UPDATER`。它不负责下载 `ttpcomm.dll`，也不使用
+发布令牌 `GITEE_TOKEN` 或 GitHub 的 `GH_TOKEN`。
+
+旧日志 `Gitee anonymous and read-only fallback probes failed` 只能说明：匿名的整条
+API → 校验文件 → ZIP 探测失败，随后使用已配置令牌的探测也失败。旧代码用
+`except Exception` 丢弃了具体异常，无法据此区分 HTTP 401/403/429、超时、附件不完整、
+JSON/摘要解析错误或哈希不匹配；不能仅凭这条日志断定令牌失效。旧版没有重试，并把
+更新服务的临时可用性设为了编译的强制前提。
+
+本次从本机匿名访问公开 Gitee API、`2026.10.06` 的摘要和播放器 ZIP 均成功。ZIP 为
+2,267,935 字节，SHA256 为
+`2586a89db27d3ade6653e4d9d6033d75b6f33ec81e5d1dada310c9eb4fd4ed69`，与清单一致。
+这验证了当前公开附件；不能倒推失败时 GitHub runner 的网络状态。下载实际重定向至
+`foruda.gitee.com`，修复后的完整脚本亦实测通过，生成空令牌头文件。
+
+修复后的行为：
+
+- 按 `release-api`、`checksum`、`package` 输出失败阶段、固定错误码、HTTP 状态和尝试次数，
+  不输出令牌、带凭据的 URL、服务器响应正文或原始异常文本。
+- 超时、连接错误、短读、HTTP 408/425/429/5xx 最多尝试 3 次，间隔 1、2 秒。
+- 仅对 401/403/404 尝试专用只读令牌，与运行时更新器规则一致；API、摘要和 ZIP 全部
+  验证成功且确实使用了认证，才嵌入令牌。跨域 CDN 重定向去除认证，保留签名参数原样。
+- 从最近 20 条记录选择最新完整正式版本，跳过草稿、预发布和附件尚未齐全的记录。
+  空清单或没有完整版本会报告“未验证”，不会再声称已验证 ZIP。
+- 摘要解析支持 BOM、空行和二进制 `*` 标记，拒绝缺失、重复或非法的目标摘要。
+- Action 显式使用 `--allow-unverified-public`：服务不可达、访问被拒绝且回退仍失败、
+  或暂无完整 Release 时，发出 warning 并生成空凭据头文件继续构建。未经验证的令牌
+  不会进入程序。SHA256 不匹配、非法来源和畸形内容仍然失败；不传该参数则保留严格预检。
+- 开始预检时清理指定输出的旧头文件，防止失败后误用上次构建的凭据；成功输出原子替换。
+
+继续构建不表示 Gitee 服务已恢复，也不改变播放器实际下载/安装时的校验规则。发布任务
+和 HTTPS／TTPCOMM 组件下载仍执行各自的校验，未设置 `continue-on-error`。
+
+本地 15 项回归覆盖上述分支及日志脱敏，脚本位于 `tests/update/test_prepare_update_access.py`，
+不进入 Actions。Python 语法、Actionlint、公开网络实测均通过。提交修复后应从包含新代码的
+分支发起新的 **Run workflow**；直接重跑旧记录仍使用旧脚本。
+
 ### 构建与发布
 
 本地 `rebuild` 是独立 Git 仓库；它在 GitHub 上就是仓库根目录。
