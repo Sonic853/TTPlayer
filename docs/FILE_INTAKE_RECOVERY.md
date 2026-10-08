@@ -178,8 +178,8 @@ observable to the source.
 | Surface | Recovered behavior |
 | --- | --- |
 | Main player | A first `.skn` installs/switches that skin. Otherwise all dropped paths replace the active playlist and the first imported item starts playing. |
-| Playlist track pane | All paths are inserted at the hit/insertion row. The active playing row is remapped if insertion occurs before it; the drop itself does not start another song. |
-| Playlist catalogue row | Ordinary files append to the hit playlist. Dropping on catalogue whitespace creates a new list; a dropped playlist file is added as its own list. |
+| Playlist track pane | All paths are inserted at the hit/insertion row. The active playing row is remapped if insertion occurs before it. An idle target with no playing marker can auto-start the first inserted item; see the 2026-10-09 correction below. |
+| Playlist catalogue row | Ordinary files append to the hit playlist with the same conditional auto-start. Dropping on catalogue whitespace creates a new list without auto-start; a dropped playlist file is added as its own list. |
 | Lyric window | Only `HDROP` item zero is inspected, matching `0044AC70`; the lyric loader then validates/loads that first path. |
 | Equalizer | No target is registered and the drop is rejected. |
 
@@ -187,6 +187,97 @@ The playlist target maintains an insertion cue while OLE is over the track
 pane and a target-list cue while it is over the catalogue.  These are visual
 reconstructions of the native hit-test contract, not evidence that the lost
 private drawing implementation had the same class layout.
+
+### Drop argument audit and completed follow-up (2026-10-09)
+
+The original x86 argument audit corrected the earlier blanket statement that
+a playlist-window drop cannot start playback. The two differences identified
+by that audit are now implemented. The original calls are:
+
+| Native call site | Arguments to `00480386` |
+| --- | --- |
+| `00482470..00482479`, existing catalogue row | `insertion = destination.count`, `read_info = 1`, `allow_idle_play = 1` |
+| `00482612..0048261B`, track pane | `insertion = hit row / count`, `read_info = 1`, `allow_idle_play = 1` |
+| `00482482..004824BA`, blank catalogue space | Appends the temporary list through `0047928F` and activates it through `0047F294`; does not call `00480386` |
+
+Both ordinary insert/append calls push `1, 1, insertion` in x86 right-to-left
+argument order. `004804AD` tests the third argument, then checks the current
+list's `+0x1C == -1` and main-window message `0x7F3 == -1`, before calling
+`0047FEA3(insertion, 0)`. Stopped playback can retain a playing marker, so
+"stopped" and "eligible to auto-start" are different states. The rebuild now
+uses `ImportPlayback::if_idle` for these two drop paths. The blank-catalogue
+new-list path retains `none` and does not select the new list's tracks.
+
+The 2026-10-08 regression run passed its 83 assertions, but the drop cases
+reused a target carrying `PlayingRow(0)`. They therefore covered preserving
+stopped playback, not the missing idle/no-marker auto-start case. The previous
+result is not evidence that all drop playback states match the original.
+
+There is also an empty-batch ordering edge case. For blank catalogue space,
+the original only changes the signed insertion cursor from `-1` to the old
+catalogue count when the temporary **track batch is nonempty**. With an empty
+folder plus two explicit playlist files, no ordinary list is created: the
+first playlist is appended at `-1`, then the cursor becomes `0` and the second
+playlist is inserted at the front. The rebuild previously normalized this
+cursor when the ordinary **path vector was nonempty**, even if those paths
+produced no tracks. It now normalizes only inside the nonempty track-batch
+branch. It also retains a raw nonnegative hit, including the synthetic row
+immediately below the final list (`count`), rather than treating it as `-1`.
+
+For existing lists `[A, B]` and incoming playlist files `first`, `second`:
+
+| Drop contents / location | Final catalogue |
+| --- | --- |
+| Empty folder + playlists, true blank (`-1`) | `[second, A, B, first]` |
+| Empty folder + playlists, synthetic bottom row (`2`) | `[A, B, first, second]` |
+| Playlists only, true blank / synthetic bottom row | Same respective orders as above |
+| Nonempty ordinary batch + playlists, either blank location | `[A, B, first, second, ordinary]` |
+| Any of these batches on existing row `A` | `[first, second, A, B]`; ordinary tracks append to `A` |
+
+After each imported playlist the original activates `count - 1`, even if the
+playlist was inserted earlier. Existing-source identity is preserved when
+insertion shifts its playlist or track index.
+
+Folder naming is independent of whether each folder contributed tracks.
+`0048205E..0048208E` scans a directory using `Histroy/CheckSubFolder`, then
+unconditionally copies its final path component into the shared temporary
+list's title. Multiple folder inputs therefore form one ordinary batch and
+the last folder wins, including a final empty folder. If the whole batch is
+empty and there are no explicit playlist files, the drop returns no effect
+and creates no list. Folder contents are references; the external drop's
+`DROPEFFECT_LINK` does not move the source directory or create `.lnk` files.
+
+The local regression harness now adds 18 playback cases (three destinations
+times six initial states), nine mixed-order cases, and an empty-folder-only
+case. Playback states cover fully idle, stopped with a retained marker,
+playing/paused in the target list, and playing/paused in another list while
+the target has no marker. Silent PCM fixtures exercise the real audio engine;
+the assertions check actual playback state, source identity, selection and
+the first inserted track, rather than merely checking that a play request was
+issued. Before the fix, the new test reproduced the missing idle autoplay in
+the track pane. The mixed-order cases cover both blank hit kinds, existing
+rows, playlist-only input, and a nonempty folder followed by an empty folder.
+
+Validation completed on 2026-10-09:
+
+- **334 assertions passed on each of Windows XP, Windows 7 and local Windows
+  11**, including the earlier folder chooser/scanning tests. Windows 11 is the
+  requested substitute for Windows 10; no actual Windows 10 run is claimed.
+- These new cases call the production drop handler using real `CF_HDROP`
+  objects and actual list-control coordinates; they are not new end-to-end
+  mouse-drag comparisons against the original executable. The expected native
+  behavior comes from the pseudocode and x86 call/branch audit above.
+- Release `2026.10.09` builds successfully. The player and updater pass the
+  static import checks against both XP and Win7 inventories (717 and 292
+  imports respectively).
+- The local-only harness and results remain under `tests/folder_intake/`
+  (`drop-fixed-run.log`, `drop-vm-results.json`,
+  `verification-20261009.json`). Test code is not added to the player repository
+  or release archive, and Actions do not run it.
+- The universal archive is
+  `build/Release/TTPlayerRebuild-2026.10.09.zip`. Its five entries are the player,
+  updater, HTTPS plugin, rebuilt `ttpcomm.dll` and `SHA256SUMS.txt`; every
+  checksum is verified against the archived bytes.
 
 ## Legacy XML playlists
 

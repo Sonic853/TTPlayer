@@ -1575,9 +1575,11 @@ void PlayerWindow::HandleDroppedFiles(FileDropSurface surface, IDataObject* data
         auto classified = ClassifyExternalDropPaths(paths);
         const bool consumed_playlist = !classified.playlists.empty();
         auto ordered = OriginalExternalImportOrder(std::move(classified));
+        // 00482612..0048261B calls 00480386 with allow_idle_play = 1.
+        // A retained playing-row marker or an open source suppresses autoplay.
         const bool imported = ImportFiles(ordered, playlists_.ActiveIndex(),
                                           insertion, false,
-                                          ImportPlayback::none);
+                                          ImportPlayback::if_idle);
         if (imported || consumed_playlist) {
             const HWND focus=provider_drop?provider_window:playlist_track_control_;
             if (focus) SetFocus(focus);
@@ -1602,13 +1604,11 @@ void PlayerWindow::HandleDroppedFiles(FileDropSurface surface, IDataObject* data
     // 004824C4 passes the raw catalogue hit to FUN_00478E4E.  A true blank
     // hit is -1: the first playlist is appended, then 004824DE increments the
     // signed cursor to zero, so the second playlist is inserted at the front.
-    // If ordinary files exist, 004823DD first normalizes blank to itemCount;
-    // their newly-created list is consequently kept after the imported
-    // playlist files.  Preserve the -1 sentinel instead of collapsing both
-    // paths to itemCount.
+    // Keep the synthetic itemCount hit distinct from the -1 sentinel too.
+    // Blank is normalized only after ordinary paths yield actual tracks:
+    // an empty directory must not change the playlist-file insertion order.
     std::optional<size_t> list_insertion;
-    if (hit) list_insertion = *hit;
-    else if (!ordinary.empty()) list_insertion = playlists_.Size();
+    if (list_row >= 0) list_insertion = static_cast<size_t>(list_row);
     bool imported{};
     if (hit && !ordinary.empty()) {
         std::vector<playlist::Track> tracks;
@@ -1616,15 +1616,19 @@ void PlayerWindow::HandleDroppedFiles(FileDropSurface surface, IDataObject* data
             static_cast<void>(CollectImportedTracks(path, tracks));
         if (!tracks.empty()) {
             SwitchPlaylist(*hit);
+            // 00482470..00482479 enables the same idle-play path as Files.
             imported = CommitImportedTracks(std::move(tracks), *hit,
                 playlists_.At(*hit).Tracks().size(), false,
-                ImportPlayback::none);
+                ImportPlayback::if_idle);
         }
     } else if (!ordinary.empty()) {
         std::vector<playlist::Track> tracks;
         for (const auto& path : ordinary)
             static_cast<void>(CollectImportedTracks(path, tracks));
         if (!tracks.empty()) {
+            // The native blank branch appends the ordinary-input list, then
+            // inserts queued playlist files at its original catalogue index.
+            list_insertion = playlists_.Size();
             std::wstring title;
             // 00481F2A overwrites the temporary list title for each directory
             // it encounters; consequently the last directory wins in a
