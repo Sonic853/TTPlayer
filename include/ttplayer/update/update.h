@@ -51,11 +51,29 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 std::optional<Release> Check(Http& http, Source source, const Cancel& canceled = {});
-// Only player/updater payloads are installed. An optional bundled HTTPS DLL is
-// checksum-verified and discarded; installed DLLs and settings remain unchanged.
+// Verify and stage every payload file, excluding the root checksum manifest.
 std::filesystem::path PreparePackage(Http& http, const Release& release,
     const std::filesystem::path& staging, const Cancel& canceled, const Progress& progress);
 void ExtractPackage(const std::filesystem::path& zip, const std::filesystem::path& staging);
+// All files are staged on the destination volume before any replacement.
+// Keep the transaction alive until the new player starts. Rollback restores
+// replaced files and removes newly installed files. Successful backups remain
+// in BackupDirectory(); files absent from the package are never removed.
+class PackageInstall {
+public:
+    PackageInstall(const std::filesystem::path& directory,
+                   const std::filesystem::path& payload, const Version& expected);
+    ~PackageInstall();
+    PackageInstall(const PackageInstall&) = delete;
+    PackageInstall& operator=(const PackageInstall&) = delete;
+    void Apply();
+    void Rollback();
+    void Commit() noexcept;
+    std::filesystem::path BackupDirectory() const;
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 void ReplacePlayer(const std::filesystem::path& directory,
                    const std::filesystem::path& prepared, const Version& expected);
 void ReplaceUpdater(const std::filesystem::path& directory,

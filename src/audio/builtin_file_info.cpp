@@ -1,4 +1,4 @@
-#include <ttpcomm/tags_zlib.h>
+#include <ttpcomm/runtime_tags.h>
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/builtin_file_info.h"
 #include "ttplayer/audio/format_probe.h"
@@ -6,7 +6,6 @@
 #include <mfapi.h>
 #include "ttplayer/audio/midi_player.h"
 #include "tag_genres.h"
-#include <zlib.h>
 
 #include <algorithm>
 #include <array>
@@ -482,12 +481,12 @@ struct Id3Tag {
 };
 
 size_t EncodedTerminatorSize(unsigned char encoding) noexcept {
-    return ttpcomm::tags::TerminatorSize(encoding);
+    return ttpcomm::host::tags::TerminatorSize(encoding);
 }
 
 size_t FindEncodedTerminator(std::span<const unsigned char> value,
                              unsigned char encoding) noexcept {
-    return ttpcomm::tags::FindTerminator({value.data(), value.size()}, encoding);
+    return ttpcomm::host::tags::FindTerminator({value.data(), value.size()}, encoding);
 }
 
 void DecodeId3Frame(std::string_view identifier,
@@ -531,7 +530,7 @@ void DecodeId3Frame(std::string_view identifier,
         return;
     }
     if ((identifier == "APIC" || identifier == "PIC") && data.cover.empty()) {
-        const auto picture = ttpcomm::tags::Id3Picture({payload.data(), payload.size()},
+        const auto picture = ttpcomm::host::tags::Id3Picture({payload.data(), payload.size()},
             identifier == "PIC" ? 2 : 3);
         if (picture && !picture->data.empty())
             data.cover.assign(picture->data.begin(), picture->data.end());
@@ -549,7 +548,7 @@ std::wstring Id3UserTextName(std::string_view identifier,
 }
 
 Bytes RemoveUnsynchronization(std::span<const unsigned char> value) {
-    return ttpcomm::tags::RemoveUnsynchronization({value.data(), value.size()});
+    return ttpcomm::host::tags::RemoveUnsynchronization({value.data(), value.size()});
 }
 
 // libid3tag frame.c / id3_util_decompress: v2.3 prefixes the inflated
@@ -560,7 +559,7 @@ std::optional<std::span<const unsigned char>> Id3DecodedPayload(
     std::span<const unsigned char> data, unsigned char major,
     unsigned char flags, bool tag_unsynchronized, Bytes& storage,
     std::uint64_t& inflate_budget) {
-    const auto view = ttpcomm::tags::DecodePayload({data.data(), data.size()}, major,
+    const auto view = ttpcomm::host::tags::DecodePayload({data.data(), data.size()}, major,
         flags, tag_unsynchronized, storage, inflate_budget);
     if (!view) return std::nullopt;
     return std::span<const unsigned char>(view->data(), view->size());
@@ -591,17 +590,17 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
         tag.rewrite_safe = false;
         payload = RemoveUnsynchronization(payload);
     }
-    const auto start = ttpcomm::tags::FrameStart({payload.data(), payload.size()}, major, header[5]);
+    const auto start = ttpcomm::host::tags::FrameStart({payload.data(), payload.size()}, major, header[5]);
     if (!start) { tag.rewrite_safe = false; return tag; }
     size_t offset = *start;
     TagData user_text;
     std::uint64_t inflate_budget = kMaximumTagBytes;
     for (;;) {
         const size_t begin = offset;
-        ttpcomm::tags::Frame parsed;
-        const auto status = ttpcomm::tags::NextFrame({payload.data(), payload.size()}, major, offset, parsed);
-        if (status != ttpcomm::tags::FrameStatus::frame) {
-            if (status == ttpcomm::tags::FrameStatus::invalid) tag.rewrite_safe = false;
+        ttpcomm::host::tags::Frame parsed;
+        const auto status = ttpcomm::host::tags::NextFrame({payload.data(), payload.size()}, major, offset, parsed);
+        if (status != ttpcomm::host::tags::FrameStatus::frame) {
+            if (status == ttpcomm::host::tags::FrameStatus::invalid) tag.rewrite_safe = false;
             break;
         }
         const std::string identifier(parsed.identifier);

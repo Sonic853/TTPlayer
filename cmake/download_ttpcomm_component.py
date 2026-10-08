@@ -134,8 +134,13 @@ def main():
         exported = inspect_exports(temporary)
         expected = set(range(1,6)) | set(range(10,15)) | set(range(50,84)) | set(range(90,94)) | set(range(100,107)) | set(range(200,207)) | set(range(300,303)) | {400,401}
         named = {1:'ttpcomm_getversion',2:'_resetstkoflw',3:'srand48',4:'lrand48',5:'_set_security_error_handler'}
-        optional = {500: 'ttpcomm_query_extension'}
-        if not expected.issubset(exported) or set(exported) - expected - optional.keys() or any(e['name'] != (named | optional).get(n,'') for n,e in exported.items()) or exported[12]['rva'] != exported[78]['rva']:
+        extensions = {500: 'ttpcomm_query_extension', 501: 'ttpcomm_query_runtime'}
+        required = expected | extensions.keys()
+        if (not required.issubset(exported) or
+            any(e['name'] != named.get(n, '') for n,e in exported.items() if n in expected) or
+            any(exported[n]['name'] != name for n,name in extensions.items()) or
+            any(n < 500 or not e['name'].startswith('ttpcomm_') for n,e in exported.items() if n not in required) or
+            exported[12]['rva'] != exported[78]['rva']):
             raise ValueError('TTPCOMM export ABI mismatch')
         imports = inspect(temporary)
         for inventory in args.exports:
@@ -148,6 +153,7 @@ def main():
     finally:
         temporary.unlink(missing_ok=True)
     metadata['inventories'] = [p.name for p in args.exports]
+    metadata['runtime_api_export'] = 'ttpcomm_query_runtime'
     (args.output / 'ttpcomm-component.json').write_text(
         json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
     print(f"Staged TTPlayerComm {metadata['version']}: {len(dll)} bytes; SHA-256 and XP/Win7 imports verified")

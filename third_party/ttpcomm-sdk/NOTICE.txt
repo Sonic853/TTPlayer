@@ -18,3 +18,11 @@ libraries (../licenses). The SDK does not include third-party library sources.
 The zlib helper calls the consumer's zlib; it does not load ttpcomm.dll or change
 the strictness of archive validation. Decoder, filesystem and UI policy remains
 with the host.
+
+runtime_api.h defines the separate rebuilt-host ABI 1 (ordinal 501).
+runtime_client.cpp, runtime_pcm.h and runtime_tags.h use the rebuilt DLL for
+compression, PCM and standard tag primitives. Unlike the reference helpers,
+they require this runtime and do not fall back to the original DLL. The
+consumer allocates PCM buffers; DLL-owned decoded payloads and quantizer
+handles must be destroyed through the matching function table. The standalone
+updater continues using its private inflater so it can replace the core DLL.

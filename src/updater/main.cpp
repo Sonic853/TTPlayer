@@ -24,6 +24,7 @@ struct State {
     std::atomic<bool> cancel{},done{},applying{};
     std::atomic<uint64_t> received{},total{};
     std::wstring error;
+    std::filesystem::path backup_directory;
     bool busy{},installing{},closing{},success{};
     ~State(){cancel=true;if(worker.joinable()) worker.join();if(instance_mutex) CloseHandle(instance_mutex);}
     void Status(const std::wstring& text){SetDlgItemTextW(window,1006,text.c_str());}
@@ -60,19 +61,22 @@ struct State {
     void Install() {
         if(busy) return;
         if(!latest || latest->version<=current) {Check();return;}
-        busy=true;installing=true;cancel=false;done=false;applying=false;success=false;error.clear();received=0;total=0;
+        busy=true;installing=true;cancel=false;done=false;applying=false;success=false;error.clear();backup_directory.clear();received=0;total=0;
         Status(L"正在下载更新…");EnableWindow(GetDlgItem(window,1008),FALSE);EnableWindow(GetDlgItem(window,1003),FALSE);
         StartWorker([this] {
             struct Processes {std::vector<HANDLE> handles;~Processes(){for(auto handle:handles) CloseHandle(handle);}} processes;
             try {
-                update::Http http(directory,settings.network);
-                if(update::IsXp() && !http.HasProvider()) throw std::runtime_error(coreMessage());
                 // Each attempt has its own directory; canceled/failed payloads
                 // can never be reused as a completed update.
                 const auto stage=session/(L"download-"+std::to_wstring(GetTickCount64()));
                 if(!std::filesystem::create_directory(stage)) throw std::runtime_error("Cannot create a fresh download directory");
                 struct Staging {std::filesystem::path path;~Staging(){std::error_code ignored;std::filesystem::remove_all(path,ignored);}} cleanup{stage};
-                const auto prepared=update::PreparePackage(http,*latest,stage,[this]{return cancel.load();},[this](uint64_t n,uint64_t all){received=n;total=all;});
+                std::filesystem::path prepared;
+                {
+                    update::Http http(directory,settings.network);
+                    if(update::IsXp() && !http.HasProvider()) throw std::runtime_error(coreMessage());
+                    prepared=update::PreparePackage(http,*latest,stage,[this]{return cancel.load();},[this](uint64_t n,uint64_t all){received=n;total=all;});
+                } // Release the installed HTTPS DLL before replacing package files.
                 if(cancel) throw std::runtime_error("Canceled");
                 // Probe write access before asking the user to stop playback.
                 wchar_t probe[MAX_PATH]{};
@@ -101,31 +105,27 @@ struct State {
                 }
                 if(cancel) throw std::runtime_error("Canceled");
                 applying=true;
-                update::ReplacePlayer(directory,prepared,latest->version);
-                const auto next_updater=prepared.parent_path()/L"TTPUpdater.exe";
-                if(std::filesystem::is_regular_file(next_updater)) {
-                    // This process runs from session/, so its installed image
-                    // is free to receive the next updater without self-locking.
-                    try { update::ReplaceUpdater(directory,next_updater,latest->version); }
-                    catch(const std::exception& reason) {
-                        error=L"播放器已更新，但更新器替换失败，请从发行包手动更新 TTPUpdater.exe。\n"+update::ErrorText(reason);
+                update::PackageInstall installation(directory,prepared.parent_path(),latest->version);
+                installation.Apply();
+                try {
+                    const auto exe=directory/L"TTPlayerRebuild.exe";std::wstring command=L"\""+exe.wstring()+L"\"";
+                    STARTUPINFOW si{sizeof(si)};PROCESS_INFORMATION pi{};
+                    if(!CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,FALSE,0,nullptr,directory.c_str(),&si,&pi)) {
+                        throw std::runtime_error("新版启动失败。");
                     }
+                    CloseHandle(pi.hThread);
+                    const auto input=WaitForInputIdle(pi.hProcess,15000);
+                    DWORD code=STILL_ACTIVE;GetExitCodeProcess(pi.hProcess,&code);
+                    CloseHandle(pi.hProcess);
+                    if(code!=STILL_ACTIVE && code!=0) throw std::runtime_error("新版启动后异常退出。");
+                    backup_directory=installation.BackupDirectory();
+                    installation.Commit();
+                    if(input==WAIT_TIMEOUT) error=L"文件已更新，程序启动较慢。旧文件备份：\n"+backup_directory.wstring();
+                    success=true;
+                } catch(const std::exception& reason) {
+                    installation.Rollback();
+                    throw std::runtime_error(std::string(reason.what())+" 已恢复更新前的全部文件。");
                 }
-                const auto exe=directory/L"TTPlayerRebuild.exe";std::wstring command=L"\""+exe.wstring()+L"\"";
-                STARTUPINFOW si{sizeof(si)};PROCESS_INFORMATION pi{};
-                if(!CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,FALSE,0,nullptr,directory.c_str(),&si,&pi)) {
-                    const auto backup=directory/L"TTPlayerRebuild.exe.bak";
-                    if(!MoveFileExW(backup.c_str(),exe.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
-                        throw std::runtime_error("新版启动失败，请将 TTPlayerRebuild.exe.bak 恢复为 TTPlayerRebuild.exe。");
-                    throw std::runtime_error("新版启动失败，已恢复旧程序。");
-                }
-                CloseHandle(pi.hThread);
-                const auto input=WaitForInputIdle(pi.hProcess,15000);
-                DWORD code{};GetExitCodeProcess(pi.hProcess,&code);
-                CloseHandle(pi.hProcess);
-                if(code!=STILL_ACTIVE && code!=0) throw std::runtime_error("新版启动后异常退出，旧程序保留为 TTPlayerRebuild.exe.bak。");
-                if(input==WAIT_TIMEOUT && error.empty()) error=L"文件已更新，程序启动较慢；旧程序已保留为 TTPlayerRebuild.exe.bak。";
-                success=true;
             } catch(const std::exception& e){error=update::ErrorText(e);}
             done.store(true,std::memory_order_release);
         });
@@ -142,7 +142,7 @@ struct State {
         if(!error.empty()) {
             Status(error);MessageBoxW(window,error.c_str(),L"软件更新",MB_OK|(success?MB_ICONINFORMATION:MB_ICONEXCLAMATION));
             if(!installing) SetDlgItemTextW(window,1002,L"检查失败");
-        } else if(installing) Status(L"更新完成，旧程序已保留为 TTPlayerRebuild.exe.bak。");
+        } else if(installing) Status(L"更新完成。旧文件备份："+backup_directory.wstring());
         else {
             SetDlgItemTextW(window,1002,latest ? latest->version.Text().c_str() : L"无可用发行包");
             Status(latest && latest->version>current ? L"发现新版本，可以立即更新。" : L"当前没有可安装的新版本。");

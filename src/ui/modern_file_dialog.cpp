@@ -61,25 +61,92 @@ std::optional<std::vector<std::filesystem::path>> ClassicFiles(
     return paths;
 }
 
+// 004367E3/004368E6 add and anchor the subdirectory checkbox inside the
+// classic shell dialog. Keep its state local until a filesystem selection
+// has been accepted, just as 00436A0C does.
+class ClassicFolderDialog final : public WTL::CFolderDialogImpl<ClassicFolderDialog> {
+public:
+    explicit ClassicFolderDialog(const ModernFolderOptions& options)
+        : WTL::CFolderDialogImpl<ClassicFolderDialog>(options.owner,
+              options.title.empty() ? nullptr : options.title.c_str(),
+              BIF_RETURNONLYFSDIRS |
+                  (options.checkbox_label.empty() ? BIF_NEWDIALOGSTYLE : 0)),
+          options_(options), checked_(options.checkbox_checked) {}
+
+    void OnInitialized() {
+        if (options_.checkbox_label.empty()) return;
+        // The original, compact browser has free space left of OK. The new
+        // browser style puts a New Folder button there instead.
+        checkbox_ = CreateWindowExW(0, L"BUTTON", options_.checkbox_label.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, m_hWnd,
+            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(options_.checkbox_id)),
+            GetModuleHandleW(nullptr), nullptr);
+        if (!checkbox_) {
+            PostMessageW(m_hWnd, WM_COMMAND, IDCANCEL, 0);
+            return;
+        }
+        if (!SetWindowSubclass(m_hWnd, DialogSubclass, kSubclassId,
+                               reinterpret_cast<DWORD_PTR>(this))) {
+            DestroyWindow(checkbox_);
+            checkbox_ = nullptr;
+            PostMessageW(m_hWnd, WM_COMMAND, IDCANCEL, 0);
+            return;
+        }
+        SendMessageW(checkbox_, WM_SETFONT,
+            SendMessageW(GetDlgItem(m_hWnd, IDOK), WM_GETFONT, 0, 0), TRUE);
+        SendMessageW(checkbox_, BM_SETCHECK, checked_ ? BST_CHECKED : BST_UNCHECKED, 0);
+        LayoutCheckbox(m_hWnd);
+        initialized_ = true;
+    }
+
+    bool Ready() const noexcept { return options_.checkbox_label.empty() || initialized_; }
+    bool Checked() const noexcept { return checked_; }
+
+private:
+    void LayoutCheckbox(HWND dialog) const {
+        RECT button{};
+        if (!checkbox_ || !GetWindowRect(GetDlgItem(dialog, IDOK), &button)) return;
+        MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&button), 2);
+        constexpr int margin = 12;
+        SetWindowPos(checkbox_, nullptr, margin, button.top,
+            std::max(0L, button.left - 2 * margin), button.bottom - button.top,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    static LRESULT CALLBACK DialogSubclass(HWND dialog, UINT message,
+        WPARAM wparam, LPARAM lparam, UINT_PTR id, DWORD_PTR data) {
+        auto* self = reinterpret_cast<ClassicFolderDialog*>(data);
+        if (message == WM_COMMAND && self->checkbox_) {
+            // Read at OK as well as BN_CLICKED so the accepted result always
+            // reflects the actual control state, including keyboard changes.
+            if (reinterpret_cast<HWND>(lparam) == self->checkbox_ ||
+                LOWORD(wparam) == IDOK)
+                self->checked_ = SendMessageW(self->checkbox_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        }
+        if (message == WM_NCDESTROY) {
+            RemoveWindowSubclass(dialog, DialogSubclass, id);
+            self->checkbox_ = nullptr;
+        }
+        const LRESULT result = DefSubclassProc(dialog, message, wparam, lparam);
+        if (message == WM_SIZE) self->LayoutCheckbox(dialog);
+        return result;
+    }
+
+    static constexpr UINT_PTR kSubclassId = 0x54544644;
+    const ModernFolderOptions& options_;
+    HWND checkbox_{};
+    bool checked_{};
+    bool initialized_{};
+};
+
 std::optional<ModernFolderResult> ClassicFolder(const ModernFolderOptions& options) {
-    WTL::CFolderDialog chooser(options.owner,
-        options.title.empty() ? nullptr : options.title.c_str(),
-        BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE);
+    ClassicFolderDialog chooser(options);
     chooser.SetInitialFolder(options.initial_path.c_str(), false);
-    if (chooser.DoModal(options.owner) != IDOK) return std::nullopt;
+    if (chooser.DoModal(options.owner) != IDOK || !chooser.Ready()) return std::nullopt;
     const wchar_t* path = chooser.GetFolderPath();
     if (!path || !*path) return std::nullopt;
-    bool checked = options.checkbox_checked;
-    if (!options.checkbox_label.empty()) {
-        // The XP folder browser has no IFileDialogCustomize checkbox. Ask for
-        // the same choice after selection; cancellation still changes nothing.
-        const int choice = MessageBoxW(options.owner, options.checkbox_label.c_str(),
-            options.title.c_str(), MB_YESNOCANCEL | MB_ICONQUESTION |
-                (checked ? MB_DEFBUTTON1 : MB_DEFBUTTON2));
-        if (choice == IDCANCEL) return std::nullopt;
-        checked = choice == IDYES;
-    }
-    return ModernFolderResult{std::filesystem::path(path), checked};
+    return ModernFolderResult{std::filesystem::path(path), chooser.Checked()};
 }
 
 class ScopedStaApartment {

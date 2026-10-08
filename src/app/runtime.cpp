@@ -1,3 +1,4 @@
+#include <ttpcomm/runtime_client.h>
 #include "ttplayer/app/runtime.h"
 
 #include <commctrl.h>
@@ -169,7 +170,9 @@ TtpCommRuntime::~TtpCommRuntime() { Shutdown(); }
 bool TtpCommRuntime::Initialize() {
     if (api_.module) return true;
     const auto path = FindRuntimePath(L"ttpcomm.dll");
-    return !path.empty() && TtpComm_LoadApi(&api_, path.c_str());
+    if(path.empty() || !TtpComm_LoadApi(&api_, path.c_str())) return false;
+    if(!ttpcomm::host::Runtime()) {Shutdown();return false;}
+    return true;
 }
 void TtpCommRuntime::Shutdown() { if (api_.module) TtpComm_UnloadApi(&api_); }
 

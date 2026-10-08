@@ -70,3 +70,9 @@ Windows 10 按用户要求由 Win11 代测。测试源码不加入发行包或 A
 本轮补齐重建核心的 RG 并行能力协商和五文件组合更新包识别，保持插件单独核验、自动更新只替换 EXE 的策略。没有将文件写入事务、中文标签编码规则或两种 FFT 数值模式强行合并。
 
 详细设计、迁移清单和 XP/Win7/Win11 测试结果记录在相邻 `ttpcomm/docs/RECONSTRUCTION_STATUS.md` 第 9 节。发行版为 `2026.10.08p1`；测试仅位于 `rebuild/tests/ttpcomm_rebuild`，不加入 Actions 或运行包。
+
+## 2026-10-08：整包更新与强制核心依赖评估
+
+`2026.10.08p2` 的更新器改为安装播放器 ZIP 内除根目录 `SHA256SUMS.txt` 外的全部文件，覆盖包内核心、HTTPS DLL 和新增子目录资源；使用整包备份与回滚，详见 [更新器实现](RELEASE_UPDATE_IMPLEMENTATION.md)。这取代上一节“自动更新只替换 EXE”的历史策略。
+
+强制重建核心的体积评估见相邻 `ttpcomm/docs/RECONSTRUCTION_STATUS.md` 第 10 节。结论是可行，但仅禁止旧 DLL 不会明显缩小 EXE；需迁移目前编译进 EXE 的实现。实测首选候选为约 22.7 KiB 的 zlib 链接贡献，其后是 PCM 和标签公共解析；尚未实施强制依赖或这些二进制迁移。

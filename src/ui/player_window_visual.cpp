@@ -1,4 +1,4 @@
-#include <ttpcomm/tags_zlib.h>
+#include <ttpcomm/runtime_tags.h>
 #include <ttpcomm/client.h>
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
@@ -147,7 +147,7 @@ bool CoverPictureMimeMatches(std::string_view mime,
 
 std::vector<unsigned char> ParseFlacPictureBlock(
     const std::vector<unsigned char>& block, uint32_t* picture_type) {
-    const auto picture = ttpcomm::tags::FlacPicture({block.data(), block.size()});
+    const auto picture = ttpcomm::host::tags::FlacPicture({block.data(), block.size()});
     if (!picture || !picture->width || !picture->height || !picture->depth ||
         picture->data.empty() || picture->data.size() > kMaximumPictureBytes ||
         !CoverPictureMimeMatches(picture->mime, {picture->data.data(), picture->data.size()})) return {};
@@ -191,7 +191,7 @@ std::vector<unsigned char> ReadFlacPicture(std::ifstream& input,
 std::vector<unsigned char> ParseId3Apic(
     std::span<const unsigned char> frame, unsigned int version,
     unsigned int* picture_type) {
-    const auto picture = ttpcomm::tags::Id3Picture({frame.data(), frame.size()}, version);
+    const auto picture = ttpcomm::host::tags::Id3Picture({frame.data(), frame.size()}, version);
     if (!picture || picture->data.empty() || picture->data.size() > kMaximumPictureBytes ||
         !CoverPictureMimeMatches(picture->mime, {picture->data.data(), picture->data.size()})) return {};
     if (picture_type) *picture_type = picture->type;
@@ -207,17 +207,17 @@ std::vector<unsigned char> ReadId3Picture(std::ifstream& input,
     std::vector<unsigned char> tag(tag_size);
     if (!ReadExact(input, tag.data(), tag.size())) return {};
     const bool unsynchronized = (header[5] & 0x80U) != 0;
-    if (unsynchronized) tag = ttpcomm::tags::RemoveUnsynchronization({tag.data(), tag.size()});
-    const auto start = ttpcomm::tags::FrameStart({tag.data(), tag.size()}, version, header[5]);
+    if (unsynchronized) tag = ttpcomm::host::tags::RemoveUnsynchronization({tag.data(), tag.size()});
+    const auto start = ttpcomm::host::tags::FrameStart({tag.data(), tag.size()}, version, header[5]);
     if (!start) return {};
     size_t cursor = *start;
-    ttpcomm::tags::Frame frame;
-    while (ttpcomm::tags::NextFrame({tag.data(), tag.size()}, version, cursor, frame) == ttpcomm::tags::FrameStatus::frame) {
+    ttpcomm::host::tags::Frame frame;
+    while (ttpcomm::host::tags::NextFrame({tag.data(), tag.size()}, version, cursor, frame) == ttpcomm::host::tags::FrameStatus::frame) {
         if (frame.identifier != "APIC" && frame.identifier != "PIC") continue;
         if (picture_declared) *picture_declared = true;
         std::vector<unsigned char> storage;
         uint64_t budget = kMaximumPictureBytes;
-        const auto decoded = ttpcomm::tags::DecodePayload(frame.payload, static_cast<unsigned char>(version),
+        const auto decoded = ttpcomm::host::tags::DecodePayload(frame.payload, static_cast<unsigned char>(version),
             static_cast<unsigned char>(frame.flags), unsynchronized, storage, budget);
         if (!decoded) return {};
         return ParseId3Apic({decoded->data(), decoded->size()}, version, nullptr);

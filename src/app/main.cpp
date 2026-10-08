@@ -92,11 +92,10 @@ int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     const auto command_line = ttplayer::app::ParseCommandLine();
     if (command_line.registry_import) return ImportPluginRegistration(command_line);
 
-    // Retain EXE-local dependency paths and omit the original exact-version
-    // gate. ABI-compatible revisions are accepted; consumers check exports.
+    // Require the rebuilt runtime ABI/capabilities, not an exact release date.
     ttplayer::app::TtpCommRuntime ttpcomm;
     if (!ttpcomm.Initialize()) {
-        MessageBoxW(nullptr, i18n::Literal(L"Error in ttpcomm.dll, please resetup this program!"),
+        MessageBoxW(nullptr, i18n::Literal(L"ttpcomm.dll 缺少此版本播放器需要的运行时接口。\n\n请退出播放器，将完整发行包手动解压并替换到同一目录，包括 TTPlayerRebuild.exe 和 ttpcomm.dll。请勿混用原版或旧版核心 DLL。"),
                     i18n::Literal(L"TTPlayer"), MB_OK | MB_ICONERROR);
         return -1;
     }

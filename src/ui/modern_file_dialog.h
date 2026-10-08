@@ -60,8 +60,8 @@ struct ModernFolderOptions {
     HWND owner{};
     std::filesystem::path initial_path;
     std::wstring title;
-    // A non-empty label adds a native IFileDialogCustomize checkbox.  This is
-    // used by the options page's "include subfolders" folder picker.
+    // A non-empty label adds an in-dialog checkbox in both the modern shell
+    // picker and its XP fallback. State is returned only after acceptance.
     DWORD checkbox_id{0x5454};
     std::wstring checkbox_label;
     bool checkbox_checked{};

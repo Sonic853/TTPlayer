@@ -876,16 +876,24 @@ bool PlayerWindow::CollectImportedTracks(const std::filesystem::path& input,
         tracks.push_back({path, {}, {}, -2});
         return true;
     }
+    bool resolved_shortcut{};
     if (LowerExtension(path) == L".lnk") {
         const auto resolved = ResolveShortcut(path);
         // 004739DB keeps the .lnk itself as an ordinary item when IShellLink
         // resolution fails.  If resolution succeeds, even a now-missing
         // target continues through the type-0 ordinary-item route.
-        if (resolved) path = *resolved;
+        if (resolved) {
+            path = *resolved;
+            resolved_shortcut = true;
+        }
     }
 
     std::error_code error;
     if (std::filesystem::is_directory(path, error) && !error) {
+        // 0047444A only recurses into actual directory entries. Its type-6
+        // branch for a resolved .lnk does not dispatch or recurse, even with
+        // CheckSubFolder enabled. Explicit folder shortcuts still scan.
+        if (directory_member && resolved_shortcut) return false;
         std::vector<std::wstring> root_ancestry;
         if (!directory_ancestry) directory_ancestry = &root_ancestry;
         const auto identity = DirectoryIdentity(path);
@@ -1257,14 +1265,19 @@ void PlayerWindow::ChooseFiles(bool replace_and_play, HWND owner) {
 }
 
 void PlayerWindow::ChooseFolder() {
+    LeaveFullScreen(); // 004851A1 -> 0044AB8F, before showing the picker.
     ModernFolderOptions dialog;
     dialog.owner = playlist_window_ ? playlist_window_ : window_;
+    dialog.title = ResourceText(0x8152);
+    dialog.checkbox_label = ResourceText(0x8153);
+    dialog.checkbox_checked = settings_.history.check_sub_folder;
     dialog.initial_path = PreferredDialogHistory(
         settings_.history.folder, file_dialog_initial_directory_);
     const auto selected = ModernPickFolder(dialog);
     if (!selected) return;
     file_dialog_initial_directory_ = selected->path;
     settings_.history.folder = selected->path;
+    settings_.history.check_sub_folder = selected->checkbox_checked;
     static_cast<void>(ImportFiles({selected->path},
         playlists_.ActiveIndex(), std::nullopt, false,
         ImportPlayback::if_idle));

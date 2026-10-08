@@ -1,5 +1,5 @@
 #include <ttpcomm/client.h>
-#include <ttpcomm/pcm.h>
+#include <ttpcomm/runtime_pcm.h>
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/audio/legacy_equalizer.h"
 #include "options_buttons.h"
@@ -846,7 +846,7 @@ public:
             return Fail(i18n::Literal(L"offline processor does not support the PCM format"));
 
         if (replay_gain_ != 1.0) {
-            ttpcomm::pcm::ApplyGainHalf(samples, replay_gain_);
+            ttpcomm::host::pcm::ApplyGainHalf(samples, replay_gain_);
     }
 #if defined(_MSC_VER) && defined(_M_IX86)
         int count = static_cast<int>(std::min<size_t>(
@@ -881,12 +881,12 @@ private:
 
     bool Decode(const std::vector<std::byte>& bytes,
                 std::vector<double>& samples) const {
-        return ttpcomm::pcm::Decode(bytes.data(), bytes.size(), format_, samples, ttpcomm::pcm::Domain::half);
+        return ttpcomm::host::pcm::Decode(bytes.data(), bytes.size(), format_, samples, ttpcomm::host::pcm::Domain::half);
     }
 
     bool Encode(const std::vector<double>& samples,
                 std::vector<std::byte>& bytes) const {
-        return ttpcomm::pcm::EncodeHalf(samples, format_, bytes);
+        return ttpcomm::host::pcm::EncodeHalf(samples, format_, bytes);
     }
 
 #if defined(_MSC_VER) && defined(_M_IX86)

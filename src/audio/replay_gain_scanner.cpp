@@ -1,5 +1,5 @@
 #include <ttpcomm/client.h>
-#include <ttpcomm/pcm.h>
+#include <ttpcomm/runtime_pcm.h>
 #include "ttplayer/audio/disc_media.h"
 #include "ttplayer/audio/replay_gain_scanner.h"
 
@@ -121,7 +121,7 @@ bool ConvertSamples(const std::vector<std::byte>& bytes,
                     const WAVEFORMATEX& format,
                     std::vector<double>& samples, DWORD* frames) {
     if (!frames || !format.nBlockAlign || bytes.size() / format.nBlockAlign > MAXDWORD) return false;
-    if (!ttpcomm::pcm::Decode(bytes.data(), bytes.size(), format, samples, ttpcomm::pcm::Domain::full, true)) return false;
+    if (!ttpcomm::host::pcm::Decode(bytes.data(), bytes.size(), format, samples, ttpcomm::host::pcm::Domain::full, true)) return false;
     *frames = static_cast<DWORD>(bytes.size() / format.nBlockAlign);
     return true;
 }

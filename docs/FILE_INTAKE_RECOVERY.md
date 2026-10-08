@@ -59,6 +59,70 @@ uses `Histroy/CheckSubFolder` to decide whether to descend. The rebuild keeps
 this distinction in `CollectImportedTracks` and adds only an ancestry check to
 prevent a reparse-point directory cycle from recursing forever.
 
+### Folder intake follow-up (2026-10-08)
+
+The folder shortcut rule needs one further distinction. In `0047444A`, the
+type-6 result for a shortcut discovered during enumeration does **not** call
+the dispatcher or recurse. This was verified against the original machine
+code at `004745B3` through `00474652`, not inferred from the decompiler's
+unused string comparisons. An explicitly supplied folder shortcut still
+enters directory intake. The rebuild now preserves this distinction, including
+when `CheckSubFolder` is disabled: a discovered `.lnk` cannot bypass the
+subdirectory setting. Audio-file shortcuts remain eligible.
+
+Menu command `0x7F0A` follows `004851A1 -> 00480C91 -> 0047444A -> 00480386`:
+
+- Leave fullscreen before opening the folder picker (`0044AB8F`).
+- Restore the last folder and `Histroy/CheckSubFolder` state. Resource `0x8152`
+  is `请选择一个文件夹:`; resource `0x8153` is `包括子目录`.
+- Show the subdirectory checkbox inside the picker. Modern Windows retains
+  `IFileDialogCustomize`; the XP fallback uses a WTL `CFolderDialogImpl` with
+  a real checkbox aligned to the left of OK, matching `004367E3/004368E6`.
+  Its font follows OK, it accepts keyboard focus, and its rectangle is updated
+  after dialog resizing. There is no second yes/no question after selection.
+- Keep edits local to the dialog until a valid filesystem folder is accepted.
+  Cancel does not change history, recursion state, or playlist contents.
+- Save the accepted checkbox value **before** enumerating the selected folder.
+- Append the collected batch to the active list; select the imported range.
+  Empty append remains a no-op. Ordinary repeated imports retain duplicate rows.
+- Keep the existing idle-play gate: both the destination playing marker and
+  the open-source state must be absent before auto-start is allowed.
+
+Directory enumeration is depth first in `FindFirstFileW/FindNextFileW` order;
+this path does not add a name sort or a hidden/system-file exclusion. Nested
+playlist files are skipped; CUE and supported ZIP/RAR members use their existing
+expansion paths. The original scans directories synchronously, then optionally
+pre-reads information (1–5 entries inline, 6+ on one worker thread). The rebuild
+retains its existing asynchronous metadata queue and directory ancestry guard.
+
+Folder drops continue to share this setting and classification. Track-pane
+drops insert at the hit row; a catalogue-row drop appends to that list; blank
+catalogue space creates one list from the ordinary batch. `00481F2A` overwrites
+the temporary title for each folder, so the last folder names a multi-folder
+batch. The blank-catalogue branch does not select the new track rows.
+
+Validation for this follow-up:
+
+- Universal Release build and XP/Win7 static-import audit passed.
+- The local regression executable passed **83 checks on Windows 11, Windows 7,
+  and Windows XP**, including the classic and OS-selected folder dialogs,
+  checkbox initial values/toggling, OK/cancel, checkbox geometry/font/resizing,
+  fullscreen exit, history preservation, recursion on/off, explicit/discovered
+  folder shortcuts, real directories named with `.lnk`, audio/missing shortcuts,
+  nested playlists, CUE, ZIP, empty
+  and repeated imports, stopped playing-marker behavior, imported selection,
+  and actual `CF_HDROP` dispatch to the three playlist destinations.
+- Windows 11 provides the previously agreed substitute coverage for Windows
+  10; this is not a claim of execution on an actual Windows 10 installation.
+- Test source and fixtures stay under `rebuild/tests/folder_intake`; they are
+  local only. No workflow was changed, and `BUILD_TESTING` remains disabled in
+  the Release build.
+- The resulting universal package is
+  `rebuild/build/Release/TTPlayerRebuild-2026.10.08p4.zip`. It contains the
+  player, updater, required rebuilt `ttpcomm.dll`, verified HTTPS component,
+  and `SHA256SUMS.txt`; no test executables are included. Existing manual
+  replacement/update behavior is unchanged.
+
 ## Open-file dialog and multi-select layout
 
 `0048059D` composes its filter from resource-backed audio descriptions, the

@@ -1,5 +1,5 @@
 #include <ttpcomm/client.h>
-#include <ttpcomm/pcm.h>
+#include <ttpcomm/runtime_pcm.h>
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/audio_engine.h"
 #include "ttplayer/audio/legacy_equalizer.h"
@@ -1571,7 +1571,7 @@ public:
         // (16-bit /32768). AnalyzePcm above deliberately bypasses this local
         // scaling; 004B1950's +/-0.5 values are nonlinear branch thresholds.
         if (replay_gain_.Scale() != 1.0) {
-            ttpcomm::pcm::ApplyGainHalf(samples, replay_gain_.Scale());
+            ttpcomm::host::pcm::ApplyGainHalf(samples, replay_gain_.Scale());
         }
 #if defined(_MSC_VER) && defined(_M_IX86)
         int count = static_cast<int>(std::min<size_t>(
@@ -1648,12 +1648,12 @@ public:
 private:
     bool Decode(const std::vector<std::byte>& bytes,
                 std::vector<double>& samples) const {
-        return ttpcomm::pcm::Decode(bytes.data(), bytes.size(), format_, samples, ttpcomm::pcm::Domain::half);
+        return ttpcomm::host::pcm::Decode(bytes.data(), bytes.size(), format_, samples, ttpcomm::host::pcm::Domain::half);
     }
 
     bool Encode(const std::vector<double>& samples,
                 std::vector<std::byte>& bytes) const {
-        return ttpcomm::pcm::EncodeHalf(samples, format_, bytes);
+        return ttpcomm::host::pcm::EncodeHalf(samples, format_, bytes);
     }
 
 #if defined(_MSC_VER) && defined(_M_IX86)

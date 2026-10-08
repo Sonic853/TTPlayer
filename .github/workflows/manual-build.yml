@@ -295,7 +295,9 @@ jobs:
             - CodecAddIn-Rebuild-{version}.zip：WebM、APE、FLAC、MP3/WMA 编码、OGG/Opus、AAC 插件，合并 AddIn 文件夹。
             - ExtraAddIn-{version}.zip：Winamp 皮肤、MAKI 虚拟机、多语言插件，合并 AddIn 和 i18n 文件夹；i18n 放在播放器旁。
             - 插件来自各自仓库本次构建解析到的最新正式 Release；插件自身版本独立于播放器，具体版本见下表。
-            - SHA256SUMS.txt 可校验上述三个 ZIP；插件包内另有各运行文件的校验清单。播放器自动更新器只更新播放器包。
+            - SHA256SUMS.txt 可校验上述三个 ZIP；插件包内另有各运行文件的校验清单。新版更新器更新播放器包中除根目录 SHA256SUMS.txt 外的全部文件，并保留子目录；不删除包外文件。
+            - 从仅更新 EXE 的旧更新器过渡时，首次请手动解压本版播放器包，确保核心 DLL 和 HTTPS 组件同步更新。
+            - 本版要求重建 ttpcomm.dll 的运行接口；请退出播放器后整包替换，不要仅替换 EXE 或混用原版、旧版核心。
         run: |
           $ErrorActionPreference = 'Stop'
           $publishGitHub = $env:PUBLISH_RELEASE -eq 'true'

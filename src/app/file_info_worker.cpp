@@ -1,5 +1,6 @@
 ﻿#include "ttplayer/audio/disc_media.h"
 #include "ttplayer/platform/optional_windows_api.h"
+#include <ttpcomm/runtime_client.h>
 #include "ttplayer/app/file_info_worker.h"
 #include "../ui/file_info_cover_policy.h"
 #include "../ui/file_info_probe_protocol.h"
@@ -625,6 +626,9 @@ int ttplayer::app::RunFileInfoWorker(int count, wchar_t** arguments) {
     if (count != 7 && count != 8) return 2;
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
                  SEM_NOOPENFILEERRORBOX);
+    // Workers bypass normal startup. Never interpret an unavailable parser as
+    // an empty tag and then permit a save with missing metadata.
+    if (!ttpcomm::host::Runtime()) return ERROR_REVISION_MISMATCH;
     const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool owns_apartment = SUCCEEDED(apartment);
     int exit_code{2};

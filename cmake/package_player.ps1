@@ -51,12 +51,15 @@ $entries = @('TTPlayerRebuild.exe', 'TTPUpdater.exe', 'AddIn/ttp_https.dll', 'SH
 if (-not $TtpCommDirectory -and (Test-Path -LiteralPath (Join-Path $output 'ttpcomm-component.json'))) {
     $TtpCommDirectory = $output
 }
+if (-not $TtpCommDirectory) {
+    throw 'The player requires the rebuilt TTPCOMM runtime; stage a verified component before packaging.'
+}
 if ($TtpCommDirectory) {
     $comm = Join-Path $TtpCommDirectory 'ttpcomm.dll'
     $commInfo = Get-Content -LiteralPath (Join-Path $TtpCommDirectory 'ttpcomm-component.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $commHash = (Get-FileHash -LiteralPath $comm -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($commInfo.repository -cne 'https://github.com/TTPlayerRebuild/TTPlayerComm' -or
-        $commInfo.sha256 -cne $commHash -or
+        $commInfo.sha256 -cne $commHash -or $commInfo.runtime_api_export -cne 'ttpcomm_query_runtime' -or
         $commInfo.inventories -notcontains '5.1.2600.txt' -or $commInfo.inventories -notcontains '6.1.7600.txt' -or
         (Get-Item -LiteralPath $comm).VersionInfo.FileVersion -cne $commInfo.version) {
         throw 'Download and verify the TTPCOMM component before packaging.'

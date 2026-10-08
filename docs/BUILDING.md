@@ -19,11 +19,20 @@ git submodule update --init --recursive -- tests
 ### 默认使用最新 TTPCOMM
 
 手动构建的 `ttpcomm_version` 默认值为 `latest`；省略或留空也使用
-TTPlayerComm 的最新正式 Release。仍可填写日期版本（例如 `2026.10.08p1`）固定核心版本。
+TTPlayerComm 的最新正式 Release。仍可填写日期版本（例如 `2026.10.08p3`）固定核心版本。
 普通构建、GitHub 发布和 Gitee 发布均下载并打包 `ttpcomm.dll`，下载失败或校验失败时停止构建。
 
 下载沿用 ZIP/DLL SHA256、导出 ABI 和 XP／Win7 导入校验，实际核心版本及摘要记入
 `build-info.json`。`latest` 指已发布的正式版本，不包含草稿、预发布或尚未发布的源码修改。
+
+新版播放器要求 `ttpcomm_query_runtime`（ordinal 501）的运行 ABI 1；必须先发布带该接口的
+TTPlayerComm，再运行播放器构建。旧核心或缺少核心会使打包失败。首次升级按已确认方式
+手动替换完整发行包，详见 [核心运行接口与体积优化](TTPCOMM_REQUIRED_RUNTIME.md)。
+
+本地 `TTPLAYER_STAGE_RUNTIME=ON` 时，默认从同级 `ttpcomm/build/Release/ttpcomm.dll`
+复制重建核心；先构建该项目，或用 `TTPLAYER_TTPCOMM_DLL` 指定兼容的新核心路径。
+不再自动复制工作区根目录的原版 DLL。`STAGE_RUNTIME=OFF` 仍允许独立编译，
+运行和打包前需要显式准备经校验的核心。
 
 ### GitHub API 认证
 

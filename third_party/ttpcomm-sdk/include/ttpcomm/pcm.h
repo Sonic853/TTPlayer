@@ -60,13 +60,12 @@ inline double DecodeSample(const uint8_t* value, WORD bits, bool floating,
     if (validBits < bits) number >>= bits - validBits;
     return double(number) / std::ldexp(1.0, validBits - (domain == Domain::full ? 1 : 0));
 }
-inline bool Decode(const void* bytes, size_t size, const WAVEFORMATEX& format,
-                    std::vector<double>& samples, Domain domain, bool allowPadding = false) {
+inline bool DecodeTo(const void* bytes, size_t size, const WAVEFORMATEX& format,
+                    double* samples, size_t capacity, Domain domain, bool allowPadding = false) noexcept {
     const auto encoding = Describe(format, allowPadding);
     if (!encoding.supported || (size && !bytes) || size % format.nBlockAlign) return false;
     const size_t frames = size / format.nBlockAlign;
-    if (frames > samples.max_size() / format.nChannels) return false;
-    samples.resize(frames * format.nChannels);
+    if (frames > capacity / format.nChannels || (frames && !samples)) return false;
     const auto* input = static_cast<const uint8_t*>(bytes);
     const unsigned width = format.wBitsPerSample / 8;
     for (size_t i = 0; i < frames; ++i)
@@ -75,20 +74,25 @@ inline bool Decode(const void* bytes, size_t size, const WAVEFORMATEX& format,
                 format.wBitsPerSample, encoding.floating_point, encoding.valid_bits, domain);
     return true;
 }
+inline bool Decode(const void* bytes, size_t size, const WAVEFORMATEX& format,
+                    std::vector<double>& samples, Domain domain, bool allowPadding = false) {
+    if (!Describe(format, allowPadding).supported || size % format.nBlockAlign) return false;
+    const size_t frames = size / format.nBlockAlign;
+    if (frames > samples.max_size() / format.nChannels) return false;
+    samples.resize(frames * format.nChannels);
+    return DecodeTo(bytes, size, format, samples.data(), samples.size(), domain, allowPadding);
+}
 // Legacy effect-chain encoder. Dither/noise shaping is a separate final-output
 // operation; do not substitute this rounding rule for the dither quantizer.
-template<class Byte>
-bool EncodeHalf(const std::vector<double>& samples, const WAVEFORMATEX& format,
-                std::vector<Byte>& bytes) {
-    static_assert(sizeof(Byte) == 1, "PCM output is a byte buffer");
+inline bool EncodeHalfTo(const double* samples, size_t count, const WAVEFORMATEX& format,
+                         void* bytes, size_t capacity) noexcept {
     const auto encoding = Describe(format);
     if (!encoding.supported || encoding.valid_bits != format.wBitsPerSample ||
-        samples.size() % format.nChannels) return false;
+        count % format.nChannels || (count && (!samples || !bytes))) return false;
     const unsigned width = format.wBitsPerSample / 8;
-    if (samples.size() > bytes.max_size() / width) return false;
-    bytes.resize(samples.size() * width);
-    auto* output = reinterpret_cast<uint8_t*>(bytes.data());
-    for (size_t i = 0; i < samples.size(); ++i) {
+    if (count > capacity / width) return false;
+    auto* output = static_cast<uint8_t*>(bytes);
+    for (size_t i = 0; i < count; ++i) {
         auto* value = output + i * width;
         const double sample = std::isfinite(samples[i]) ? samples[i] : 0.0;
         if (encoding.floating_point) {
@@ -106,13 +110,29 @@ bool EncodeHalf(const std::vector<double>& samples, const WAVEFORMATEX& format,
     }
     return true;
 }
-inline void ApplyGainHalf(std::vector<double>& samples, double gain) noexcept {
+template<class Byte>
+bool EncodeHalf(const std::vector<double>& samples, const WAVEFORMATEX& format,
+                std::vector<Byte>& bytes) {
+    static_assert(sizeof(Byte) == 1, "PCM output is a byte buffer");
+    const auto encoding = Describe(format);
+    if (!encoding.supported || encoding.valid_bits != format.wBitsPerSample ||
+        samples.size() % format.nChannels) return false;
+    const unsigned width = format.wBitsPerSample / 8;
+    if (samples.size() > bytes.max_size() / width) return false;
+    bytes.resize(samples.size() * width);
+    return EncodeHalfTo(samples.data(), samples.size(), format, bytes.data(), bytes.size());
+}
+inline void ApplyGainHalfTo(double* samples, size_t count, double gain) noexcept {
     if (gain == 1.0) return;
-    for (auto& sample : samples) {
+    for (size_t i = 0; i < count; ++i) {
+        auto& sample = samples[i];
         double value = sample * gain;
         if (value > 0.5) value = (std::tan((value - 0.5) * 2.0) + 1.0) * 0.5;
         else if (value < -0.5) value = std::tan((value + 0.5) * 2.0) * 0.5 - 0.5;
         sample = value;
     }
+}
+inline void ApplyGainHalf(std::vector<double>& samples, double gain) noexcept {
+    ApplyGainHalfTo(samples.data(), samples.size(), gain);
 }
 }

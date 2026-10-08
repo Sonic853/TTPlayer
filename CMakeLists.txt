@@ -62,6 +62,7 @@ add_custom_target(ttplayer_build_date
 )
 
 add_library(ttplayer_core
+  third_party/ttpcomm-sdk/src/runtime_client.cpp
   src/i18n/i18n.cpp
   src/ui/wtl_runtime.cpp
   src/ui/wtl_dialogs.cpp
@@ -989,13 +990,18 @@ endif()
 if(TTPLAYER_STAGE_RUNTIME)
 set(TTPRES_RECOVERY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../reverse/ttpres")
 set(TTPRES_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/resources")
+set(TTPLAYER_TTPCOMM_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../ttpcomm/build/Release/ttpcomm.dll" CACHE FILEPATH
+  "Independently rebuilt ttpcomm.dll providing runtime ABI 1 (never the original DLL)")
+if(NOT EXISTS "${TTPLAYER_TTPCOMM_DLL}")
+  message(FATAL_ERROR "Build TTPlayerComm first or set TTPLAYER_TTPCOMM_DLL to its rebuilt DLL. CI uses STAGE_RUNTIME=OFF and downloads the verified release.")
+endif()
 
 add_custom_command(
   OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ttpcomm.dll"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${CMAKE_CURRENT_SOURCE_DIR}/../ttpcomm.dll"
+          "${TTPLAYER_TTPCOMM_DLL}"
           "${CMAKE_CURRENT_BINARY_DIR}/ttpcomm.dll"
-  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../ttpcomm.dll"
+  DEPENDS "${TTPLAYER_TTPCOMM_DLL}"
   VERBATIM
 )
 
@@ -1034,7 +1040,7 @@ add_custom_target(ttpres_resources ALL
 add_dependencies(ttplayer_rebuild ttpres_resources)
 add_custom_command(TARGET ttplayer_rebuild POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${CMAKE_CURRENT_SOURCE_DIR}/../ttpcomm.dll"
+          "${TTPLAYER_TTPCOMM_DLL}"
           "$<TARGET_FILE_DIR:ttplayer_rebuild>/ttpcomm.dll"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
           "${TTPRES_OUTPUT_DIR}/root/ttpres.dll"

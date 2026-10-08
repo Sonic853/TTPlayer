@@ -21,7 +21,8 @@ else()
   file(WRITE "${TTPLAYER_GENERATED_INCLUDE_DIR}/ttplayer/update_build_config.h"
     "#pragma once\nnamespace ttplayer::update { inline constexpr char kUpdaterGiteeToken[] = \"\"; }\n")
 endif()
-add_library(ttplayer_update STATIC src/update/update.cpp src/update/update_http.cpp src/update/update_package.cpp)
+add_library(ttplayer_update STATIC src/update/update.cpp src/update/update_http.cpp
+  src/update/update_hash.cpp src/update/update_package.cpp)
 target_include_directories(ttplayer_update PUBLIC include PRIVATE third_party/ttpcomm-sdk/include "${TTPLAYER_GENERATED_INCLUDE_DIR}")
 target_compile_definitions(ttplayer_update PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(ttplayer_update PRIVATE /W4 /permissive- /EHsc /utf-8 /O1)
