@@ -764,11 +764,14 @@ private:
     void ScrollPlaylist(int rows);
     void CancelPlaylistScrollbarInteraction(bool release_capture);
     void LoadStoredPlaylist();
-    void SaveStoredPlaylist();
+    SaveResult SaveStoredPlaylist();
     void CaptureWindowState();
-    void SaveCurrentSkinProfile();
+    SaveResult SaveCurrentSkinProfile();
     [[nodiscard]] std::filesystem::path CurrentSkinProfilePath() const;
-    void PersistWindowState();
+    SaveResult PersistWindowState();
+    SaveResult SavePersistentState();
+    bool SaveSettingsWithFeedback();
+    void ReportPersistenceFailure(const SaveResult& failure);
     void RefreshPlaybackUi();
     void CheckExtensionCorrection(const std::filesystem::path& path, int subtrack);
     void QueueExtensionCorrection(audio::ExtensionCorrection correction);
@@ -1068,6 +1071,10 @@ private:
     bool context_menu_open_{};
     HWND main_context_menu_origin_{};
     bool window_state_saved_{};
+    bool persistence_in_progress_{};
+    bool persistence_error_open_{};
+    bool session_end_pending_{};
+    SaveResult pending_persistence_error_;
     int transparency_percent_{};
     BYTE skin_window_alpha_{255};
     BYTE rendered_skin_window_alpha_{255};

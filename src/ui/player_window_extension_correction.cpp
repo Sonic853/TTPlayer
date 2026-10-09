@@ -117,7 +117,7 @@ void PlayerWindow::PromptExtensionCorrection() {
             extension_corrections_.clear();
             // Use the same persistence path as the options window's Save.
             // This choice cancels the current rename without restarting audio.
-            settings::SaveWindowState(settings_.source_path,settings_);
+            SaveSettingsWithFeedback();
         }
         return choice;
     };

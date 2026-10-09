@@ -643,7 +643,7 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
         }
         if (control == kSaveAllOptions && notification == BN_CLICKED) {
             CaptureWindowState();
-            settings::SaveWindowState(settings_.source_path, settings_);
+            SaveSettingsWithFeedback();
             return TRUE;
         }
         if (control == kResetAllOptions && notification == BN_CLICKED) {

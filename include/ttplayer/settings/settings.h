@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ttplayer/core/save_result.h"
 #include "ttplayer/integrations/discord_presence_config.h"
 #include "ttplayer/skin/default_colors.h"
 
@@ -466,6 +467,6 @@ bool SaveSkinVisualProfile(const std::filesystem::path& path,
                            const VisualSettings& visual,
                            const std::filesystem::path& global_settings_path = {},
                            const std::wstring* plugin_state = nullptr);
-void SaveWindowState(const std::filesystem::path& path,
+SaveResult SaveWindowState(const std::filesystem::path& path,
                      const Settings& settings);
 }

@@ -325,6 +325,245 @@ shutdown also closes slot holes without losing a later slot; a small
 transaction marker lets startup finish an interrupted compaction before
 scanning the catalogue.
 
+## Persistence feedback audit (2026-10-09)
+
+Feedback under review: folder-added lists disappear after closing/reopening,
+and playback order returns to its initial setting. This subsection records the
+**pre-fix `2026.10.09` audit**. The confirmed defects are addressed by the
+`2026.10.09p1` implementation and verification below.
+The preceding 334-check import regression did not test process restart and
+must not be used as evidence of persistence under every exit condition.
+
+### Three different meanings of order
+
+- Catalogue order, titles and each list's visible track order are stored in
+  numbered `PlayList/*.ttbl` files, not in the source music folder.
+- The playback mode (single, repeat-one, sequential, repeat-all or random) is
+  `Player/PlayMode` in the root XML. `Player/PlayLists` and `ActiveList` record
+  the catalogue count and active slot. The rebuild uses `TTPlayerRebuild.xml`;
+  it imports the original `TTPlayer.xml` only when the new file is absent.
+- The random playback index sequence/cursor is transient. The original
+  `0045BBF6` uses main-window `+0x4384`, `+0x4388`, `+0x4394`; these are not
+  serialized as the TTBL track order or the XML playback mode. A fresh random
+  sequence after restart is different from losing the random-mode setting.
+
+Both rebuild storage paths are relative to the EXE directory. Launching a
+different extracted copy therefore loads that copy's state. An unwritable
+installation directory currently has no alternate writable state directory.
+Neither is established as the third party's actual cause without their
+version, executable path and exit method.
+
+### Original pseudocode contract
+
+| Original entry | Persistence behavior |
+| --- | --- |
+| `0047444A -> 00480386` | Folder collection produces ordinary playlist items; insertion changes the same list and dirty state as other file imports. There is no folder-only volatile-list mode. |
+| `00480DE3` (`00480E75` threshold branch) | Dirty-list autosave after elapsed time exceeds 29999 ms or edit count exceeds 4. Writes a temporary TTBL and publishes it; failure keeps it eligible for a later attempt. |
+| `004616BD`, reached by `WM_CLOSE` | Captures state, reconciles playlist storage and commits settings before destroying the main window. |
+| Main message dispatch, pseudo lines 88801–88804 | `WM_QUERYENDSESSION` (`0x11`) also calls `004616BD` and returns TRUE. Thus original shutdown/logoff participates in persistence. |
+| `004812AC` | Records catalogue count and active-list index into `DAT_00547834/38`. |
+| `CPlayListManager_ReconcileStorage` (pseudo line 116736) | Saves modified lists, stages/renames numbered files to the current catalogue order and reconciles old storage. |
+| `004783FA` | Startup loads numbered TTBL files and restores the active list; supports the original three-/four-digit generations. |
+| `004B605A` | Reads/writes `PlayMode`, `PlayLists`, `ActiveList` and other player settings. |
+
+Normal restart is therefore expected to preserve folder-added tracks, list
+order and playback mode. The original delayed autosave still permits recent
+unsaved changes to be lost on a forced process termination. Its pseudocode
+does not establish that access-denied or disk-write failures can be overcome.
+
+### Current implementation and confirmed gaps
+
+**Normal exit works in the tested current build.** Folder insertion calls
+`MarkDirty`; a new catalogue list is dirty too. The UI timer calls
+`FlushDirty(false)`. `WM_CLOSE` calls `SaveStoredPlaylist()` then
+`PersistWindowState()`, with a `WM_DESTROY` fallback. Forced flush writes dirty
+TTBLs and compacts slots to preserve catalogue order. XML writes `PlayMode`,
+`PlayLists` and `ActiveList`. A normal restart test should not be described as
+a reproduction of the reported loss when these writes succeed.
+
+Confirmed unresolved issues:
+
+1. **System-session exit does not save.** There is no `WM_QUERYENDSESSION` or
+   `WM_ENDSESSION` handling anywhere in the current player sources. The default
+   handler accepts the query but does not execute the normal save transaction.
+   With two just-imported short lists and no intervening autosave, the test's
+   query/end-session sequence leaves no XML or TTBL. The next process sees one
+   empty default list and mode `2`. This is a direct difference from the native
+   dispatch above. It can explain the combined symptom when exiting Windows;
+   it does not explain a successful ordinary close on its own.
+2. **Save failure is invisible to the caller.** `PlaylistStore::FlushDirty`
+   catches write errors and returns `void`; it retains dirty entries during
+   the live session but cannot report the final failure to shutdown. XML
+   `SaveWindowState` likewise returns `void` and ignores the `save` HRESULT.
+   The user can see an apparently successful exit even though old state was
+   retained. Fault injection blocking both storage destinations reproduces
+   empty-list/default-mode restart. This demonstrates a failure path, not that
+   the reporter's directory permissions have been diagnosed.
+3. **A failed settings save suppresses later attempts.** `PersistWindowState`
+   sets `window_state_saved_ = true` before it calls the XML writer. With an
+   existing read-only XML at mode `2`, changing to mode `4` fails to save;
+   removing the read-only flag and calling persistence again still leaves
+   mode `2`, because the guard returns early. The test also loses the new
+   active-list setting, while the successfully saved TTBL contents survive.
+
+Additional source-level reliability concern: the root XML is saved directly
+to its final path, unlike the TTBL temporary-file transaction. A malformed XML
+causes `LoadRuntimeSettings` to return defaults. This audit did not inject a
+mid-write crash or disk-full event, so it does not claim a reproduced partial
+XML write. XML damage alone does not delete valid TTBL files in the same
+runtime directory.
+
+### Restart and failure verification
+
+The local-only probe links the same Release core and creates the real
+`PlayerWindow`. It appends a folder, creates a second folder list through the
+production `CF_HDROP` handler, reverses two track rows, reorders the catalogue,
+changes the active list and playback mode, and issues a normal `WM_CLOSE`.
+A separate fresh process loads the saved XML/TTBL and reports its state.
+These are host-level tests; the folder chooser itself is covered separately.
+
+| Case | Windows 11 | Windows XP | Windows 7 |
+| --- | --- | --- | --- |
+| Normal close, all five modes, list/track order and active list | All five pass | Random mode checked, passes | Random mode checked, passes |
+| Query/end-session before autosave | Missing-save defect reproduced | Same | Same |
+| Failed XML write, then restored write access and retry | Stale-mode/saved-flag defect reproduced | Same | Same |
+| Both storage destinations deliberately blocked | Combined loss reproduced | Not run | Not run |
+
+The session probe sends the actual session messages only to its own test
+window and then ends that test process without providing an extra normal
+close/destruction callback. It does **not** log off or shut down the host/VM.
+Windows 11 remains substitute coverage for Windows 10, not an actual Win10 run.
+
+Evidence stays local under `tests/folder_intake/`: `persistence_audit.cpp`,
+`persistence_audit.inc`, `run_persistence_audit.py`,
+`persistence-20261009-025016/results.json` (16 subprocess runs) and
+`persistence-vm-results-20261009.json`. No tests or test execution are added to
+Actions or the release archive.
+
+Recommended fix order:
+
+1. Implement explicit session-end state capture/flush, independent of
+   close-to-tray and visual/audio closing effects. Handle cancelled session
+   termination without leaving saving permanently disabled.
+2. Return structured success/failure from playlist and settings commits;
+   publish `window_state_saved_` only after successful required writes. Keep
+   failed changes retryable and report the affected path instead of silently
+   claiming success.
+3. Save root XML through a complete temporary document and atomic replacement,
+   with a validated recovery copy; retain the preceding file on failure.
+4. Add restart, read-only/locked-file and session-end regression coverage to
+   the existing local tests. Diagnose the third-party report using its exact
+   build, runtime directory and exit method before assigning a single cause.
+
+## Persistence fixes and verification (2026-10-09p1)
+
+The preceding audit's three confirmed gaps are fixed. Folder import still
+uses the original dirty-list mechanism; the changes complete the save and
+restart paths shared by all playlists.
+
+### Save results and failed-close behavior
+
+- `SaveResult` carries the actual destination and HRESULT. Playlist flush,
+  catalogue compaction and root settings save return their result to the
+  caller; failed list entries remain dirty for retry.
+- `SavePersistentState` completes playlist writes/compaction before writing
+  `ActiveList` and the other root settings. A list-write failure prevents a new
+  XML index from claiming an unfinished catalogue has been committed.
+- `window_state_saved_` is set only after the root XML and active skin profile
+  succeed. A failed attempt remains retryable. A changed active slot after
+  compaction invalidates an earlier settings snapshot too.
+- An ordinary close that cannot save displays the failed path and error code,
+  leaves the player and its in-memory contents alive, and does not start close
+  fades or disable its windows. After fixing the read-only flag or releasing
+  the file lock, another close saves and exits normally. Desktop-lyric unlock
+  and auto-shutdown timer cancellation are deferred until that save succeeds.
+- Explicit settings saves in the options and related UI paths report errors
+  through the same feedback method. Destruction/session-confirmation fallbacks
+  log failures without opening a modal dialog during teardown.
+- Compaction now also checks removal of its committed old slots/stages/marker.
+  A failed cleanup is not reported as a successful transaction and remains
+  available for recovery/retry.
+
+### Windows session end and cancellation
+
+`WM_QUERYENDSESSION` captures and saves state without routing through the
+caption-close handler. Close-to-tray, lyric save prompts and visual/audio
+closing effects therefore cannot prevent the storage commit. A failed query
+commit returns FALSE and queues the path-specific error for the live player.
+
+The query snapshot does not permanently latch `window_state_saved_`.
+`WM_ENDSESSION(FALSE)` clears the pending/final-save state, so changing the
+mode or active list after cancelling shutdown is saved on the later normal
+exit. `WM_ENDSESSION(TRUE)` takes a fresh final snapshot, including changes
+after the query, without waiting for a normal close/destruction callback.
+This retains the original `0x11` persistence intent while supporting cancelled
+shutdown. Microsoft's message contract confirms that FALSE means the session
+is not ending and that explicit window destruction is not required on TRUE.
+See [WM_ENDSESSION](https://learn.microsoft.com/en-us/windows/win32/shutdown/wm-endsession)
+and [WM_QUERYENDSESSION](https://learn.microsoft.com/en-us/windows/win32/shutdown/wm-queryendsession).
+
+### Atomic XML and validated recovery copy
+
+The root and skin-profile XML serializers now use the same commit helper:
+
+1. Serialize into a uniquely named adjacent `.writing.<pid>.<serial>` file.
+2. Reparse it, require the `ttplayer` root, and flush its file buffers.
+3. Preserve a validated preceding document in `<destination>.bak`; for the
+   first save, create a recovery copy of the new valid document. A corrupt
+   primary never replaces an existing valid recovery copy.
+4. Replace the primary with `ReplaceFileW`, or publish a new file with
+   `MoveFileExW`. A read-only or locked destination is an error; the code never
+   clears its attributes or deletes it to force a replacement.
+5. Clean up only this attempt's staging files. Unknown XML fields are retained.
+
+Startup prefers a valid primary document, then its validated `.bak`. A
+missing primary with a good new-format backup uses that backup before trying
+the one-time original `TTPlayer.xml` import. A malformed existing rebuild
+configuration never revives an unrelated original XML. Early language loading
+uses the same primary/backup preference. Incomplete `.writing.*` files are not
+used as configuration. The backup is the preceding valid snapshot, so recovery
+can retain an earlier setting rather than the very last edit.
+
+### Completed tests and release
+
+All three systems ran the same **13 scenarios / 25 subprocesses**. Each
+restart is a fresh process reading the files produced by its predecessor.
+
+| Case | XP | Win7 | Win11 |
+| --- | --- | --- | --- |
+| Normal close/restart, all five playback modes | Pass | Pass | Pass |
+| Added folder lists, catalogue/track ordering and active list | Pass | Pass | Pass |
+| Session-end save, including close-to-tray setting | Pass | Pass | Pass |
+| Cancel shutdown, change mode/current list, then close | Pass | Pass | Pass |
+| Read-only save/query failure, restore write access, retry | Pass | Pass | Pass |
+| Ordinary-close error dialog identifies the path and retains the live player | Pass | Pass | Pass |
+| Locked TTBL, cancelled close, unlock and successful restart | Pass | Pass | Pass |
+| Locked root/backup XML, unchanged primary, successful retry | Pass | Pass | Pass |
+| Corrupt/missing primary, valid/invalid backup and unknown XML fields | Pass | Pass | Pass |
+| Interrupted compaction and failed autosave retry | Pass | Pass | Pass |
+
+The existing folder chooser/intake/playback suite additionally passes **334
+checks on each system** after the changes. Session notifications are sent only
+to isolated test windows; these tests do not log off or shut down Windows.
+Windows 11 is the requested substitute coverage for Windows 10.
+
+The failure-dialog test originally attempted to dismiss the message box before
+its static text/button initialization completed. The local probe now waits
+for the exact expected path and closes only that test process's error dialog;
+both path matching and retention of the player are asserted before retry.
+
+Local evidence: `tests/folder_intake/persistence-fixed-run.log`, its timestamped
+`persistence-fixed-*/results.json`,
+`persistence-fixed-vm-results-20261009p1.json`,
+`folder-after-persistence.log`, and `verification-20261009p1.json`.
+Test sources/results remain local; Actions and the release archive exclude them.
+
+Universal release: `build/Release/TTPlayerRebuild-2026.10.09p1.zip`.
+The player and updater pass the XP/Win7 static import audits. Package contents
+and all archived file hashes are verified. Source/backup storage still requires
+a writable destination; forced process termination or failing storage cannot
+be made equivalent to a successful graceful exit.
+
 ## Isolated validation
 
 The Release probe runs as `WDAGUtilityAccount` and uses a helper that publishes

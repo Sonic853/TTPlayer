@@ -73,7 +73,7 @@ void PlayerWindow::PollUpdateCheck() {
                 status=state->release ? L"当前已是最新版本。" : L"尚无可用的完整发行包，请前往发布页查看。";
                 if(state->manual) MessageBoxW(options_window_ ? options_window_ : window_,status.c_str(),L"软件更新",MB_OK|MB_ICONINFORMATION);
             }
-            settings::SaveWindowState(settings_.source_path,settings_);
+            SaveSettingsWithFeedback();
         } catch(const std::exception& error) {status=L"检查更新失败："+update::ErrorText(error);}
     }
     if(options_pages_.size()>1 && options_pages_[1]) SetDlgItemTextW(options_pages_[1],detail::kUpdateStatus,status.c_str());
@@ -87,7 +87,7 @@ void PlayerWindow::CancelUpdateCheck() {
 void PlayerWindow::OpenUpdater() {
     try {
         FlushDeferredOptionsRuntime();
-        settings::SaveWindowState(settings_.source_path,settings_);
+        SaveSettingsWithFeedback();
         const auto runtime=update::ExecutablePath().parent_path(),file=runtime/L"TTPUpdater.exe";
         if(!std::filesystem::is_regular_file(file)) throw std::runtime_error("TTPUpdater.exe is missing; extract the complete release ZIP");
         std::wstring command=L"\""+file.wstring()+L"\" --player-window "+std::to_wstring(reinterpret_cast<uintptr_t>(window_));

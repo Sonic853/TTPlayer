@@ -3409,7 +3409,7 @@ int PlayerWindow::ShowRegistrationOptions(HINSTANCE instance) {
     options_registration_mode_ = false;
     // 004C0900 serializes settings after the modal /reg sheet returns; do
     // not capture nonexistent player HWNDs over the stored window geometry.
-    if (result != -1) settings::SaveWindowState(settings_.source_path, settings_);
+    if (result != -1) SaveSettingsWithFeedback();
     return static_cast<int>(result);
 }
 
@@ -4026,7 +4026,7 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
             // page has already updated the shared settings object from its
             // individual notification handlers.
             CaptureWindowState();
-            settings::SaveWindowState(settings_.source_path, settings_);
+            SaveSettingsWithFeedback();
             return 0;
         }
         if (control == kResetAllOptions) {

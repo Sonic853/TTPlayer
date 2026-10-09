@@ -3617,8 +3617,49 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             RotateMainWindowCaption();
         }
         return 0;
+    case kMsgPersistenceError:
+        if (!session_end_pending_ && !pending_persistence_error_) {
+            const auto failure = pending_persistence_error_;
+            pending_persistence_error_ = {};
+            ReportPersistenceFailure(failure);
+        }
+        return 0;
+    case WM_QUERYENDSESSION: {
+        // Native 004616BD also persists on 0x11. Keep our window alive until
+        // Windows confirms the session end, so a cancellation remains usable.
+        if (persistence_in_progress_ || lyric_save_in_progress_ || file_info_write_in_progress_)
+            return FALSE;
+        session_end_pending_ = true; // Never open a modal error during shutdown.
+        if (options_window_ && IsWindow(options_window_))
+            SendMessageW(options_window_, WM_COMMAND, IDOK, 0);
+        window_state_saved_ = false;
+        const auto result = SavePersistentState();
+        window_state_saved_ = false; // A query is a snapshot, not a final close.
+        session_end_pending_ = static_cast<bool>(result);
+        if (!result) {
+            pending_persistence_error_ = result;
+            PostMessageW(window_, kMsgPersistenceError, 0, 0);
+        }
+        return result ? TRUE : FALSE;
+    }
+    case WM_ENDSESSION:
+        if (wparam) {
+            session_end_pending_ = true;
+            // Save once more in case state changed after the query. This path
+            // bypasses close-to-tray, unsaved-lyric prompts and closing fades.
+            window_state_saved_ = false;
+            const auto result = SavePersistentState();
+            if (!result) ReportPersistenceFailure(result); // Diagnostics only.
+        } else {
+            session_end_pending_ = false;
+            window_state_saved_ = false;
+            if (!pending_persistence_error_)
+                PostMessageW(window_, kMsgPersistenceError, 0, 0);
+        }
+        return 0;
     case WM_CLOSE:
         if (close_after_skin_window_fade_) return 0;
+        if (persistence_in_progress_ || persistence_error_open_) return 0;
         if (lyric_save_in_progress_ || file_info_write_in_progress_) return 0;
         // Explicit Exit (also routed from Alt+F4) uses a private nonzero
         // wParam; caption/skin close keeps zero and may hide without stopping.
@@ -3632,23 +3673,27 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         CompleteSkinWindowFadeForReplacement();
         if (!window_ || !IsWindow(window_)) return 0;
         LeaveFullScreen();
-        if (auto_shutdown_timer_) {
-            KillTimer(window_, auto_shutdown_timer_);
-            auto_shutdown_timer_ = 0;
-        }
-        if (settings_.desktop_lyric.unlock_when_close &&
-            settings_.desktop_lyric.lock) {
-            settings_.desktop_lyric.lock = false;
-            desktop_lyrics_.ApplySettings();
-        }
         // 004616BD asks the modeless sheet to execute its IDOK transaction
         // before the main window persists TTPlayerRebuild.xml. A raw DestroyWindow
         // loses edits still resident in the active/nested page controls.
         if (options_window_ && IsWindow(options_window_))
             SendMessageW(options_window_, WM_COMMAND, IDOK, 0);
         CloseOptions();
-        SaveStoredPlaylist();
-        PersistWindowState();
+        {
+            const bool unlock = settings_.desktop_lyric.unlock_when_close &&
+                                settings_.desktop_lyric.lock;
+            if (unlock) settings_.desktop_lyric.lock = false;
+            if (const auto saved = SavePersistentState(); !saved) {
+                if (unlock) settings_.desktop_lyric.lock = true;
+                ReportPersistenceFailure(saved);
+                return 0; // Keep the list and settings in memory for a later retry.
+            }
+            if (unlock) desktop_lyrics_.ApplySettings();
+        }
+        if (auto_shutdown_timer_) {
+            KillTimer(window_, auto_shutdown_timer_);
+            auto_shutdown_timer_ = 0;
+        }
         // FUN_0045B78E starts CSoundFadeOut only when SoundFadeMode bit 3 is
         // enabled for an actively playing wave/DirectSound output.  Original
         // OnDestroy (00461ADB) keeps dispatching messages until that object
@@ -3727,8 +3772,12 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         KillTimer(window_, kInfoItemTimer);
         KillTimer(window_, kInfoTransitionTimer);
         KillTimer(window_, kInfoScrollTimer);
-        SaveStoredPlaylist();
-        PersistWindowState();
+        if (const auto saved = SavePersistentState(); !saved) {
+            // Destruction cannot be cancelled; ordinary WM_CLOSE reports and
+            // returns earlier. Avoid creating a new modal window in teardown.
+            session_end_pending_ = true;
+            ReportPersistenceFailure(saved);
+        }
         // Keep the source/progress object alive through the 004616BD-style
         // state capture even when destruction did not originate at WM_CLOSE.
         audio_->Stop();
@@ -3854,17 +3903,17 @@ std::filesystem::path PlayerWindow::CurrentSkinProfilePath() const {
     return ResolveSkinProfilePath(global_settings, ActiveSkinSelector());
 }
 
-void PlayerWindow::SaveCurrentSkinProfile() {
-    if (!skin_ || !skin_->Valid()) return;
+SaveResult PlayerWindow::SaveCurrentSkinProfile() {
+    if (!skin_ || !skin_->Valid()) return {};
     CaptureWindowState();
     const auto profile = CurrentSkinProfilePath();
-    if (profile.empty()) return;
+    if (profile.empty()) return {profile, E_INVALIDARG};
     // A provider's built-in package can be selected before its Skin directory
     // exists. Its sidecar still needs to persist window geometry and options.
     if(external_skin_) {
         std::error_code error;
         std::filesystem::create_directories(profile.parent_path(),error);
-        if(error) return;
+        if(error) return SaveResult::Win32Failure(profile, static_cast<DWORD>(error.value()));
     }
     std::wstring plugin_state;
     TtpSkinLayout layout{};layout.size=sizeof(layout);
@@ -3877,14 +3926,14 @@ void PlayerWindow::SaveCurrentSkinProfile() {
     }
     // FUN_0045D5FA captures the outgoing package's windows and invokes the
     // common serializer with DAT_00547744 set before loading the replacement.
-    static_cast<void>(settings::SaveSkinVisualProfile(
+    const bool saved = settings::SaveSkinVisualProfile(
         profile, settings_.player, settings_.playlist, settings_.lyric,
-        settings_.visual, settings_.source_path,have_layout?&plugin_state:nullptr));
+        settings_.visual, settings_.source_path,have_layout?&plugin_state:nullptr);
+    return saved ? SaveResult{} : SaveResult{profile, E_FAIL};
 }
 
-void PlayerWindow::PersistWindowState() {
-    if (window_state_saved_) return;
-    window_state_saved_ = true;
+SaveResult PlayerWindow::PersistWindowState() {
+    if (window_state_saved_) return {};
     CaptureWindowState();
     settings_.player.mini_mode = mini_mode_;
     settings_.player.playlist_scan_count = static_cast<int>(playlists_.Size());
@@ -3907,10 +3956,48 @@ void PlayerWindow::PersistWindowState() {
     // flags on the next launch.  FUN_0045D5FA uses this same per-skin branch
     // when leaving a package; commit the active package snapshot at shutdown
     // as well, before the root state that owns mini visibility/top-most data.
-    SaveCurrentSkinProfile();
-    settings::SaveWindowState(settings_.source_path, settings_);
+    const auto profile = SaveCurrentSkinProfile();
+    const auto root = settings::SaveWindowState(settings_.source_path, settings_);
     if (!lyric_associations_.Save())
         OutputDebugStringW(L"TTPlayerRebuild: cannot save lyric associations; previous .rll retained.\n");
+    window_state_saved_ = profile && root;
+    return !root ? root : profile;
+}
+
+SaveResult PlayerWindow::SavePersistentState() {
+    if (persistence_in_progress_) return SaveResult::Win32Failure(settings_.source_path, ERROR_BUSY);
+    persistence_in_progress_ = true;
+    struct Reset { bool& flag; ~Reset() { flag = false; } } reset{persistence_in_progress_};
+    // Compact the catalogue before serializing ActiveList. A failed list commit
+    // must not publish a new XML index that refers to unfinished storage.
+    const auto old_active_slot = playlists_.ActiveSlot();
+    const auto lists = SaveStoredPlaylist();
+    if (!lists) { window_state_saved_ = false; return lists; }
+    if (old_active_slot != playlists_.ActiveSlot()) window_state_saved_ = false;
+    const auto result = PersistWindowState();
+    if (result) pending_persistence_error_ = {};
+    return result;
+}
+
+bool PlayerWindow::SaveSettingsWithFeedback() {
+    window_state_saved_ = false;
+    const auto result = settings::SaveWindowState(settings_.source_path, settings_);
+    if (!result) ReportPersistenceFailure(result);
+    return static_cast<bool>(result);
+}
+
+void PlayerWindow::ReportPersistenceFailure(const SaveResult& failure) {
+    if (failure) return;
+    wchar_t code[24]{};
+    swprintf_s(code, L"0x%08lX", static_cast<unsigned long>(failure.error));
+    const auto message = std::wstring(i18n::Literal(
+        L"无法保存播放列表或设置：\n\n")) + failure.path.wstring() + L"\n" + code +
+        i18n::Literal(L"\n\n请检查文件是否只读、被占用，或所在目录是否可写。\n播放器已保留当前内容，请修复后再次保存或退出。");
+    OutputDebugStringW((message + L"\n").c_str());
+    if (session_end_pending_ || persistence_error_open_) return;
+    persistence_error_open_ = true;
+    MessageBoxW(window_, message.c_str(), ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
+    persistence_error_open_ = false;
 }
 
 void PlayerWindow::LayoutControls(int width, int height) const {

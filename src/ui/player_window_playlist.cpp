@@ -6692,8 +6692,8 @@ void PlayerWindow::LoadStoredPlaylist() {
     }
 }
 
-void PlayerWindow::SaveStoredPlaylist() {
-    playlists_.FlushDirty(true);
+SaveResult PlayerWindow::SaveStoredPlaylist() {
+    return playlists_.FlushDirty(true);
 }
 
 LRESULT CALLBACK PlayerWindow::PlaylistWindowProc(HWND window, UINT message,

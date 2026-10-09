@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ttplayer/playlist/playlist.h"
+#include "ttplayer/core/save_result.h"
 
 #include <cstddef>
 #include <filesystem>
@@ -58,12 +59,12 @@ public:
     void SortByTitle(bool ascending);
     void MarkDirty();
     void MarkDirty(size_t index, unsigned int edits = 1);
-    void FlushDirty(bool force);
+    SaveResult FlushDirty(bool force);
 
 private:
     [[nodiscard]] std::filesystem::path SlotPath(size_t slot, int digits = 4) const;
     void SaveEntry(Entry& entry);
-    bool CompactSlots();
+    SaveResult CompactSlots();
 
     std::filesystem::path directory_;
     std::vector<Entry> entries_;

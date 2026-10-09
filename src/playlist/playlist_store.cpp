@@ -101,18 +101,20 @@ bool RecoverCompaction(const std::filesystem::path& directory) {
     // Only source slots named by our committed transaction are eligible for
     // cleanup.  Other files in PlayList, including unrelated *.ttbl files,
     // are never enumerated or removed.
+    const auto remove_committed_file = [](const std::filesystem::path& path) {
+        if (DeleteFileW(path.c_str())) return true;
+        const auto error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    };
     for (const size_t source : sources) {
         if (source < sources.size()) continue;
         const auto old = NumberedSlotPath(directory, source);
-        std::filesystem::remove(old, ignored);
-        std::filesystem::remove(
-            std::filesystem::path(old.wstring() + L".tmp"), ignored);
+        if (!remove_committed_file(old) || !remove_committed_file(
+                std::filesystem::path(old.wstring() + L".tmp"))) return false;
     }
     for (size_t destination = 0; destination < sources.size(); ++destination)
-        std::filesystem::remove(CompactionStagePath(directory, destination),
-                                ignored);
-    std::filesystem::remove(marker, ignored);
-    return true;
+        if (!remove_committed_file(CompactionStagePath(directory, destination))) return false;
+    return remove_committed_file(marker);
 }
 }
 
@@ -337,20 +339,24 @@ void PlaylistStore::SaveEntry(Entry& entry) {
         const DWORD error = GetLastError();
         std::error_code ignored;
         std::filesystem::remove(temporary, ignored);
-        throw std::runtime_error("cannot commit TTBL: " + std::to_string(error));
+        throw std::system_error(static_cast<int>(error), std::system_category(),
+                                "cannot commit TTBL");
     }
     entry.dirty_edits = 0;
     entry.dirty_since = 0;
 }
 
-bool PlaylistStore::CompactSlots() {
-    if (entries_.empty() || entries_.size() > kMaximumStoredSlots) return false;
+SaveResult PlaylistStore::CompactSlots() {
+    if (entries_.empty()) return {};
+    if (entries_.size() > kMaximumStoredSlots)
+        return SaveResult::Win32Failure(directory_, ERROR_TOO_MANY_NAMES);
     bool needed{};
     for (size_t index = 0; index < entries_.size(); ++index) {
-        if (entries_[index].slot >= kMaximumStoredSlots) return false;
+        if (entries_[index].slot >= kMaximumStoredSlots)
+            return SaveResult::Win32Failure(directory_, ERROR_TOO_MANY_NAMES);
         needed = needed || entries_[index].slot != index;
     }
-    if (!needed) return true;
+    if (!needed) return {};
 
     std::vector<std::filesystem::path> staged;
     staged.reserve(entries_.size());
@@ -364,7 +370,8 @@ bool PlaylistStore::CompactSlots() {
     } catch (const std::exception&) {
         std::error_code ignored;
         for (const auto& path : staged) std::filesystem::remove(path, ignored);
-        return false;
+        return SaveResult::Win32Failure(staged.empty() ? directory_ : staged.back(),
+                                       ERROR_WRITE_FAULT);
     }
 
     const auto marker = CompactionMarkerPath(directory_);
@@ -386,15 +393,16 @@ bool PlaylistStore::CompactSlots() {
             std::filesystem::remove(marker_temporary, ignored);
             for (const auto& path : staged)
                 std::filesystem::remove(path, ignored);
-            return false;
+            return SaveResult::Win32Failure(marker_temporary, ERROR_WRITE_FAULT);
         }
     }
     if (!MoveFileExW(marker_temporary.c_str(), marker.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const auto failure = SaveResult::Win32Failure(marker);
         std::error_code ignored;
         std::filesystem::remove(marker_temporary, ignored);
         for (const auto& path : staged) std::filesystem::remove(path, ignored);
-        return false;
+        return failure;
     }
 
     // Once the marker is durable, Load can finish any interrupted sequence.
@@ -402,32 +410,41 @@ bool PlaylistStore::CompactSlots() {
     // so ActiveSlot and the persisted ActiveList setting stay in sync.
     for (size_t index = 0; index < entries_.size(); ++index)
         entries_[index].slot = index;
-    if (RecoverCompaction(directory_)) return true;
+    if (RecoverCompaction(directory_)) return {};
+    const auto failure = SaveResult::Win32Failure(marker);
     for (auto& entry : entries_) {
         if (entry.dirty_edits == 0) entry.dirty_since = TickCount();
         entry.dirty_edits = std::max(1U, entry.dirty_edits);
     }
-    return false;
+    return failure;
 }
 
-void PlaylistStore::FlushDirty(bool force) {
+SaveResult PlaylistStore::FlushDirty(bool force) {
     // Complete a published transaction before any later edit is saved;
     // otherwise its older staged image could overwrite the new edit.
-    if (!RecoverCompaction(directory_)) return;
+    if (!RecoverCompaction(directory_))
+        return SaveResult::Win32Failure(CompactionMarkerPath(directory_));
     const auto now = TickCount();
-    bool all_saved = true;
+    SaveResult result;
     for (auto& entry : entries_) {
         if (entry.dirty_edits == 0) continue;
         // Exact thresholds visible at 00480E75: elapsed > 29999 ms or edits > 4.
         if (!force && entry.dirty_edits <= 4 && now - entry.dirty_since < 30000) continue;
         try { SaveEntry(entry); }
+        catch (const std::system_error& error) {
+            if (result) result = SaveResult::Win32Failure(SlotPath(entry.slot),
+                error.code().category() == std::system_category()
+                    ? static_cast<DWORD>(error.code().value()) : ERROR_WRITE_FAULT);
+        }
         catch (const std::exception&) {
             // The original retains the dirty counter after a failed commit so
             // the next timer tick retries without destroying the old TTBL.
-            all_saved = false;
+            if (result) result = SaveResult::Win32Failure(SlotPath(entry.slot),
+                                                        ERROR_WRITE_FAULT);
         }
     }
-    if (force && all_saved) static_cast<void>(CompactSlots());
+    if (force && result) result = CompactSlots();
+    return result;
 }
 
 } // namespace ttplayer::playlist

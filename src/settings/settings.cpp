@@ -3,6 +3,7 @@
 #include "ttplayer/skin/skin_paths.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <cwctype>
 #include <windows.h>
@@ -520,6 +521,85 @@ IXMLDOMElement* EnsureElement(IXMLDOMDocument* document,const wchar_t* name) {
     return element.Detach();
 }
 
+bool LoadSettingsDocument(IXMLDOMDocument* document,
+                          const std::filesystem::path& path) {
+    document->put_async(VARIANT_FALSE);
+    document->put_preserveWhiteSpace(VARIANT_TRUE);
+    document->put_resolveExternals(VARIANT_FALSE);
+    document->put_validateOnParse(VARIANT_FALSE);
+    VARIANT_BOOL loaded{};
+    return SUCCEEDED(document->load(_variant_t(path.c_str()), &loaded)) &&
+        loaded == VARIANT_TRUE && SelectOwned(document, L"/ttplayer");
+}
+
+std::filesystem::path SettingsBackupPath(const std::filesystem::path& path) {
+    return std::filesystem::path(path.wstring() + L".bak");
+}
+
+// Each staged file belongs to this call. The final document and its recovery
+// copy are never truncated, even when MSXML fails midway through serialization.
+SaveResult CommitSettingsDocument(IXMLDOMDocument* document,
+                                  const std::filesystem::path& path) {
+    static std::atomic_ulong serial{};
+    auto temporary = path;
+    temporary += L".writing." + std::to_wstring(GetCurrentProcessId()) + L"." +
+                 std::to_wstring(serial.fetch_add(1));
+    const auto backup = SettingsBackupPath(path);
+    const auto backup_temporary = std::filesystem::path(temporary.wstring() + L".bak");
+    struct Cleanup {
+        std::filesystem::path file, backup;
+        ~Cleanup() { DeleteFileW(file.c_str()); DeleteFileW(backup.c_str()); }
+    } cleanup{temporary, backup_temporary};
+    std::error_code error;
+    if (!path.parent_path().empty())
+        std::filesystem::create_directories(path.parent_path(), error);
+    if (error) return SaveResult::Win32Failure(path, static_cast<DWORD>(error.value()));
+    const auto attributes = GetFileAttributesW(path.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY)))
+        return SaveResult::Win32Failure(path, ERROR_ACCESS_DENIED);
+
+    const auto saved = document->save(_variant_t(temporary.c_str()));
+    if (FAILED(saved)) return {path, saved};
+    ComPtr<IXMLDOMDocument> check;
+    const auto created = CoCreateInstance(__uuidof(DOMDocument60), nullptr,
+        CLSCTX_INPROC_SERVER, IID_PPV_ARGS(check.GetAddressOf()));
+    if (FAILED(created)) return {path, created};
+    if (!LoadSettingsDocument(check.Get(), temporary))
+        return SaveResult::Win32Failure(path, ERROR_INVALID_DATA);
+    const auto flush = [](const std::filesystem::path& file) -> HRESULT {
+        HANDLE handle = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) return HRESULT_FROM_WIN32(GetLastError());
+        const HRESULT result = FlushFileBuffers(handle) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
+        CloseHandle(handle);
+        return result;
+    };
+    const auto flushed = flush(temporary);
+    if (FAILED(flushed)) return {path, flushed};
+
+    // Keep the preceding valid root, including unknown fields. When recovering
+    // from a damaged root, never replace a good backup with that damaged file.
+    const bool valid_previous = LoadSettingsDocument(check.Get(), path);
+    if (valid_previous || !LoadSettingsDocument(check.Get(), backup)) {
+        const auto& source = valid_previous ? path : temporary;
+        if (!CopyFileW(source.c_str(), backup_temporary.c_str(), TRUE))
+            return SaveResult::Win32Failure(backup);
+        if (!LoadSettingsDocument(check.Get(), backup_temporary))
+            return SaveResult::Win32Failure(backup, ERROR_INVALID_DATA);
+        const auto backup_flushed = flush(backup_temporary);
+        if (FAILED(backup_flushed)) return {backup, backup_flushed};
+        if (!MoveFileExW(backup_temporary.c_str(), backup.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            return SaveResult::Win32Failure(backup);
+    }
+    const bool replaced = attributes != INVALID_FILE_ATTRIBUTES
+        ? ReplaceFileW(path.c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr) != FALSE
+        : MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE;
+    if (!replaced) return SaveResult::Win32Failure(path);
+    return {};
+}
+
 bool OpenSettingsDocument(const std::filesystem::path& path,
                           IXMLDOMDocument** result) {
     if(!result || path.empty()) return false;
@@ -528,11 +608,15 @@ bool OpenSettingsDocument(const std::filesystem::path& path,
     if(FAILED(CoCreateInstance(__uuidof(DOMDocument60),nullptr,
         CLSCTX_INPROC_SERVER,IID_PPV_ARGS(document.GetAddressOf()))) ||
        !document) return false;
-    document->put_async(VARIANT_FALSE);
-    document->put_preserveWhiteSpace(VARIANT_TRUE);
-    VARIANT_BOOL loaded{};
-    document->load(_variant_t(path.wstring().c_str()),&loaded);
-    if(loaded!=VARIANT_TRUE) {
+    if (!LoadSettingsDocument(document.Get(), path) &&
+        !LoadSettingsDocument(document.Get(), SettingsBackupPath(path))) {
+        // Drop any wrong-root document before creating the normal schema.
+        VARIANT_BOOL cleared{};
+        document->loadXML(_bstr_t(L"<ttplayer/>"), &cleared);
+        if (cleared != VARIANT_TRUE) return false;
+        auto empty_root = SelectOwned(document.Get(), L"/ttplayer");
+        ComPtr<IXMLDOMNode> removed;
+        document->removeChild(empty_root.Get(), removed.GetAddressOf());
         ComPtr<IXMLDOMProcessingInstruction> declaration;
         document->createProcessingInstruction(_bstr_t(L"xml"),
             _bstr_t(L"version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\""),
@@ -792,11 +876,12 @@ LyricSettings::LyricSettings() {
 std::wstring LoadRuntimeLanguage(const std::filesystem::path& runtime_directory) noexcept {
     try {
         if (runtime_directory.empty()) return L"auto";
-        auto source = runtime_directory / kSettingsFileName;
+        const auto source = runtime_directory / kSettingsFileName;
+        std::vector<std::filesystem::path> candidates{source, SettingsBackupPath(source)};
         std::error_code error;
         if (!std::filesystem::exists(source, error)) {
             if (error) return L"auto";
-            source = runtime_directory / L"TTPlayer.xml";
+            candidates.push_back(runtime_directory / L"TTPlayer.xml");
         }
         // An existing but malformed new file must not revive the old language.
         ComInit com;
@@ -804,15 +889,12 @@ std::wstring LoadRuntimeLanguage(const std::filesystem::path& runtime_directory)
         ComPtr<IXMLDOMDocument> document;
         if (FAILED(CoCreateInstance(__uuidof(DOMDocument60), nullptr,
                 CLSCTX_INPROC_SERVER, IID_PPV_ARGS(document.GetAddressOf())))) return L"auto";
-        document->put_async(VARIANT_FALSE);
-        document->put_resolveExternals(VARIANT_FALSE);
-        document->put_validateOnParse(VARIANT_FALSE);
-        VARIANT_BOOL loaded{};
-        if (FAILED(document->load(_variant_t(source.c_str()), &loaded)) ||
-            loaded != VARIANT_TRUE) return L"auto";
-        const auto general = SelectOwned(document.Get(), L"/ttplayer/General");
-        auto language = StringAttr(general.Get(), L"Language");
-        if (!language.empty()) return language;
+        for (const auto& candidate : candidates) {
+            if (!LoadSettingsDocument(document.Get(), candidate)) continue;
+            const auto general = SelectOwned(document.Get(), L"/ttplayer/General");
+            auto language = StringAttr(general.Get(), L"Language");
+            return language.empty() ? L"auto" : language;
+        }
     } catch (...) {
         // Translation must never prevent the original startup error message.
     }
@@ -827,7 +909,8 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         throw std::runtime_error("MSXML6 unavailable");
     auto* const doc=document.Get();
     VARIANT_BOOL loaded{}; doc->put_async(VARIANT_FALSE); doc->load(_variant_t(path.wstring().c_str()), &loaded);
-    if (loaded != VARIANT_TRUE) throw std::runtime_error("invalid settings XML");
+    if (loaded != VARIANT_TRUE || !SelectOwned(doc, L"/ttplayer"))
+        throw std::runtime_error("invalid settings XML");
     Settings s; s.source_path=path;
     if (auto node=SelectOwned(doc,L"/ttplayer/Player")) {
         auto* const n=node.Get();
@@ -1636,16 +1719,15 @@ bool SaveSkinVisualProfile(const std::filesystem::path& path,
         SetAttribute(element,L"CreateNewVerPlayList",
                      playlist.legacy_playlist_generation ? 1 : 0);
     }
-    const HRESULT saved=document->save(_variant_t(path.wstring().c_str()));
-    return SUCCEEDED(saved);
+    return static_cast<bool>(CommitSettingsDocument(document, path));
 }
 
-void SaveWindowState(const std::filesystem::path& path,
-                     const Settings& settings) {
-    if(path.empty()) return;
-    ComInit com; if(FAILED(com.hr) && com.hr!=RPC_E_CHANGED_MODE) return;
+SaveResult SaveWindowState(const std::filesystem::path& path,
+                     const Settings& settings) try {
+    if(path.empty()) return {path, E_INVALIDARG};
+    ComInit com; if(FAILED(com.hr) && com.hr!=RPC_E_CHANGED_MODE) return {path, com.hr};
     IXMLDOMDocument* document{};
-    if(!OpenSettingsDocument(path,&document)) return;
+    if(!OpenSettingsDocument(path,&document)) return {path, E_FAIL};
     auto document_owner=AdoptCom(document);
     const auto& player=settings.player;
     if(auto* element=EnsureElement(document,L"Player")) {
@@ -2129,6 +2211,12 @@ void SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"CustomPackageName",settings.plugin_skin_file);
         element->removeAttribute(_bstr_t(L"WinampPackageName"));
     }
-    document->save(_variant_t(path.wstring().c_str()));
+    return CommitSettingsDocument(document, path);
+} catch (const _com_error& error) {
+    return {path, error.Error()};
+} catch (const std::filesystem::filesystem_error& error) {
+    return SaveResult::Win32Failure(path, static_cast<DWORD>(error.code().value()));
+} catch (const std::exception&) {
+    return {path, E_FAIL};
 }
 }
