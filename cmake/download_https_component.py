@@ -18,6 +18,66 @@ from check_legacy_imports import exports, inspect
 REPOSITORY = 'https://github.com/TTPlayerRebuild/TTPlayerHttps'
 API = 'https://api.github.com/repos/TTPlayerRebuild/TTPlayerHttps/releases/latest'
 LIMIT = 16 * 1024 * 1024
+REQUIRED_ABI = 6
+
+
+def capabilities(data):
+    """Read the release-hash-verified PE resource, without loading native code."""
+    def read(fmt, offset):
+        count = struct.calcsize('<' + fmt)
+        if offset < 0 or offset + count > len(data):
+            raise ValueError('Truncated HTTPS capability PE data')
+        return struct.unpack_from('<' + fmt, data, offset)
+
+    if data[:2] != b'MZ':
+        raise ValueError('Missing HTTPS DOS header')
+    pe, = read('I', 0x3c)
+    if data[pe:pe+4] != b'PE\0\0':
+        raise ValueError('Missing HTTPS PE signature')
+    machine, count = read('HH', pe+4)
+    optional_size, = read('H', pe+20)
+    optional = pe+24
+    if machine != 0x14c or read('H', optional)[0] != 0x10b or optional_size < 120:
+        raise ValueError('HTTPS component must be x86 PE32')
+    sections = [read('IIII', optional+optional_size+i*40+8) for i in range(count)]
+
+    def mapped(rva, size):
+        for virtual_size, virtual, raw_size, raw in sections:
+            if virtual <= rva and rva-virtual+size <= raw_size:
+                offset = raw+rva-virtual
+                if offset+size <= len(data):
+                    return offset
+        raise ValueError('Unmapped HTTPS capability resource')
+
+    rva, size = read('II', optional+112)
+    if not rva or size < 16:
+        raise ValueError('HTTPS component has no capability resource; ABI 6 is required')
+
+    def relative(at, length):
+        if at < 0 or at+length > size:
+            raise ValueError('Invalid HTTPS resource offset')
+        return mapped(rva+at, length)
+
+    def child(at, identifier, directory):
+        node = relative(at, 16)
+        named, numbered = read('HH', node+12)
+        for i in range(named+numbered):
+            name, target = read('II', relative(at+16+i*8, 8))
+            if name == identifier:
+                if bool(target & 0x80000000) != directory:
+                    raise ValueError('Invalid HTTPS resource tree')
+                return target & 0x7fffffff
+        raise ValueError('HTTPS component lacks ABI 6 capability metadata')
+
+    # RT_RCDATA / ID 100 / LANG_NEUTRAL, fixed 16-byte versioned record.
+    entry = child(child(child(0, 10, True), 100, True), 0, False)
+    payload, length = read('II', relative(entry, 16))
+    if length != 16:
+        raise ValueError('Unexpected HTTPS capability record size')
+    magic, version, abi, features = read('IIII', mapped(payload, length))
+    if magic != 0x48505454 or version != 1 or abi < REQUIRED_ABI or features & 0x1f != 0x1f:
+        raise ValueError('HTTPS component does not provide required ABI 6 lyric capabilities')
+    return {'max_abi': abi, 'features': features}
 
 
 class HttpsRedirect(urllib.request.HTTPRedirectHandler):
@@ -100,8 +160,10 @@ def unpack(release, archive):
     pe = struct.unpack_from('<I', dll, 0x3c)[0]
     if pe + 24 > len(dll) or not struct.unpack_from('<H', dll, pe + 22)[0] & 0x2000:
         raise ValueError('HTTPS component is not a DLL')
+    contract = capabilities(dll)
     return dll, dict(repository=REPOSITORY, version=tag, asset=asset_name,
-                     url=url, archive_sha256=digest[7:], sha256=dll_hash)
+                     url=url, archive_sha256=digest[7:], sha256=dll_hash,
+                     required_abi=REQUIRED_ABI, capabilities=contract)
 
 
 def main():
@@ -131,7 +193,7 @@ def main():
     metadata['inventories'] = [p.name for p in args.exports]
     (args.output / 'https-component.json').write_text(
         json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
-    print(f"Staged TTPlayerHttps {metadata['version']}: {len(dll)} bytes; SHA-256 and XP/Win7 imports verified")
+    print(f"Staged TTPlayerHttps {metadata['version']}: {len(dll)} bytes; ABI {REQUIRED_ABI}, SHA-256 and XP/Win7 imports verified")
 
 
 if __name__ == '__main__':

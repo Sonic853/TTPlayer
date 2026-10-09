@@ -14,22 +14,42 @@
 
 namespace ttplayer::lyrics {
 namespace {
+bool Missing(const std::filesystem::path& path) {
+    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
+    const auto error = GetLastError();
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return true;
+    throw std::runtime_error("Cannot inspect lyric catalog");
+}
+void MigrateIni(const std::filesystem::path& target) {
+    auto legacy = target; legacy.replace_extension(L".ini");
+    if (!Missing(target) || Missing(legacy)) return;
+    wchar_t temp[MAX_PATH]{};
+    if (!GetTempFileNameW(target.parent_path().c_str(), L"lrm", 0, temp))
+        throw std::runtime_error("Cannot create catalog migration temporary file");
+    // Keep all bytes and the old INI; publish the complete copy without
+    // replacing XML that another reader/editor might create concurrently.
+    const bool copied = CopyFileW(legacy.c_str(), temp, FALSE) != FALSE;
+    if (copied && MoveFileExW(temp, target.c_str(), MOVEFILE_WRITE_THROUGH)) return;
+    SetFileAttributesW(temp, FILE_ATTRIBUTE_NORMAL); DeleteFileW(temp);
+    if (!Missing(target)) return;
+    throw std::runtime_error("Cannot migrate lyric INI to XML");
+}
 void BuiltinsFirst(std::vector<LyricService>& entries) {
-    // One global DLL prefix, even when several AddIns have sibling INIs.
+    // One global DLL prefix, even when several AddIns have sibling XMLs.
     // Preserve the original order within each source group.
     std::stable_partition(entries.begin(), entries.end(), [](const auto& entry) { return entry.read_only; });
 }
 std::string Read(const std::filesystem::path& path, bool& exists) {
     std::error_code error;
     exists = std::filesystem::exists(path, error);
-    if (error) throw std::runtime_error("Cannot inspect INI");
+    if (error) throw std::runtime_error("Cannot inspect XML");
     if (!exists) return {};
     if (std::filesystem::file_size(path, error) > 2 * 1024 * 1024 || error)
-        throw std::runtime_error("Cannot read INI size");
+        throw std::runtime_error("Cannot read XML size");
     std::ifstream file(path, std::ios::binary);
-    if (!file) throw std::runtime_error("Cannot read INI");
+    if (!file) throw std::runtime_error("Cannot read XML");
     std::string bytes((std::istreambuf_iterator<char>(file)), {});
-    if (file.bad() || bytes.size() > 2 * 1024 * 1024) throw std::runtime_error("Cannot read INI");
+    if (file.bad() || bytes.size() > 2 * 1024 * 1024) throw std::runtime_error("Cannot read XML");
     return bytes;
 }
 std::wstring Resource(HMODULE module, UINT id) {
@@ -41,7 +61,7 @@ void Error(ServiceCatalog& catalog, const std::filesystem::path& path, const wch
     if (!catalog.error.empty()) catalog.error += L"\r\n";
     catalog.error += path.wstring() + L": " + reason;
 }
-std::vector<LyricService> IniEntries(const ServiceFile& file, size_t provider) {
+std::vector<LyricService> XmlEntries(const ServiceFile& file, size_t provider) {
     auto doc = xml::Parse(file.original);
     xml::ComPtr<IXMLDOMNode> root;
     doc->selectSingleNode(_bstr_t(L"/ttp_lrcsvr"), &root);
@@ -54,7 +74,7 @@ std::vector<LyricService> IniEntries(const ServiceFile& file, size_t provider) {
     for (long i = 0; i < size; ++i) {
         xml::ComPtr<IXMLDOMNode> node; nodes->get_item(i, &node);
         LyricService entry{xml::Attribute(node.Get(), L"name"), xml::Attribute(node.Get(), L"url"),
-            {}, file.module, file.ini, false, provider};
+            {}, file.module, file.xml, false, provider};
         if (entry.name.empty() || !ValidServiceUrl(entry.url)) throw std::runtime_error("Invalid server name/URL");
         entry.key = ServiceKey(entry);
         const auto order = core::WideToUtf8(xml::Attribute(node.Get(), L"order"));
@@ -68,31 +88,31 @@ std::vector<LyricService> IniEntries(const ServiceFile& file, size_t provider) {
 }
 void AtomicWrite(const ServiceFile& file, const std::string& bytes) {
     bool exists{};
-    if (Read(file.ini, exists) != file.original || exists != file.exists)
-        throw std::runtime_error("INI changed outside editor; reopen and retry");
+    if (Read(file.xml, exists) != file.original || exists != file.exists)
+        throw std::runtime_error("XML changed outside editor; reopen and retry");
     wchar_t temp[MAX_PATH]{};
-    if (!GetTempFileNameW(file.ini.parent_path().c_str(), L"lrs", 0, temp)) throw std::runtime_error("Cannot create temporary INI");
+    if (!GetTempFileNameW(file.xml.parent_path().c_str(), L"lrs", 0, temp)) throw std::runtime_error("Cannot create temporary XML");
     HANDLE output = CreateFileW(temp, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     DWORD written{};
     bool ok = output != INVALID_HANDLE_VALUE && WriteFile(output, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr)
         && written == bytes.size() && FlushFileBuffers(output);
     if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
     if (ok) {
-        try { ok = Read(file.ini, exists) == file.original && exists == file.exists; }
+        try { ok = Read(file.xml, exists) == file.original && exists == file.exists; }
         catch (...) { ok = false; }
     }
     if (ok) {
         // ReplaceFile retains metadata and leaves a recoverable backup. The
-        // only overwrite target is the validated DLL-sibling INI, never DLL.
-        const auto backup = file.ini.wstring() + L".bak";
-        ok = file.exists ? ReplaceFileW(file.ini.c_str(), temp, backup.c_str(), 0, nullptr, nullptr) != FALSE
-            : MoveFileExW(temp, file.ini.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE;
+        // only overwrite target is the validated DLL-sibling XML, never DLL.
+        const auto backup = file.xml.wstring() + L".bak";
+        ok = file.exists ? ReplaceFileW(file.xml.c_str(), temp, backup.c_str(), 0, nullptr, nullptr) != FALSE
+            : MoveFileExW(temp, file.xml.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE;
     }
-    if (!ok) { DeleteFileW(temp); throw std::runtime_error("Cannot save INI (changed, read-only or inaccessible)"); }
+    if (!ok) { DeleteFileW(temp); throw std::runtime_error("Cannot save XML (changed, read-only or inaccessible)"); }
 }
 }
 
-std::filesystem::path ServiceIniPath(std::filesystem::path module) { return module.replace_extension(L".ini"); }
+std::filesystem::path ServiceXmlPath(std::filesystem::path module) { return module.replace_extension(L".xml"); }
 bool CanMoveService(const std::vector<LyricService>& entries, int index, int direction) noexcept {
     if ((direction != -1 && direction != 1) || index < 0 || static_cast<size_t>(index) >= entries.size()) return false;
     const auto target = static_cast<std::int64_t>(index) + direction;
@@ -102,7 +122,7 @@ bool CanMoveService(const std::vector<LyricService>& entries, int index, int dir
 bool MoveService(std::vector<LyricService>& entries, int index, int direction) {
     if (!CanMoveService(entries, index, direction)) return false;
     std::swap(entries[index], entries[index + direction]);
-    // Persist a common INI-only order, including moves across plugin files.
+    // Persist a common XML-only order, including moves across plugin files.
     // Unknown XML attributes are ignored by the original lyric DLL.
     int order = 0;
     for (auto& entry : entries) if (!entry.read_only) entry.order = order++;
@@ -111,6 +131,7 @@ bool MoveService(std::vector<LyricService>& entries, int index, int direction) {
 std::wstring ServiceKey(const LyricService& service) {
     auto module = service.module.filename().wstring();
     std::transform(module.begin(), module.end(), module.begin(), towlower);
+    // Keep the persisted legacy identity so an existing selection survives migration.
     return (service.read_only ? L"dll|" : L"ini|") + module + L"|" + service.name + L"|" + service.url;
 }
 bool ValidServiceUrl(std::wstring_view value) {
@@ -129,16 +150,17 @@ ServiceCatalog ReadServiceCatalog(const std::vector<plugins::LyricSearchProvider
     for (size_t i = 0; i < providers.size(); ++i) {
         const auto& provider = providers[i];
         if (!visited.insert(provider.module_path).second) continue;
-        ServiceFile file{provider.module_path, ServiceIniPath(provider.module_path)};
+        ServiceFile file{provider.module_path, ServiceXmlPath(provider.module_path)};
         try {
-            file.original = Read(file.ini, file.exists);
+            MigrateIni(file.xml);
+            file.original = Read(file.xml, file.exists);
             if (file.exists) {
-                auto custom = IniEntries(file, i);
+                auto custom = XmlEntries(file, i);
                 catalog.entries.insert(catalog.entries.end(), custom.begin(), custom.end());
             }
         } catch (...) {
             file.valid = false;
-            Error(catalog, file.ini, i18n::Literal(L"无法读取有效的服务器 XML，保留原文件，不允许覆盖。"));
+            Error(catalog, file.xml, i18n::Literal(L"无法读取有效的服务器 XML，保留原文件，不允许覆盖。"));
         }
         catalog.files.push_back(file);
         // Load only resource data; never unload/reload a live sound AddIn.
@@ -181,7 +203,7 @@ ServiceCatalog SaveServiceCatalog(const ServiceCatalog& baseline, const std::vec
         for (const auto& entry : edited) if (entry.read_only) fixed_after.push_back(entry);
         if (fixed_before != fixed_after || !std::is_partitioned(edited.begin(), edited.end(),
             [](const auto& entry) { return entry.read_only; }))
-            throw std::runtime_error("DLL order is fixed; INI entries must follow DLL entries");
+            throw std::runtime_error("DLL order is fixed; XML entries must follow DLL entries");
         for (const auto& original : baseline.entries) if (original.read_only &&
             std::find(edited.begin(), edited.end(), original) == edited.end())
             throw std::runtime_error("DLL entries are read-only");
@@ -191,7 +213,7 @@ ServiceCatalog SaveServiceCatalog(const ServiceCatalog& baseline, const std::vec
                     throw std::runtime_error("Cannot change DLL entries");
             } else if (entry.name.empty() || entry.name.size() > 256 || !ValidServiceUrl(entry.url) ||
                 (entry.order && *entry.order < 0) ||
-                entry.storage != ServiceIniPath(entry.module) ||
+                entry.storage != ServiceXmlPath(entry.module) ||
                 std::none_of(baseline.files.begin(), baseline.files.end(), [&](const auto& f) { return f.module == entry.module; }))
                 throw std::runtime_error("Invalid server or save location");
         }
@@ -204,9 +226,9 @@ ServiceCatalog SaveServiceCatalog(const ServiceCatalog& baseline, const std::vec
             for (const auto& entry : baseline.entries) if (!entry.read_only && entry.module == file.module) before.push_back(entry);
             for (const auto& entry : edited) if (!entry.read_only && entry.module == file.module) after.push_back(entry);
             if (before == after) continue;
-            if (!file.valid || after.size() > 128) throw std::runtime_error("Invalid original INI or too many entries");
+            if (!file.valid || after.size() > 128) throw std::runtime_error("Invalid original XML or too many entries");
             bool exists{};
-            if (Read(file.ini, exists) != file.original || exists != file.exists) throw std::runtime_error("INI changed outside editor; reopen and retry");
+            if (Read(file.xml, exists) != file.original || exists != file.exists) throw std::runtime_error("XML changed outside editor; reopen and retry");
             auto doc = xml::Parse(file.exists ? file.original : "<ttp_lrcsvr/>");
             xml::ComPtr<IXMLDOMElement> root; doc->get_documentElement(&root);
             xml::ComPtr<IXMLDOMNodeList> nodes; root->selectNodes(_bstr_t(L"server"), &nodes);
@@ -232,7 +254,7 @@ ServiceCatalog SaveServiceCatalog(const ServiceCatalog& baseline, const std::vec
                 entry.key = ServiceKey(entry); result.entries.push_back(std::move(entry));
             }
         }
-        // Keep each source group's order, including newly added INI rows.
+        // Keep each source group's order, including newly added XML rows.
         result.entries = edited;
         for (auto& entry : result.entries) entry.key = ServiceKey(entry);
     } catch (const std::exception& error) {

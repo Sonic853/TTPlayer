@@ -14,12 +14,12 @@ struct LyricService {
     bool operator==(const LyricService&) const = default;
 };
 struct ServiceFile {
-    std::filesystem::path module, ini;
+    std::filesystem::path module, xml;
     bool exists{}, valid{true};
     std::string original;
 };
 struct ServiceCatalog {
-    // DLL entries first, then INI entries; stable ordering within each group.
+    // DLL entries first, then XML entries; stable ordering within each group.
     std::vector<LyricService> entries;
     std::vector<ServiceFile> files;
     std::wstring error;
@@ -28,13 +28,13 @@ struct CatalogJob {
     std::mutex mutex;
     std::optional<ServiceCatalog> result;
 };
-std::filesystem::path ServiceIniPath(std::filesystem::path module);
+std::filesystem::path ServiceXmlPath(std::filesystem::path module);
 std::wstring ServiceKey(const LyricService& service);
 bool ValidServiceUrl(std::wstring_view url);
 bool CanMoveService(const std::vector<LyricService>& entries, int index, int direction) noexcept;
 bool MoveService(std::vector<LyricService>& entries, int index, int direction);
 ServiceCatalog ReadServiceCatalog(const std::vector<plugins::LyricSearchProviderInfo>& providers);
-// Only INI files represented by baseline can be changed. Reject edits to DLL
+// Only XML files represented by baseline can be changed. Reject edits to DLL
 // rows and detect external file changes before committing a complete XML file.
 ServiceCatalog SaveServiceCatalog(const ServiceCatalog& baseline,
                                  const std::vector<LyricService>& edited);

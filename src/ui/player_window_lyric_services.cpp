@@ -326,7 +326,7 @@ INT_PTR CALLBACK PlayerWindow::LyricServiceEditorProc(HWND dialog, UINT message,
         if (id == IDC_LYRIC_SERVICES_ADD && !self->lyric_editor_baseline_.files.empty()) {
             const auto module = selected ? self->lyric_service_draft_[index].module : self->lyric_editor_baseline_.files.front().module;
             lyrics::LyricService entry{Text(IDS_LYRIC_SERVICES_NEW), L"https://", {}, module,
-                lyrics::ServiceIniPath(module), false, 0};
+                lyrics::ServiceXmlPath(module), false, 0};
             self->lyric_service_draft_.push_back(std::move(entry)); self->lyric_service_dirty_ = true;
             self->PopulateLyricServiceEditor(static_cast<int>(self->lyric_service_draft_.size()) - 1);
             SetFocus(GetDlgItem(dialog, IDC_LYRIC_SERVICES_NAME));
