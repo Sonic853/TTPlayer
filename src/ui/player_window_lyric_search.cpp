@@ -142,7 +142,7 @@ void PlayerWindow::StartOnlineLyricSearch(bool automatic) {
         const auto& service = lyric_services_.entries[index];
         if (!service.url.empty())
             lyric_search_ = std::make_unique<lyrics::OnlineSearch>(service, index, settings_.network,
-                lyric_search_artist_, lyric_search_title_);
+                lyric_search_artist_, lyric_search_title_, sound_library_);
         else // Other AddIns keep their own private, non-ttp_lrcsh protocol.
             lyric_search_ = std::make_unique<lyrics::OnlineSearch>(*sound_library_, service.legacy_provider,
                 settings_.network, lyric_search_artist_, lyric_search_title_);

@@ -48,6 +48,18 @@ New-Item -ItemType Directory -Path (Join-Path $package 'AddIn') | Out-Null
 Copy-Item -LiteralPath $https -Destination (Join-Path $package 'AddIn/ttp_https.dll')
 "$hash  TTPlayerRebuild.exe`n$updaterHash  TTPUpdater.exe`n$httpsHash  AddIn/ttp_https.dll" | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
 $entries = @('TTPlayerRebuild.exe', 'TTPUpdater.exe', 'AddIn/ttp_https.dll', 'SHA256SUMS.txt')
+$lrcsh = Join-Path $output 'AddIn/ttp_lrcsh.dll'
+$lrcshInfo = Get-Content -LiteralPath (Join-Path $output 'lrcsh-component.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$lrcshHash = (Get-FileHash -LiteralPath $lrcsh -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($lrcshInfo.repository -cne 'https://github.com/TTPlayerRebuild/TTPlayerLrcsh' -or
+    $lrcshInfo.sha256 -cne $lrcshHash -or
+    $lrcshInfo.inventories -notcontains '5.1.2600.txt' -or $lrcshInfo.inventories -notcontains '6.1.7600.txt' -or
+    (Get-Item -LiteralPath $lrcsh).VersionInfo.FileVersion -cne $lrcshInfo.version) {
+    throw 'Download and verify the TTPlayerLrcsh release component before packaging.'
+}
+Copy-Item -LiteralPath $lrcsh -Destination (Join-Path $package 'AddIn/ttp_lrcsh.dll')
+"$lrcshHash  AddIn/ttp_lrcsh.dll" | Add-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
+$entries += 'AddIn/ttp_lrcsh.dll'
 if (-not $TtpCommDirectory -and (Test-Path -LiteralPath (Join-Path $output 'ttpcomm-component.json'))) {
     $TtpCommDirectory = $output
 }

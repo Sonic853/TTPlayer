@@ -230,6 +230,14 @@ struct LyricSearchCallback : IUnknown {
     virtual HRESULT STDMETHODCALLTYPE OnServer(LPCWSTR name) = 0;
 };
 
+// Optional ttp_lrcsh extension; legacy vtables and the 24-byte network ABI stay intact.
+inline constexpr GUID kLyricControlId{0xb25e8a91,0x0a73,0x46bb,
+    {0x9c,0x25,0xa8,0xe7,0x3c,0x51,0x9d,0x64}};
+struct LyricSearchControl : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE Configure(LPCWSTR name, LPCWSTR url, DWORD flags) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Cancel() = 0;
+};
+
 class LegacyLyricSearchSession {
 public:
     ~LegacyLyricSearchSession();
@@ -334,7 +342,8 @@ public:
     [[nodiscard]] std::unique_ptr<LegacyLyricSearchSession> CreateLyricSearch(
         size_t index, LyricSearchCallback* context, const LyricNetworkConfig* network,
         HRESULT* result = nullptr,
-        std::wstring* diagnostic = nullptr) const;
+        std::wstring* diagnostic = nullptr,
+        LPCWSTR service_name = nullptr, LPCWSTR service_url = nullptr) const;
 
 private:
     [[nodiscard]] std::unique_ptr<LegacyReaderSession> OpenReaderWithFlags(

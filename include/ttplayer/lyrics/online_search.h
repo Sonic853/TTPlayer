@@ -25,7 +25,8 @@ public:
                  settings::NetworkSettings network, std::wstring artist,
                  std::wstring title);
     OnlineSearch(LyricService service, size_t index, settings::NetworkSettings network,
-                 std::wstring artist, std::wstring title);
+                 std::wstring artist, std::wstring title,
+                 const plugins::PluginManager* library = nullptr);
     ~OnlineSearch();
     OnlineSearch(const OnlineSearch&) = delete;
     OnlineSearch& operator=(const OnlineSearch&) = delete;

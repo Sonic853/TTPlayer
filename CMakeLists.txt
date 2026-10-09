@@ -4,6 +4,8 @@ project(TTPlayerRebuild VERSION 0.1.0 LANGUAGES C CXX)
 option(BUILD_TESTING "Build local, unpublished tests" OFF)
 include(CTest)
 option(TTPLAYER_STAGE_RUNTIME "Rebuild/copy local original DLLs, skins and configuration beside the EXE" ON)
+set(TTPLAYER_LRCSH_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../ttp_lrcsh/build/Release/ttp_lrcsh.dll" CACHE FILEPATH
+  "Independently rebuilt lyrics plugin with explicit-service and cancellation interfaces")
 # Retain the old cache argument as a migration alias; there is now one binary.
 if(DEFINED TTPLAYER_LEGACY_WINDOWS)
   message(STATUS "TTPLAYER_LEGACY_WINDOWS is obsolete: all Release builds support XP and newer Windows")
@@ -103,9 +105,6 @@ add_library(ttplayer_core
   src/lyrics/local_search.cpp
   src/lyrics/online_search.cpp
   src/lyrics/service_catalog.cpp
-  src/lyrics/lyric_http.cpp
-  src/lyrics/legacy_lyric_http.cpp
-  src/lyrics/https_provider.cpp
   src/playlist/playlist.cpp
   src/playlist/playback_order.cpp
   src/playlist/playlist_store.cpp
@@ -517,11 +516,20 @@ set_tests_properties(options_drawing_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE
 add_test(NAME options_general_tabs_tests COMMAND options_drawing_tests "${CMAKE_CURRENT_SOURCE_DIR}/.." --general-tabs)
 set_tests_properties(options_general_tabs_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
+# Archived protocol oracle belongs only to private local tests, never the player.
+add_library(lyric_protocol_test_reference STATIC
+  tests/lrcsh_rebuild/host_reference/lyric_http.cpp
+  tests/lrcsh_rebuild/host_reference/legacy_lyric_http.cpp
+  tests/lrcsh_rebuild/host_reference/https_provider.cpp)
+target_include_directories(lyric_protocol_test_reference PUBLIC tests/lrcsh_rebuild/host_reference/include PRIVATE src/lyrics)
+target_compile_definitions(lyric_protocol_test_reference PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(lyric_protocol_test_reference PRIVATE /W4 /EHsc /utf-8)
+target_link_libraries(lyric_protocol_test_reference PUBLIC ttplayer_core wininet)
 add_executable(lyric_search_tests tests/ui/lyric_search_tests.cpp src/app/resources.rc src/app/ttplayer.manifest)
 target_compile_definitions(lyric_search_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(lyric_search_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
-target_link_libraries(lyric_search_tests PRIVATE ttplayer_core ws2_32)
-add_test(NAME lyric_search_tests COMMAND lyric_search_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
+target_link_libraries(lyric_search_tests PRIVATE ttplayer_core lyric_protocol_test_reference ws2_32)
+add_test(NAME lyric_search_tests COMMAND lyric_search_tests "${CMAKE_CURRENT_SOURCE_DIR}/.." "${TTPLAYER_LRCSH_DLL}")
 set_tests_properties(lyric_search_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
 add_executable(lyric_menu_tests tests/ui/lyric_menu_tests.cpp src/app/resources.rc src/app/ttplayer.manifest)
@@ -542,7 +550,7 @@ set_tests_properties(lyric_association_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TR
 add_executable(lyric_service_catalog_tests tests/lyrics/service_catalog_tests.cpp)
 target_compile_definitions(lyric_service_catalog_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(lyric_service_catalog_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
-target_link_libraries(lyric_service_catalog_tests PRIVATE ttplayer_core)
+target_link_libraries(lyric_service_catalog_tests PRIVATE ttplayer_core lyric_protocol_test_reference)
 add_test(NAME lyric_service_catalog_tests COMMAND lyric_service_catalog_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(lyric_service_catalog_tests PROPERTIES TIMEOUT 60)
 
@@ -996,6 +1004,9 @@ set(TTPLAYER_TTPCOMM_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../ttpcomm/build/Release/t
 if(NOT EXISTS "${TTPLAYER_TTPCOMM_DLL}")
   message(FATAL_ERROR "Build TTPlayerComm first or set TTPLAYER_TTPCOMM_DLL to its rebuilt DLL. CI uses STAGE_RUNTIME=OFF and downloads the verified release.")
 endif()
+if(NOT EXISTS "${TTPLAYER_LRCSH_DLL}")
+  message(FATAL_ERROR "Build TTPlayerLrcsh first or set TTPLAYER_LRCSH_DLL. CI downloads the verified release with STAGE_RUNTIME=OFF.")
+endif()
 
 add_custom_command(
   OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ttpcomm.dll"
@@ -1057,6 +1068,9 @@ add_custom_command(TARGET ttplayer_rebuild POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory
           "${CMAKE_CURRENT_SOURCE_DIR}/../AddIn"
           "$<TARGET_FILE_DIR:ttplayer_rebuild>/AddIn"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${TTPLAYER_LRCSH_DLL}"
+          "$<TARGET_FILE_DIR:ttplayer_rebuild>/AddIn/ttp_lrcsh.dll"
   COMMAND "${CMAKE_COMMAND}" -E copy_directory
           "${CMAKE_CURRENT_SOURCE_DIR}/../PlayList"
           "$<TARGET_FILE_DIR:ttplayer_rebuild>/PlayList"

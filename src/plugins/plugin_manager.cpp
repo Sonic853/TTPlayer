@@ -2681,7 +2681,7 @@ std::unique_ptr<LegacyEncoderSession> PluginManager::CreateEncoder(
 
 std::unique_ptr<LegacyLyricSearchSession> PluginManager::CreateLyricSearch(
     size_t index, LyricSearchCallback* context, const LyricNetworkConfig* network,
-    HRESULT* result, std::wstring* diagnostic) const {
+    HRESULT* result, std::wstring* diagnostic, LPCWSTR service_name, LPCWSTR service_url) const {
     if (diagnostic) diagnostic->clear();
     if (index >= lyric_providers_.size()) {
         if (result) *result = E_INVALIDARG;
@@ -2708,6 +2708,20 @@ std::unique_ptr<LegacyLyricSearchSession> PluginManager::CreateLyricSearch(
         if (result) *result = current;
         if (diagnostic) *diagnostic = L"lyric provider slot 3";
         return {};
+    }
+    if (service_url) {
+        LyricSearchControl* control{};
+        current = InvokeQueryInterface(search, kLyricControlId, reinterpret_cast<void**>(&control));
+        if (SUCCEEDED(current) && control) {
+            current = control->Configure(service_name ? service_name : L"", service_url, 0);
+            control->Release();
+        } else if (SUCCEEDED(current)) current = E_NOINTERFACE;
+        if (FAILED(current)) {
+            Release(search);
+            if (result) *result = current;
+            if (diagnostic) *diagnostic = L"lyric service configuration extension";
+            return {};
+        }
     }
     current = InvokeLyricSearchInitialize(
         search, context, network);

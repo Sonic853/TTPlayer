@@ -167,6 +167,14 @@ jobs:
           --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt
           --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/6.1.7600.txt
 
+      - name: Download and verify latest lyrics search component
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: >-
+          python cmake/download_lrcsh_component.py --output "build/$env:BUILD_CONFIGURATION"
+          --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt
+          --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/6.1.7600.txt
+
       - name: Prepare artifact
         env:
           PACKAGE_VERSION: ${{ steps.version.outputs.version }}
@@ -210,6 +218,7 @@ jobs:
             release_size_optimization = $true
             https_component = Get-Content -LiteralPath (Join-Path $output 'https-component.json') -Raw | ConvertFrom-Json
             ttpcomm_component = Get-Content -LiteralPath (Join-Path $output 'ttpcomm-component.json') -Raw | ConvertFrom-Json
+            lrcsh_component = Get-Content -LiteralPath (Join-Path $output 'lrcsh-component.json') -Raw | ConvertFrom-Json
             run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
 
@@ -298,6 +307,7 @@ jobs:
             - SHA256SUMS.txt 可校验上述三个 ZIP；插件包内另有各运行文件的校验清单。新版更新器更新播放器包中除根目录 SHA256SUMS.txt 外的全部文件，并保留子目录；不删除包外文件。
             - 从仅更新 EXE 的旧更新器过渡时，首次请手动解压本版播放器包，确保核心 DLL 和 HTTPS 组件同步更新。
             - 本版要求重建 ttpcomm.dll 的运行接口；请退出播放器后整包替换，不要仅替换 EXE 或混用原版、旧版核心。
+            - 在线歌词搜索由 AddIn/ttp_lrcsh.dll 统一提供，发行包包含 TTPlayerLrcsh 最新稳定版。
         run: |
           $ErrorActionPreference = 'Stop'
           $publishGitHub = $env:PUBLISH_RELEASE -eq 'true'
