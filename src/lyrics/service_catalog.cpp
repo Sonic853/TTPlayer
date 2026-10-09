@@ -171,7 +171,10 @@ ServiceCatalog ReadServiceCatalog(const std::vector<plugins::LyricSearchProvider
             for (UINT j = 0; j < 2; ++j) {
                 const auto name = Resource(module, 32000 + j), url = Resource(module, 32002 + j);
                 if (name.empty() || !ValidServiceUrl(url)) continue;
-                LyricService entry{name, url, {}, provider.module_path, provider.module_path, true, i + j};
+                // A valid one-server XML may expose only one factory. Resource
+                // defaults use Configure, so both may use that first factory.
+                const auto factory = i + j < providers.size() && providers[i + j].module_path == provider.module_path ? i + j : i;
+                LyricService entry{name, url, {}, provider.module_path, provider.module_path, true, factory};
                 entry.key = ServiceKey(entry); catalog.entries.push_back(std::move(entry)); ++builtins;
             }
             FreeLibrary(module);
