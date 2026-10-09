@@ -7,7 +7,7 @@
 namespace ttplayer::lyrics {
 
 struct SearchResult { std::wstring artist, title; };
-enum class SearchPhase { searching, results, downloading, downloaded, failed, canceled };
+enum class SearchPhase { searching, results, downloading, downloaded, download_failed, failed, canceled };
 struct SearchSnapshot {
     SearchPhase phase{SearchPhase::searching};
     size_t revision{};

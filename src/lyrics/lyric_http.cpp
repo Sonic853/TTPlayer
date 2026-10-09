@@ -2,6 +2,7 @@
 #include "ttplayer/lyrics/service_catalog.h"
 #include "service_xml.h"
 #include "https_provider.h"
+#include "legacy_lyric_http.h"
 #include <algorithm>
 #include <bit>
 #include <charconv>
@@ -138,6 +139,50 @@ Response Fetch(const std::wstring& address, const settings::NetworkSettings& net
     }
     guard(); return response;
 }
+Response FetchLyric(const std::wstring& url, const settings::NetworkSettings& network,
+    const std::function<bool()>& canceled, const std::shared_ptr<LegacyLyricSession>& session) {
+    std::wstring address=url;
+    for(int redirects=0;redirects<=8;++redirects) {
+        if(!ValidServiceUrl(address)) throw std::runtime_error("Invalid HTTP/HTTPS URL");
+        if(!session || _wcsnicmp(address.c_str(),L"http://",7)!=0)
+            return Fetch(address,network,canceled);
+        auto response=session->Fetch(address,network,canceled);
+        if(response.redirect.empty()) return {std::move(response.body),
+            DecodeHeader(response.title_header),DecodeHeader(response.url_header)};
+        address=std::move(response.redirect);
+    }
+    throw std::runtime_error("Too many lyric redirects");
+}
+xml::ComPtr<IXMLDOMDocument2> ParseSearchResult(const std::string& bytes) {
+    // ttp_lrcsh's embedded parser accepts literal '&' inside attributes.
+    // NCAB emits names such as R&B without XML escaping. Repair just that
+    // representation; the catalog, DTD policy and XML structure stay strict.
+    try { return xml::Parse(bytes); }
+    catch(const std::runtime_error&) {
+        if(bytes.size()>2*1024*1024 || bytes.find('\0')!=bytes.npos ||
+            bytes.find("<!DOCTYPE")!=bytes.npos || bytes.find("<!ENTITY")!=bytes.npos) throw;
+        std::string repaired; repaired.reserve(bytes.size());
+        char quote=0; bool tag=false;
+        for(size_t i=0;i<bytes.size();++i) {
+            const char c=bytes[i];
+            if(!quote && c=='<') tag=true;
+            else if(!quote && c=='>') tag=false;
+            else if(tag && (c=='\'' || c=='"')) {
+                if(!quote) quote=c; else if(quote==c) quote=0;
+            }
+            if(quote && c=='&') {
+                const auto rest=std::string_view(bytes).substr(i);
+                const bool entity=rest.starts_with("&amp;") || rest.starts_with("&lt;") ||
+                    rest.starts_with("&gt;") || rest.starts_with("&quot;") || rest.starts_with("&apos;") ||
+                    rest.starts_with("&#");
+                if(!entity) { repaired+="&amp;"; continue; }
+            }
+            repaired+=c;
+        }
+        if(repaired==bytes) throw;
+        return xml::Parse(repaired);
+    }
+}
 std::wstring SearchHex(std::wstring_view text) {
     // 60352A6F -> 603529F6(0x02000100) -> 60352BC0.
     constexpr std::wstring_view pairs = L"()[]{}<>（）［］｛｝《》【】“”";
@@ -171,9 +216,20 @@ std::wstring SearchHex(std::wstring_view text) {
     }
     return encoded;
 }
+std::wstring ProtocolBase(std::wstring_view base) {
+    std::wstring result(base);
+    if(const auto scheme=result.find(L"://");scheme!=result.npos) {
+        const auto path=result.find_first_of(L"/?",scheme+3);
+        // Old WinHttpCrackUrl rejects host:port?query with no path separator.
+        // The actual wire request has always used '/' for an empty path.
+        if(path==result.npos) result+=L'/';
+        else if(result[path]==L'?') result.insert(path,1,L'/');
+    }
+    return result;
+}
 }
 std::wstring LyricSearchUrl(std::wstring_view base, std::wstring_view artist, std::wstring_view title) {
-    return std::wstring(base) + L"?sh?Artist=" + SearchHex(artist) + L"&Title=" + SearchHex(title) + L"&Flags=0&";
+    return ProtocolBase(base) + L"?sh?Artist=" + SearchHex(artist) + L"&Title=" + SearchHex(title) + L"&Flags=0&";
 }
 std::int32_t LyricDownloadCode(std::uint32_t id, std::string_view bytes) {
     // 603531E7: explicit 32-bit wrapping; plain char is SIGNED on x86.
@@ -191,14 +247,15 @@ std::int32_t LyricDownloadCode(std::uint32_t id, std::string_view bytes) {
 }
 std::wstring LyricDownloadUrl(std::wstring_view base, const HttpLyricResult& result) {
     const auto bytes = core::WideToUtf8(result.artist + result.title);
-    return std::wstring(base) + L"?dl?Id=" + std::to_wstring(result.id) + L"&Code=" +
+    return ProtocolBase(base) + L"?dl?Id=" + std::to_wstring(result.id) + L"&Code=" +
         std::to_wstring(LyricDownloadCode(static_cast<std::uint32_t>(result.id), bytes)) + L"&";
 }
 std::vector<HttpLyricResult> SearchHttpLyrics(const std::wstring& base, std::wstring_view artist,
     std::wstring_view title, const settings::NetworkSettings& network, const std::function<bool()>& canceled) {
     xml::Apartment apartment;
-    auto response = Fetch(LyricSearchUrl(base, artist, title), network, canceled);
-    auto doc = xml::Parse(response.body);
+    auto session=std::make_shared<LegacyLyricSession>();
+    auto response = FetchLyric(LyricSearchUrl(base, artist, title), network, canceled, session);
+    auto doc = ParseSearchResult(response.body);
     xml::ComPtr<IXMLDOMNode> result_node; doc->selectSingleNode(_bstr_t(L"/result"), &result_node);
     if (!result_node) throw std::runtime_error("Not a lyric search result");
     xml::ComPtr<IXMLDOMElement> root; doc->get_documentElement(&root);
@@ -211,7 +268,7 @@ std::vector<HttpLyricResult> SearchHttpLyrics(const std::wstring& base, std::wst
         const auto id = core::WideToUtf8(xml::Attribute(node.Get(), L"id"));
         std::int32_t value{}; const auto parse = std::from_chars(id.data(), id.data()+id.size(), value);
         if (parse.ec != std::errc{} || parse.ptr != id.data()+id.size()) continue;
-        results.push_back({value, xml::Attribute(node.Get(), L"artist"), xml::Attribute(node.Get(), L"title")});
+        results.push_back({value, xml::Attribute(node.Get(), L"artist"), xml::Attribute(node.Get(), L"title"), session});
     }
     if (results.empty()) {
         const auto error = xml::Attribute(root.Get(), L"errmsg");
@@ -221,7 +278,8 @@ std::vector<HttpLyricResult> SearchHttpLyrics(const std::wstring& base, std::wst
 }
 HttpLyricDownload DownloadHttpLyric(const std::wstring& base, const HttpLyricResult& result,
     const settings::NetworkSettings& network, const std::function<bool()>& canceled) {
-    auto response = Fetch(LyricDownloadUrl(base, result), network, canceled);
+    auto response = FetchLyric(LyricDownloadUrl(base, result), network, canceled,
+        result.session ? result.session : std::make_shared<LegacyLyricSession>());
     auto body = std::string_view(response.body);
     if (body.starts_with("\xef\xbb\xbf")) body.remove_prefix(3);
     const auto first = body.find_first_not_of(" \t\r\n");

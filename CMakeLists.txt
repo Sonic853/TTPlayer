@@ -104,6 +104,7 @@ add_library(ttplayer_core
   src/lyrics/online_search.cpp
   src/lyrics/service_catalog.cpp
   src/lyrics/lyric_http.cpp
+  src/lyrics/legacy_lyric_http.cpp
   src/lyrics/https_provider.cpp
   src/playlist/playlist.cpp
   src/playlist/playback_order.cpp
@@ -173,7 +174,7 @@ target_link_libraries(ttplayer_core PUBLIC
   ttplayer_wtl_headers
   advapi32 winmm ole32 oleaut32 comsuppw uuid strmiids msimg32 shell32 shlwapi comctl32 comdlg32
   windowscodecs gdiplus dsound setupapi dwmapi uxtheme
-  mfplat mfreadwrite mfuuid propsys winhttp
+  mfplat mfreadwrite mfuuid propsys winhttp wininet
 )
 
 # WinRT is compiled into the universal player. YY-Thunks resolves its entry

@@ -1,5 +1,7 @@
 # 在线歌词搜索恢复（5.7.9）
 
+> 2026-10-09：补齐 NCAB 的搜索 Cookie、无 HTTP 响应头下载、裸 `&` 结果解析、旧系统空 URL 路径和下载失败重试。详见 [NCAB 兼容修复](LYRIC_NCAB_COMPATIBILITY.md)。
+
 > 2026-09-21 补充：相关功能已在 XP SP3 / Win7 SP1 虚拟机中执行回归。覆盖项、修复和未覆盖边界见 [虚拟机验证记录](XP_WIN7_VM_VALIDATION.md)。下文保留原日期的历史结论。
 
 2026-09-13。本次依据根目录 `TTPlayer.exe` 的伪代码及

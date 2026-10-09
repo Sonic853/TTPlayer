@@ -3,9 +3,16 @@
 #include <functional>
 #include <cstdint>
 #include <string_view>
+#include <memory>
 
 namespace ttplayer::lyrics {
-struct HttpLyricResult { std::int32_t id{}; std::wstring artist, title; };
+class LegacyLyricSession;
+struct HttpLyricResult {
+    std::int32_t id{};
+    std::wstring artist, title;
+    // Search cookies belong to this result set, never the browser/global jar.
+    std::shared_ptr<LegacyLyricSession> session;
+};
 struct HttpLyricDownload { std::wstring text, extra_title, extra_url; };
 std::wstring LyricSearchUrl(std::wstring_view base, std::wstring_view artist, std::wstring_view title);
 std::int32_t LyricDownloadCode(std::uint32_t id, std::string_view utf8_artist_title);

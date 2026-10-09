@@ -1,5 +1,7 @@
 # 歌词服务器编辑与 HTTPS
 
+> 2026-10-09：明文 HTTP 歌词请求改用原版 WinINet 兼容路径；HTTPS 保留既有实现。NCAB 的 Cookie、无头下载及结果解析修复见 [NCAB 兼容修复](LYRIC_NCAB_COMPATIBILITY.md)。下文保留原恢复记录。
+
 2026-09-14。在 5.7.9 歌词搜索恢复的基础上增加用户要求的列表编辑和 HTTPS，
 这是有意扩展，不是声称旧 DLL 原本支持 HTTPS 或无限服务数量。
 

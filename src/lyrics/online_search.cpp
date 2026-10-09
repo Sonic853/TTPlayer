@@ -64,7 +64,8 @@ public:
     HRESULT STDMETHODCALLTYPE OnError(LPCWSTR text) override {
         return Update([&](SearchSnapshot& s) {
             if (s.phase == Phase::downloaded) return;
-            s.error = text ? text : L""; s.phase = Phase::failed;
+            s.error = text ? text : L"";
+            s.phase = s.phase == Phase::downloading ? Phase::download_failed : Phase::failed;
         });
     }
     HRESULT STDMETHODCALLTYPE OnServer(LPCWSTR name) override {
@@ -150,7 +151,7 @@ void Run(const std::shared_ptr<OnlineSearch::State>& state,
                     lock.lock();
                     continue;
                 }
-                if (phase != Phase::results && phase != Phase::downloaded &&
+                if (phase != Phase::results && phase != Phase::downloaded && phase != Phase::download_failed &&
                     std::chrono::steady_clock::now() >= deadline) {
                     state->snapshot.phase = Phase::failed;
                     ++state->snapshot.revision;
@@ -203,7 +204,18 @@ OnlineSearch::OnlineSearch(LyricService service, size_t index, settings::Network
                 if (state->canceled) break;
                 const int selected = std::exchange(state->download, -1);
                 lock.unlock();
-                const auto downloaded = DownloadHttpLyric(service.url, results.at(selected), network, canceled);
+                HttpLyricDownload downloaded;
+                try { downloaded = DownloadHttpLyric(service.url, results.at(selected), network, canceled); }
+                catch (const std::exception& e) {
+                    lock.lock();
+                    if (state->canceled) break;
+                    // 0043B8A3 returns to idle and retains the candidate list.
+                    // A failed source must not kill retries on the other rows.
+                    state->snapshot.phase = Phase::download_failed;
+                    state->snapshot.error = core::Utf8ToWide(e.what());
+                    ++state->snapshot.revision;
+                    continue;
+                }
                 lock.lock();
                 if (state->canceled) break;
                 state->snapshot.text = downloaded.text;
@@ -235,10 +247,11 @@ SearchSnapshot OnlineSearch::Snapshot() const {
 bool OnlineSearch::Download(int index) {
     std::lock_guard lock(state_->mutex);
     if (state_->canceled || (state_->snapshot.phase != Phase::results &&
-        state_->snapshot.phase != Phase::downloaded) || index < 0 ||
+        state_->snapshot.phase != Phase::downloaded && state_->snapshot.phase != Phase::download_failed) || index < 0 ||
         static_cast<size_t>(index) >= state_->snapshot.results.size()) return false;
     state_->download = index;
     state_->snapshot.text.clear();
+    state_->snapshot.error.clear();
     state_->snapshot.phase = Phase::downloading;
     ++state_->snapshot.revision;
     state_->changed.notify_all();
