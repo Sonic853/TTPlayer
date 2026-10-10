@@ -1,5 +1,7 @@
 #include <ttpcomm/base64.h>
 #include "ttplayer/settings/settings.h"
+#include "ttplayer/core/build_version.h"
+#include "ttplayer/settings/personalization.h"
 #include "ttplayer/skin/skin_paths.h"
 
 #include <algorithm>
@@ -540,6 +542,9 @@ std::filesystem::path SettingsBackupPath(const std::filesystem::path& path) {
 // copy are never truncated, even when MSXML fails midway through serialization.
 SaveResult CommitSettingsDocument(IXMLDOMDocument* document,
                                   const std::filesystem::path& path) {
+    ComPtr<IXMLDOMElement> root;
+    if (SUCCEEDED(document->get_documentElement(root.GetAddressOf())) && root)
+        SetAttribute(root.Get(), L"version", build::Version());
     static std::atomic_ulong serial{};
     auto temporary = path;
     temporary += L".writing." + std::to_wstring(GetCurrentProcessId()) + L"." +
@@ -631,7 +636,7 @@ bool OpenSettingsDocument(const std::filesystem::path& path,
            !root) {
             return false;
         }
-        SetAttribute(root.Get(),L"version",L"5.7.9");
+        SetAttribute(root.Get(),L"version",build::Version());
         ComPtr<IXMLDOMNode> appended;
         document->appendChild(root.Get(),appended.GetAddressOf());
     }
@@ -957,6 +962,7 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
             n,L"FirstRun_552",s.player.first_run_552 ? 1 : 0)!=0;
         s.player.user_word=StringAttr(n,L"UserWord");
         s.player.user_word_md5=StringAttr(n,L"UserWordMD5");
+        s.player.personal_name = DecodeLegacyPersonalName(s.player.user_word, s.player.user_word_md5);
     }
     if (auto node=SelectOwned(doc,L"/ttplayer/General")) {
         auto* const n=node.Get();

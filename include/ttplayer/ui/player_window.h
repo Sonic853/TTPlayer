@@ -802,6 +802,7 @@ private:
     void AdvanceAfterNaturalEnd();
     void Stop();
     [[nodiscard]] std::wstring DefaultPlayerTitle() const;
+    [[nodiscard]] std::wstring PersonalEditionText() const;
     [[nodiscard]] std::wstring LyricFallbackText(bool desktop = false) const;
     void ShowAudioError(const std::filesystem::path& path);
     void ClearAudioError();
@@ -1034,6 +1035,7 @@ private:
     audio::PlaybackState slider_status_state_{audio::PlaybackState::stopped};
     ULONGLONG volume_status_deadline_{};
     std::wstring window_caption_source_;
+    std::wstring personal_name_applied_;
     bool window_caption_scrolling_{};
     std::vector<std::wstring> info_items_;
     size_t info_item_index_{};

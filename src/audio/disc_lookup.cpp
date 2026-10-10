@@ -1,7 +1,7 @@
 #include "ttplayer/audio/disc_lookup.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/net/http.h"
-#include "ttplayer/build_date.h"
+#include "ttplayer/core/build_version.h"
 #include "ttplayer/platform/optional_windows_api.h"
 #include "../update/json.h"
 #include <algorithm>
@@ -49,7 +49,7 @@ std::string Fetch(const std::wstring& url,const settings::NetworkSettings& netwo
     for(unsigned attempt=0;attempt<3;++attempt) {
         while(Clock::now()<next){Guard(cancel);std::this_thread::sleep_for(std::chrono::milliseconds(25));}
         Guard(cancel);next=Clock::now()+std::chrono::milliseconds(1100);
-        const auto agent="TTPlayerRebuild/"+core::WideToUtf8(build::kCompletionDate)+" (https://github.com/Sonic853/TTPlayer)";
+        const auto agent=std::string("TTPlayerRebuild/")+build::VersionUtf8()+" (https://github.com/Sonic853/TTPlayer)";
         auto response=net::GetHttps(url,agent,network,cancel);Guard(cancel);
         if(response.status==429 || response.status==503) {
             unsigned seconds=2U<<attempt;

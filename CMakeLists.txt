@@ -49,8 +49,10 @@ add_custom_target(ttplayer_file_version
           -File "${CMAKE_CURRENT_SOURCE_DIR}/cmake/write_version.ps1"
           -Template "${CMAKE_CURRENT_SOURCE_DIR}/src/app/version.rc.in"
           -OutputPath "${TTPLAYER_GENERATED_INCLUDE_DIR}/version.rc"
+          -HeaderPath "${TTPLAYER_GENERATED_INCLUDE_DIR}/ttplayer/build_version.h"
           ${_player_version_args}
   BYPRODUCTS "${TTPLAYER_GENERATED_INCLUDE_DIR}/version.rc"
+             "${TTPLAYER_GENERATED_INCLUDE_DIR}/ttplayer/build_version.h"
   COMMENT "Updating EXE author, description and version"
   VERBATIM
 )
@@ -98,6 +100,7 @@ add_library(ttplayer_core
   src/audio/plugin_registry.cpp
   src/audio/dfx_registry_helper.cpp
   src/core/text.cpp
+  src/core/build_version.cpp
   src/integrations/discord_presence.cpp
   src/integrations/discord_track_presence.cpp
   src/lyrics/lrc_parser.cpp
@@ -114,6 +117,7 @@ add_library(ttplayer_core
   src/plugins/nero_config_layout.cpp
   src/settings/file_association.cpp
   src/settings/settings.cpp
+  src/settings/personalization.cpp
   src/settings/runtime_settings.cpp
   src/skin/default_colors.cpp
   src/skin/skin.cpp
@@ -166,7 +170,7 @@ target_include_directories(ttplayer_core
   PUBLIC include third_party/ttpcomm-sdk/include
   PRIVATE "${TTPLAYER_GENERATED_INCLUDE_DIR}"
 )
-add_dependencies(ttplayer_core ttplayer_build_date)
+add_dependencies(ttplayer_core ttplayer_build_date ttplayer_file_version)
 target_compile_definitions(ttplayer_core PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(ttplayer_core PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_core PUBLIC

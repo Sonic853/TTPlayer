@@ -17,7 +17,9 @@
 #include "../app/resource_ids.h"
 #include "ttplayer/app/worker_process.h"
 #include "ttplayer/build_date.h"
+#include "ttplayer/core/build_version.h"
 #include "ttplayer/settings/file_association.h"
+#include "ttplayer/settings/personalization.h"
 #include "ttplayer/ui/player_runtime_policy.h"
 
 #include <algorithm>
@@ -79,6 +81,7 @@ constexpr int kOptionsNavigation = 0xe910;
 constexpr int kOptionsHeader = 0xe911;
 constexpr int kOptionsRelated = 0xe912;
 constexpr int kOptionsDiscordLyrics = 0xe913;
+constexpr int kOptionsDedication = 0xe930;
 constexpr int kOptionsExtensionCorrection = 0xe92a;
 constexpr int kOptionsMinimizeToTrayLabel = 0xe92b;
 constexpr int kOptionsMinimizeToTray = 0xe92c;
@@ -827,6 +830,24 @@ void DrawAboutText(const DRAWITEMSTRUCT& item, HWND dialog,
         SetTextColor(item.hDC, RGB(0, 0, 128));
         DrawTextW(item.hDC, text.data(), static_cast<int>(text.size()),
                   &bounds, flags);
+        const auto dedication = GetText(dialog, kOptionsDedication);
+        if (!dedication.empty()) {
+            SIZE extent{};
+            GetTextExtentPoint32W(item.hDC, text.data(), static_cast<int>(text.size()), &extent);
+            RECT client{}; GetClientRect(dialog, &client);
+            bounds.left += extent.cx + 8;
+            bounds.right = client.right - 12;
+            font.lfHeight = 12;
+            font.lfWeight = FW_NORMAL;
+            const HFONT small_font = CreateFontIndirectW(&font);
+            if (small_font) {
+                const auto previous = SelectObject(item.hDC, small_font);
+                if (bounds.right > bounds.left)
+                    DrawTextW(item.hDC, dedication.c_str(), -1, &bounds, flags | DT_END_ELLIPSIS);
+                SelectObject(item.hDC, previous);
+                DeleteObject(small_font);
+            }
+        }
     } else {
         SetTextColor(item.hDC, RGB(32, 32, 32));
         OffsetRect(&bounds, 1, 1);
@@ -2749,7 +2770,7 @@ void DrawPreviewSlider(HDC dc, const skin::SkinElement& element, COLORREF key) {
 }
 
 HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source,
-                               HMODULE resources, HICON fallback_icon) {
+                               HMODULE resources, HICON fallback_icon, std::wstring_view idle_caption) {
     if (!source.Valid()) return nullptr;
     BITMAP background{};
     if (!GetObjectW(source.Background(), sizeof(background), &background) ||
@@ -2844,12 +2865,13 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source,
         }
     }
     // 00467B9B creates these child windows with their initial strings.
-    // Status is empty; info is the program/version string, NOT the selected
-    // track or skin name. Both strings come from this executable's ttpres.
+    // Status is empty; info uses the idle program/version caption. Keep the
+    // resource program name and the same build tag as the live main window.
     auto caption = LoadResourceText(resources, 0x80);
-    const auto version = LoadResourceText(resources, 0x8299);
-    if (!caption.empty() && !version.empty()) caption += L" ";
-    caption += version;
+    if (caption.empty()) caption = L"TTPlayer";
+    caption += L" ";
+    caption += build::Version();
+    if (!idle_caption.empty()) caption = idle_caption;
     const auto channel = LoadResourceText(resources, 0x81b7);
     for (const auto& element : source.Elements()) {
         if (IsSuppressedSkinControl(element.name)) continue;
@@ -3012,8 +3034,8 @@ bool detail::InstallOptionsBitmapButton(HWND dialog, int control, HMODULE resour
 }
 
 HBITMAP detail::RenderSkinPreview(const skin::LegacySkin& source,
-                                HMODULE resources, HICON fallback_icon) {
-    return RenderLegacySkinPreview(source, resources, fallback_icon);
+                                HMODULE resources, HICON fallback_icon, std::wstring_view idle_caption) {
+    return RenderLegacySkinPreview(source, resources, fallback_icon, idle_caption);
 }
 
 bool detail::ShowLegacyPresetColor(
@@ -4500,6 +4522,12 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         }, 0);
         SetDlgItemTextW(dialog, 1009, ResourceText(0x80).c_str());
         SetDlgItemTextW(dialog, 1020, i18n::Literal(L"社区版"));
+        if (!GetDlgItem(dialog, kOptionsDedication))
+            CreateWindowExW(0, WC_STATICW, L"", WS_CHILD, 0, 0, 0, 0, dialog,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOptionsDedication)), instance_, nullptr);
+        const auto dedication = settings_.player.personal_name.empty() ? std::wstring{} :
+            i18n::Text(L"献给") + L" " + settings_.player.personal_name;
+        SetDlgItemTextW(dialog, kOptionsDedication, dedication.c_str());
         // The resource placeholders are intentionally hidden.  AboutPage's
         // window paint hook uses their rectangles just like FUN_0049227D,
         // so the logo/icon are part of the page rather than child controls.
@@ -4511,7 +4539,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
     }
     case 250: {
         const auto& value = settings_.general;
-        // Keep the resource controls alive across the three General tabs.
+        // Keep the resource controls alive across the four General tabs.
         // All coordinates use the loaded resource's font and dialog units.
         if (!GetDlgItem(dialog, kOptionsDiscordLyrics)) {
             const bool language_available = !FindRuntimePath(L"AddIn/ttp_i18n.dll").empty();
@@ -4536,24 +4564,30 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             const HWND shutdown_time = GetDlgItem(dialog, 2183);
             SetWindowPos(shutdown_time, GetDlgItem(dialog, 2182), 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            // Continue the resource's 13-DLU row cadence below shutdown.
-            place(discord, {13, 122, 267, 132}, shutdown_time);
+            const HWND name_label = add(WC_STATICW, i18n::Literal(L"个人定制名称"),
+                kGeneralPersonalNameLabel, 0, {13, 22, 83, 34}, shutdown_time);
+            const HWND name = add(WC_EDITW, L"", kGeneralPersonalName,
+                WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, {85, 18, 267, 32}, name_label);
+            SendMessageW(name, EM_SETLIMITTEXT, settings::kPersonalNameLimit, 0);
+            const HWND notice = add(WC_STATICW, i18n::Literal(L"留空时不显示个人定制文字。"),
+                kGeneralPersonalNameNotice, 0, {13, 38, 267, 50}, name);
+            place(discord, {13, 59, 267, 69}, notice);
             const HWND lyrics = add(WC_BUTTONW, i18n::Literal(L"向 Discord 发送歌词"),
-                kOptionsDiscordLyrics, WS_TABSTOP | BS_AUTOCHECKBOX, {13, 135, 267, 145}, discord);
+                kOptionsDiscordLyrics, WS_TABSTOP | BS_AUTOCHECKBOX, {13, 72, 267, 82}, discord);
             const HWND extension = add(WC_BUTTONW, i18n::Literal(L"识别到错误后缀时提示更改"),
                 kOptionsExtensionCorrection, WS_TABSTOP | BS_AUTOCHECKBOX,
-                {13, 148, 267, 158}, lyrics);
+                {13, 122, 267, 132}, lyrics);
             const HWND tray_label = add(WC_STATICW, i18n::Literal(L"最小化到系统栏"),
-                kOptionsMinimizeToTrayLabel, 0, {13, 165, 83, 177}, extension);
+                kOptionsMinimizeToTrayLabel, 0, {13, 139, 83, 151}, extension);
             const HWND tray_mode = add(WC_COMBOBOXW, L"", kOptionsMinimizeToTray,
                 WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
-                {85, 161, 197, 225}, tray_label);
+                {85, 135, 197, 199}, tray_label);
             if (language_available) {
                 const HWND label = add(WC_STATICW, i18n::Literal(L"界面语言"), kOptionsLanguageLabel,
-                    0, {13, 184, 83, 196}, tray_mode);
+                    0, {13, 158, 83, 170}, tray_mode);
                 const HWND languages = add(WC_COMBOBOXW, L"", kOptionsLanguage,
                     WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
-                    {85, 180, 197, 300}, label);
+                    {85, 154, 197, 274}, label);
                 std::vector<std::wstring> choices{L"auto", L"source"};
                 const auto available = i18n::Languages(PlayerRuntimeDirectory());
                 for (const auto& locale : available)
@@ -4579,7 +4613,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                     if (locale == selected) SendMessageW(languages, CB_SETCURSEL, item, 0);
                 }
                 add(WC_STATICW, i18n::Literal(L"界面语言将在下次启动播放器时生效。"),
-                    kOptionsLanguageNotice, 0, {13, 196, 267, 208}, languages);
+                    kOptionsLanguageNotice, 0, {13, 170, 267, 182}, languages);
             }
         }
         SetChecked(dialog, 2088, value.startup_minimize);
@@ -4593,6 +4627,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetChecked(dialog, 2153, value.menu_bar_playlist);
         SetChecked(dialog, 2189, value.scroll_title);
         SetChecked(dialog, 2188, value.send_title_to_msn);
+        SetDlgItemTextW(dialog, kGeneralPersonalName, settings_.player.personal_name.c_str());
         SetChecked(dialog, kOptionsDiscordLyrics, value.discord_sync_lyrics);
         SetChecked(dialog, kOptionsExtensionCorrection, value.prompt_extension_correction);
         EnableWindow(GetDlgItem(dialog, kOptionsDiscordLyrics),
@@ -5489,6 +5524,8 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         value.menu_bar_playlist = IsChecked(dialog, 2153);
         value.scroll_title = IsChecked(dialog, 2189);
         value.send_title_to_msn = IsChecked(dialog, 2188);
+        if (GetDlgItem(dialog, kGeneralPersonalName))
+            settings::SetPersonalName(settings_.player, GetText(dialog, kGeneralPersonalName));
         if (GetDlgItem(dialog, kOptionsDiscordLyrics))
             value.discord_sync_lyrics = IsChecked(dialog, kOptionsDiscordLyrics);
         if (GetDlgItem(dialog, kOptionsExtensionCorrection))
@@ -5793,6 +5830,12 @@ bool PlayerWindow::CommitOptionsControl(
         case 2153: value.menu_bar_playlist = IsChecked(dialog, 2153); break;
         case 2189: value.scroll_title = IsChecked(dialog, 2189); break;
         case 2188: value.send_title_to_msn = IsChecked(dialog, 2188); break;
+        case kGeneralPersonalName:
+            SetDlgItemTextW(dialog, kGeneralPersonalNameNotice,
+                settings::SetPersonalName(settings_.player, GetText(dialog, kGeneralPersonalName))
+                    ? i18n::Literal(L"留空时不显示个人定制文字。")
+                    : i18n::Literal(L"名称含有原版编码无法保存的字符，请更换。"));
+            break;
         case kOptionsDiscordLyrics:
             value.discord_sync_lyrics = IsChecked(dialog, kOptionsDiscordLyrics);
             break;
@@ -6300,6 +6343,21 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
             static_cast<float>(settings_.player.volume) / 100.0F);
     }
     if (all || template_id == 250) {
+        const auto dedication = settings_.player.personal_name.empty() ? std::wstring{} :
+            i18n::Text(L"献给") + L" " + settings_.player.personal_name;
+        const HWND about = options_pages_[kPageAbout];
+        if (about && dedication != GetText(about, kOptionsDedication)) {
+            SetDlgItemTextW(about, kOptionsDedication, dedication.c_str());
+            InvalidateRect(about, nullptr, TRUE);
+        }
+        if (personal_name_applied_ != settings_.player.personal_name) {
+            personal_name_applied_ = settings_.player.personal_name;
+            if (window_) {
+                RefreshPlaybackUi();
+                if (lyric_control_) SetWindowTextW(lyric_control_, LyricFallbackText().c_str());
+            }
+            if (options_pages_[kPageSkin]) UpdateOptionsSkinDetails(options_pages_[kPageSkin]);
+        }
         discord_presence_.Configure(settings_.general.send_title_to_msn,
                                     settings_.general.discord_application_id);
         UpdateTrayIcon();
@@ -6765,7 +6823,7 @@ void PlayerWindow::UpdateOptionsSkinDetails(HWND dialog) {
             auto preview = skin::LegacySkin::Load(cache);
             if (preview.Valid()) {
                 options_skin_preview_ = RenderSkinPreview(preview,
-                    ResourceModule(), window_icon_small_);
+                    ResourceModule(), window_icon_small_, DefaultPlayerTitle());
             }
         } catch (const std::exception&) {
             options_skin_preview_ = nullptr;
@@ -7016,6 +7074,14 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
             }
         }
         if (template_id == 250) {
+            if (control == kGeneralPersonalName && notification == EN_KILLFOCUS &&
+                !settings::SetPersonalName(settings_.player, GetText(dialog, kGeneralPersonalName))) {
+                SetDlgItemTextW(dialog, kGeneralPersonalName, settings_.player.personal_name.c_str());
+                SetDlgItemTextW(dialog, kGeneralPersonalNameNotice,
+                    i18n::Literal(L"名称无法按原版编码保存，已保留先前名称。"));
+                FlushDeferredOptionsRuntime(template_id);
+                return TRUE;
+            }
             if (control == 2188)
                 EnableWindow(GetDlgItem(dialog, kOptionsDiscordLyrics),
                              IsChecked(dialog, 2188));

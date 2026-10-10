@@ -97,6 +97,7 @@ struct PlayerSettings {
     bool first_run_552{true};
     std::wstring user_word;
     std::wstring user_word_md5;
+    std::wstring personal_name; // Decoded/validated cache of UserWord + UserWordMD5; not an XML field.
 };
 struct PlaybackSettings {
     bool auto_play{true};

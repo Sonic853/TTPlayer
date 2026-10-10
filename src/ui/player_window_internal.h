@@ -490,7 +490,8 @@ HRGN CreateSkinWindowRegion(const skin::SkinBitmap& bitmap, RECT resize_rect,
                            int width, int height, bool tile, COLORREF transparent);
 // Independent, initial-state main-window preview (0049A6EF), never live state.
 HBITMAP RenderSkinPreview(const skin::LegacySkin& source,
-                          HMODULE resources = nullptr, HICON fallback_icon = nullptr);
+                          HMODULE resources = nullptr, HICON fallback_icon = nullptr,
+                          std::wstring_view idle_caption = {});
 RECT ResolveAlignedRect(RECT bounds, unsigned int alignment, SIZE native,
                         int width, int height, SIZE image_size = {});
 void DrawElementFrame(HDC target, const skin::SkinElement& element, RECT bounds,

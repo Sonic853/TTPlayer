@@ -1,4 +1,5 @@
 #include "ttplayer/i18n/i18n.h"
+#include "ttplayer/core/build_version.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_window.h"
@@ -5864,6 +5865,7 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
         media_library_playback_.Clear();
         associated_lyric_path_.clear();
         ClearLyrics();
+        RefreshPlaybackUi();
         break;
     case kCmdVolumeUp:
         AdjustPlaybackVolume(5);
@@ -6633,6 +6635,18 @@ void PlayerWindow::RefreshPlaylist() {
 }
 
 void PlayerWindow::RefreshPlaybackUi() {
+    // 0045CA57 resets both the native caption and the skin info when the
+    // retained track is released. Stop alone keeps that track/title intact.
+    if (!PlaybackTrackForUi() && playback_error_text_.empty()) {
+        const auto title = DefaultPlayerTitle();
+        if (display_title_ != title) {
+            display_title_ = title;
+            display_artist_.clear();
+            RebuildSkinInfoItems(false);
+            ResetSkinInfoScroll();
+            if (title_) SetWindowTextW(title_, display_title_.c_str());
+        }
+    }
     // The original keeps wheel feedback until a slider commit or a playback
     // status update (0045BF4B / 0045C0C6 / 0045C198 / 00461F87). The extra
     // volume timeout is handled separately; repainting must not restart it.
@@ -6718,9 +6732,8 @@ std::wstring PlayerWindow::MainWindowCaptionText() const {
     if (!track) return DefaultPlayerTitle();
     // 0045CA57 uses CPlayItem's formatted title (004AE7FD), before the
     // playlist row number is added for the skin's scrolling info control.
-    // The final space precedes the original's optional distribution label;
-    // that label is empty in the standard player, including when stopped.
-    return PlaylistDisplayText(*track) + L" - " + ResourceText(0x80) + L" ";
+    // 0045CA57 appends the optional personal edition, including when stopped.
+    return PlaylistDisplayText(*track) + L" - " + ResourceText(0x80) + L" " + PersonalEditionText();
 }
 
 void PlayerWindow::UpdateMainWindowCaption(bool force_reset) {
@@ -7559,10 +7572,16 @@ void PlayerWindow::Stop() {
 
 std::wstring PlayerWindow::DefaultPlayerTitle() const {
     auto title = ResourceText(0x80);
-    const auto version = ResourceText(0x8299);
-    if (!title.empty() && !version.empty()) title += L" ";
-    title += version;
-    return title.empty() ? L"TTPlayer" : title;
+    if (title.empty()) title = L"TTPlayer";
+    title += L" " + std::wstring(build::Version());
+    const auto personal = PersonalEditionText();
+    if (!personal.empty()) title += L" " + personal;
+    return title;
+}
+
+std::wstring PlayerWindow::PersonalEditionText() const {
+    if (settings_.player.personal_name.empty()) return {};
+    return settings_.player.personal_name + L" " + i18n::Text(L"个人版");
 }
 
 std::wstring PlayerWindow::LyricFallbackText(bool desktop) const {

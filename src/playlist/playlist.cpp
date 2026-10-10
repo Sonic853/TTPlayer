@@ -1,6 +1,7 @@
 #include "ttplayer/playlist/playlist.h"
 #include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/core/text.h"
+#include "ttplayer/core/build_version.h"
 
 #include <algorithm>
 #include <map>
@@ -1347,7 +1348,8 @@ void Playlist::SaveXml(const std::filesystem::path& path,
     output << "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
            << "<ttplaylist title=\""
            << EscapeXmlAttribute(core::WideToUtf8(title_))
-           << "\" version=\"4\" generator=\"TTPlayer -- 5.7.9\">\r\n"
+           << "\" version=\"4\" generator=\"TTPlayer -- "
+           << build::VersionUtf8() << "\">\r\n"
            << "\t<format tagtitle=\""
            << EscapeXmlAttribute(core::WideToUtf8(tag_title_format))
            << "\" deftitle=\""
