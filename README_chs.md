@@ -26,6 +26,7 @@
 20. 增加 APE 编码的额外拓展 [TTPlayerAPE](https://github.com/TTPlayerRebuild/TTPlayerAPE)
 21. 增加 FLAC 编码的额外拓展 [TTPlayerFLAC](https://github.com/TTPlayerRebuild/TTPlayerFLAC)
 22. 重写 Enc 编码并更新编码库 [TTPlayerEnc](https://github.com/TTPlayerRebuild/TTPlayerEnc)
+23. 重写歌词服务器插件，使原版支持超过4个服务器的列表 [TTPlayerLrcsh](https://github.com/TTPlayerRebuild/TTPlayerLrcsh)
 
 ## 构建
 
