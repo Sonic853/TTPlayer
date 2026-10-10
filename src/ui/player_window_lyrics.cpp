@@ -1225,7 +1225,7 @@ void PlayerWindow::CreateLyricControls() {
     // document, its selection/undo history and the full-screen HWND.
     if (!lyric_control_ || !IsWindow(lyric_control_))
         lyric_control_ = CreateWindowExW(0, kLyricControlClass, LyricFallbackText().c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, lyric_window_,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP, 0, 0, 0, 0, lyric_window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLyricControlId)),
             instance_, this);
     UpdateLyricScrollTimer();

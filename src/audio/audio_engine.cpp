@@ -173,35 +173,6 @@ std::wstring HResultMessage(std::wstring_view operation, HRESULT result) {
     return message;
 }
 
-ComPtr<IStream> MemoryStream(const std::vector<unsigned char>& bytes) {
-    ComPtr<IStream> stream;
-    const SIZE_T allocation_size = std::max<size_t>(bytes.size(), 1);
-    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, allocation_size);
-    if (!memory) return stream;
-    void* destination = GlobalLock(memory);
-    if (!destination) {
-        GlobalFree(memory);
-        return stream;
-    }
-    if (!bytes.empty()) std::memcpy(destination, bytes.data(), bytes.size());
-    GlobalUnlock(memory);
-    IStream* raw{};
-    if (FAILED(CreateStreamOnHGlobal(memory, TRUE, &raw)) || !raw) {
-        GlobalFree(memory);
-        return stream;
-    }
-    stream.Attach(raw);
-    ULARGE_INTEGER exact_size{};
-    exact_size.QuadPart = bytes.size();
-    if (FAILED(stream->SetSize(exact_size))) {
-        stream.Reset();
-        return stream;
-    }
-    LARGE_INTEGER beginning{};
-    if (FAILED(stream->Seek(beginning, STREAM_SEEK_SET, nullptr))) stream.Reset();
-    return stream;
-}
-
 std::wstring CodecNameFromTag(uint32_t tag, const std::filesystem::path&) {
     switch (tag) {
     case WAVE_FORMAT_PCM: return L"PCM";
@@ -247,7 +218,7 @@ public:
             ArchiveMemberPath member;
             if (ParseArchiveMemberPath(path.native(), member)) {
                 try {
-                    archive_stream_ = MemoryStream(ReadArchiveMember(member, ttpcomm_));
+                    archive_stream_.Attach(OpenArchiveMemberStream(member, ttpcomm_));
                     if (!archive_stream_) {
                         result = HRESULT_FROM_WIN32(ERROR_OUTOFMEMORY);
                     } else {
@@ -258,6 +229,8 @@ public:
                         result = platform::MFCreateSourceReaderFromByteStream(
                             archive_byte_stream_.Get(), attributes.Get(), &reader_);
                     }
+                } catch (const ArchiveError& error) {
+                    return Fail(error.Message(), error.Result());
                 } catch (const std::exception&) {
                     result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
                 }
@@ -267,6 +240,10 @@ public:
             }
         }
         if (FAILED(result)) return Fail(L"MFCreateSourceReader", result);
+
+        if (AudioEngine::IsNetworkMediaLocation(path))
+            reader_->GetServiceForStream(MF_SOURCE_READER_MEDIASOURCE,
+                MFNETSOURCE_STATISTICS_SERVICE, IID_PPV_ARGS(&network_statistics_));
 
         reader_->SetStreamSelection(kAllStreams, FALSE);
         result = reader_->SetStreamSelection(kFirstAudioStream, TRUE);
@@ -490,6 +467,24 @@ private:
         return false;
     }
 
+public:
+    int DownloadedPercent() override {
+        if (!network_statistics_) return -1;
+        const ULONGLONG now = GetTickCount64();
+        if (now < next_statistics_tick_) return downloaded_percent_;
+        next_statistics_tick_ = now + 250;
+        const PROPERTYKEY key{MFNETSOURCE_STATISTICS, MFNETSOURCE_DOWNLOADPROGRESS_ID};
+        PROPVARIANT value{};
+        downloaded_percent_ = -1;
+        if (SUCCEEDED(network_statistics_->GetValue(key, &value)) && value.vt == VT_I4 &&
+            value.lVal >= 0 && value.lVal <= 100) downloaded_percent_ = value.lVal;
+        PropVariantClear(&value);
+        return downloaded_percent_;
+    }
+private:
+    ComPtr<IPropertyStore> network_statistics_;
+    ULONGLONG next_statistics_tick_{};
+    int downloaded_percent_{-1};
     ComPtr<IMFSourceReader> reader_;
     ComPtr<IStream> archive_stream_;
     ComPtr<IMFByteStream> archive_byte_stream_;
@@ -532,14 +527,16 @@ public:
         ArchiveMemberPath member;
         if (ParseArchiveMemberPath(path.native(), member)) {
             try {
-                const auto bytes = ReadArchiveMember(member, ttpcomm_);
-                const auto stream = MemoryStream(bytes);
+                ComPtr<IStream> stream;
+                stream.Attach(OpenArchiveMemberStream(member, ttpcomm_));
                 if (!stream) {
                     return Fail(L"CreateStreamOnHGlobal",
                                 HRESULT_FROM_WIN32(ERROR_OUTOFMEMORY));
                 }
                 reader_ = manager_.OpenReader(path, stream.Get(), &result,
                                               &diagnostic);
+            } catch (const ArchiveError& error) {
+                return Fail(error.Message(), error.Result());
             } catch (const std::exception&) {
                 return Fail(L"Archive member reader",
                             HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
@@ -672,11 +669,64 @@ private:
     HRESULT error_result_{E_FAIL};
 };
 
+// Reuse the PCM parser for both files and seekable archive members. XP's
+// Windows Media OpenStream cannot decode every PCM container (including WAV).
+// This adapter keeps the existing parser's read/seek contract without copying
+// a whole archive member into another memory buffer or named extraction file.
+class PcmInputStream {
+public:
+    void Open(const std::filesystem::path& path, HMODULE comm) {
+        ArchiveMemberPath member;
+        if (ParseArchiveMemberPath(path.native(), member))
+            member_.Attach(OpenArchiveMemberStream(member, comm));
+        else file_.open(path, std::ios::binary);
+    }
+    explicit operator bool() const { return member_ ? good_ : static_cast<bool>(file_); }
+    void clear() { if (member_) good_=true; else file_.clear(); }
+    void read(char* bytes, std::streamsize count) {
+        if (!member_) { file_.read(bytes,count); return; }
+        read_=0;
+        if (!good_) return;
+        if (count<0 || static_cast<uint64_t>(count)>ULONG_MAX) { good_=false; return; }
+        ULONG actual{};
+        const HRESULT hr=member_->Read(bytes,static_cast<ULONG>(count),&actual);
+        read_=actual; good_=SUCCEEDED(hr) && actual==static_cast<uint64_t>(count);
+    }
+    std::streamsize gcount() const { return member_ ? read_ : file_.gcount(); }
+    void seekg(std::streamoff offset, std::ios::seekdir direction=std::ios::beg) {
+        if (!member_) { file_.seekg(offset,direction); return; }
+        if (!good_) return;
+        LARGE_INTEGER move{}; move.QuadPart=offset;
+        const DWORD origin=direction==std::ios::beg ? STREAM_SEEK_SET :
+                           direction==std::ios::cur ? STREAM_SEEK_CUR : STREAM_SEEK_END;
+        good_=SUCCEEDED(member_->Seek(move,origin,nullptr));
+    }
+    std::streamoff tellg() {
+        if (!member_) return file_.tellg();
+        if (!good_) return -1;
+        LARGE_INTEGER zero{}; ULARGE_INTEGER position{};
+        good_=SUCCEEDED(member_->Seek(zero,STREAM_SEEK_CUR,&position)) && position.QuadPart<=INT64_MAX;
+        return good_ ? static_cast<std::streamoff>(position.QuadPart) : -1;
+    }
+private:
+    std::ifstream file_;
+    ComPtr<IStream> member_;
+    std::streamsize read_{};
+    bool good_{true};
+};
+
 class PcmFileSource final : public DecodedAudioSource {
 public:
+    explicit PcmFileSource(HMODULE comm) : ttpcomm_(comm) {}
     bool Open(const std::filesystem::path& path,
               const PlaybackOptions&) override {
-        stream_.open(path, std::ios::binary);
+        try { stream_.Open(path,ttpcomm_); }
+        catch (const ArchiveError& error) {
+            error_=error.Message(); error_result_=error.Result(); return false;
+        }
+        catch (const std::exception&) {
+            error_=L"Unable to read audio file"; return false;
+        }
         if (!stream_) {
             error_ = L"Unable to open audio file";
             return false;
@@ -758,6 +808,7 @@ public:
     [[nodiscard]] AudioFormat DisplayFormat() const override { return display_format_; }
     [[nodiscard]] std::chrono::milliseconds Duration() const override { return duration_; }
     [[nodiscard]] std::wstring Error() const override { return error_; }
+    [[nodiscard]] HRESULT ErrorResult() const override { return error_result_; }
 
 private:
     bool OpenWave() {
@@ -975,7 +1026,9 @@ private:
         return static_cast<bool>(stream_);
     }
 
-    std::ifstream stream_;
+    PcmInputStream stream_;
+    HMODULE ttpcomm_{};
+    HRESULT error_result_{E_FAIL};
     WAVEFORMATEX wave_format_{};
     AudioFormat display_format_{};
     std::chrono::milliseconds duration_{};
@@ -1057,9 +1110,9 @@ public:
             if (attempt(std::make_unique<LegacyPluginSource>(*manager_, comm_), false)) return true;
             if (IsTerminalAudioOpenError(result_)) return false;
         }
-        if (!archive && (hint == L".wav" || hint == L".wave" || hint == L".aif" ||
-            hint == L".aiff" || hint == L".aifc" || hint == L".au" || hint == L".snd")) {
-            if (attempt(std::make_unique<PcmFileSource>(), false)) return true;
+        if (hint == L".wav" || hint == L".wave" || hint == L".aif" ||
+            hint == L".aiff" || hint == L".aifc" || hint == L".au" || hint == L".snd") {
+            if (attempt(std::make_unique<PcmFileSource>(comm_), false)) return true;
             if (IsTerminalAudioOpenError(result_)) return false;
         }
         const auto system_source = [&]() -> std::unique_ptr<DecodedAudioSource> {
@@ -2094,6 +2147,7 @@ bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
         SetError(L"The previous audio decoder is still stopping");
         return false;
     }
+    downloaded_percent_ = -1;
     position_ms_ = 0;
     duration_ms_ = 0;
     seek_request_ms_ = -1;
@@ -2441,6 +2495,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             std::vector<std::byte> native;
             const size_t native_request = SourceReadBytes(
                 source_format, wave_format, requested, options.file_buffer_bytes);
+            downloaded_percent_ = source->DownloadedPercent();
             if (!source->Read(native_request, native, decoder_eof)) {
                 if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                 return false;
@@ -2863,6 +2918,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             if (decoded_offset == decoded.size()) {
                 decoded.clear();
                 decoded_offset = 0;
+                downloaded_percent_ = source->DownloadedPercent();
                 if (!source->Read(native_request, decoded, decoder_eof)) {
                     if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                     return false;
@@ -3621,6 +3677,7 @@ void AudioEngine::Stop() {
         // The worker remains joinable and owned.  Play refuses to replace it,
         // while subsequent Stop calls can reap it after the decoder returns.
     }
+    downloaded_percent_ = -1;
     position_ms_ = 0;
     backend_ = Backend::none;
 }

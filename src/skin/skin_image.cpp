@@ -37,7 +37,10 @@ struct SkinImage::Storage {
     std::unique_ptr<Gdiplus::Bitmap> image;
     HBITMAP dib{};
     SIZE size{};
+    struct RegionEntry { COLORREF key; int frames; HRGN region; };
+    std::vector<RegionEntry> regions;
     ~Storage() {
+        for (const auto& entry : regions) DeleteObject(entry.region);
         image.reset(); // GDI+ may lazily read its stream until destruction.
         if (stream) stream->Release();
         if (dib) DeleteObject(dib);
@@ -154,6 +157,102 @@ SkinImage SkinImage::CoverageMask() const {
     if (data->image->GetLastStatus() != Gdiplus::Ok) return result;
     result.storage_ = std::move(data);
     return result;
+}
+
+SkinImage SkinImage::DarkenedBufferFill(COLORREF key) const {
+    // 0045269C only derives fill_image2 from a 24-bit DIB. Keep mask pixels
+    // intact; halving them would turn transparent pink into a visible stripe.
+    BITMAP source{};
+    if (IsGdiPlus() || !GetObjectW(*this, sizeof(source), &source) ||
+        source.bmBitsPixel != 24) return {};
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = source.bmWidth;
+    info.bmiHeader.biHeight = -source.bmHeight;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 24;
+    auto data = std::make_shared<Storage>();
+    data->size = {source.bmWidth, source.bmHeight};
+    BYTE* pixels{};
+    const HDC dc = CreateCompatibleDC(nullptr);
+    data->dib = CreateDIBSection(dc, &info, DIB_RGB_COLORS,
+        reinterpret_cast<void**>(&pixels), nullptr, 0);
+    const int rows = data->dib && pixels ? GetDIBits(dc, *this, 0, source.bmHeight,
+        pixels, &info, DIB_RGB_COLORS) : 0;
+    DeleteDC(dc);
+    if (rows != source.bmHeight) return {};
+    const int stride = (source.bmWidth * 3 + 3) & ~3;
+    for (int y = 0; y < source.bmHeight; ++y) for (int x = 0; x < source.bmWidth; ++x) {
+        BYTE* pixel = pixels + y * stride + x * 3;
+        if (key != CLR_INVALID && RGB(pixel[2], pixel[1], pixel[0]) == key) continue;
+        pixel[0] /= 2; pixel[1] /= 2; pixel[2] /= 2;
+    }
+    SkinImage result;
+    result.storage_ = std::move(data);
+    return result;
+}
+
+HRGN SkinImage::CreateRegion(COLORREF key, int frames) const {
+    const SIZE size = Size();
+    const int width = size.cx / std::max(1, frames);
+    if (!static_cast<HBITMAP>(*this) || width <= 0 || size.cy <= 0) return nullptr;
+    const auto copy = [](HRGN source) {
+        const HRGN result = CreateRectRgn(0, 0, 0, 0);
+        CombineRgn(result, source, nullptr, RGN_COPY);
+        return result;
+    };
+    if (storage_) for (const auto& entry : storage_->regions)
+        if (entry.key == key && entry.frames == frames) return copy(entry.region);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -size.cy;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    DWORD* pixels{};
+    const HDC dc = CreateCompatibleDC(nullptr);
+    const HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS,
+        reinterpret_cast<void**>(&pixels), nullptr, 0);
+    if (!dc || !bitmap || !pixels) {
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+        return nullptr;
+    }
+    const auto old = SelectObject(dc, bitmap);
+    const bool alpha = IsGdiPlus();
+    if (alpha) CoverageMask().Draw(dc, 0, 0, width, size.cy, 0, 0, width, size.cy);
+    else Draw(dc, 0, 0, width, size.cy, 0, 0, width, size.cy);
+    GdiFlush();
+    const DWORD rgb = (GetRValue(key) << 16) | (GetGValue(key) << 8) | GetBValue(key);
+    std::vector<RECT> runs;
+    for (int y = 0; y < size.cy; ++y) {
+        int start = -1;
+        for (int x = 0; x <= width; ++x) {
+            const bool opaque = x < width && (alpha ? (pixels[y * width + x] & 0xffffff) != 0
+                : key == CLR_INVALID || (pixels[y * width + x] & 0xffffff) != rgb);
+            if (opaque && start < 0) start = x;
+            if (!opaque && start >= 0) { runs.push_back({start,y,x,y+1}); start = -1; }
+        }
+    }
+    SelectObject(dc, old);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+    HRGN region{};
+    if (!runs.empty()) {
+        const size_t bytes = sizeof(RGNDATAHEADER) + runs.size() * sizeof(RECT);
+        std::vector<unsigned char> data(bytes);
+        auto* rgn = reinterpret_cast<RGNDATA*>(data.data());
+        rgn->rdh = {sizeof(RGNDATAHEADER), RDH_RECTANGLES, static_cast<DWORD>(runs.size()),
+            static_cast<DWORD>(runs.size() * sizeof(RECT)), {0,0,width,size.cy}};
+        std::memcpy(rgn->Buffer, runs.data(), runs.size() * sizeof(RECT));
+        region = ExtCreateRegion(nullptr, static_cast<DWORD>(bytes), rgn);
+    }
+    if (!region) region = CreateRectRgn(0,0,0,0);
+    if (storage_) {
+        storage_->regions.push_back({key, frames, region});
+        return copy(region);
+    }
+    return region;
 }
 
 bool SkinImage::Draw(HDC dc, int x, int y, int width, int height,

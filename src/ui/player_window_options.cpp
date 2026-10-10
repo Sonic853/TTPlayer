@@ -2873,7 +2873,10 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source,
     caption += build::Version();
     if (!idle_caption.empty()) caption = idle_caption;
     const auto channel = LoadResourceText(resources, 0x81b7);
+    const skin::SkinLayers layers(PlayerSkinLayers(source.Elements(), false, 0,
+        FormatLedTime(std::chrono::milliseconds(0))), source.TransparentColor());
     for (const auto& element : source.Elements()) {
+        const skin::SkinLayerClip clip(target, layers, &element);
         if (IsSuppressedSkinControl(element.name)) continue;
         if (element.name == L"pause") continue;
         if (element.name.starts_with(L"mode_") && element.name != L"mode_single") continue;
@@ -2887,26 +2890,7 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source,
         }
         if (element.name == L"icon") {
             const HICON icon = source.Icon() ? source.Icon() : fallback_icon;
-            ICONINFO info{};
-            if (icon && GetIconInfo(icon, &info)) {
-                BITMAP icon_bitmap{};
-                GetObjectW(info.hbmColor ? info.hbmColor : info.hbmMask, sizeof(icon_bitmap), &icon_bitmap);
-                if (!info.hbmColor) icon_bitmap.bmHeight /= 2;
-                if (info.hbmColor) DeleteObject(info.hbmColor);
-                if (info.hbmMask) DeleteObject(info.hbmMask);
-                // 00415D3D / 0041606F: native icon size, centred in the XML
-                // child client rectangle (Let's Vista has a 16x26 icon slot).
-                const int saved = SaveDC(target);
-                if (saved) {
-                    IntersectClipRect(target, element.bounds.left, element.bounds.top,
-                        element.bounds.right, element.bounds.bottom);
-                    DrawIconEx(target,
-                        element.bounds.left + (element.bounds.right - element.bounds.left - icon_bitmap.bmWidth) / 2,
-                        element.bounds.top + (element.bounds.bottom - element.bounds.top - icon_bitmap.bmHeight) / 2,
-                        icon, icon_bitmap.bmWidth, icon_bitmap.bmHeight, 0, nullptr, DI_NORMAL);
-                    RestoreDC(target, saved);
-                }
-            }
+            DrawSkinIcon(target, icon, element.bounds);
             continue;
         }
         if (element.name == L"progress" || element.name == L"volume") {

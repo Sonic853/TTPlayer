@@ -170,6 +170,9 @@ public:
     // thread. Called on the source owner thread, never directly by the UI.
     // Read may temporarily resume that producer for paused seek prefill.
     virtual void SetPaused(bool) {}
+    // Content downloaded, not the short playout buffer; -1 means unavailable.
+    // Queried on the decoder thread. UI consumes the engine's atomic snapshot.
+    virtual int DownloadedPercent() { return -1; }
     [[nodiscard]] virtual const WAVEFORMATEX& OutputFormat() const = 0;
     [[nodiscard]] virtual AudioFormat DisplayFormat() const = 0;
     [[nodiscard]] virtual std::chrono::milliseconds Duration() const = 0;
@@ -271,6 +274,7 @@ public:
     [[nodiscard]] std::chrono::milliseconds Duration() const noexcept {
         return std::chrono::milliseconds(duration_ms_.load());
     }
+    [[nodiscard]] int DownloadedPercent() const noexcept { return downloaded_percent_.load(); }
     [[nodiscard]] std::wstring LastError() const;
     [[nodiscard]] HRESULT LastErrorResult() const;
     // Successful fallback is intentionally separate from LastError: choosing
@@ -332,6 +336,7 @@ private:
     std::atomic<PlaybackState> state_{PlaybackState::stopped};
     std::atomic<int64_t> position_ms_{};
     std::atomic<int64_t> duration_ms_{};
+    std::atomic<int> downloaded_percent_{-1};
     std::atomic<int64_t> seek_request_ms_{-1};
     std::atomic<int64_t> pending_seek_position_ms_{-1};
     uint64_t seek_revision_{}; // guarded by mutex_; also invalidates stale ACKs

@@ -23,9 +23,9 @@ public:
         ArchiveMemberPath member;
         if (ParseArchiveMemberPath(path.native(), member)) {
             try {
-                const auto bytes = ReadArchiveMember(member, ttpcomm_);
-                if (bytes.size() > UINT_MAX) return Fail(L"Archive member is too large", E_INVALIDARG);
-                stream_.Attach(platform::SHCreateMemStream(bytes.data(), static_cast<UINT>(bytes.size())));
+                stream_.Attach(OpenArchiveMemberStream(member, ttpcomm_));
+            } catch (const ArchiveError& error) {
+                return Fail(error.Message().c_str(), error.Result());
             } catch (const std::exception&) {
                 return Fail(L"Cannot read archive member", E_FAIL);
             }

@@ -35,6 +35,21 @@ struct SkinMetadata {
 [[nodiscard]] std::optional<SkinMetadata> ParseLegacySkinMetadata(
     std::span<const unsigned char> xml_bytes);
 
+// Front-to-back child order from 0044E50C / 00467B9B. Unknown XML
+// elements have no native slot. 6.1.2-only controls keep explicit slots too.
+[[nodiscard]] inline int PlayerSkinOrder(std::wstring_view name) {
+    constexpr std::wstring_view names[] = {
+        L"exit", L"minimize", L"minimode", L"equalizer", L"lyric", L"playlist",
+        L"browser", L"play", L"pause", L"stop", L"prev", L"next", L"open", L"mute",
+        L"icon", L"info", L"visual", L"led", L"stereo", L"status", L"progress", L"volume",
+        L"set", L"login", L"login_name", L"mode_single", L"mode_loop", L"mode_slider",
+        L"mode_circle", L"mode_random"
+    };
+    for (int i = 0; i < static_cast<int>(std::size(names)); ++i)
+        if (name == names[i]) return i;
+    return -1;
+}
+
 struct SkinElement {
     std::wstring name;
     RECT bounds{};
@@ -57,7 +72,7 @@ struct SkinElement {
     COLORREF color{RGB(255, 255, 255)};
     COLORREF background{0xff000000};
     unsigned int alignment{};
-    std::wstring font{L"Tahoma"};
+    std::wstring font; // empty: use the parser caption-font seed
     int font_size{12};
 };
 
@@ -107,6 +122,7 @@ struct PlaylistSkin {
     bool scrollbar_thumb_resize_tile{};
     std::wstring font{L"SimSun"};
     int font_height{-13};
+    LOGFONTW font_descriptor{};
     COLORREF text_color{DefaultSkinColors().playlist.text_color};
     COLORREF highlight_color{DefaultSkinColors().playlist.highlight_color};
     COLORREF background_color{DefaultSkinColors().playlist.background_color};

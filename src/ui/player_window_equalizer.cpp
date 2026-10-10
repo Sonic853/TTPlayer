@@ -19,6 +19,28 @@
 
 namespace ttplayer::ui {
 using namespace detail;
+namespace {
+std::vector<skin::SkinLayer> EqualizerLayers(const skin::EqualizerSkin& layout) {
+    std::vector<skin::SkinLayer> layers;
+    const auto add = [&](const skin::SkinElement& e, int id) {
+        if (!e.image && !e.bar_image && !e.fill_image && !e.thumb_image) return;
+        const auto size = layout.background.size;
+        const RECT bounds = ResolveAlignedRect(e.bounds, e.alignment, size, size.cx, size.cy);
+        if (!IsRectEmpty(&bounds)) layers.push_back({&e, bounds, id});
+    };
+    add(layout.enabled, kEqHitEnabled);
+    add(layout.profile, kEqHitProfile);
+    add(layout.reset, kEqHitReset);
+    add(layout.balance, kEqSliderBalance);
+    add(layout.surround, kEqSliderSurround);
+    add(layout.preamp, kEqSliderPreamp);
+    for (size_t i = 0; i < layout.bands.size(); ++i)
+        add(layout.bands[i], kEqSliderFirstBand + static_cast<int>(i));
+    add(layout.close, kEqHitClose); // 00429AAA calls its base last.
+    return layers;
+}
+}
+
 
 LRESULT PlayerWindow::HandleEqualizerControlMessage(HWND control, UINT message,
                                                      WPARAM wparam,
@@ -459,8 +481,6 @@ void PlayerWindow::CreateEqualizerControls() {
 
     // Creation order and IDs are taken from FUN_00429AAA.  The close button
     // is supplied by the skinned-window base and uses the show/hide command.
-    create(kEqHitClose, kCmdShowEqualizer, layout.close,
-           kEqualizerButtonClass);
     create(kEqHitEnabled, kEqCommandEnable, layout.enabled,
            kEqualizerButtonClass);
     create(kEqHitProfile, kEqControlProfile, layout.profile,
@@ -477,6 +497,8 @@ void PlayerWindow::CreateEqualizerControls() {
         const int slider = kEqSliderFirstBand + static_cast<int>(index);
         create(slider, slider, layout.bands[index], kEqualizerSliderClass);
     }
+    create(kEqHitClose, kCmdShowEqualizer, layout.close,
+           kEqualizerButtonClass);
     UpdateEqualizerControlState();
 }
 
@@ -708,37 +730,8 @@ RECT PlayerWindow::EqualizerSliderThumbRect(int slider) const {
 
 int PlayerWindow::EqualizerHitTest(POINT point) const {
     if (!skin_ || !skin_->Equalizer().valid) return 0;
-    const auto& layout = skin_->Equalizer();
-    const struct ButtonHit { int hit; const skin::SkinElement* element; } buttons[] = {
-        {kEqHitClose, &layout.close}, {kEqHitEnabled, &layout.enabled},
-        {kEqHitProfile, &layout.profile}, {kEqHitReset, &layout.reset}
-    };
-    for (const auto& button : buttons) {
-        const RECT bounds = EqualizerElementBounds(*button.element);
-        if (button.element->image && PtInRect(&bounds, point)) return button.hit;
-    }
-    const struct SliderHit { int hit; const skin::SkinElement* element; } sliders[] = {
-        {kEqSliderBalance, &layout.balance}, {kEqSliderSurround, &layout.surround},
-        {kEqSliderPreamp, &layout.preamp},
-        {kEqSliderFirstBand + 0, &layout.bands[0]},
-        {kEqSliderFirstBand + 1, &layout.bands[1]},
-        {kEqSliderFirstBand + 2, &layout.bands[2]},
-        {kEqSliderFirstBand + 3, &layout.bands[3]},
-        {kEqSliderFirstBand + 4, &layout.bands[4]},
-        {kEqSliderFirstBand + 5, &layout.bands[5]},
-        {kEqSliderFirstBand + 6, &layout.bands[6]},
-        {kEqSliderFirstBand + 7, &layout.bands[7]},
-        {kEqSliderFirstBand + 8, &layout.bands[8]},
-        {kEqSliderFirstBand + 9, &layout.bands[9]}
-    };
-    for (const auto& slider : sliders) {
-        if (!slider.element->thumb_image && !slider.element->fill_image &&
-            !slider.element->bar_image) continue;
-        if (settings_.equalizer.profile == -2 && slider.hit >= kEqSliderPreamp)
-            continue;
-        const RECT bounds = EqualizerElementBounds(*slider.element);
-        if (PtInRect(&bounds, point)) return slider.hit;
-    }
+    const skin::SkinLayers layers(EqualizerLayers(skin_->Equalizer()), skin_->TransparentColor());
+    if (const auto* hit = layers.Hit(point)) return hit->id;
     return 0;
 }
 
@@ -746,6 +739,7 @@ void PlayerWindow::PaintEqualizer(HDC dc) const {
     if (!skin_ || !skin_->Equalizer().valid) return;
     const auto& layout = skin_->Equalizer();
     const SIZE size = layout.background.size;
+    const skin::SkinLayers layers(EqualizerLayers(layout), skin_->TransparentColor());
     const HDC canvas = CreateCompatibleDC(dc);
     const HBITMAP buffer = CreateCompatibleBitmap(dc, size.cx, size.cy);
     const HGDIOBJ old_buffer = SelectObject(canvas, buffer);
@@ -761,17 +755,30 @@ void PlayerWindow::PaintEqualizer(HDC dc) const {
     };
     DrawElementFrame(canvas, layout.title, EqualizerElementBounds(layout.title),
                      0, skin_->TransparentColor());
-    DrawAnimatedSkinFrame(canvas, layout.close, EqualizerElementBounds(layout.close),
-                     button_state(kEqHitClose), equalizer_window_);
-    DrawAnimatedSkinFrame(canvas, layout.enabled, EqualizerElementBounds(layout.enabled),
-                     button_state(kEqHitEnabled, settings_.equalizer.profile != -2),
-                     equalizer_window_);
-    DrawAnimatedSkinFrame(canvas, layout.profile, EqualizerElementBounds(layout.profile),
-                     button_state(kEqHitProfile), equalizer_window_);
-    DrawAnimatedSkinFrame(canvas, layout.reset, EqualizerElementBounds(layout.reset),
-                     button_state(kEqHitReset), equalizer_window_);
+    {
+        const skin::SkinLayerClip clip(canvas, layers, &layout.close);
+        DrawAnimatedSkinFrame(canvas, layout.close, EqualizerElementBounds(layout.close),
+                         button_state(kEqHitClose), equalizer_window_);
+    }
+    {
+        const skin::SkinLayerClip clip(canvas, layers, &layout.enabled);
+        DrawAnimatedSkinFrame(canvas, layout.enabled, EqualizerElementBounds(layout.enabled),
+                         button_state(kEqHitEnabled, settings_.equalizer.profile != -2),
+                         equalizer_window_);
+    }
+    {
+        const skin::SkinLayerClip clip(canvas, layers, &layout.profile);
+        DrawAnimatedSkinFrame(canvas, layout.profile, EqualizerElementBounds(layout.profile),
+                         button_state(kEqHitProfile), equalizer_window_);
+    }
+    {
+        const skin::SkinLayerClip clip(canvas, layers, &layout.reset);
+        DrawAnimatedSkinFrame(canvas, layout.reset, EqualizerElementBounds(layout.reset),
+                         button_state(kEqHitReset), equalizer_window_);
+    }
 
     const auto draw_slider = [&](int slider, const skin::SkinElement& element) {
+        const skin::SkinLayerClip clip(canvas, layers, &element);
         const RECT bounds = EqualizerElementBounds(element);
         const bool disabled = settings_.equalizer.profile == -2 &&
                               slider >= kEqSliderPreamp;

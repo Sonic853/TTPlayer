@@ -1654,6 +1654,15 @@ void PlayerWindow::UpdateVisualWindowLayout() {
     SetWindowPos(visual_window_, nullptr, analysis_bounds.left,
                  analysis_bounds.top, width, height,
                  SWP_NOACTIVATE | SWP_NOZORDER | (plugin_embedded?SWP_HIDEWINDOW:SWP_SHOWWINDOW));
+    if (skin_ && element && !plugin_embedded) {
+        const auto playback = audio_->State();
+        const skin::SkinLayers layers(PlayerSkinLayers(ActiveSkinElements(),
+            playback == audio::PlaybackState::playing || playback == audio::PlaybackState::opening,
+            settings_.player.play_mode, CurrentLedText()), skin_->TransparentColor());
+        const HRGN region = layers.Region(element);
+        OffsetRgn(region, -analysis_bounds.left, -analysis_bounds.top);
+        if (!SetWindowRgn(visual_window_, region, TRUE)) DeleteObject(region);
+    } else SetWindowRgn(visual_window_, nullptr, TRUE);
     const auto background = ActiveSkinBackground();
     visual_runtime_->Configure(settings_.visual, {width, height}, false,
                                plugin_embedded?skin::SkinImage{}:background, &analysis_bounds);
@@ -1905,6 +1914,7 @@ void PlayerWindow::DetachVisualWindow(const RECT& target) {
         fullscreen_visual_detached_ = true;
     }
     const RECT window_target = WindowRectForClientTarget(visual_window_, target);
+    SetWindowRgn(visual_window_, nullptr, FALSE);
     SetWindowPos(visual_window_, HWND_TOPMOST,
         window_target.left, window_target.top,
         window_target.right - window_target.left,

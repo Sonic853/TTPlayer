@@ -976,7 +976,7 @@ HFONT CreatePlaylistFont(const settings::PlaylistSettings& settings) {
 
 PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
                                       int split_on_lists, int width, int height,
-                                      size_t track_count, int row_height) {
+                                      size_t track_count, int row_height, size_t list_count, bool library_mode) {
     PlaylistGeometry result;
     result.list = layout.list_bounds;
     const int extra_width = std::max<int>(0, width - layout.background.size.cx);
@@ -994,9 +994,8 @@ PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
     // The original track ListCtrl creates its vertical scrollbar only when
     // its item count exceeds the page.  Reserving this strip unconditionally
     // shortens a one-row selection by 15 px in LX-iPlay (9 px in TT2012).
-    result.scrollbar_width = track_count > static_cast<size_t>(result.page_rows) &&
-                             layout.scrollbar_buttons.size.cx >= 3
-        ? layout.scrollbar_buttons.size.cx / 3 : 0;
+    result.scrollbar_width = track_count > static_cast<size_t>(result.page_rows)
+        ? (layout.scrollbar_buttons.size.cx >= 3 ? layout.scrollbar_buttons.size.cx / 3 : 13) : 0;
     // SplitterCtrl retains its five-pixel default renderer when a skin omits
     // splitter_bar_image (TT2012); image-backed skins use the native width.
     const int splitter_width = layout.splitter_bar.image
@@ -1013,8 +1012,22 @@ PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
     result.tracks = {result.splitter.right, result.list.top,
                      result.scrollbar_width ? result.scrollbar.left : result.list.right,
                      result.list.bottom};
+    if (!library_mode && list_count > static_cast<size_t>(result.page_rows)) {
+        const int bar_width = layout.scrollbar_buttons.size.cx >= 3
+            ? layout.scrollbar_buttons.size.cx / 3 : 13;
+        if (result.list_titles.right - result.list_titles.left > bar_width) {
+            result.list_scrollbar = {result.list_titles.right - bar_width, result.list_titles.top,
+                result.list_titles.right, result.list_titles.bottom};
+            result.list_titles.right -= bar_width;
+        }
+    }
     result.toolbar = ResolveAlignedRect(layout.toolbar_bounds, layout.toolbar_alignment,
                                         layout.background.size, width, height);
+    if (!layout.toolbar.image && !IsRectEmpty(&result.toolbar)) {
+        // 0047E512 synthesizes seven 32 x 16 menu-label cells.
+        result.toolbar.right = result.toolbar.left + 7 * 32;
+        result.toolbar.bottom = result.toolbar.top + 16;
+    }
     result.close = ResolveAlignedRect(layout.close.bounds, layout.close.alignment,
                                       layout.background.size, width, height);
     result.title = ResolveAlignedRect(layout.title.bounds, layout.title.alignment,
@@ -1025,12 +1038,8 @@ PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
 
 void ApplyPlaylistSkinDefaults(const skin::PlaylistSkin& source,
                                settings::PlaylistSettings& target) {
-    target.font = source.font;
-    target.font_height = source.font_height;
-    // LegacySkin currently exposes only these two font fields.  Do not carry
-    // a complete LOGFONT imported for the preceding skin into this package.
-    target.font_descriptor = {};
-    target.font_descriptor_valid = false;
+    // 0047E6FC copies the package palette, but 0048301E takes LOGFONT from
+    // the user's playlist settings. A skin switch must not reset that font.
     target.text_color = source.text_color;
     target.highlight_color = source.highlight_color;
     target.background_color = source.background_color;
@@ -1084,16 +1093,58 @@ HFONT CreateSkinFont(const skin::SkinElement& element) {
         // replaces the face and height supplied by the skin.
         descriptor = metrics.lfCaptionFont;
     }
-    descriptor.lfHeight = element.font_size;
+    if (!element.font.empty()) descriptor.lfHeight = element.font_size;
     descriptor.lfWeight = FW_NORMAL;
     descriptor.lfQuality = ANTIALIASED_QUALITY;
-    wcsncpy_s(descriptor.lfFaceName, element.font.c_str(), _TRUNCATE);
+    if (!element.font.empty()) wcsncpy_s(descriptor.lfFaceName, element.font.c_str(), _TRUNCATE);
     HFONT font = CreateFontIndirectW(&descriptor);
     if (!font) {
         wcscpy_s(descriptor.lfFaceName, L"SimSun");
         font = CreateFontIndirectW(&descriptor);
     }
     return font;
+}
+
+std::vector<skin::SkinLayer> PlayerSkinLayers(const std::vector<skin::SkinElement>& elements,
+    bool playing, int play_mode, std::wstring_view led_text) {
+    std::vector<skin::SkinLayer> result;
+    const auto play = std::find_if(elements.begin(), elements.end(),
+        [](const auto& element) { return element.name == L"play"; });
+    for (const auto& element : elements) {
+        if (skin::PlayerSkinOrder(element.name) < 0 || IsSuppressedSkinControl(element.name) ||
+            !IsPlayModeSkinVisible(element.name, play_mode)) continue;
+        if ((element.name == L"play" && playing) || (element.name == L"pause" && !playing)) continue;
+        if (element.four_state && !element.image) continue;
+        if (element.name == L"led" && !element.image) continue;
+        RECT bounds = element.bounds;
+        if (element.name == L"led") bounds = SkinLedBounds(element, led_text);
+        if (element.name == L"pause" && play != elements.end()) {
+            bounds = {play->bounds.left, play->bounds.top,
+                play->bounds.left + element.image_size.cx / 4,
+                play->bounds.top + element.image_size.cy};
+        }
+        if (!IsRectEmpty(&bounds)) result.push_back({&element, bounds});
+    }
+    std::stable_sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
+        return skin::PlayerSkinOrder(a.element->name) < skin::PlayerSkinOrder(b.element->name);
+    });
+    return result;
+}
+
+void DrawSkinIcon(HDC dc, HICON icon, const RECT& bounds) {
+    ICONINFO info{};
+    if (!icon || !GetIconInfo(icon, &info)) return;
+    BITMAP bitmap{};
+    GetObjectW(info.hbmColor ? info.hbmColor : info.hbmMask, sizeof(bitmap), &bitmap);
+    if (!info.hbmColor) bitmap.bmHeight /= 2;
+    if (info.hbmColor) DeleteObject(info.hbmColor);
+    if (info.hbmMask) DeleteObject(info.hbmMask);
+    const int saved = SaveDC(dc);
+    IntersectClipRect(dc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+    DrawIconEx(dc, bounds.left + (bounds.right - bounds.left - bitmap.bmWidth) / 2,
+        bounds.top + (bounds.bottom - bounds.top - bitmap.bmHeight) / 2,
+        icon, bitmap.bmWidth, bitmap.bmHeight, 0, nullptr, DI_NORMAL);
+    if (saved) RestoreDC(dc, saved);
 }
 
 void DrawSkinText(HDC dc, const skin::SkinElement& element, const wchar_t* text) {
@@ -3073,7 +3124,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             const auto hit = HitTestSkin(point);
             // LEDTimerCtrl and the scroll-info text retain the default arrow,
             // unlike the skin button/slider classes.
-            if (!hit.empty() && hit != L"led" && hit != L"info") {
+            if (!hit.empty() && hit != L"led" && hit != L"info" && hit != L"skin_blocked") {
                 SetCursor(LoadCursorW(nullptr, IDC_HAND));
                 return TRUE;
             }
@@ -4068,7 +4119,10 @@ void PlayerWindow::PaintSkin(HDC dc) const {
     const auto playback = audio_->State();
     const bool active = playback == audio::PlaybackState::opening ||
                         playback == audio::PlaybackState::playing;
+    const skin::SkinLayers layers(PlayerSkinLayers(ActiveSkinElements(), active,
+        settings_.player.play_mode, CurrentLedText()), skin_->TransparentColor());
     for (const auto& element : ActiveSkinElements()) {
+        const skin::SkinLayerClip clip(canvas, layers, &element);
         if (!element.image || !element.four_state) continue;
         if (IsSuppressedSkinControl(element.name)) continue;
         if (!IsPlayModeSkinVisible(element.name, settings_.player.play_mode)) continue;
@@ -4098,7 +4152,8 @@ void PlayerWindow::PaintSkin(HDC dc) const {
         DrawSkinElement(canvas, displayed, state);
     }
 
-    if (const auto* progress = FindActiveSkinElement(L"progress"); progress && progress->thumb_image) {
+    if (const auto* progress = FindActiveSkinElement(L"progress"); progress) {
+        const skin::SkinLayerClip clip(canvas, layers, progress);
         const int control_width = progress->bounds.right - progress->bounds.left;
         const int control_height = progress->bounds.bottom - progress->bounds.top;
         const auto duration = audio_->Duration().count();
@@ -4110,7 +4165,7 @@ void PlayerWindow::PaintSkin(HDC dc) const {
         const int safe_position = static_cast<int>(
             std::clamp<int64_t>(position, 0, safe_duration));
         const int width = std::max(1L, progress->thumb_size.cx / 4);
-        const int height = progress->thumb_size.cy;
+        const int height = std::max(1L, progress->thumb_size.cy);
         // FUN_00451CEF initializes the shared legacy slider edge inset to one
         // pixel; FUN_00428F41 excludes it at both value-range endpoints.
         constexpr int slider_inset = 1;
@@ -4131,41 +4186,28 @@ void PlayerWindow::PaintSkin(HDC dc) const {
             progress->bar_image.Draw(canvas, x, y, progress->bar_size.cx,
                 progress->bar_size.cy, 0, 0, progress->bar_size.cx, progress->bar_size.cy);
         }
-        if (duration > 0 && progress->fill_image &&
-            progress->fill_size.cx > 0 && progress->fill_size.cy > 0) {
-            const int saved_dc = SaveDC(canvas);
-            if (saved_dc != 0) {
-                IntersectClipRect(canvas, progress->bounds.left, progress->bounds.top,
-                                  progress->bounds.right, progress->bounds.bottom);
-            }
-            const int fill_left = progress->bounds.left +
-                (control_width - progress->fill_size.cx) / 2;
-            const int fill_top = progress->bounds.top +
-                (control_height - progress->fill_size.cy) / 2;
+        const auto draw_fill = [&](const skin::SkinImage& image, SIZE fill_size, int value, int maximum) {
+            if (!image || fill_size.cx <= 0 || fill_size.cy <= 0 || maximum <= 0) return;
+            const int fill_left = progress->bounds.left + (control_width - fill_size.cx) / 2;
+            const int fill_top = progress->bounds.top + (control_height - fill_size.cy) / 2;
             if (progress->vertical) {
-                // FUN_00451E07 derives the fill boundary from the already
-                // rounded thumb rectangle, never from a second value ratio.
-                const int fill_start = logical_thumb_top + height / 2;
-                const int source_y = std::clamp(fill_start - fill_top, 0,
-                                                static_cast<int>(progress->fill_size.cy));
-                const int filled = progress->fill_size.cy - source_y;
-                if (filled > 0) {
-                    progress->fill_image.Draw(canvas, fill_left, fill_start,
-                        progress->fill_size.cx, filled, 0, source_y,
-                        progress->fill_size.cx, filled, skin_->TransparentColor());
-                }
+                const int edge = progress->bounds.top + slider_inset +
+                    MulDiv(maximum - value, vertical_span, maximum) + height / 2;
+                const int sy = std::clamp(edge - fill_top, 0, static_cast<int>(fill_size.cy));
+                image.Draw(canvas, fill_left, fill_top + sy, fill_size.cx, fill_size.cy - sy,
+                    0, sy, fill_size.cx, fill_size.cy - sy, skin_->TransparentColor());
             } else {
-                const int fill_end = logical_thumb_left + width / 2;
-                const int filled = std::clamp(fill_end - fill_left, 0,
-                                              static_cast<int>(progress->fill_size.cx));
-                if (filled > 0) {
-                    progress->fill_image.Draw(canvas, fill_left, fill_top, filled,
-                        progress->fill_size.cy, 0, 0, filled,
-                        progress->fill_size.cy, skin_->TransparentColor());
-                }
+                const int edge = progress->bounds.left + slider_inset +
+                    MulDiv(value, horizontal_span, maximum) + width / 2;
+                const int filled = std::clamp(edge - fill_left, 0, static_cast<int>(fill_size.cx));
+                image.Draw(canvas, fill_left, fill_top, filled, fill_size.cy,
+                    0, 0, filled, fill_size.cy, skin_->TransparentColor());
             }
-            if (saved_dc != 0) RestoreDC(canvas, saved_dc);
-        }
+        };
+        // 0045287B: background, downloaded layer, played layer, thumb.
+        const int downloaded = audio_->DownloadedPercent();
+        if (downloaded > 0) draw_fill(progress->fill_image2, progress->fill_size2, downloaded, 100);
+        if (duration > 0) draw_fill(progress->fill_image, progress->fill_size, safe_position, safe_duration);
         skin::SkinElement thumb = *progress;
         thumb.image = progress->thumb_image;
         thumb.image_size = progress->thumb_size;
@@ -4188,6 +4230,7 @@ void PlayerWindow::PaintSkin(HDC dc) const {
             playback == audio::PlaybackState::playing && duration > 0, progress->bounds);
     }
     if (const auto* volume = FindActiveSkinElement(L"volume")) {
+        const skin::SkinLayerClip clip(canvas, layers, volume);
         const int control_width = volume->bounds.right - volume->bounds.left;
         const int control_height = volume->bounds.bottom - volume->bounds.top;
         const int value = std::clamp(settings_.player.volume, 0, 100);
@@ -4284,6 +4327,7 @@ void PlayerWindow::PaintSkin(HDC dc) const {
     // composed with the parent surface, unlike the two ordinary status
     // statics below.
     if (const auto* info = FindActiveSkinElement(L"info")) {
+        const skin::SkinLayerClip clip(canvas, layers, info);
         const wchar_t* current = display_title_.c_str();
         const wchar_t* next = nullptr;
         if (!info_items_.empty() && info_item_index_ < info_items_.size()) {
@@ -4295,6 +4339,7 @@ void PlayerWindow::PaintSkin(HDC dc) const {
     }
 
     if (const auto* led = FindActiveSkinElement(L"led"); led && led->image) {
+        const skin::SkinLayerClip clip(canvas, layers, led);
         DrawSkinLed(canvas, *led, CurrentLedText(), skin_->TransparentColor());
     }
 
@@ -4303,10 +4348,8 @@ void PlayerWindow::PaintSkin(HDC dc) const {
         ? skin_->Icon() : window_icon_small_;
     if (skin_icon) {
         if (const auto* icon = FindActiveSkinElement(L"icon")) {
-            const int width = GetSystemMetrics(SM_CXSMICON);
-            const int height = GetSystemMetrics(SM_CYSMICON);
-            DrawIconEx(canvas, icon->bounds.left, icon->bounds.top, skin_icon,
-                width, height, 0, nullptr, DI_NORMAL);
+            const skin::SkinLayerClip clip(canvas, layers, icon);
+            DrawSkinIcon(canvas, skin_icon, icon->bounds);
         }
     }
 
@@ -4320,12 +4363,20 @@ void PlayerWindow::PaintSkin(HDC dc) const {
     if (visual_window_ && !fullscreen_visual_detached_ &&
         GetParent(visual_window_) == window_ &&
         IsWindowVisible(visual_window_)) {
-        RECT visual_bounds{};
-        GetWindowRect(visual_window_, &visual_bounds);
-        MapWindowPoints(HWND_DESKTOP, window_,
-                        reinterpret_cast<POINT*>(&visual_bounds), 2);
-        ExcludeClipRect(dc, visual_bounds.left, visual_bounds.top,
-                       visual_bounds.right, visual_bounds.bottom);
+        if (const auto* visual = FindActiveSkinElement(L"visual")) {
+            const HRGN region = layers.Region(visual);
+            // A play/pause sprite can change its shaped region without a
+            // layout change. Keep the real visual child below the same mask.
+            const HRGN child_region = layers.Region(visual);
+            OffsetRgn(child_region, -visual->bounds.left, -visual->bounds.top);
+            const HRGN previous = CreateRectRgn(0, 0, 0, 0);
+            if (GetWindowRgn(visual_window_, previous) == ERROR || !EqualRgn(previous, child_region)) {
+                if (!SetWindowRgn(visual_window_, child_region, TRUE)) DeleteObject(child_region);
+            } else DeleteObject(child_region);
+            DeleteObject(previous);
+            ExtSelectClipRgn(dc, region, RGN_DIFF);
+            DeleteObject(region);
+        }
     }
     BitBlt(dc, 0, 0, size.cx, size.cy, canvas, 0, 0, SRCCOPY);
 
@@ -4333,10 +4384,12 @@ void PlayerWindow::PaintSkin(HDC dc) const {
     // copying or filling their parent background. Keeping this final screen-DC
     // pass preserves GDI's exact antialias rounding on colored backgrounds.
     if (const auto* stereo = FindActiveSkinElement(L"stereo")) {
+        const skin::SkinLayerClip clip(dc, layers, stereo);
         const auto text = ChannelText();
         DrawSkinText(dc, *stereo, text.c_str());
     }
     if (const auto* status = FindActiveSkinElement(L"status")) {
+        const skin::SkinLayerClip clip(dc, layers, status);
         const auto text = PlaybackStatusText();
         DrawSkinText(dc, *status, text.c_str());
     }
@@ -4458,26 +4511,14 @@ std::wstring PlayerWindow::HitTestSkin(POINT point) const {
     const auto playback = audio_->State();
     const bool active = playback == audio::PlaybackState::opening ||
                         playback == audio::PlaybackState::playing;
-    const auto& elements = ActiveSkinElements();
-    for (auto item = elements.rbegin(); item != elements.rend(); ++item) {
-        // Scroll-info is an interactive text child in the original, not a
-        // button or draggable background. Use this mode's parsed skin bounds.
-        if (!IsSkinButton(item->name) && item->name != L"info") continue;
-        if (!IsPlayModeSkinVisible(item->name, settings_.player.play_mode)) continue;
-        if (item->name == L"play" && active) continue;
-        if (item->name == L"pause" && !active) continue;
-        if (!IsSkinElementEnabled(item->name)) continue;
-        RECT bounds = item->bounds;
-        if (item->name == L"led") bounds = SkinLedBounds(*item, CurrentLedText());
-        if (item->name == L"pause") {
-            if (const auto* play = FindActiveSkinElement(L"play")) {
-                const int width = item->image_size.cx / 4;
-                bounds = {play->bounds.left, play->bounds.top,
-                    play->bounds.left + width,
-                    play->bounds.top + item->image_size.cy};
-            }
-        }
-        if (PtInRect(&bounds, point)) return item->name;
+    const skin::SkinLayers layers(PlayerSkinLayers(ActiveSkinElements(), active,
+        settings_.player.play_mode, CurrentLedText()), skin_->TransparentColor());
+    if (const auto* layer = layers.Hit(point)) {
+        const auto& name = layer->element->name;
+        // Disabled and non-command children still occlude lower controls.
+        if ((!IsSkinButton(name) && name != L"info") || !IsSkinElementEnabled(name))
+            return L"skin_blocked";
+        return name;
     }
     return {};
 }

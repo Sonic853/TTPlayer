@@ -171,7 +171,8 @@ bool TtpCommRuntime::Initialize() {
     if (api_.module) return true;
     const auto path = FindRuntimePath(L"ttpcomm.dll");
     if(path.empty() || !TtpComm_LoadApi(&api_, path.c_str())) return false;
-    if(!ttpcomm::host::Runtime()) {Shutdown();return false;}
+    TtpCommArchiveApi archive{};
+    if(!ttpcomm::host::Runtime() || !ttpcomm::host::QueryArchive(api_.module,archive)) {Shutdown();return false;}
     return true;
 }
 void TtpCommRuntime::Shutdown() { if (api_.module) TtpComm_UnloadApi(&api_); }

@@ -21,6 +21,9 @@ public:
     // This binary mask is only for HWND shape/hit testing, never for painting.
     // BMP callers retain their original RGB colour-key region path.
     [[nodiscard]] SkinImage CoverageMask() const;
+    // Caller owns the returned normal-frame region. Cached for owned images.
+    [[nodiscard]] HRGN CreateRegion(COLORREF key, int frames = 1) const;
+    [[nodiscard]] SkinImage DarkenedBufferFill(COLORREF key) const;
     // A DIB view for legacy size/region APIs, never the PNG drawing source.
     [[nodiscard]] operator HBITMAP() const noexcept;
     bool Draw(HDC dc, int x, int y, int width, int height,

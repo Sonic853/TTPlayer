@@ -1,20 +1,12 @@
 #include "ttplayer/audio/archive_member.h"
 
 #include "ttplayer/skin/skin_package.h"
+#include <ttpcomm/runtime_client.h>
 
 #include <algorithm>
-#include <chrono>
 #include <cwctype>
-#include <fstream>
-#include <iterator>
-#include <mutex>
 #include <stdexcept>
-#include <thread>
-
-#include <comdef.h>
-#include <shldisp.h>
-#include <shellapi.h>
-#include <shlobj.h>
+#include <exception>
 #include <wrl/client.h>
 
 namespace ttplayer::audio {
@@ -63,139 +55,33 @@ std::filesystem::path NormalizeArchiveMember(std::wstring_view value) {
     return path;
 }
 
-void HashByte(std::uint64_t& hash, unsigned char value) noexcept {
-    hash ^= value;
-    hash *= 1099511628211ULL;
-}
-
-std::filesystem::path RarCacheDirectory(
-    const std::filesystem::path& archive) {
-    std::error_code error;
-    auto absolute = std::filesystem::absolute(archive, error);
-    if (error) absolute = archive;
-    const auto identity = absolute.lexically_normal().wstring();
-    std::uint64_t hash = 14695981039346656037ULL;
-    for (const wchar_t character : identity) {
-        const auto folded = static_cast<std::uint16_t>(towlower(character));
-        HashByte(hash, static_cast<unsigned char>(folded));
-        HashByte(hash, static_cast<unsigned char>(folded >> 8));
-    }
-    error.clear();
-    const auto size = std::filesystem::file_size(archive, error);
-    if (!error) {
-        for (unsigned shift = 0; shift < 64; shift += 8)
-            HashByte(hash, static_cast<unsigned char>(size >> shift));
-    }
-    error.clear();
-    const auto modified = std::filesystem::last_write_time(archive, error);
-    if (!error) {
-        const auto ticks = static_cast<std::uint64_t>(
-            modified.time_since_epoch().count());
-        for (unsigned shift = 0; shift < 64; shift += 8)
-            HashByte(hash, static_cast<unsigned char>(ticks >> shift));
-    }
-    wchar_t key[17]{};
-    swprintf_s(key, L"%016llx", static_cast<unsigned long long>(hash));
-    return std::filesystem::temp_directory_path() / L"TTPlayerRebuild" /
-        L"ImportedArchives" / key;
-}
-
-struct DirectorySnapshot {
-    std::uint64_t files{};
-    std::uint64_t bytes{};
-
-    bool operator==(const DirectorySnapshot&) const = default;
-};
-
-DirectorySnapshot SnapshotDirectory(const std::filesystem::path& directory) {
-    DirectorySnapshot snapshot;
-    std::error_code error;
-    std::filesystem::recursive_directory_iterator iterator(
-        directory, std::filesystem::directory_options::skip_permission_denied,
-        error);
-    const std::filesystem::recursive_directory_iterator end;
-    while (!error && iterator != end) {
-        if (iterator->is_regular_file(error) && !error &&
-            _wcsicmp(iterator->path().filename().c_str(), L".ttp-complete") != 0) {
-            ++snapshot.files;
-            snapshot.bytes += iterator->file_size(error);
-        }
-        error.clear();
-        iterator.increment(error);
-    }
-    return snapshot;
-}
-
-std::filesystem::path EnsureRarExtracted(
-    const std::filesystem::path& archive) {
-    static std::mutex extraction_mutex;
-    std::scoped_lock lock(extraction_mutex);
-    const auto destination = RarCacheDirectory(archive);
-    const auto marker = destination / L".ttp-complete";
-    std::error_code error;
-    if (std::filesystem::is_regular_file(marker, error) && !error)
-        return destination;
-    error.clear();
-    std::filesystem::create_directories(destination, error);
-    if (error) throw std::runtime_error("cannot create RAR member cache");
-
-    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE)
-        throw std::runtime_error("COM is unavailable for RAR extraction");
-    struct ScopedComApartment {
-        bool owns{};
-        ~ScopedComApartment() { if (owns) CoUninitialize(); }
-    } apartment{SUCCEEDED(initialized)};
-
-    Microsoft::WRL::ComPtr<IShellDispatch> shell;
-    Microsoft::WRL::ComPtr<Folder> source;
-    Microsoft::WRL::ComPtr<Folder> target;
-    Microsoft::WRL::ComPtr<FolderItems> items;
-    if (FAILED(CoCreateInstance(CLSID_Shell, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(shell.GetAddressOf()))) || !shell) {
-        throw std::runtime_error("Windows archive namespace is unavailable");
-    }
-    _variant_t source_path(std::filesystem::absolute(archive).wstring().c_str());
-    _variant_t target_path(std::filesystem::absolute(destination).wstring().c_str());
-    if (FAILED(shell->NameSpace(source_path, source.GetAddressOf())) || !source ||
-        FAILED(shell->NameSpace(target_path, target.GetAddressOf())) || !target ||
-        FAILED(source->Items(items.GetAddressOf())) || !items) {
-        throw std::runtime_error("Windows cannot open this RAR archive");
-    }
-    long source_count{};
-    if (FAILED(items->get_Count(&source_count)))
-        throw std::runtime_error("cannot enumerate RAR archive");
-    _variant_t content(static_cast<IDispatch*>(items.Get()));
-    _variant_t options(static_cast<long>(
-        FOF_NOCONFIRMATION | FOF_NOCONFIRMMKDIR | FOF_NOERRORUI | FOF_SILENT));
-    if (FAILED(target->CopyHere(content, options))) {
-        throw std::runtime_error("RAR extraction failed");
-    }
-
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::seconds(30);
-    DirectorySnapshot previous{};
-    unsigned stable_polls{};
-    bool complete = source_count == 0;
-    while (!complete && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        const auto current = SnapshotDirectory(destination);
-        if (current.files != 0 && current == previous) {
-            ++stable_polls;
-        } else {
-            stable_polls = 0;
-            previous = current;
-        }
-        complete = stable_polls >= 15; // 750 ms with no size/count change.
-    }
-    if (!complete) throw std::runtime_error("RAR extraction timed out");
-    std::ofstream complete_marker(marker, std::ios::binary | std::ios::trunc);
-    if (!complete_marker.put('\n'))
-        throw std::runtime_error("cannot finalize RAR member cache");
-    return destination;
+TtpCommArchiveApi ArchiveApi(HMODULE module) {
+    TtpCommArchiveApi api{};
+    if(module) {
+        if(ttpcomm::host::QueryArchive(module,api)) return api;
+    } else if(const auto* loaded=ttpcomm::host::Archive()) return *loaded;
+    throw ArchiveError(HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH));
 }
 
 } // namespace
+
+ArchiveError::ArchiveError(HRESULT result)
+    : std::runtime_error("Archive operation failed: " + std::to_string(static_cast<unsigned long>(result))),result_(result) {}
+
+std::wstring ArchiveError::Message() const {
+    if(result_==TTPCOMM_ARCHIVE_PASSWORD) return L"压缩包需要密码，当前播放器未提供密码输入。";
+    if(result_==TTPCOMM_ARCHIVE_BAD_PASSWORD) return L"压缩包密码不正确。";
+    if(result_==TTPCOMM_ARCHIVE_MISSING_VOLUME) return L"压缩包缺少分卷，请将全部分卷放在同一目录。";
+    if(result_==TTPCOMM_ARCHIVE_DICTIONARY_LIMIT) return L"压缩包所需的解压字典超过播放器的内存限制。";
+    if(result_==TTPCOMM_ARCHIVE_UNSUPPORTED) return L"不支持此压缩方式或成员类型。";
+    if(result_==HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH)) return L"ttpcomm.dll 缺少归档接口，请手动替换完整发行包。";
+    if(result_==HRESULT_FROM_WIN32(ERROR_CRC) || result_==HRESULT_FROM_WIN32(ERROR_INVALID_DATA)) return L"压缩包数据损坏或校验失败。";
+    if(result_==HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE)) return L"压缩包成员超过允许的大小。";
+    if(result_==HRESULT_FROM_WIN32(ERROR_CANCELLED)) return L"已取消读取压缩包。";
+    if(result_==E_OUTOFMEMORY) return L"读取压缩包时内存不足。";
+    if(result_==HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) return L"压缩包内找不到此文件。";
+    return L"无法读取压缩包，请检查文件是否完整且可访问。";
+}
 
 bool ParseZipMemberPath(std::wstring_view logical_path,
                         ZipMemberPath& result) {
@@ -276,50 +162,64 @@ std::filesystem::path MakeArchiveMemberPath(
     return std::filesystem::path(std::move(logical));
 }
 
-std::vector<unsigned char> ReadArchiveMember(
-    const ArchiveMemberPath& path, HMODULE ttpcomm) {
-    if (path.kind == ArchiveKind::zip)
-        return ReadZipMember({path.archive, path.member}, ttpcomm);
-
-    // 0047E177 enumerates the archive and compares the requested member with
-    // _wcsicmp.  In particular, it does not fold `directory\\..\\file` before
-    // looking it up.  Resolve the extracted RAR member through the same exact
-    // name match so the filesystem cannot silently canonicalize that spelling.
-    const auto members = ListRarArchiveMembers(path.archive);
-    const auto found = std::ranges::find_if(members, [&](const auto& member) {
-        return _wcsicmp(member.c_str(), path.member.c_str()) == 0;
-    });
-    if (found == members.end()) throw std::runtime_error("RAR member not found");
-    const auto root = EnsureRarExtracted(path.archive);
-    const auto file = root / NormalizeArchiveMember(*found);
-    std::ifstream input(file, std::ios::binary);
-    if (!input) throw std::runtime_error("RAR member not found");
-    return std::vector<unsigned char>(std::istreambuf_iterator<char>(input),
-                                      std::istreambuf_iterator<char>());
+IStream* OpenArchiveMemberStream(const ArchiveMemberPath& path, HMODULE ttpcomm) {
+    IStream* stream{};
+    if(path.kind==ArchiveKind::rar) {
+        const auto api=ArchiveApi(ttpcomm);
+        const HRESULT result=api.open_member(path.archive.c_str(),path.member.c_str(),nullptr,&stream);
+        if(FAILED(result)) throw ArchiveError(result);
+        if(!stream) throw ArchiveError(E_UNEXPECTED);
+        return stream;
+    }
+    const auto bytes=ReadZipMember({path.archive,path.member},ttpcomm);
+    if(bytes.size()>ULONG_MAX) throw ArchiveError(HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE));
+    HRESULT result=CreateStreamOnHGlobal(nullptr,TRUE,&stream);
+    if(FAILED(result)) throw ArchiveError(result);
+    Microsoft::WRL::ComPtr<IStream> owner; owner.Attach(stream);
+    ULONG written{};
+    result=stream->Write(bytes.data(),static_cast<ULONG>(bytes.size()),&written);
+    if(FAILED(result) || written!=bytes.size()) throw ArchiveError(FAILED(result) ? result : STG_E_WRITEFAULT);
+    LARGE_INTEGER zero{};
+    result=stream->Seek(zero,STREAM_SEEK_SET,nullptr);
+    if(FAILED(result)) throw ArchiveError(result);
+    return owner.Detach();
 }
 
-std::vector<std::wstring> ListRarArchiveMembers(
-    const std::filesystem::path& archive) {
-    const auto root = EnsureRarExtracted(archive);
-    std::vector<std::wstring> members;
-    std::error_code error;
-    std::filesystem::recursive_directory_iterator iterator(
-        root, std::filesystem::directory_options::skip_permission_denied, error);
-    const std::filesystem::recursive_directory_iterator end;
-    while (!error && iterator != end) {
-        if (iterator->is_regular_file(error) && !error &&
-            _wcsicmp(iterator->path().filename().c_str(), L".ttp-complete") != 0) {
-            const auto relative = std::filesystem::relative(iterator->path(), root,
-                                                             error);
-            if (!error && !relative.empty()) members.push_back(relative.native());
-        }
-        error.clear();
-        iterator.increment(error);
-    }
-    std::ranges::sort(members, [](const auto& left, const auto& right) {
-        return _wcsicmp(left.c_str(), right.c_str()) < 0;
-    });
-    return members;
+std::vector<unsigned char> ReadArchiveMember(const ArchiveMemberPath& path, HMODULE ttpcomm) {
+    // This buffered adapter is for CUE/text consumers. Audio readers use the
+    // seekable member stream directly, including its bounded disk backing.
+    if(path.kind==ArchiveKind::zip) return ReadZipMember({path.archive,path.member},ttpcomm);
+    const auto api=ArchiveApi(ttpcomm);
+    TtpCommArchiveOptions options{}; options.size=sizeof(options);
+    options.member_limit_bytes=64ULL*1024*1024;
+    Microsoft::WRL::ComPtr<IStream> stream;
+    HRESULT result=api.open_member(path.archive.c_str(),path.member.c_str(),&options,stream.GetAddressOf());
+    if(FAILED(result)) throw ArchiveError(result);
+    if(!stream) throw ArchiveError(E_UNEXPECTED);
+    STATSTG stat{}; result=stream->Stat(&stat,STATFLAG_NONAME);
+    if(FAILED(result)) throw ArchiveError(result);
+    if(stat.cbSize.QuadPart>options.member_limit_bytes) throw ArchiveError(HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE));
+    std::vector<unsigned char> bytes(static_cast<size_t>(stat.cbSize.QuadPart));
+    ULONG read{}; result=stream->Read(bytes.data(),static_cast<ULONG>(bytes.size()),&read);
+    if(FAILED(result) || read!=bytes.size()) throw ArchiveError(FAILED(result) ? result : STG_E_READFAULT);
+    return bytes;
+}
+
+std::vector<std::wstring> ListRarArchiveMembers(const std::filesystem::path& archive, HMODULE ttpcomm) {
+    struct Context { std::vector<std::wstring> names; std::exception_ptr error; } context;
+    const auto visitor=[](void* opaque,const TtpCommArchiveEntry* entry)->BOOL {
+        auto& out=*static_cast<Context*>(opaque);
+        try {
+            if(!(entry->flags&(TTPCOMM_ARCHIVE_DIRECTORY|TTPCOMM_ARCHIVE_LINK))) out.names.emplace_back(entry->name);
+            return TRUE;
+        } catch(...) { out.error=std::current_exception(); return FALSE; }
+    };
+    const auto api=ArchiveApi(ttpcomm);
+    const HRESULT result=api.enumerate(archive.c_str(),nullptr,visitor,&context);
+    if(context.error) std::rethrow_exception(context.error);
+    if(FAILED(result)) throw ArchiveError(result);
+    // 00473338 and 00474051 retain the archive's order. Never alphabetize here.
+    return std::move(context.names);
 }
 
 } // namespace ttplayer::audio

@@ -1,3 +1,4 @@
+#include "ttplayer/skin/skin_layers.h"
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/desktop_lyrics.h"
@@ -1143,6 +1144,10 @@ private:
             ShowWindow(button.window, present ? SW_SHOWNA : SW_HIDE);
             if (present) MoveWindow(button.window, bounds.left, bounds.top,
                 Width(bounds), Height(bounds), FALSE);
+            if (present && element && element->image) {
+                const HRGN region = element->image.CreateRegion(transparent, 4);
+                if (!SetWindowRgn(button.window, region, FALSE) && region) DeleteObject(region);
+            } else SetWindowRgn(button.window, nullptr, FALSE);
             if (tooltip_) {
                 TOOLINFOW tool{};
                 tool.cbSize = TTTOOLINFO_V1_SIZE;
@@ -1200,7 +1205,25 @@ private:
                 layout->background.size.cy, 0, 0, layout->background.size.cx,
                 layout->background.size.cy);
         }
+        skin::SkinElement icon_element;
+        std::vector<skin::SkinLayer> descriptors;
         if (icon_) {
+            GetWindowRect(icon_, &icon_element.bounds);
+            MapWindowPoints(nullptr, bar_, reinterpret_cast<POINT*>(&icon_element.bounds), 2);
+            descriptors.push_back({&icon_element, icon_element.bounds});
+        }
+        for (const auto& button : buttons_) {
+            const auto* element = ButtonElement(button.command);
+            if (!element || !element->image || !button.window ||
+                !(GetWindowLongPtrW(button.window, GWL_STYLE) & WS_VISIBLE)) continue;
+            RECT bounds{};
+            GetWindowRect(button.window, &bounds);
+            MapWindowPoints(nullptr, bar_, reinterpret_cast<POINT*>(&bounds), 2);
+            descriptors.push_back({element, bounds});
+        }
+        const skin::SkinLayers layers(std::move(descriptors), transparent);
+        if (icon_) {
+            const skin::SkinLayerClip clip(dc, layers, &icon_element);
             RECT bounds{};
             GetWindowRect(icon_, &bounds);
             MapWindowPoints(nullptr, bar_, reinterpret_cast<POINT*>(&bounds), 2);
@@ -1212,7 +1235,10 @@ private:
             if (icon) DrawIconEx(dc, bounds.left, bounds.top, icon,
                 Width(bounds), Height(bounds), 0, nullptr, DI_NORMAL);
         }
-        for (const auto& button : buttons_) DrawBarButton(dc, button);
+        for (const auto& button : buttons_) {
+            const skin::SkinLayerClip clip(dc, layers, ButtonElement(button.command));
+            DrawBarButton(dc, button);
+        }
     }
 
     void DrawBarButton(HDC dc, const Button& button) const {

@@ -31,6 +31,7 @@
 #include <vector>
 #include <windows.h>
 #include <shlwapi.h>
+#include <wrl/client.h>
 
 namespace {
 
@@ -175,21 +176,16 @@ std::unique_ptr<ttplayer::plugins::LegacyReaderSession> OpenReader(
         return manager.OpenReaderForInspection(logical_path, result);
 
     try {
-        const auto bytes = ttplayer::audio::ReadArchiveMember(member, ttpcomm);
-        if (bytes.size() > static_cast<size_t>(UINT_MAX)) {
-            if (result) *result = HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
-            return {};
-        }
-        IStream* stream = ttplayer::platform::SHCreateMemStream(
-            bytes.empty() ? nullptr : bytes.data(),
-            static_cast<UINT>(bytes.size()));
+        Microsoft::WRL::ComPtr<IStream> stream;
+        stream.Attach(ttplayer::audio::OpenArchiveMemberStream(member, ttpcomm));
         if (!stream) {
             if (result) *result = E_OUTOFMEMORY;
             return {};
         }
-        auto reader = manager.OpenReaderForInspection(logical_path, stream, result);
-        stream->Release();
-        return reader;
+        return manager.OpenReaderForInspection(logical_path, stream.Get(), result);
+    } catch (const ttplayer::audio::ArchiveError& error) {
+        if (result) *result = error.Result();
+        return {};
     } catch (const std::exception&) {
         if (result) *result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
         return {};

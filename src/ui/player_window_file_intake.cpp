@@ -1031,12 +1031,11 @@ bool PlayerWindow::CollectImportedTracks(const std::filesystem::path& input,
     }
     if (extension == L".rar") {
         // 004738B5 selects a distinct RAR archive object, but 00474051 keeps
-        // the same archive|member identity.  The rebuild uses Windows' RAR
-        // namespace as the decompressor while ensuring cache paths never leak
-        // into TTBL persistence.
+        // the same archive|member identity. The rebuilt core enumerates headers
+        // in archive order; payloads are only read for CUE or playback.
         try {
             const size_t before = tracks.size();
-            for (const auto& member : audio::ListRarArchiveMembers(path)) {
+            for (const auto& member : audio::ListRarArchiveMembers(path, ttpcomm_module_)) {
                 const auto logical = audio::MakeArchiveMemberPath(path, member);
                 const auto member_extension = LowerExtension(logical);
                 if (member_extension == L".cue") {
@@ -1077,6 +1076,10 @@ bool PlayerWindow::CollectImportedTracks(const std::filesystem::path& input,
                 }
             }
             return tracks.size() != before;
+        } catch (const audio::ArchiveError& error) {
+            const std::wstring message=path.filename().wstring()+L"\n\n"+error.Message();
+            MessageBoxW(window_,message.c_str(),L"读取压缩包",MB_OK|MB_ICONERROR);
+            return false;
         } catch (const std::exception&) {
             return false;
         }

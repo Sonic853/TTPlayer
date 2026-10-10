@@ -39,10 +39,36 @@ std::wstring Attribute(IXMLDOMNode* node, const wchar_t* name) {
     return static_cast<const wchar_t*>(_bstr_t(managed));
 }
 
-RECT ParseRect(const std::wstring& value) {
-    RECT result{};
-    if (swscanf_s(value.c_str(), L"%ld , %ld , %ld , %ld",
-                  &result.left, &result.top, &result.right, &result.bottom) != 4) return {};
+std::vector<IXMLDOMNode*> Nodes(IXMLDOMDocument* document, const wchar_t* path) {
+    std::vector<IXMLDOMNode*> result;
+    IXMLDOMNodeList* list{};
+    document->selectNodes(_bstr_t(path), &list);
+    long count{};
+    if (list) list->get_length(&count);
+    for (long i = 0; i < count; ++i) {
+        IXMLDOMNode* node{};
+        list->get_item(i, &node);
+        if (node) result.push_back(node); // caller releases each item
+    }
+    if (list) list->Release();
+    return result;
+}
+
+std::filesystem::path SkinAssetPath(const std::filesystem::path& directory,
+                                    const std::wstring& name) {
+    const std::filesystem::path relative(name);
+    if (name.empty() || relative.is_absolute() || relative.has_root_name() ||
+        relative.has_root_directory() || name.find(L':') != std::wstring::npos) return {};
+    for (const auto& part : relative) if (part == L"..") return {};
+    return directory / relative;
+}
+
+RECT ParseRect(const std::wstring& value, RECT result = {}) {
+    // 004A9D02 clears empty input, but sscanf writes any successfully parsed
+    // prefix into the existing slot. Preserve that deterministic behavior.
+    if (value.empty()) return {};
+    swscanf_s(value.c_str(), L"%ld,%ld,%ld,%ld",
+        &result.left, &result.top, &result.right, &result.bottom);
     return result;
 }
 
@@ -57,7 +83,8 @@ int ParseInt(const std::wstring& value, int fallback) {
     if (value.empty()) return fallback;
     wchar_t* end{};
     const long parsed = wcstol(value.c_str(), &end, 10);
-    return end && *end == L'\0' ? static_cast<int>(parsed) : fallback;
+    // 004A9CE9 uses atoi: accept a numeric prefix (including whitespace).
+    return end != value.c_str() ? static_cast<int>(parsed) : 0;
 }
 
 unsigned int ParseAlignment(const std::wstring& value) {
@@ -348,13 +375,14 @@ void LoadElementAnimation(LegacySkin& skin, const std::filesystem::path& directo
 }
 
 SkinBitmap LoadSkinBitmap(LegacySkin& skin, const std::filesystem::path& directory,
-                          IXMLDOMNode* node, const wchar_t* attribute) {
-    SkinBitmap result;
+                          IXMLDOMNode* node, const wchar_t* attribute, const SkinBitmap* previous = nullptr) {
+    SkinBitmap result = previous ? *previous : SkinBitmap{};
     const auto name = Attribute(node, attribute);
     if (name.empty()) return result;
     // Keep bitmap ownership centralized in LegacySkin::bitmaps_.
-    result.image = skin.LoadBitmap(directory / name);
-    if (result.image) {
+    auto candidate = skin.LoadBitmap(SkinAssetPath(directory, name));
+    if (candidate) {
+        result.image = std::move(candidate);
         BITMAP info{};
         GetObjectW(result.image, sizeof(info), &info);
         result.size = {info.bmWidth, info.bmHeight};
@@ -365,20 +393,21 @@ SkinBitmap LoadSkinBitmap(LegacySkin& skin, const std::filesystem::path& directo
 SkinElement LoadEqualizerElement(LegacySkin& skin,
                                  const std::filesystem::path& directory,
                                  IXMLDOMNode* node, std::wstring name,
-                                 bool button, bool force_vertical = false) {
-    SkinElement element;
+                                 bool button, bool force_vertical = false,
+                                 const SkinElement* previous = nullptr) {
+    SkinElement element = previous ? *previous : SkinElement{};
     element.name = std::move(name);
-    element.bounds = ParseRect(Attribute(node, L"position"));
+    element.bounds = ParseRect(Attribute(node, L"position"), element.bounds);
     element.alignment = ParseAlignment(Attribute(node, L"align"));
     const auto vertical = Attribute(node, L"vertical");
-    element.vertical = force_vertical || _wcsicmp(vertical.c_str(), L"true") == 0 ||
-                       vertical == L"1";
+    element.vertical = force_vertical || _wcsicmp(vertical.c_str(), L"true") == 0;
     element.four_state = button;
     const auto load = [&](const wchar_t* attribute, SkinImage& bitmap, SIZE& size) {
         const auto file = Attribute(node, attribute);
         if (file.empty()) return;
-        bitmap = skin.LoadBitmap(directory / file);
-        if (!bitmap) return;
+        auto candidate = skin.LoadBitmap(SkinAssetPath(directory, file));
+        if (!candidate) return;
+        bitmap = std::move(candidate);
         BITMAP info{};
         GetObjectW(bitmap, sizeof(info), &info);
         size = {info.bmWidth, info.bmHeight};
@@ -401,29 +430,24 @@ SkinElement LoadEqualizerElement(LegacySkin& skin,
 
 SkinElement LoadPlaylistImageElement(LegacySkin& skin,
                                      const std::filesystem::path& directory,
-                                     IXMLDOMNode* node, std::wstring name) {
-    SkinElement element;
+                                     IXMLDOMNode* node, std::wstring name,
+                                     const SkinElement* previous = nullptr) {
+    SkinElement element = previous ? *previous : SkinElement{};
     element.name = std::move(name);
-    element.bounds = ParseRect(Attribute(node, L"position"));
+    element.bounds = ParseRect(Attribute(node, L"position"), element.bounds);
     element.alignment = ParseAlignment(Attribute(node, L"align"));
     const auto image = Attribute(node, L"image");
     if (!image.empty()) {
-        element.image = skin.LoadBitmap(directory / image);
-        if (element.image) {
-            BITMAP info{};
-            GetObjectW(element.image, sizeof(info), &info);
-            element.image_size = {info.bmWidth, info.bmHeight};
-            if (_wcsicmp(element.name.c_str(), L"close") == 0 &&
-                info.bmWidth >= 4) {
-                element.four_state = true;
-                element.frames = 4;
-                // Playlist XML stores the four-frame strip extent and anchors
-                // its right edge.  The live button occupies the final frame's
-                // width immediately to the left of that anchor.
-                element.bounds.left = element.bounds.right - info.bmWidth / 4;
-                element.bounds.bottom = element.bounds.top + info.bmHeight;
-            }
+        if (auto candidate = skin.LoadBitmap(SkinAssetPath(directory, image))) {
+            element.image = std::move(candidate);
+            element.image_size = element.image.Size();
         }
+    }
+    if (element.name == L"close" && element.image && element.image_size.cx >= 4) {
+        element.four_state = true;
+        element.frames = 4;
+        element.bounds.left = element.bounds.right - element.image_size.cx / 4;
+        element.bounds.bottom = element.bounds.top + element.image_size.cy;
     }
     LoadElementAnimation(skin, directory, node, element);
     return element;
@@ -518,7 +542,6 @@ bool ParseLogFont(const std::wstring& descriptor, LOGFONTW& font) {
 }
 
 void LoadLyricColors(const std::filesystem::path& directory, LyricSkin& lyric) {
-    InitializeDefaultLogFont(lyric.font);
     const auto path = directory / L"Lyric.xml";
     if (!std::filesystem::exists(path)) return;
     ComScope com;
@@ -571,15 +594,9 @@ void LoadPlaylistColors(const std::filesystem::path& directory, PlaylistSkin& pl
         IXMLDOMNode* node{};
         document->selectSingleNode(_bstr_t(L"/ttplayer_playlist/PlayList"), &node);
         if (node) {
-            const auto descriptor = Attribute(node, L"Font");
-            if (!descriptor.empty()) {
-                const auto comma = descriptor.rfind(L',');
-                if (comma != std::wstring::npos && comma + 1 < descriptor.size())
-                    playlist.font = descriptor.substr(comma + 1);
-                const auto first_comma = descriptor.find(L',');
-                playlist.font_height = ParseInt(descriptor.substr(0, first_comma),
-                                                playlist.font_height);
-            }
+            static_cast<void>(ParseLogFont(Attribute(node, L"Font"), playlist.font_descriptor));
+            playlist.font = playlist.font_descriptor.lfFaceName;
+            playlist.font_height = playlist.font_descriptor.lfHeight;
             playlist.text_color = ParseColor(Attribute(node, L"Color_Text"), playlist.text_color);
             playlist.highlight_color = ParseColor(Attribute(node, L"Color_Hilight"), playlist.highlight_color);
             playlist.background_color = ParseColor(Attribute(node, L"Color_Bkgnd"), playlist.background_color);
@@ -717,10 +734,18 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
     }
 
     LegacySkin skin;
+    InitializeDefaultLogFont(skin.lyric_.font);
+    InitializeDefaultLogFont(skin.playlist_.font_descriptor);
     // 0048E635 / 0048EA53 seed package descriptors from the current settings
     // before parsing sparse XML. Standalone loads start with DLL defaults.
     if (current) {
         auto& list = skin.playlist_;
+        if (current->playlist.font_descriptor_valid)
+            list.font_descriptor = current->playlist.font_descriptor;
+        else {
+            list.font_descriptor.lfHeight = current->playlist.font_height;
+            wcsncpy_s(list.font_descriptor.lfFaceName, current->playlist.font.c_str(), _TRUNCATE);
+        }
         list.text_color = current->playlist.text_color;
         list.highlight_color = current->playlist.highlight_color;
         list.number_color = current->playlist.number_color;
@@ -729,6 +754,7 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
         list.background_color = current->playlist.background_color;
         list.alternate_background_color = current->playlist.alternate_background_color;
         auto& lyric = skin.lyric_;
+        if (current->lyric.font_valid) lyric.font = current->lyric.font;
         if (current->lyric.text_color != CLR_INVALID)
             lyric.text_color = current->lyric.text_color;
         if (current->lyric.highlight_color != CLR_INVALID)
@@ -738,234 +764,123 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
     }
     IXMLDOMNode* root{};
     document->selectSingleNode(_bstr_t(L"/skin"), &root);
-    skin.transparent_color_ = ParseColor(Attribute(root, L"transparent_color"), RGB(255, 0, 255));
+    if (!root || ParseInt(Attribute(root, L"version"), 0) != 2) {
+        if (root) root->Release();
+        document->Release();
+        throw std::runtime_error("unsupported Skin.xml version (expected 2)");
+    }
+    skin.transparent_color_ = ParseColor(Attribute(root, L"transparent_color"), CLR_INVALID);
     if (root) root->Release();
 
-    IXMLDOMNode* player{};
-    document->selectSingleNode(_bstr_t(L"/skin/player_window"), &player);
-    if (!player) {
-        document->Release();
-        throw std::runtime_error("player_window missing from Skin.xml");
-    }
-    const auto background_name = Attribute(player, L"image");
-    skin.background_ = skin.LoadBitmap(directory / background_name);
-    if (!skin.background_) {
-        player->Release();
-        document->Release();
-        throw std::runtime_error("player skin bitmap unavailable");
-    }
-    BITMAP background_info{};
-    GetObjectW(skin.background_, sizeof(background_info), &background_info);
-    skin.window_size_ = {background_info.bmWidth, background_info.bmHeight};
-
-    IXMLDOMNodeList* children{};
-    player->get_childNodes(&children);
-    long count{};
-    if (children) children->get_length(&count);
-    for (long index = 0; index < count; ++index) {
-        IXMLDOMNode* node{};
-        children->get_item(index, &node);
-        if (!node) continue;
-        DOMNodeType type{};
-        node->get_nodeType(&type);
-        if (type != NODE_ELEMENT) { node->Release(); continue; }
-        BSTR raw_name{};
-        node->get_nodeName(&raw_name);
-        SkinElement element;
-        if (raw_name) {
-            element.name.assign(raw_name, SysStringLen(raw_name));
-            SysFreeString(raw_name);
-        }
-        element.four_state = IsFourStateButton(element.name);
-        element.bounds = ParseRect(Attribute(node, L"position"));
-        element.color = ParseColor(Attribute(node, L"color"), element.color);
-        element.background = ParseColor(Attribute(node, L"bkgnd"), element.background);
-        element.alignment = ParseAlignment(Attribute(node, L"align"));
-        const auto font = Attribute(node, L"font");
-        if (!font.empty()) element.font = font;
-        element.font_size = ParseInt(Attribute(node, L"font_size"), element.font_size);
-        element.vertical = _wcsicmp(Attribute(node, L"vertical").c_str(), L"true") == 0;
-        const auto image = Attribute(node, L"image");
-        if (!image.empty()) {
-            element.image = skin.LoadBitmap(directory / image);
-            if (element.image) {
-                BITMAP info{};
-                GetObjectW(element.image, sizeof(info), &info);
-                element.image_size = {info.bmWidth, info.bmHeight};
-                if (element.four_state) {
-                    // FUN_0040A35B always treats a button strip as exactly four
-                    // horizontal frames and sizes the child to frameWidth x
-                    // bitmapHeight, rather than stretching to the XML rect.
-                    element.frames = 4;
-                    element.bounds.right = element.bounds.left + info.bmWidth / 4;
-                    element.bounds.bottom = element.bounds.top + info.bmHeight;
+    // 004A8536 writes fixed slots. Repeated definitions update the same slot;
+    // missing/failed bitmap loads preserve its previous image (004A9D8C).
+    const auto load_player = [&](const wchar_t* path, SkinImage& background,
+                                 SIZE& size, std::vector<SkinElement>& elements) {
+        IXMLDOMNodeList* windows{};
+        document->selectNodes(_bstr_t(path), &windows);
+        long window_count{};
+        if (windows) windows->get_length(&window_count);
+        for (long w = 0; w < window_count; ++w) {
+            IXMLDOMNode* window{};
+            windows->get_item(w, &window);
+            if (!window) continue;
+            const auto file = Attribute(window, L"image");
+            if (!file.empty()) {
+                if (auto image = skin.LoadBitmap(SkinAssetPath(directory, file))) {
+                    background = image;
+                    size = image.Size();
                 }
             }
-        }
-        if (element.name == L"icon" && !skin.icon_) {
-            auto icon_name = Attribute(node, L"icon");
-            if (!icon_name.empty()) {
-                skin.icon_ = static_cast<HICON>(LoadImageW(nullptr,
-                    (directory / icon_name).c_str(), IMAGE_ICON,
-                    GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
-                    LR_LOADFROMFILE));
-            }
-        }
-        const auto fill_image = Attribute(node, L"fill_image");
-        if (!fill_image.empty()) {
-            element.fill_image = skin.LoadBitmap(directory / fill_image);
-            if (element.fill_image) {
-                BITMAP info{};
-                GetObjectW(element.fill_image, sizeof(info), &info);
-                element.fill_size = {info.bmWidth, info.bmHeight};
-            }
-        }
-        const auto fill_image2 = Attribute(node, L"fill_image2");
-        if (!fill_image2.empty()) {
-            element.fill_image2 = skin.LoadBitmap(directory / fill_image2);
-            if (element.fill_image2) {
-                BITMAP info{};
-                GetObjectW(element.fill_image2, sizeof(info), &info);
-                element.fill_size2 = {info.bmWidth, info.bmHeight};
-            }
-        }
-        const auto bar_image = Attribute(node, L"bar_image");
-        if (!bar_image.empty()) {
-            element.bar_image = skin.LoadBitmap(directory / bar_image);
-            if (element.bar_image) {
-                BITMAP info{};
-                GetObjectW(element.bar_image, sizeof(info), &info);
-                element.bar_size = {info.bmWidth, info.bmHeight};
-            }
-        }
-        const auto thumb_image = Attribute(node, L"thumb_image");
-        if (!thumb_image.empty()) {
-            element.thumb_image = skin.LoadBitmap(directory / thumb_image);
-            if (element.thumb_image) {
-                BITMAP info{};
-                GetObjectW(element.thumb_image, sizeof(info), &info);
-                element.thumb_size = {info.bmWidth, info.bmHeight};
-            }
-        }
-        LoadElementAnimation(skin, directory, node, element);
-        skin.elements_.push_back(std::move(element));
-        node->Release();
-    }
-    if (children) children->Release();
-    player->Release();
-
-    // FUN_0047EBxx stores mini_window at skin-object offset +0x4A0.  The
-    // double-click handler (00460CF5) enables command 0x7DD4 only when this
-    // layout exists, and 00464B6C swaps the live controls to these elements.
-    IXMLDOMNode* mini_window{};
-    document->selectSingleNode(_bstr_t(L"/skin/mini_window"), &mini_window);
-    if (mini_window) {
-        const auto mini_background = Attribute(mini_window, L"image");
-        skin.mini_.background = skin.LoadBitmap(directory / mini_background);
-        if (skin.mini_.background) {
-            BITMAP mini_info{};
-            GetObjectW(skin.mini_.background, sizeof(mini_info), &mini_info);
-            skin.mini_.window_size = {mini_info.bmWidth, mini_info.bmHeight};
-
-            IXMLDOMNodeList* mini_children{};
-            mini_window->get_childNodes(&mini_children);
-            long mini_count{};
-            if (mini_children) mini_children->get_length(&mini_count);
-            for (long index = 0; index < mini_count; ++index) {
+            IXMLDOMNodeList* children{};
+            window->get_childNodes(&children);
+            long count{};
+            if (children) children->get_length(&count);
+            for (long i = 0; i < count; ++i) {
                 IXMLDOMNode* node{};
-                mini_children->get_item(index, &node);
+                children->get_item(i, &node);
                 if (!node) continue;
-                DOMNodeType type{};
-                node->get_nodeType(&type);
-                if (type != NODE_ELEMENT) { node->Release(); continue; }
-
-                BSTR raw_name{};
-                node->get_nodeName(&raw_name);
-                SkinElement element;
-                if (raw_name) {
-                    element.name.assign(raw_name, SysStringLen(raw_name));
-                    SysFreeString(raw_name);
+                BSTR raw{};
+                node->get_nodeName(&raw);
+                const std::wstring name = raw ? raw : L"";
+                SysFreeString(raw);
+                if (PlayerSkinOrder(name) < 0) { node->Release(); continue; }
+                auto it = std::find_if(elements.begin(), elements.end(),
+                    [&](const auto& e) { return e.name == name; });
+                if (it == elements.end()) {
+                    elements.emplace_back();
+                    it = std::prev(elements.end());
+                    it->name = name;
                 }
-                element.four_state = IsFourStateButton(element.name);
-                element.bounds = ParseRect(Attribute(node, L"position"));
-                element.color = ParseColor(Attribute(node, L"color"), element.color);
-                element.background = ParseColor(Attribute(node, L"bkgnd"), element.background);
+                auto& element = *it;
+                element.four_state = IsFourStateButton(name);
+                element.bounds = ParseRect(Attribute(node, L"position"), element.bounds);
+                element.color = ParseColor(Attribute(node, L"color"), RGB(255,255,255));
+                element.background = ParseColor(Attribute(node, L"bkgnd"), 0xff000000);
                 element.alignment = ParseAlignment(Attribute(node, L"align"));
                 const auto font = Attribute(node, L"font");
-                if (!font.empty()) element.font = font;
-                element.font_size = ParseInt(Attribute(node, L"font_size"), element.font_size);
+                if (!font.empty()) {
+                    element.font = font;
+                    element.font_size = ParseInt(Attribute(node, L"font_size"), 12);
+                }
                 element.vertical = _wcsicmp(Attribute(node, L"vertical").c_str(), L"true") == 0;
-
-                const auto image = Attribute(node, L"image");
-                if (!image.empty()) {
-                    element.image = skin.LoadBitmap(directory / image);
-                    if (element.image) {
-                        BITMAP info{};
-                        GetObjectW(element.image, sizeof(info), &info);
-                        element.image_size = {info.bmWidth, info.bmHeight};
-                        if (element.four_state) {
-                            element.frames = 4;
-                            element.bounds.right = element.bounds.left + info.bmWidth / 4;
-                            element.bounds.bottom = element.bounds.top + info.bmHeight;
+                const auto load = [&](const wchar_t* attr, SkinImage& image, SIZE& image_size) {
+                    const auto file_name = Attribute(node, attr);
+                    if (!file_name.empty()) {
+                        if (auto candidate = skin.LoadBitmap(SkinAssetPath(directory, file_name))) {
+                            image = candidate;
+                            image_size = candidate.Size();
+                        }
+                    }
+                };
+                load(L"image", element.image, element.image_size);
+                load(L"bar_image", element.bar_image, element.bar_size);
+                load(L"fill_image", element.fill_image, element.fill_size);
+                load(L"fill_image2", element.fill_image2, element.fill_size2);
+                load(L"thumb_image", element.thumb_image, element.thumb_size);
+                if (element.four_state && element.image) {
+                    element.frames = 4;
+                    element.bounds.right = element.bounds.left + element.image_size.cx / 4;
+                    element.bounds.bottom = element.bounds.top + element.image_size.cy;
+                }
+                if (name == L"icon") {
+                    const auto icon_file = Attribute(node, L"icon");
+                    if (!icon_file.empty()) {
+                        const auto icon = static_cast<HICON>(LoadImageW(nullptr,
+                            (SkinAssetPath(directory, icon_file)).c_str(), IMAGE_ICON,
+                            GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE));
+                        if (icon) {
+                            if (skin.icon_) DestroyIcon(skin.icon_);
+                            skin.icon_ = icon;
                         }
                     }
                 }
-                const auto fill_image = Attribute(node, L"fill_image");
-                if (!fill_image.empty()) {
-                    element.fill_image = skin.LoadBitmap(directory / fill_image);
-                    if (element.fill_image) {
-                        BITMAP info{};
-                        GetObjectW(element.fill_image, sizeof(info), &info);
-                        element.fill_size = {info.bmWidth, info.bmHeight};
-                    }
-                }
-                const auto fill_image2 = Attribute(node, L"fill_image2");
-                if (!fill_image2.empty()) {
-                    element.fill_image2 = skin.LoadBitmap(directory / fill_image2);
-                    if (element.fill_image2) {
-                        BITMAP info{};
-                        GetObjectW(element.fill_image2, sizeof(info), &info);
-                        element.fill_size2 = {info.bmWidth, info.bmHeight};
-                    }
-                }
-                const auto bar_image = Attribute(node, L"bar_image");
-                if (!bar_image.empty()) {
-                    element.bar_image = skin.LoadBitmap(directory / bar_image);
-                    if (element.bar_image) {
-                        BITMAP info{};
-                        GetObjectW(element.bar_image, sizeof(info), &info);
-                        element.bar_size = {info.bmWidth, info.bmHeight};
-                    }
-                }
-                const auto thumb_image = Attribute(node, L"thumb_image");
-                if (!thumb_image.empty()) {
-                    element.thumb_image = skin.LoadBitmap(directory / thumb_image);
-                    if (element.thumb_image) {
-                        BITMAP info{};
-                        GetObjectW(element.thumb_image, sizeof(info), &info);
-                        element.thumb_size = {info.bmWidth, info.bmHeight};
-                    }
-                }
                 LoadElementAnimation(skin, directory, node, element);
-                skin.mini_.elements.push_back(std::move(element));
                 node->Release();
             }
-            if (mini_children) mini_children->Release();
+            if (children) children->Release();
+            window->Release();
         }
-        mini_window->Release();
+        if (windows) windows->Release();
+        std::stable_sort(elements.begin(), elements.end(), [](const auto& a, const auto& b) {
+            return PlayerSkinOrder(a.name) < PlayerSkinOrder(b.name);
+        });
+    };
+    load_player(L"/skin/player_window", skin.background_, skin.window_size_, skin.elements_);
+    load_player(L"/skin/mini_window", skin.mini_.background, skin.mini_.window_size, skin.mini_.elements);
+    if (!skin.background_) {
+        document->Release();
+        throw std::runtime_error("player skin bitmap unavailable");
     }
 
     // 004A88D0 stores lyric_window at skin-object offset +0x91C.  Its three
     // commands are real four-frame SkinButton children and its lyric rect is
     // enlarged by the same delta as the resizable popup.
-    IXMLDOMNode* lyric_window{};
-    document->selectSingleNode(_bstr_t(L"/skin/lyric_window"), &lyric_window);
-    if (lyric_window) {
+    for (auto* lyric_window : Nodes(document, L"/skin/lyric_window")) {
         auto& lyric = skin.lyric_;
         lyric.position = ParseRect(Attribute(lyric_window, L"position"));
         lyric.resize_rect = ParseRect(Attribute(lyric_window, L"resize_rect"));
-        lyric.resize_tile = ParseBool(Attribute(lyric_window, L"resize_tile"));
-        lyric.background = LoadSkinBitmap(skin, directory, lyric_window, L"image");
+        lyric.resize_tile = ParseInt(Attribute(lyric_window, L"resize_tile"), 0) != 0;
+        lyric.background = LoadSkinBitmap(skin, directory, lyric_window, L"image", &lyric.background);
         lyric.valid = lyric.background.image != nullptr;
 
         IXMLDOMNodeList* lyric_children{};
@@ -984,22 +899,22 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
             const std::wstring name = raw_name
                 ? std::wstring(raw_name, SysStringLen(raw_name)) : std::wstring{};
             if (raw_name) SysFreeString(raw_name);
-            if (_wcsicmp(name.c_str(), L"title") == 0) {
-                lyric.title = LoadEqualizerElement(skin, directory, node, name, false);
-            } else if (_wcsicmp(name.c_str(), L"close") == 0) {
-                lyric.close = LoadEqualizerElement(skin, directory, node, name, true);
-            } else if (_wcsicmp(name.c_str(), L"ontop") == 0) {
-                lyric.ontop = LoadEqualizerElement(skin, directory, node, name, true);
-            } else if (_wcsicmp(name.c_str(), L"desklrc") == 0) {
-                lyric.desklrc = LoadEqualizerElement(skin, directory, node, name, true);
-            } else if (_wcsicmp(name.c_str(), L"lyric") == 0) {
+            if (name == L"title") {
+                lyric.title = LoadEqualizerElement(skin, directory, node, name, false, false, &lyric.title);
+            } else if (name == L"close") {
+                lyric.close = LoadEqualizerElement(skin, directory, node, name, true, false, &lyric.close);
+            } else if (name == L"ontop") {
+                lyric.ontop = LoadEqualizerElement(skin, directory, node, name, true, false, &lyric.ontop);
+            } else if (name == L"desklrc") {
+                lyric.desklrc = LoadEqualizerElement(skin, directory, node, name, true, false, &lyric.desklrc);
+            } else if (name == L"lyric") {
                 lyric.lyric_bounds = ParseRect(Attribute(node, L"position"));
-            } else if (_wcsicmp(name.c_str(), L"mini_border") == 0) {
+            } else if (name == L"mini_border") {
                 lyric.mini_border_left_top = ParseColor(
                     Attribute(node, L"left_top_color"), 0xff000000);
                 lyric.mini_border_right_bottom = ParseColor(
                     Attribute(node, L"right_bottom_color"), 0xff000000);
-            } else if (_wcsicmp(name.c_str(), L"mini_lyric") == 0) {
+            } else if (name == L"mini_lyric") {
                 // Compatibility extension for converted dialog-based skins;
                 // not a node understood by the original 5.7.9 parser.
                 InitializeDefaultLogFont(lyric.mini_font);
@@ -1028,13 +943,9 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
     // 004A92A2 parses /skin/desklrc_bar after the ordinary lyric window.
     // Unlike the main skin controls its XML rectangles are retained verbatim:
     // FUN_004186BC installs the four-frame images and then applies positions.
-    IXMLDOMNode* desktop_bar_node{};
-    document->selectSingleNode(_bstr_t(L"/skin/desklrc_bar"),
-                               &desktop_bar_node);
-    if (desktop_bar_node) {
+    for (auto* desktop_bar_node : Nodes(document, L"/skin/desklrc_bar")) {
         auto& bar = skin.desktop_lyric_bar_;
-        bar.background = LoadSkinBitmap(skin, directory, desktop_bar_node,
-                                        L"image");
+        bar.background = LoadSkinBitmap(skin, directory, desktop_bar_node, L"image", &bar.background);
         bar.transparent_color = ParseColor(
             Attribute(desktop_bar_node, L"transparent_color"),
             RGB(255, 0, 255));
@@ -1061,39 +972,19 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
                 : std::wstring{};
             if (raw_name) SysFreeString(raw_name);
 
-            if (_wcsicmp(name.c_str(), L"icon") == 0) {
+            if (name == L"icon") {
                 bar.icon = ParseRect(Attribute(node, L"position"));
             } else {
-                SkinElement element = LoadEqualizerElement(
-                    skin, directory, node, name, true);
-                if (_wcsicmp(name.c_str(), L"play") == 0)
-                    bar.play = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"pause") == 0)
-                    bar.pause = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"prev") == 0)
-                    bar.previous = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"next") == 0)
-                    bar.next = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"list") == 0)
-                    bar.list = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"settings") == 0)
-                    bar.settings = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"kalaok") == 0)
-                    bar.karaoke = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"lines") == 0)
-                    bar.lines = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"lock") == 0)
-                    bar.lock = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"ontop") == 0)
-                    bar.ontop = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"zoomin") == 0)
-                    bar.zoom_in = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"zoomout") == 0)
-                    bar.zoom_out = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"return") == 0)
-                    bar.return_to_window = std::move(element);
-                else if (_wcsicmp(name.c_str(), L"close") == 0)
-                    bar.close = std::move(element);
+                SkinElement* target{};
+                const struct { const wchar_t* name; SkinElement* field; } fields[] = {
+                    {L"play", &bar.play}, {L"pause", &bar.pause}, {L"prev", &bar.previous},
+                    {L"next", &bar.next}, {L"list", &bar.list}, {L"settings", &bar.settings},
+                    {L"kalaok", &bar.karaoke}, {L"lines", &bar.lines}, {L"lock", &bar.lock},
+                    {L"ontop", &bar.ontop}, {L"zoomin", &bar.zoom_in}, {L"zoomout", &bar.zoom_out},
+                    {L"return", &bar.return_to_window}, {L"close", &bar.close}
+                };
+                for (const auto& field : fields) if (name == field.name) target = field.field;
+                if (target) *target = LoadEqualizerElement(skin, directory, node, name, true, false, target);
             }
             node->Release();
         }
@@ -1104,13 +995,11 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
     // CSkinParser_ParseEqualizerWindow (004A8B73) dispatches these exact
     // node names.  In particular eqfactor is not a single control in the
     // native object: FUN_0042955B materializes ten copies at width+interval.
-    IXMLDOMNode* equalizer_window{};
-    document->selectSingleNode(_bstr_t(L"/skin/equalizer_window"), &equalizer_window);
-    if (equalizer_window) {
+    for (auto* equalizer_window : Nodes(document, L"/skin/equalizer_window")) {
         auto& equalizer = skin.equalizer_;
         equalizer.position = ParseRect(Attribute(equalizer_window, L"position"));
         equalizer.eq_interval = ParseInt(Attribute(equalizer_window, L"eq_interval"), 0);
-        equalizer.background = LoadSkinBitmap(skin, directory, equalizer_window, L"image");
+        equalizer.background = LoadSkinBitmap(skin, directory, equalizer_window, L"image", &equalizer.background);
         equalizer.valid = equalizer.background.image != nullptr;
 
         IXMLDOMNodeList* equalizer_children{};
@@ -1129,24 +1018,24 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
             const std::wstring name = raw_name
                 ? std::wstring(raw_name, SysStringLen(raw_name)) : std::wstring{};
             if (raw_name) SysFreeString(raw_name);
-            if (_wcsicmp(name.c_str(), L"title") == 0) {
-                equalizer.title = LoadEqualizerElement(skin, directory, node, name, false);
-            } else if (_wcsicmp(name.c_str(), L"close") == 0) {
-                equalizer.close = LoadEqualizerElement(skin, directory, node, name, true);
-            } else if (_wcsicmp(name.c_str(), L"enabled") == 0) {
-                equalizer.enabled = LoadEqualizerElement(skin, directory, node, name, true);
-            } else if (_wcsicmp(name.c_str(), L"profile") == 0) {
-                equalizer.profile = LoadEqualizerElement(skin, directory, node, name, true);
-            } else if (_wcsicmp(name.c_str(), L"reset") == 0) {
-                equalizer.reset = LoadEqualizerElement(skin, directory, node, name, true);
-            } else if (_wcsicmp(name.c_str(), L"balance") == 0) {
-                equalizer.balance = LoadEqualizerElement(skin, directory, node, name, false);
-            } else if (_wcsicmp(name.c_str(), L"surround") == 0) {
-                equalizer.surround = LoadEqualizerElement(skin, directory, node, name, false);
-            } else if (_wcsicmp(name.c_str(), L"preamp") == 0) {
-                equalizer.preamp = LoadEqualizerElement(skin, directory, node, name, false, true);
-            } else if (_wcsicmp(name.c_str(), L"eqfactor") == 0) {
-                auto band = LoadEqualizerElement(skin, directory, node, name, false, true);
+            if (name == L"title") {
+                equalizer.title = LoadEqualizerElement(skin, directory, node, name, false, false, &equalizer.title);
+            } else if (name == L"close") {
+                equalizer.close = LoadEqualizerElement(skin, directory, node, name, true, false, &equalizer.close);
+            } else if (name == L"enabled") {
+                equalizer.enabled = LoadEqualizerElement(skin, directory, node, name, true, false, &equalizer.enabled);
+            } else if (name == L"profile") {
+                equalizer.profile = LoadEqualizerElement(skin, directory, node, name, true, false, &equalizer.profile);
+            } else if (name == L"reset") {
+                equalizer.reset = LoadEqualizerElement(skin, directory, node, name, true, false, &equalizer.reset);
+            } else if (name == L"balance") {
+                equalizer.balance = LoadEqualizerElement(skin, directory, node, name, false, false, &equalizer.balance);
+            } else if (name == L"surround") {
+                equalizer.surround = LoadEqualizerElement(skin, directory, node, name, false, false, &equalizer.surround);
+            } else if (name == L"preamp") {
+                equalizer.preamp = LoadEqualizerElement(skin, directory, node, name, false, true, &equalizer.preamp);
+            } else if (name == L"eqfactor") {
+                auto band = LoadEqualizerElement(skin, directory, node, name, false, true, &equalizer.bands[0]);
                 const LONG stride = (band.bounds.right - band.bounds.left) +
                                     equalizer.eq_interval;
                 for (size_t band_index = 0; band_index < equalizer.bands.size(); ++band_index) {
@@ -1166,14 +1055,12 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
     // 004A8DC6 parses playlist_window independently from player_window.  It
     // is deliberately loaded before the XML document is released so runtime
     // skin switching can update both HWNDs transactionally.
-    IXMLDOMNode* playlist_window{};
-    document->selectSingleNode(_bstr_t(L"/skin/playlist_window"), &playlist_window);
-    if (playlist_window) {
+    for (auto* playlist_window : Nodes(document, L"/skin/playlist_window")) {
         auto& playlist = skin.playlist_;
         playlist.position = ParseRect(Attribute(playlist_window, L"position"));
         playlist.resize_rect = ParseRect(Attribute(playlist_window, L"resize_rect"));
-        playlist.resize_tile = ParseBool(Attribute(playlist_window, L"resize_tile"));
-        playlist.background = LoadSkinBitmap(skin, directory, playlist_window, L"image");
+        playlist.resize_tile = ParseInt(Attribute(playlist_window, L"resize_tile"), 0) != 0;
+        playlist.background = LoadSkinBitmap(skin, directory, playlist_window, L"image", &playlist.background);
         playlist.valid = playlist.background.image != nullptr;
 
         IXMLDOMNodeList* playlist_children{};
@@ -1192,15 +1079,15 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
             const std::wstring name = raw_name
                 ? std::wstring(raw_name, SysStringLen(raw_name)) : std::wstring{};
             if (raw_name) SysFreeString(raw_name);
-            if (_wcsicmp(name.c_str(), L"title") == 0) {
-                playlist.title = LoadPlaylistImageElement(skin, directory, node, L"title");
-            } else if (_wcsicmp(name.c_str(), L"close") == 0) {
-                playlist.close = LoadPlaylistImageElement(skin, directory, node, L"close");
-            } else if (_wcsicmp(name.c_str(), L"toolbar") == 0) {
+            if (name == L"title") {
+                playlist.title = LoadPlaylistImageElement(skin, directory, node, L"title", &playlist.title);
+            } else if (name == L"close") {
+                playlist.close = LoadPlaylistImageElement(skin, directory, node, L"close", &playlist.close);
+            } else if (name == L"toolbar") {
                 playlist.toolbar_bounds = ParseRect(Attribute(node, L"position"));
                 playlist.toolbar_alignment = ParseAlignment(Attribute(node, L"align"));
-                playlist.toolbar = LoadSkinBitmap(skin, directory, node, L"image");
-                playlist.toolbar_hot = LoadSkinBitmap(skin, directory, node, L"hot_image");
+                playlist.toolbar = LoadSkinBitmap(skin, directory, node, L"image", &playlist.toolbar);
+                playlist.toolbar_hot = LoadSkinBitmap(skin, directory, node, L"hot_image", &playlist.toolbar_hot);
                 playlist.toolbar_animation = LoadAnimation(node, 1);
                 IXMLDOMNodeList* items{};
                 node->selectNodes(_bstr_t(L"item"), &items);
@@ -1223,25 +1110,33 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
                     item->Release();
                 }
                 if (items) items->Release();
-            } else if (_wcsicmp(name.c_str(), L"scrollbar") == 0) {
-                playlist.scrollbar_buttons = LoadSkinBitmap(skin, directory, node, L"buttons_image");
-                playlist.scrollbar_thumb = LoadSkinBitmap(skin, directory, node, L"thumb_image");
-                playlist.scrollbar_bar = LoadSkinBitmap(skin, directory, node, L"bar_image");
+            } else if (name == L"scrollbar") {
+                playlist.scrollbar_buttons = LoadSkinBitmap(skin, directory, node, L"buttons_image", &playlist.scrollbar_buttons);
+                playlist.scrollbar_thumb = LoadSkinBitmap(skin, directory, node, L"thumb_image", &playlist.scrollbar_thumb);
+                playlist.scrollbar_bar = LoadSkinBitmap(skin, directory, node, L"bar_image", &playlist.scrollbar_bar);
                 playlist.scrollbar_thumb_resize_center = std::max(0, ParseInt(
                     Attribute(node, L"thumb_resize_center"), 0));
-                playlist.scrollbar_thumb_resize_tile = ParseBool(
-                    Attribute(node, L"thumb_resize_tile"));
-            } else if (_wcsicmp(name.c_str(), L"playlist") == 0) {
+                playlist.scrollbar_thumb_resize_tile = ParseInt(
+                    Attribute(node, L"thumb_resize_tile"), 0) != 0;
+            } else if (name == L"playlist") {
                 playlist.list_bounds = ParseRect(Attribute(node, L"position"));
-                playlist.splitter_bar = LoadSkinBitmap(skin, directory, node, L"splitter_bar_image");
-                playlist.splitter_arrow = LoadSkinBitmap(skin, directory, node, L"splitter_arrow_image");
-                playlist.selected = LoadSkinBitmap(skin, directory, node, L"selected_image");
+                playlist.splitter_bar = LoadSkinBitmap(skin, directory, node, L"splitter_bar_image", &playlist.splitter_bar);
+                playlist.splitter_arrow = LoadSkinBitmap(skin, directory, node, L"splitter_arrow_image", &playlist.splitter_arrow);
+                playlist.selected = LoadSkinBitmap(skin, directory, node, L"selected_image", &playlist.selected);
             }
             node->Release();
         }
         if (playlist_children) playlist_children->Release();
         playlist_window->Release();
         LoadPlaylistColors(directory, playlist);
+    }
+    for (auto* elements : {&skin.elements_, &skin.mini_.elements}) {
+        for (auto& element : *elements) {
+            if (element.name == L"progress" && !element.fill_image2 && element.fill_image) {
+                element.fill_image2 = element.fill_image.DarkenedBufferFill(skin.transparent_color_);
+                element.fill_size2 = element.fill_image2.Size();
+            }
+        }
     }
     // CSkinManager_LoadPackageXml opens Visual.xml after the window layouts
     // and stores its sparse descriptor at skin-object offset +0x498.

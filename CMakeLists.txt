@@ -122,6 +122,7 @@ add_library(ttplayer_core
   src/skin/default_colors.cpp
   src/skin/skin.cpp
   src/skin/skin_image.cpp
+  src/skin/skin_layers.cpp
   src/skin/skin_package.cpp
   src/skin/skin_plugin.cpp
   src/ui/desktop_lyrics.cpp

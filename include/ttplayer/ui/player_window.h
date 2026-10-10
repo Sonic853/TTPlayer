@@ -1180,6 +1180,7 @@ private:
     std::vector<std::pair<int, HWND>> equalizer_controls_;
     std::vector<std::pair<UINT_PTR, HWND>> playlist_tool_controls_;
     bool playlist_scrollbar_dragging_{};
+    bool playlist_scrollbar_catalogue_{};
     PlaylistScrollbarPart playlist_scrollbar_hover_{};
     PlaylistScrollbarPart playlist_scrollbar_pressed_{};
     bool playlist_scrollbar_repeat_fast_{};

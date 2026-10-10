@@ -134,7 +134,7 @@ def main():
         exported = inspect_exports(temporary)
         expected = set(range(1,6)) | set(range(10,15)) | set(range(50,84)) | set(range(90,94)) | set(range(100,107)) | set(range(200,207)) | set(range(300,303)) | {400,401}
         named = {1:'ttpcomm_getversion',2:'_resetstkoflw',3:'srand48',4:'lrand48',5:'_set_security_error_handler'}
-        extensions = {500: 'ttpcomm_query_extension', 501: 'ttpcomm_query_runtime'}
+        extensions = {500: 'ttpcomm_query_extension', 501: 'ttpcomm_query_runtime', 502: 'ttpcomm_query_archive'}
         required = expected | extensions.keys()
         if (not required.issubset(exported) or
             any(e['name'] != named.get(n, '') for n,e in exported.items() if n in expected) or
@@ -154,6 +154,7 @@ def main():
         temporary.unlink(missing_ok=True)
     metadata['inventories'] = [p.name for p in args.exports]
     metadata['runtime_api_export'] = 'ttpcomm_query_runtime'
+    metadata['archive_api_export'] = 'ttpcomm_query_archive'
     (args.output / 'ttpcomm-component.json').write_text(
         json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
     print(f"Staged TTPlayerComm {metadata['version']}: {len(dll)} bytes; SHA-256 and XP/Win7 imports verified")

@@ -5,6 +5,7 @@
 // These declarations do not alter the public PlayerWindow ABI.
 
 #include "ttplayer/ui/player_window.h"
+#include "ttplayer/skin/skin_layers.h"
 
 #include <chrono>
 #include <functional>
@@ -415,6 +416,7 @@ static_assert(std::size(kEqualizerPresets) == 13);
 struct PlaylistGeometry {
     RECT list{};
     RECT list_titles{};
+    RECT list_scrollbar{};
     RECT splitter{};
     RECT tracks{};
     RECT scrollbar{};
@@ -498,7 +500,8 @@ void DrawElementFrame(HDC target, const skin::SkinElement& element, RECT bounds,
                       int state, COLORREF transparent);
 PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
                                       int split_on_lists, int width, int height,
-                                      size_t track_count, int row_height = 16);
+                                      size_t track_count, int row_height = 16,
+                                      size_t list_count = 0, bool library_mode = false);
 LOGFONTW PlaylistFontDescriptor(const settings::PlaylistSettings& settings);
 HFONT CreatePlaylistFont(const settings::PlaylistSettings& settings);
 void ApplyPlaylistSkinDefaults(const skin::PlaylistSkin& source,
@@ -519,6 +522,9 @@ void DrawScrollingSkinInfo(HDC dc, const skin::SkinElement& element,
 std::wstring FormatInfoDuration(std::chrono::milliseconds duration);
 std::wstring FormatAudioDescription(const audio::AudioFormat& format);
 std::wstring FormatLedTime(std::chrono::milliseconds position);
+std::vector<skin::SkinLayer> PlayerSkinLayers(const std::vector<skin::SkinElement>& elements,
+    bool playing, int play_mode, std::wstring_view led_text);
+void DrawSkinIcon(HDC dc, HICON icon, const RECT& bounds);
 RECT SkinLedBounds(const skin::SkinElement& led, std::wstring_view value);
 void DrawSkinLed(HDC dc, const skin::SkinElement& led, std::wstring_view value,
                  COLORREF transparent);

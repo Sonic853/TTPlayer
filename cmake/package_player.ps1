@@ -72,6 +72,7 @@ if ($TtpCommDirectory) {
     $commHash = (Get-FileHash -LiteralPath $comm -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($commInfo.repository -cne 'https://github.com/TTPlayerRebuild/TTPlayerComm' -or
         $commInfo.sha256 -cne $commHash -or $commInfo.runtime_api_export -cne 'ttpcomm_query_runtime' -or
+        $commInfo.archive_api_export -cne 'ttpcomm_query_archive' -or
         $commInfo.inventories -notcontains '5.1.2600.txt' -or $commInfo.inventories -notcontains '6.1.7600.txt' -or
         (Get-Item -LiteralPath $comm).VersionInfo.FileVersion -cne $commInfo.version) {
         throw 'Download and verify the TTPCOMM component before packaging.'
