@@ -51,6 +51,16 @@ New-Item -ItemType Directory -Path (Join-Path $package 'AddIn') | Out-Null
 Copy-Item -LiteralPath $https -Destination (Join-Path $package 'AddIn/ttp_https.dll')
 "$hash  TTPlayerRebuild.exe`n$updaterHash  TTPUpdater.exe`n$httpsHash  AddIn/ttp_https.dll" | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
 $entries = @('TTPlayerRebuild.exe', 'TTPUpdater.exe', 'AddIn/ttp_https.dll', 'SHA256SUMS.txt')
+$resources = Join-Path $output 'ttpres.dll'
+# Re-audit the actual bytes, not just a previously generated sidecar.
+& python (Join-Path $PSScriptRoot '../third_party/ttpres-sdk/tools/audit.py') `
+    --dll $resources --exe $executable --manifest (Join-Path $PSScriptRoot '../third_party/ttpres-sdk/baseline.json') `
+    --output (Join-Path $package 'resource-audit.json')
+if ($LASTEXITCODE -ne 0) { throw 'TTPlayerRes resource audit failed.' }
+$resInfo = Get-Content -LiteralPath (Join-Path $package 'resource-audit.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+Copy-Item -LiteralPath $resources -Destination (Join-Path $package 'ttpres.dll')
+"$($resInfo.sha256)  ttpres.dll" | Add-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
+$entries += 'ttpres.dll'
 $lrcsh = Join-Path $output 'AddIn/ttp_lrcsh.dll'
 $lrcshInfo = Get-Content -LiteralPath (Join-Path $output 'lrcsh-component.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $lrcshHash = (Get-FileHash -LiteralPath $lrcsh -Algorithm SHA256).Hash.ToLowerInvariant()

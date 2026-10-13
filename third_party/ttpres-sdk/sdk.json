@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "extension_abi": 1,
+  "repository": "https://github.com/TTPlayerRebuild/TTPlayerRes",
+  "files": {
+    "include/ttpres/resource_extensions.h": "03b6a895e002113d37e1fd83ba529ef1601b4ced3f8a3ef62663d883d4e3d27b",
+    "include/ttpres/resource_ids.h": "14b260f85b28257f5512caf1373cfb024b5624a58f975bb2b146224da4560d1b",
+    "baseline.json": "f210a59109f09b7e6d77146e04fbfe102d1b0c552dc038b5110db37f6c026d87",
+    "tools/resource_model.py": "394c803ffb9b5020aa0a09174514cc07bdca9ca63be258b2b69d0613edba4c34",
+    "tools/audit.py": "3ca82dc77131b4bdff2861f22d903529ecbc3c043998ba17c31bd921a8b873be"
+  }
+}

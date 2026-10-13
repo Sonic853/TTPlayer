@@ -1,4 +1,5 @@
-﻿#include "ttplayer/audio/disc_media.h"
+#include <ttpres/resource_ids.h>
+#include "ttplayer/audio/disc_media.h"
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_window.h"
@@ -4759,7 +4760,8 @@ void PlayerWindow::PopulatePlaylistSwitchMenu(HMENU menu) const {
         if (!choices) return;
         item.fMask = MIIM_ID | MIIM_STRING | MIIM_SUBMENU;
         item.wID = kPlaylistSwitchMenu;
-        item.dwTypeData = const_cast<wchar_t*>(L"切换列表");
+        const auto label = i18n::ResourceText(GetModuleHandleW(nullptr), IDS_PLAYLIST_SWITCH);
+        item.dwTypeData = const_cast<wchar_t*>(label.c_str());
         item.hSubMenu = choices;
         int position = 0;
         const int count = GetMenuItemCount(lists);

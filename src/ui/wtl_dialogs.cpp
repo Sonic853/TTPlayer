@@ -1,12 +1,17 @@
 #include "ttplayer/ui/wtl_runtime.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/i18n/i18n.h"
+#include <ttpres/resource_extensions.h>
 #include <atldlgs.h>
 #include <memory>
 #include <vector>
 
 namespace ttplayer::ui {
 namespace {
+bool RequiresExternalTemplate(HINSTANCE resources, LPCWSTR name) {
+    return resources == GetModuleHandleW(nullptr) && IS_INTRESOURCE(name) &&
+        ttpres::IsExtension(RT_DIALOG, static_cast<UINT>(reinterpret_cast<ULONG_PTR>(name)));
+}
 BOOL DispatchDialog(DLGPROC handler, HWND window, UINT message, WPARAM wp,
                     LPARAM lp, LRESULT& result) {
     const INT_PTR handled = handler(window, message, wp, lp);
@@ -36,11 +41,15 @@ public:
         return DispatchDialog(handler, window, message, wp, lp, result);
     }
     HWND CreateResource(HINSTANCE resources, LPCWSTR name, HWND parent, LPARAM data) {
+        const auto translated = i18n::DialogTemplate(resources, name);
+        if (translated.empty() && RequiresExternalTemplate(resources, name)) {
+            SetLastError(ERROR_RESOURCE_DATA_NOT_FOUND);
+            return nullptr;
+        }
         if (!m_thunk.Init(nullptr, nullptr)) return nullptr;
         ATL::_AtlWinModule.AddCreateWndData(&m_thunk.cd,
             static_cast<ATL::CDialogImplBase*>(this));
         // Unlike CDialogImpl::Create, preserve the caller's resource module.
-        const auto translated = i18n::DialogTemplate(resources, name);
         const HWND window = translated.empty()
             ? ::CreateDialogParamW(resources, name, parent, StartDialogProc, data)
             : ::CreateDialogIndirectParamW(resources,
@@ -49,10 +58,14 @@ public:
         return window;
     }
     INT_PTR ModalResource(HINSTANCE resources, LPCWSTR name, HWND parent, LPARAM data) {
+        const auto translated = i18n::DialogTemplate(resources, name);
+        if (translated.empty() && RequiresExternalTemplate(resources, name)) {
+            SetLastError(ERROR_RESOURCE_DATA_NOT_FOUND);
+            return -1;
+        }
         if (!m_thunk.Init(nullptr, nullptr)) return -1;
         ATL::_AtlWinModule.AddCreateWndData(&m_thunk.cd,
             static_cast<ATL::CDialogImplBase*>(this));
-        const auto translated = i18n::DialogTemplate(resources, name);
         const INT_PTR result = translated.empty()
             ? ::DialogBoxParamW(resources, name, parent, StartDialogProc, data)
             : ::DialogBoxIndirectParamW(resources,
@@ -68,6 +81,7 @@ public:
     enum { IDD = 0 };
     PROPSHEETPAGEW original;
     std::vector<std::byte> translated;
+    bool valid{true};
     explicit ResourcePage(const PROPSHEETPAGEW& page) : original(page) {
         const auto callback = m_psp.pfnCallback;
         const auto procedure = m_psp.pfnDlgProc;
@@ -78,6 +92,10 @@ public:
         m_psp.lParam = reinterpret_cast<LPARAM>(this);
         if (!(page.dwFlags & PSP_DLGINDIRECT)) {
             translated = i18n::DialogTemplate(page.hInstance, page.pszTemplate);
+            if (translated.empty() && RequiresExternalTemplate(page.hInstance, page.pszTemplate)) {
+                valid = false;
+                return;
+            }
             if (!translated.empty()) {
                 m_psp.dwFlags |= PSP_DLGINDIRECT;
                 m_psp.pResource = reinterpret_cast<LPCDLGTEMPLATE>(translated.data());
@@ -115,6 +133,7 @@ public:
     bool AddResourcePages(const PROPSHEETHEADERW& header) {
         for (UINT i = 0; i < header.nPages; ++i) {
             auto page = std::make_unique<ResourcePage>(header.ppsp[i]);
+            if (!page->valid) { SetLastError(ERROR_RESOURCE_DATA_NOT_FOUND); return false; }
             const auto handle = page->Create();
             if (!handle) return false;
             if (!AddPage(handle)) { ::DestroyPropertySheetPage(handle); return false; }

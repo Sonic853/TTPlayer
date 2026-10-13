@@ -1,4 +1,5 @@
 #include <ttpcomm/runtime_client.h>
+#include <ttpres/resource_extensions.h>
 #include "ttplayer/app/runtime.h"
 
 #include <commctrl.h>
@@ -185,6 +186,7 @@ void TtpCommRuntime::Shutdown() {
 
 ResourceRuntime::~ResourceRuntime() { Shutdown(); }
 bool ResourceRuntime::Initialize() {
+    Shutdown();
     const auto path = FindRuntimePath(L"ttpres.dll");
     if (path.empty()) return false;
     // CPlayerApp_InitializeResources (004C077E) uses LoadLibraryW and keeps
@@ -202,7 +204,8 @@ bool ResourceRuntime::Initialize() {
     const std::wstring_view value = title_length > 0 && title
         ? std::wstring_view(title, static_cast<size_t>(title_length))
         : std::wstring_view{};
-    if (value != L"千千静听" && value != L"千千靜聽" && value != L"TTPlayer") {
+    if ((value != L"千千静听" && value != L"千千靜聽" && value != L"TTPlayer") ||
+        !ttpres::HasRequiredExtensions(module_)) {
         FreeLibrary(module_);
         module_ = nullptr;
         return false;

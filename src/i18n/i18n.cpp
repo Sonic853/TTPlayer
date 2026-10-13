@@ -1,6 +1,7 @@
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/i18n/api.h"
 #include "ttplayer/core/text.h"
+#include <ttpres/resource_extensions.h>
 #include <algorithm>
 #include <cstring>
 #include <map>
@@ -165,6 +166,9 @@ public:
 };
 std::pair<const void*, DWORD> DialogData(HMODULE module, LPCWSTR name) {
     if (!module) return {};
+    if (IS_INTRESOURCE(name)) module = ttpres::Resolve(module, RT_DIALOG,
+        static_cast<UINT>(reinterpret_cast<ULONG_PTR>(name)));
+    if (!module) return {};
     const auto resource = FindResourceW(module, name, RT_DIALOG);
     const auto loaded = resource ? LoadResource(module, resource) : nullptr;
     return loaded ? std::pair<const void*, DWORD>{LockResource(loaded), SizeofResource(module, resource)} : std::pair<const void*, DWORD>{};
@@ -245,7 +249,10 @@ std::wstring Plural(const char* context, std::wstring_view singular, std::wstrin
     return translated ? std::move(*translated) : std::wstring(count == 1 ? singular : plural);
 }
 std::wstring ResourceText(HMODULE module, UINT id) {
-    return ResourceTranslation(ResourceKey(module, "string", id), RawText(module, id));
+    const auto source = ttpres::Resolve(module, RT_STRING, id);
+    auto text = RawText(source, id);
+    // Keep existing gettext contexts even when the physical source moves.
+    return ResourceTranslation(ResourceKey(module, "string", id), text);
 }
 HMENU LoadMenu(HMODULE module, LPCWSTR name) {
     const auto menu = ::LoadMenuW(module, name);
@@ -254,10 +261,21 @@ HMENU LoadMenu(HMODULE module, LPCWSTR name) {
     return menu;
 }
 std::vector<std::byte> DialogTemplate(HMODULE module, LPCWSTR name) {
-    if (!Available() || !IS_INTRESOURCE(name)) return {};
+    if (!IS_INTRESOURCE(name)) return {};
     try {
+        const auto id = static_cast<UINT>(reinterpret_cast<ULONG_PTR>(name));
+        const bool external = ttpres::Resolve(module, RT_DIALOG, id) != module;
+        if (!Available() && !external) return {};
         const auto [data, size] = DialogData(module, name);
-        return data ? Template(module, static_cast<UINT>(reinterpret_cast<ULONG_PTR>(name)), data, size).Run() : std::vector<std::byte>{};
+        if (!data) return {};
+        auto result = Template(module, id, data, size).Run();
+        // An unmodified external template still needs an owned buffer: callers
+        // deliberately retain the logical EXE instance and translation domain.
+        if (result.empty() && external) {
+            const auto* first = static_cast<const std::byte*>(data);
+            result.assign(first, first + size);
+        }
+        return result;
     } catch (...) { return {}; }
 }
 std::wstring DialogCaption(HMODULE module, UINT id) {

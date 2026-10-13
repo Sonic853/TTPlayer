@@ -1,3 +1,4 @@
+#include <ttpres/resource_ids.h>
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/wtl_window.h"
@@ -883,7 +884,7 @@ void PlayerWindow::PrepareEqualizerMenu(HMENU menu) const {
     if (const HMENU commands = FindCommandMenu(menu, kEqCommandEnable);
         commands && !FindCommandMenu(commands, kEqCommandReset)) {
         auto label = ResourceText(0x8176);
-        if (label.empty()) label = i18n::Text(L"重设均衡器");
+        if (label.empty()) label = i18n::ResourceText(GetModuleHandleW(nullptr), IDS_EQUALIZER_RESET);
         InsertMenuW(commands, kEqCommandEnable, MF_BYCOMMAND | MF_STRING,
                     kEqCommandReset, label.c_str());
     }

@@ -134,7 +134,7 @@ int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     if (!resources.Initialize()) {
         if (SUCCEEDED(ole_result)) OleUninitialize();
         if (tls_index != TLS_OUT_OF_INDEXES) TlsFree(tls_index);
-        MessageBoxW(nullptr, i18n::Literal(L"Load resource (ttpres.dll) failed, please resetup this program!"),
+        MessageBoxW(nullptr, i18n::Literal(L"ttpres.dll 缺失、无法加载或缺少此版本播放器需要的界面资源。\n\n请退出播放器，将完整发行包解压并替换到同一目录，包括 TTPlayerRebuild.exe 和 ttpres.dll。"),
                     i18n::Literal(L"TTPlayer"), MB_OK | MB_ICONERROR);
         return -1;
     }

@@ -3,7 +3,7 @@ project(TTPlayerRebuild VERSION 0.1.0 LANGUAGES C CXX)
 
 option(BUILD_TESTING "Build local, unpublished tests" OFF)
 include(CTest)
-option(TTPLAYER_STAGE_RUNTIME "Rebuild/copy local original DLLs, skins and configuration beside the EXE" ON)
+option(TTPLAYER_STAGE_RUNTIME "Stage independently built DLLs, local skins and configuration beside the EXE" ON)
 set(TTPLAYER_LRCSH_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../ttp_lrcsh/build/Release/ttp_lrcsh.dll" CACHE FILEPATH
   "Independently rebuilt lyrics plugin with explicit-service and cancellation interfaces")
 # Retain the old cache argument as a migration alias; there is now one binary.
@@ -173,7 +173,7 @@ add_library(ttplayer_core
   src/ui/window_drag.cpp
 )
 target_include_directories(ttplayer_core
-  PUBLIC include third_party/ttpcomm-sdk/include
+  PUBLIC include third_party/ttpcomm-sdk/include third_party/ttpres-sdk/include
   PRIVATE "${TTPLAYER_GENERATED_INCLUDE_DIR}"
 )
 add_dependencies(ttplayer_core ttplayer_build_date ttplayer_file_version)
@@ -1003,12 +1003,21 @@ target_link_libraries(ole_drop_source PRIVATE ole32 shell32 user32)
 set_property(TARGET ole_drop_source PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
 endif()
 
-# The two legacy ttpres.dll files contain resources only: no code, entry point,
-# imports, or exports.  Their recovered .res files are linked as /NOENTRY DLLs
-# so resource type/name/language identities remain byte-for-byte compatible.
+# Stage the independent, audited resource component beside the EXE.
+option(TTPLAYER_BUILD_TTPRES_TESTS "Build private, local resource integration tests" OFF)
+if(TTPLAYER_BUILD_TTPRES_TESTS)
+  add_executable(ttpres_integration_tests tests/ui/ttpres_integration_tests.cpp)
+  target_compile_definitions(ttpres_integration_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(ttpres_integration_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  target_link_libraries(ttpres_integration_tests PRIVATE ttplayer_core)
+endif()
 if(TTPLAYER_STAGE_RUNTIME)
-set(TTPRES_RECOVERY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../reverse/ttpres")
-set(TTPRES_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/resources")
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(TTPLAYER_TTPRES_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../ttpres/build/Release/ttpres.dll" CACHE FILEPATH
+  "Independent TTPlayerRes resource DLL (5.7.9 baseline plus extensions)")
+if(NOT EXISTS "${TTPLAYER_TTPRES_DLL}")
+  message(FATAL_ERROR "Build TTPlayerRes first or set TTPLAYER_TTPRES_DLL. CI downloads the verified release with STAGE_RUNTIME=OFF.")
+endif()
 set(TTPLAYER_TTPCOMM_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../ttpcomm/build/Release/ttpcomm.dll" CACHE FILEPATH
   "Independently rebuilt ttpcomm.dll providing runtime ABI 1 (never the original DLL)")
 if(NOT EXISTS "${TTPLAYER_TTPCOMM_DLL}")
@@ -1027,45 +1036,25 @@ add_custom_command(
   VERBATIM
 )
 
-add_custom_command(
-  OUTPUT "${TTPRES_OUTPUT_DIR}/root/ttpres.dll"
-  COMMAND "${CMAKE_COMMAND}" -E make_directory "${TTPRES_OUTPUT_DIR}/root"
-  COMMAND "${CMAKE_LINKER}" /NOLOGO /DLL /NOENTRY /MACHINE:X86 /NODEFAULTLIB
-          /BASE:0x6FF50000
-          "/OUT:${TTPRES_OUTPUT_DIR}/root/ttpres.dll"
-          "${TTPRES_RECOVERY_DIR}/root/ttpres_original.res"
-  DEPENDS "${TTPRES_RECOVERY_DIR}/root/ttpres_original.res"
-  VERBATIM
-)
-
-add_custom_command(
-  OUTPUT "${TTPRES_OUTPUT_DIR}/AddIn/ttpres.dll"
-  COMMAND "${CMAKE_COMMAND}" -E make_directory "${TTPRES_OUTPUT_DIR}/AddIn"
-  COMMAND "${CMAKE_LINKER}" /NOLOGO /DLL /NOENTRY /MACHINE:X86 /NODEFAULTLIB
-          /BASE:0x6FF50000
-          "/OUT:${TTPRES_OUTPUT_DIR}/AddIn/ttpres.dll"
-          "${TTPRES_RECOVERY_DIR}/addin/ttpres_addin_original.res"
-  DEPENDS "${TTPRES_RECOVERY_DIR}/addin/ttpres_addin_original.res"
-  VERBATIM
-)
-
 add_custom_target(ttpres_resources ALL
-  DEPENDS
-    "${CMAKE_CURRENT_BINARY_DIR}/ttpcomm.dll"
-    "${TTPRES_OUTPUT_DIR}/root/ttpres.dll"
-    "${TTPRES_OUTPUT_DIR}/AddIn/ttpres.dll"
-)
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ttpres-sdk/tools/audit.py"
+    --dll "${TTPLAYER_TTPRES_DLL}"
+    --manifest "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ttpres-sdk/baseline.json"
+    --output "$<TARGET_FILE_DIR:ttplayer_rebuild>/ttpres-component.json"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+    "${TTPLAYER_TTPRES_DLL}" "$<TARGET_FILE_DIR:ttplayer_rebuild>/ttpres.dll"
+  DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/ttpcomm.dll"
+  VERBATIM)
 
 # The recovered program resolves runtime files strictly beside the executable.
-# Keep the intermediate resource products for tests/inspection, then stage the
-# exact runtime layout into every single- or multi-config output directory.
+# Stage the runtime layout into every single- or multi-config output directory.
 add_dependencies(ttplayer_rebuild ttpres_resources)
 add_custom_command(TARGET ttplayer_rebuild POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
           "${TTPLAYER_TTPCOMM_DLL}"
           "$<TARGET_FILE_DIR:ttplayer_rebuild>/ttpcomm.dll"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${TTPRES_OUTPUT_DIR}/root/ttpres.dll"
+          "${TTPLAYER_TTPRES_DLL}"
           "$<TARGET_FILE_DIR:ttplayer_rebuild>/ttpres.dll"
   COMMAND "${CMAKE_COMMAND}" -E copy_directory
           "${CMAKE_CURRENT_SOURCE_DIR}/../Skin"
@@ -1084,9 +1073,6 @@ add_custom_command(TARGET ttplayer_rebuild POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory
           "${CMAKE_CURRENT_SOURCE_DIR}/../PlayList"
           "$<TARGET_FILE_DIR:ttplayer_rebuild>/PlayList"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${TTPRES_OUTPUT_DIR}/AddIn/ttpres.dll"
-          "$<TARGET_FILE_DIR:ttplayer_rebuild>/AddIn/ttpres.dll"
   COMMAND "${CMAKE_COMMAND}"
           "-DSOURCE_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}/.."
           "-DDESTINATION=$<TARGET_FILE_DIR:ttplayer_rebuild>"
