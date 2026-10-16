@@ -65,6 +65,7 @@ private:
     const std::function<bool()>& canceled = {});
 // Embedded thumbnails remain authoritative. This fallback searches the member's
 // directory only, so a multi-album archive cannot borrow another album's cover.
+// OSZ instead uses the background referenced by a .osu for this audio member.
 [[nodiscard]] std::vector<unsigned char> ReadArchiveSidecarCover(
     const std::filesystem::path& media, HMODULE ttpcomm,
     const std::function<bool()>& canceled = {});

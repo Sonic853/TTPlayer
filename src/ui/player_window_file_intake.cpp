@@ -10,6 +10,7 @@
 #include <thread>
 
 #include "ttplayer/audio/archive_member.h"
+#include "ttplayer/audio/osz_archive.h"
 #include <ttpcomm/archive_format.h>
 #include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/core/text.h"
@@ -1088,6 +1089,23 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
             const auto stop = [&] { return canceled.load(); };
             const auto names = audio::ListArchiveMembers(path, module, stop,
                 [&](uint64_t n, uint64_t total) { Progress(n, total); }, &path);
+            if (audio::IsOszArchive(path)) {
+                Report(path,L"正在读取 OSZ 谱面的音频引用…",true);
+                const auto media = audio::ResolveOszMedia(path,names,module,stop,
+                    [&](uint64_t n,uint64_t total){Progress(n,total);});
+                if (media.empty()) {
+                    Error(path.filename().wstring()+L"\n\nOSZ 中没有有效的 .osu 音频引用，或引用的音乐文件不存在。");
+                    return false;
+                }
+                // ResolveOszMedia validates the reference; retain the actual
+                // entry spelling just like the ordinary archive importer.
+                for (const auto& item : media) {
+                    if (stop()) return false;
+                    const auto logical = audio::MakeZipMemberPath(path,item.audio);
+                    if (identities.Insert(logical)) tracks.push_back({logical,{},{},-2});
+                }
+                return tracks.size() != before;
+            }
             size_t index = 0;
             for (const auto& member : names) {
                 if (stop()) return false;

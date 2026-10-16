@@ -1,5 +1,6 @@
 #include "ttplayer/audio/extension_correction.h"
 #include "ttplayer/audio/format_probe.h"
+#include "ttplayer/audio/osz_archive.h"
 #include <ttpcomm/archive_format.h>
 
 #include <algorithm>
@@ -147,6 +148,8 @@ std::optional<ExtensionCorrection> FindExtensionCorrection(const std::filesystem
     const auto before=Stamp(file.value);
     if (!before) return {};
     if(archive!=ttpcomm::archive_format::Kind::unknown){
+        // OSZ is a ZIP-based beatmap package, not a mistaken ZIP suffix.
+        if (archive==ttpcomm::archive_format::Kind::zip && IsOszArchive(path)) return {};
         using K=ttpcomm::archive_format::Kind;const wchar_t* suffix=nullptr;const wchar_t* name=nullptr;
         switch(archive){
         case K::zip:suffix=L".zip";name=L"ZIP 压缩包";break;

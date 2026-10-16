@@ -337,7 +337,7 @@ std::vector<wchar_t> BuildAudioDialogFilter(
     for (const auto& format : formats) append_all_pattern(format.pattern);
     // FUN_004CB1DB explicitly adds archive and playlist extensions to the
     // combined filter after walking the registered readers.
-    append_all_pattern(L"*.zip;*.rar;*.7z;*.tar;*.gz;*.tgz");
+    append_all_pattern(L"*.zip;*.rar;*.7z;*.tar;*.gz;*.tgz;*.osz");
     const auto playlist_description = LoadResourceText(resources, 0x8125);
     const auto playlist_pattern = PatternFromDescription(playlist_description);
     append_all_pattern(playlist_pattern);
@@ -359,7 +359,7 @@ std::vector<wchar_t> BuildAudioDialogFilter(
     // 0x8126/0x8127 are appended only to CSoundLibrary's playlist-specific
     // DAT_00547FD0 filter.  0048059D consumes DAT_00547FC8, whose sole
     // playlist entry is the combined 0x8125 item.
-    AppendDialogFilter(result, LoadResourceText(resources, 0x8118), L"*.zip;*.rar;*.7z;*.tar;*.gz;*.tgz");
+    AppendDialogFilter(result, LoadResourceText(resources, 0x8118), L"*.zip;*.rar;*.7z;*.tar;*.gz;*.tgz;*.osz");
     const auto all_files_description = LoadResourceText(resources, 0x8124);
     AppendDialogFilter(result, all_files_description,
                        PatternFromDescription(all_files_description));

@@ -75,6 +75,7 @@ add_library(ttplayer_core
   src/app/file_info_worker.cpp
   src/app/output_device_worker.cpp
   src/audio/archive_member.cpp
+  src/audio/osz_archive.cpp
   src/audio/archive_password.cpp
   src/ui/archive_password_dialog.cpp
   src/audio/asio_sink.cpp
@@ -1004,6 +1005,13 @@ set_property(TARGET ole_drop_source PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
 endif()
 
 # Stage the independent, audited resource component beside the EXE.
+option(TTPLAYER_BUILD_OSZ_TESTS "Build private, local OSZ import tests" OFF)
+if(TTPLAYER_BUILD_OSZ_TESTS)
+  add_executable(osz_archive_tests tests/archive_support/osz_20261016/osz_tests.cpp)
+  target_compile_definitions(osz_archive_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(osz_archive_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  target_link_libraries(osz_archive_tests PRIVATE ttplayer_core)
+endif()
 option(TTPLAYER_BUILD_TTPRES_TESTS "Build private, local resource integration tests" OFF)
 if(TTPLAYER_BUILD_TTPRES_TESTS)
   add_executable(ttpres_integration_tests tests/ui/ttpres_integration_tests.cpp)

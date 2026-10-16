@@ -1,5 +1,6 @@
 #include "ttplayer/audio/archive_member.h"
 #include "ttplayer/audio/archive_password.h"
+#include "ttplayer/audio/osz_archive.h"
 #include <ttpcomm/archive_format.h>
 
 #include <ttpcomm/runtime_client.h>
@@ -14,6 +15,13 @@
 
 namespace ttplayer::audio {
 namespace {
+
+bool HasCoverSignature(const std::vector<unsigned char>& bytes) {
+    return (bytes.size() >= 24 && !memcmp(bytes.data(),"\x89PNG\r\n\x1a\n",8)) ||
+        (bytes.size() >= 4 && bytes[0]==0xff && bytes[1]==0xd8 && bytes[2]==0xff) ||
+        (bytes.size() >= 26 && bytes[0]=='B' && bytes[1]=='M') ||
+        (bytes.size() >= 13 && (!memcmp(bytes.data(),"GIF87a",6) || !memcmp(bytes.data(),"GIF89a",6)));
+}
 
 size_t FindZipMarker(std::wstring_view value) noexcept {
     if (value.size() < 6) return std::wstring_view::npos;
@@ -42,7 +50,7 @@ bool PathKind(std::wstring_view value, ArchiveKind& kind) {
     }
     struct Suffix {const wchar_t* text; ArchiveKind kind;};
     constexpr Suffix formats[]={{L".tar.gz",ArchiveKind::tar_gzip},
-        {L".zip",ArchiveKind::zip},{L".rar",ArchiveKind::rar},
+        {L".zip",ArchiveKind::zip},{L".osz",ArchiveKind::zip},{L".rar",ArchiveKind::rar},
         {L".tar",ArchiveKind::tar},{L".tgz",ArchiveKind::tar_gzip},
         {L".gz",ArchiveKind::gzip},{L".7z",ArchiveKind::seven_zip}};
     for(const auto& format:formats) {
@@ -287,6 +295,12 @@ std::vector<unsigned char> ReadArchiveSidecarCover(const std::filesystem::path& 
     if (!ParseArchiveMemberPath(media.native(),member)) return {};
     try {
         const auto names = ListArchiveMembers(member.archive,module,canceled);
+        if (IsOszArchive(member.archive)) {
+            const auto resolved = ResolveOszMedia(member.archive,names,module,canceled,{},member.member);
+            if (resolved.empty() || resolved.front().background.empty()) return {};
+            auto bytes = ReadArchiveMember({member.archive,resolved.front().background,member.kind},module,canceled);
+            return HasCoverSignature(bytes) ? std::move(bytes) : std::vector<unsigned char>{};
+        }
         const std::filesystem::path file(member.member);
         for (const auto& stem : {file.stem().native(),std::wstring(L"cover"),std::wstring(L"folder"),std::wstring(L"front")}) {
             for (const auto* extension : {L".png",L".jpg",L".jpeg",L".bmp",L".gif"}) {
@@ -296,11 +310,7 @@ std::vector<unsigned char> ReadArchiveSidecarCover(const std::filesystem::path& 
                 if (found == names.end()) continue;
                 try {
                     auto bytes = ReadArchiveMember({member.archive,*found,member.kind},module,canceled);
-                    const bool png = bytes.size() >= 24 && !memcmp(bytes.data(),"\x89PNG\r\n\x1a\n",8);
-                    const bool jpg = bytes.size() >= 4 && bytes[0]==0xff && bytes[1]==0xd8 && bytes[2]==0xff;
-                    const bool bmp = bytes.size() >= 26 && bytes[0]=='B' && bytes[1]=='M';
-                    const bool gif = bytes.size() >= 13 && (!memcmp(bytes.data(),"GIF87a",6) || !memcmp(bytes.data(),"GIF89a",6));
-                    if (png || jpg || bmp || gif) return bytes;
+                    if (HasCoverSignature(bytes)) return bytes;
                 } catch (...) { if(canceled && canceled())return {}; }
             }
         }
