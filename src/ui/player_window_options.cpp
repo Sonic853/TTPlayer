@@ -6452,16 +6452,7 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
             ShowWindow(equalizer_window_,
                        settings_.player.equalizer_visible ? SW_SHOWNOACTIVATE
                                                           : SW_HIDE);
-        if (lyric_window_) {
-            if (desktop_lyric_mode_) {
-                ShowWindow(lyric_window_, SW_HIDE);
-                desktop_lyrics_.Show(settings_.player.lyric_visible);
-            } else {
-                ShowWindow(lyric_window_,
-                           settings_.player.lyric_visible ? SW_SHOWNOACTIVATE
-                                                          : SW_HIDE);
-            }
-        }
+        SynchronizeLyricVisibility();
         ApplyOptionsRuntime();
         if (output_restart != OutputRestartState::none &&
             PlayCurrent()) {

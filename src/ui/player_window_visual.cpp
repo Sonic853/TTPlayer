@@ -2249,15 +2249,10 @@ void PlayerWindow::LeaveFullScreen() {
         settings_.visual.type=plugin_content_fullscreen_saved_type_;
         plugin_content_fullscreen_saved_type_=-1;
     }
-    if (lyric_window_) {
-        if (desktop_lyric_mode_) {
-            ShowWindow(lyric_window_, SW_HIDE);
-            desktop_lyrics_.Show(fullscreen_desktop_lyric_was_visible_);
-        } else {
-            ShowWindow(lyric_window_, fullscreen_lyric_window_was_visible_
-                ? SW_SHOWNOACTIVATE : SW_HIDE);
-        }
-    }
+    // Lyrics can finish loading while the fullscreen hosts are detached.
+    // Keep ActiveLyricVisible as the current intent rather than copying the
+    // entry-time HWND snapshot back over the new track's visibility.
+    if (lyric_window_) ShowWindow(lyric_window_, SW_HIDE);
     fullscreen_desktop_lyric_was_visible_ = false;
     fullscreen_lyric_desktop_mode_ = false;
     UpdateVisualWindowLayout();
@@ -2273,6 +2268,8 @@ void PlayerWindow::LeaveFullScreen() {
             ShowWindow(window_, SW_HIDE);
         }
     }
+    SynchronizeLyricVisibility();
+    QueueLyricVisibilitySync(); // settle any subsequent native owner restore
     ApplySkinWindowTopMost();
     // The original keeps the hotkey registered through the complete restore
     // sequence and removes it only after the main window is back in place.

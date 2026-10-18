@@ -688,12 +688,11 @@ LRESULT PlayerWindow::HandleLyricMessage(UINT message, WPARAM wparam,
     }
     switch (message) {
     case WM_SHOWWINDOW:
-        // 0044C2E7 masks window lyrics when the active mode is desktop.
-        // User32 remembers this owned popup across main-window minimization,
-        // even if EnterDesktopLyricMode hid it while it was already hidden.
-        // Veto only the automatic owner restore; explicit window-mode return
-        // still goes through ShowWindow/0044E2FB and its configured fade.
-        if (wparam && lparam == SW_PARENTOPENING && desktop_lyric_mode_)
+        // 0044C2E7 masks an owner restore using the latest lyric intent.
+        // The system's pre-minimize popup snapshot can outlive a track change,
+        // an automatic hide, or a switch to desktop/fullscreen lyrics.
+        // Explicit user commands still use their normal show/fade path.
+        if (wparam && lparam == SW_PARENTOPENING && !MayShowWindowLyrics())
             return 0;
         break;
     case WM_ACTIVATE:
@@ -1034,8 +1033,7 @@ void PlayerWindow::ApplyActiveLyricWindowState(bool apply_visibility) {
     if (!lyric_window_ || !skin_ || !skin_->Lyric().valid) return;
     if(external_skin_ && external_skin_->Handles(lyric_window_)) {
         RebuildLyricFont(false);UpdateLyricScrollTimer();
-        if (apply_visibility)
-            ShowWindow(lyric_window_,ActiveLyricVisible()?SW_SHOWNOACTIVATE:SW_HIDE);
+        if (apply_visibility) SynchronizeLyricVisibility();
         ApplySkinWindowTopMost();InvalidateRect(lyric_window_,nullptr,FALSE);return;
     }
     // 00464B6C swaps the active lyric object before installing its settings.
@@ -1087,9 +1085,7 @@ void PlayerWindow::ApplyActiveLyricWindowState(bool apply_visibility) {
     RebuildLyricFont(false);
     UpdateLyricWindowRegion();
     UpdateLyricToolRects();
-    if (apply_visibility)
-        ShowWindow(lyric_window_, ActiveLyricVisible()
-            ? SW_SHOWNOACTIVATE : SW_HIDE);
+    if (apply_visibility) SynchronizeLyricVisibility();
     ApplySkinWindowTopMost();
     RedrawWindow(lyric_window_, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN |
@@ -4411,20 +4407,61 @@ void PlayerWindow::ClearLyrics() {
     desktop_lyrics_.SetFallbackText(LyricFallbackText(true));
 }
 
-void PlayerWindow::ApplyAutoLyricVisibility() {
-    if (!settings_.lyric.auto_visible || lyric_association_open_) return;
-    const bool have_lyrics = !lyrics_.lines.empty();
-    ActiveLyricVisible() = have_lyrics;
-    if (desktop_lyric_mode_) {
-        desktop_lyrics_.Show(have_lyrics);
-    } else if (have_lyrics) {
-        if (!lyric_window_ && !CreateLyricWindow()) return;
-        ShowWindow(lyric_window_, SW_SHOWNOACTIVATE);
-        BringWindowToTop(lyric_window_);
-    } else if (lyric_window_) {
-        ShowWindow(lyric_window_, SW_HIDE);
+bool PlayerWindow::MayShowWindowLyrics() const noexcept {
+    if (!window_ || close_after_skin_window_fade_ || fullscreen_mode_ != 0 ||
+        desktop_lyric_mode_ || !ActiveLyricVisible()) return false;
+    if (skin_ && !skin_->Lyric().valid && !mini_mode_) return false;
+    // 0046162B deliberately preserves pinned lyrics as well as desktop lyrics.
+    // Ordinary owner-hidden lyrics must wait for an explicit player restore.
+    return ActiveLyricTopMost() ||
+        (!IsIconic(window_) && IsWindowVisible(window_) && !minimized_to_tray_);
+}
+
+void PlayerWindow::QueueLyricVisibilitySync() {
+    if (lyric_visibility_sync_queued_ || !window_ ||
+        close_after_skin_window_fade_) return;
+    lyric_visibility_sync_queued_ = PostMessageW(window_, WM_COMMAND,
+        kCmdShowLyrics, static_cast<LPARAM>(-2)) != FALSE;
+}
+
+void PlayerWindow::SynchronizeLyricVisibility() {
+    if (!window_ || close_after_skin_window_fade_) return;
+    // A matching user-requested fade keeps its cadence. Finish only a stale
+    // per-lyric fade or one whose owner is now suppressed. Group transitions
+    // retain their clock and any newly visible host joins at their current alpha.
+    if (PreserveLyricVisibilityFade(MayShowWindowLyrics())) return;
+
+    if (desktop_lyric_mode_ && fullscreen_mode_ == 0) {
+        // Hide the desktop control's owner first; owner hiding also hides its
+        // paint surface. Re-show only the selected mode afterwards.
+        if (lyric_window_ && IsWindowVisible(lyric_window_))
+            ShowWindow(lyric_window_, SW_HIDE);
+        desktop_lyrics_.Show(ActiveLyricVisible());
+    } else {
+        if (desktop_lyrics_.Visible() ||
+            IsWindowVisible(desktop_lyrics_.PaintHandle()))
+            desktop_lyrics_.Show(false);
+        const bool visible = MayShowWindowLyrics();
+        if (visible && !lyric_window_ && !CreateLyricWindow()) return;
+        if (lyric_window_ && (IsWindowVisible(lyric_window_) != FALSE) != visible) {
+            if (visible) ApplySkinWindowAlpha(lyric_window_,
+                skin_window_fade_ && skin_window_fade_->group
+                    ? skin_window_fade_->last : EffectiveSkinWindowAlpha(lyric_window_));
+            ShowWindow(lyric_window_, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
+            if (visible) ApplySkinWindowTopMost();
+        }
     }
-    if (window_) InvalidateRect(window_, nullptr, FALSE);
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void PlayerWindow::ApplyAutoLyricVisibility() {
+    if (!settings_.lyric.auto_visible || lyric_association_open_ || lyric_editor_ ||
+        close_after_skin_window_fade_) return;
+    // Keep content intent even while its host is temporarily suppressed. The
+    // original 0044A692 skips fullscreen; update the pending intent here but
+    // do not expose either ordinary host until fullscreen has been restored.
+    ActiveLyricVisible() = !lyrics_.lines.empty();
+    SynchronizeLyricVisibility();
 }
 
 void PlayerWindow::LoadLyricsFrom(const std::filesystem::path& path,

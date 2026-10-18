@@ -712,6 +712,10 @@ private:
     void LoadLyricsFrom(const std::filesystem::path& path, bool associated);
     void ClearLyrics();
     void ApplyAutoLyricVisibility();
+    [[nodiscard]] bool MayShowWindowLyrics() const noexcept;
+    void SynchronizeLyricVisibility();
+    bool PreserveLyricVisibilityFade(bool visible);
+    void QueueLyricVisibilitySync();
     void CopyLyricsToClipboard() const;
     void SeekLyricLine(std::ptrdiff_t delta);
     [[nodiscard]] bool HandleToolTipNotification(HWND owner, LPARAM notification);
@@ -1194,6 +1198,7 @@ private:
     int lyric_hover_command_{};
     int lyric_pressed_command_{};
     bool desktop_lyric_mode_{};
+    bool lyric_visibility_sync_queued_{};
     bool lyric_line_dragging_{};
     POINT lyric_line_drag_origin_{};
     int lyric_line_drag_offset_{};
