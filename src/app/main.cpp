@@ -105,6 +105,11 @@ int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     std::wstring instance_name = kSingleInstanceName;
     if (command_line.smoke_test)
         instance_name += L".Smoke." + std::to_wstring(GetCurrentProcessId());
+    else if (command_line.HasSwitch(L"reg") || command_line.HasSwitch(L"unreg"))
+        // Maintenance targets the explicitly launched installation. It must
+        // not be forwarded to an already running copy in a different folder.
+        // Registry mutations themselves are serialized by the association backend.
+        instance_name += L".Association." + std::to_wstring(GetCurrentProcessId());
     ttplayer::app::SingleInstanceIpc single_instance(
         instance_name, kSingleInstanceMappingSize);
     if (!single_instance.Valid()) return 1;

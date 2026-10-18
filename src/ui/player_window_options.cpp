@@ -153,6 +153,27 @@ constexpr UINT_PTR kOptionsSkinPreviewSubclass = 0x54545056;
 constexpr wchar_t kPageTemplateProperty[] = L"TTPlayer.Options.Template";
 constexpr wchar_t kPageReadyProperty[] = L"TTPlayer.Options.Ready";
 
+settings::FileAssociationResult ApplyAssociationUpdate(
+    HWND dialog, settings::FileAssociationBackend& backend,
+    settings::AssociationUpdate update, const settings::ShellVerbLabels& labels,
+    bool offer_handover) {
+    auto result = backend.ApplyChanges(update, labels);
+    if (result.error != settings::FileAssociationError::ownership_conflict || !offer_handover)
+        return result;
+    std::wstring text = i18n::Text(L"文件关联已登记在以下安装目录：\n");
+    for (const auto& path : result.conflicting_installations) text += path + L"\n";
+    text += i18n::Text(L"\n当前安装：\n") + backend.Executable().wstring() +
+        i18n::Text(L"\n\n是否将这些安装已有的文件关联、文件夹和音频 CD 菜单交接给当前安装？\n选择“否”保留现状。Windows 10/11 的默认应用仍由系统设置选择。");
+    if (MessageBoxW(dialog, text.c_str(), i18n::Literal(L"切换文件关联安装"),
+                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
+        settings::FileAssociationResult cancelled;
+        cancelled.cancelled = true;
+        return cancelled;
+    }
+    update.handover = true; // This consent is used once and is never persisted.
+    return backend.ApplyChanges(update, labels);
+}
+
 struct AssociationPromptState {
     bool* auto_associate{};
 };
@@ -3428,12 +3449,7 @@ bool PlayerWindow::UnregisterAllAssociations() {
     const auto formats = BuildAssociationFormatSource(
         ResourceModule(), reader_formats_);
     const auto extensions = settings::BuildAssociableExtensions(formats);
-    bool succeeded = backend.UnregisterApplication(extensions).Succeeded();
-    for (const auto target : {settings::ShellIntegrationTarget::audio_cd,
-                              settings::ShellIntegrationTarget::directory}) {
-        const auto result = backend.SetShellIntegration(target, false);
-        succeeded = succeeded && result.Succeeded();
-    }
+    const bool succeeded = backend.UnregisterAllAssociations(extensions).Succeeded();
     // FUN_0049CD41 issues SHCNE_ASSOCCHANGED once after the complete sweep,
     // even when every queried association was already absent.  Keep that
     // observable /unreg idempotency boundary instead of suppressing the
@@ -3481,25 +3497,20 @@ void PlayerWindow::CheckStartupAssociations() {
     const settings::ShellVerbLabels labels{
         ResourceText(0x81a8), ResourceText(0x81a9)};
     std::set<std::wstring> visited;
-    bool changed = false;
-    bool requires_choice = false;
+    settings::AssociationUpdate update;
     for (const auto& extension : extensions) {
         auto normalized = extension.extension;
         std::ranges::transform(normalized, normalized.begin(), towlower);
         if (!visited.insert(normalized).second) continue;
-        const auto result = batch.SetExtensionAssociation(
-            extension.extension, true,
-            AssociationTypeLabel(extension.description), {}, labels);
-        changed = changed || (result && result.changed);
-        requires_choice = requires_choice || (result && result.requires_user_choice);
+        update.extensions.push_back({extension.extension, true,
+            AssociationTypeLabel(extension.description), {}, false});
     }
     for (const auto target : {settings::ShellIntegrationTarget::audio_cd,
-                              settings::ShellIntegrationTarget::directory}) {
-        const auto result = batch.SetShellIntegration(target, true, labels);
-        changed = changed || (result && result.changed);
-    }
-    if (changed)
-        settings::FileAssociationBackend::NotifyShellAssociationsChanged();
+                              settings::ShellIntegrationTarget::directory})
+        update.shell.push_back({target, true});
+    const auto applied = batch.ApplyChanges(update, labels);
+    const bool requires_choice = applied && applied.requires_user_choice;
+    if (applied.changed) settings::FileAssociationBackend::NotifyShellAssociationsChanged();
     // Do not launch Settings on every startup just because another app is
     // the current default. Only follow a fresh affirmative user response.
     if (requires_choice && user_confirmed) {
@@ -3523,41 +3534,35 @@ bool PlayerWindow::CommitOptionsAssociations(HWND dialog, bool show_errors, bool
     options.notify_shell = false;
     settings::FileAssociationBackend backend(CurrentExecutablePath(), ResourceText(0x80), options);
     const settings::ShellVerbLabels labels{ResourceText(0x81a8), ResourceText(0x81a9)};
-    bool changed = false, requires_choice = false, success = true;
-    std::wstring errors;
-    for (auto& node : options_association_nodes_) {
+    settings::AssociationUpdate update;
+    // The manual Default Programs button registers its catalog and commits
+    // pending checkboxes in the same transaction, before launching Windows UI.
+    if (!open_requested_defaults)
+        update.register_formats = settings::BuildAssociableExtensions(
+            BuildAssociationFormatSource(ResourceModule(), reader_formats_));
+    for (const auto& node : options_association_nodes_) {
         if (node->current == node->desired && !node->icon_dirty) continue;
-        settings::FileAssociationResult result;
-        if (node->current != node->desired) {
-            result = backend.SetExtensionAssociation(
-                node->extension, node->desired, node->description,
-                node->desired ? node->icon : std::wstring{}, labels);
+        if (node->current != node->desired)
+            update.extensions.push_back({node->extension, node->desired, node->description,
+                node->desired ? node->icon : std::wstring{}, false});
+        else if (node->icon_dirty) {
+            update.register_formats.push_back({node->extension, node->description, {}});
+            update.extensions.push_back({node->extension, node->desired, node->description, node->icon, true});
         }
-        if (result && node->icon_dirty) {
-            auto update = backend.RegisterApplication({{node->extension, node->description, {}}});
-            if (update) {
-                const auto icon = backend.SetExtensionIcon(node->extension, node->icon);
-                update.changed = update.changed || icon.changed;
-                if (!icon) update = icon;
-            }
-            result.changed = result.changed || update.changed;
-            if (!update) result = update;
-        }
-        if (!result) {
-            success = false;
-            if (errors.empty()) errors = result.operation + L"\n" + result.message;
-            continue;
-        }
-        changed = changed || result.changed;
-        requires_choice = requires_choice || result.requires_user_choice;
+    }
+    const auto result = ApplyAssociationUpdate(dialog, backend, std::move(update), labels, show_errors);
+    const bool success = result.Succeeded();
+    const bool requires_choice = result.requires_user_choice;
+    const auto errors = result.operation + L"\n" + result.message;
+    if (success) for (auto& node : options_association_nodes_) {
         const auto query = backend.QueryExtension(node->extension);
-        // Never show 'checked' merely because candidate registration worked.
         node->current = query.result && query.effective;
         node->desired = node->current;
         node->icon_dirty = false;
     }
-    if (changed) settings::FileAssociationBackend::NotifyShellAssociationsChanged();
+    if (result.changed) settings::FileAssociationBackend::NotifyShellAssociationsChanged();
     RefreshOptionsAssociations(dialog);
+    if (result.cancelled) return false;
     if (!success) {
         if (show_errors) MessageBoxW(dialog, errors.c_str(), ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
         else OutputDebugStringW((L"TTPlayer association: " + errors + L"\n").c_str());
@@ -7446,10 +7451,12 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                     ? settings::ShellIntegrationTarget::audio_cd
                     : settings::ShellIntegrationTarget::directory;
                 const bool enabled = IsChecked(dialog, static_cast<int>(control));
-                const auto result = backend.SetShellIntegration(
-                    target, enabled, labels);
+                settings::AssociationUpdate update;
+                update.shell.push_back({target, enabled});
+                const auto result = ApplyAssociationUpdate(dialog, backend, std::move(update), labels, enabled);
+                const auto actual = backend.QueryShellIntegration(target);
+                SetChecked(dialog, static_cast<int>(control), actual.result && actual.associated);
                 if (!result) {
-                    SetChecked(dialog, static_cast<int>(control), !enabled);
                     MessageBoxW(dialog, result.message.c_str(),
                                 ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
                 }
@@ -7550,11 +7557,8 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 // 0049DFB4 used ttpsvr.exe / FileTypeAsso. Register a real
                 // Default Programs candidate before handing user choice to
                 // the version-appropriate Windows UI, without the old EXE.
-                const auto formats = settings::BuildAssociableExtensions(
-                    BuildAssociationFormatSource(ResourceModule(), reader_formats_));
-                auto result = backend.RegisterApplication(formats);
-                if (result && !CommitOptionsAssociations(dialog, true, false)) return TRUE;
-                if (result) result = backend.OpenDefaultPrograms(dialog);
+                if (!CommitOptionsAssociations(dialog, true, false)) return TRUE;
+                auto result = backend.OpenDefaultPrograms(dialog);
                 if (!result) {
                     const auto error_text = result.operation + L"\n" + result.message;
                     MessageBoxW(dialog, error_text.c_str(), ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);

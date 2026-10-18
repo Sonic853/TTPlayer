@@ -22,6 +22,7 @@ enum class FileAssociationError {
     shell,
     com,
     filesystem,
+    ownership_conflict,
 };
 
 struct FileAssociationResult {
@@ -32,6 +33,12 @@ struct FileAssociationResult {
     bool requires_user_choice{};
     std::wstring operation;
     std::wstring message;
+    // Business conflicts have no synthetic Win32 error (not ERROR_SHARING_VIOLATION).
+    std::vector<std::wstring> conflicting_installations;
+    std::wstring requested_installation;
+    std::wstring registry_path;
+    bool rollback_failed{};
+    bool cancelled{};
 
     [[nodiscard]] bool Succeeded() const noexcept {
         return error == FileAssociationError::none;
@@ -88,6 +95,26 @@ struct ShellVerbLabels {
     std::wstring add_to_playlist{L"Add to TTPlayer playlist"};
 };
 
+// A UI batch is preflighted and committed as one recoverable registry update.
+// Handover is one-shot consent from an explicit user action, never a setting.
+struct ExtensionAssociationChange {
+    std::wstring extension;
+    bool enabled{};
+    std::wstring description;
+    std::wstring icon;
+    bool icon_only{};
+};
+struct ShellIntegrationChange {
+    ShellIntegrationTarget target{};
+    bool enabled{};
+};
+struct AssociationUpdate {
+    std::vector<AssociableExtension> register_formats;
+    std::vector<ExtensionAssociationChange> extensions;
+    std::vector<ShellIntegrationChange> shell;
+    bool handover{};
+};
+
 enum class ShortcutLocation {
     desktop,
     programs,
@@ -140,6 +167,9 @@ public:
         std::wstring application_name = L"TTPlayer",
         FileAssociationBackendOptions options = {});
 
+    [[nodiscard]] FileAssociationResult ApplyChanges(
+        const AssociationUpdate& update, const ShellVerbLabels& labels = {});
+
     [[nodiscard]] AssociationQuery QueryExtension(
         std::wstring_view extension) const;
 
@@ -164,6 +194,9 @@ public:
     // The format catalog also identifies pre-Capabilities registrations from
     // older rebuilds. Only values bearing this executable's owner are restored.
     [[nodiscard]] FileAssociationResult UnregisterApplication(
+        const std::vector<AssociableExtension>& legacy_formats = {});
+    // /unreg removes candidates and both shell integrations in one transaction.
+    [[nodiscard]] FileAssociationResult UnregisterAllAssociations(
         const std::vector<AssociableExtension>& legacy_formats = {});
     [[nodiscard]] FileAssociationResult OpenDefaultPrograms(HWND owner) const;
 
@@ -198,6 +231,19 @@ public:
     }
 
 private:
+    [[nodiscard]] FileAssociationResult UnregisterAssociations(
+        const std::vector<AssociableExtension>& legacy_formats, bool include_shell);
+    [[nodiscard]] FileAssociationResult RegisterApplicationImpl(
+        const std::vector<AssociableExtension>& formats);
+    [[nodiscard]] FileAssociationResult UnregisterApplicationImpl(
+        const std::vector<AssociableExtension>& legacy_formats);
+    [[nodiscard]] FileAssociationResult SetExtensionAssociationImpl(
+        std::wstring_view extension, bool enabled, std::wstring_view description,
+        std::wstring_view icon, const ShellVerbLabels& labels);
+    [[nodiscard]] FileAssociationResult SetExtensionIconImpl(
+        std::wstring_view extension, std::wstring_view icon);
+    [[nodiscard]] FileAssociationResult SetShellIntegrationImpl(
+        ShellIntegrationTarget target, bool enabled, const ShellVerbLabels& labels);
     [[nodiscard]] FileAssociationResult SetLegacyExtensionAssociation(
         std::wstring_view extension, bool enabled, std::wstring_view description,
         std::wstring_view icon, const ShellVerbLabels& labels);

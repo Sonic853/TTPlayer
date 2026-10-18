@@ -73,7 +73,7 @@ int TTPlayer_RunApplicationSession(HINSTANCE instance, int show_command,
         } else {
             // FUN_0049CD41 removes registered reader/playlist patterns plus
             // the AudioCD and Directory shell verbs, then notifies Explorer.
-            static_cast<void>(association.UnregisterAllAssociations());
+            return association.UnregisterAllAssociations() ? 0 : 1;
         }
         return 0;
     }

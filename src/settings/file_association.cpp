@@ -5,6 +5,9 @@
 #include <array>
 #include <cwctype>
 #include <memory>
+#include <functional>
+#include <map>
+#include <variant>
 #include <optional>
 #include <system_error>
 #include <unordered_set>
@@ -118,6 +121,20 @@ struct ManagedChange {
     return result;
 }
 
+[[nodiscard]] FileAssociationResult OwnershipConflict(
+    std::wstring_view path, std::wstring_view existing, std::wstring_view requested) {
+    FileAssociationResult result;
+    result.error = FileAssociationError::ownership_conflict;
+    result.hresult = E_FAIL;
+    result.registry_path = path;
+    result.requested_installation = requested;
+    if (!existing.empty()) result.conflicting_installations.emplace_back(existing);
+    result.operation = i18n::Literal(L"文件关联由另一个安装目录管理");
+    result.message = i18n::Text(L"已登记的安装：") + std::wstring(existing) +
+        i18n::Text(L"\n当前安装：") + std::wstring(requested);
+    return result;
+}
+
 [[nodiscard]] bool EqualInsensitive(std::wstring_view left,
                                     std::wstring_view right) noexcept {
     if (left.size() != right.size()) return false;
@@ -133,6 +150,226 @@ struct ManagedChange {
     return value;
 }
 
+// Windows XP has no transactional registry API. Journal only the values and
+// keys changed by this operation, and undo in reverse order on failure. A later
+// external edit is never overwritten by rollback: its current value must still
+// equal our last successful write. This is failure rollback, not crash recovery.
+struct RegistryValue {
+    DWORD type{};
+    std::vector<BYTE> bytes;
+    bool operator==(const RegistryValue&) const = default;
+};
+LONG ReadRawValue(HKEY key, const wchar_t* name, std::optional<RegistryValue>& value) {
+    value.reset();
+    DWORD type{}, size{};
+    auto status = RegQueryValueExW(key, name, nullptr, &type, nullptr, &size);
+    if (status == ERROR_FILE_NOT_FOUND) return ERROR_SUCCESS;
+    if (status != ERROR_SUCCESS) return status;
+    if (size > 1024U * 1024U) return ERROR_FILE_TOO_LARGE;
+    RegistryValue result{type, std::vector<BYTE>(size)};
+    status = RegQueryValueExW(key, name, nullptr, &type, result.bytes.data(), &size);
+    if (status != ERROR_SUCCESS) return status;
+    result.type = type; result.bytes.resize(size); value = std::move(result);
+    return ERROR_SUCCESS;
+}
+struct RegistryKeyValues {
+    std::map<std::wstring, RegistryValue> values;
+    std::vector<BYTE> security;
+};
+LONG ReadKeyValues(HKEY key, RegistryKeyValues& output) {
+    for (DWORD index = 0;; ++index) {
+        wchar_t name[16384]{}; DWORD size = static_cast<DWORD>(std::size(name));
+        auto status = RegEnumValueW(key, index, name, &size, nullptr, nullptr, nullptr, nullptr);
+        if (status == ERROR_NO_MORE_ITEMS) break;
+        if (status != ERROR_SUCCESS) return status;
+        std::optional<RegistryValue> value;
+        status = ReadRawValue(key, name, value);
+        if (status != ERROR_SUCCESS) return status;
+        if (value) output.values.emplace(name, std::move(*value));
+    }
+    DWORD size{};
+    auto status = RegGetKeySecurity(key, DACL_SECURITY_INFORMATION, nullptr, &size);
+    if (status != ERROR_INSUFFICIENT_BUFFER) return status;
+    output.security.resize(size);
+    return RegGetKeySecurity(key, DACL_SECURITY_INFORMATION,
+        reinterpret_cast<PSECURITY_DESCRIPTOR>(output.security.data()), &size);
+}
+class RegistryJournal;
+thread_local RegistryJournal* active_journal{};
+class RegistryJournal {
+    struct ValueUndo {
+        std::wstring path, name;
+        std::optional<RegistryValue> previous, installed;
+    };
+    struct CreatedKey { std::wstring path; };
+    struct DeletedKey { std::wstring path; RegistryKeyValues previous; };
+    std::vector<std::variant<ValueUndo, CreatedKey, DeletedKey>> undo_;
+    std::map<HKEY, std::wstring> handles_;
+    HANDLE mutex_{};
+    bool locked_{}, finished_{};
+public:
+    FileAssociationResult initial_result;
+    RegistryJournal() {
+        mutex_ = CreateMutexW(nullptr, FALSE, L"Local\\TTPlayerRebuild.Association.Transaction");
+        if (!mutex_) { initial_result = Win32Failure(FileAssociationError::registry, L"CreateMutexW", GetLastError()); return; }
+        const auto wait = WaitForSingleObject(mutex_, 5000);
+        locked_ = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+        if (!locked_) { initial_result = Win32Failure(FileAssociationError::registry,
+            i18n::Literal(L"等待另一项文件关联操作"), wait == WAIT_TIMEOUT ? ERROR_BUSY : GetLastError()); return; }
+        active_journal = this;
+    }
+    ~RegistryJournal() {
+        if (!finished_ && locked_) static_cast<void>(Rollback());
+        if (active_journal == this) active_journal = nullptr;
+        if (locked_) ReleaseMutex(mutex_);
+        if (mutex_) CloseHandle(mutex_);
+    }
+    void Track(HKEY key, std::wstring_view path) { if (key) handles_[key] = path; }
+    static std::vector<std::wstring> MissingParents(std::wstring_view path) {
+        std::vector<std::wstring> result;
+        for (size_t end = path.find(L'\\');; end = path.find(L'\\', end + 1)) {
+            const auto current = std::wstring(path.substr(0, end));
+            HKEY key{};
+            const auto status = RegOpenKeyExW(HKEY_CURRENT_USER, current.c_str(), 0, KEY_READ, &key);
+            if (key) RegCloseKey(key);
+            if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) result.push_back(current);
+            if (end == std::wstring_view::npos) break;
+        }
+        return result;
+    }
+    void RecordCreated(const std::vector<std::wstring>& paths) {
+        for (const auto& path : paths) {
+            HKEY key{};
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, path.c_str(), 0, KEY_READ, &key) == ERROR_SUCCESS) {
+                RegCloseKey(key); undo_.push_back(CreatedKey{path});
+            }
+        }
+    }
+    LONG Write(HKEY key, const wchar_t* name, const std::optional<RegistryValue>& installed) {
+        const auto found = handles_.find(key);
+        if (found == handles_.end()) return ERROR_INVALID_HANDLE;
+        std::optional<RegistryValue> previous;
+        auto status = ReadRawValue(key, name, previous);
+        if (status != ERROR_SUCCESS || previous == installed) return status;
+        // Allocate the undo before mutating, so an allocation failure cannot
+        // strand a successful write without its recovery data.
+        undo_.push_back(ValueUndo{found->second, name ? name : L"", previous, installed});
+        status = installed ? RegSetValueExW(key, name, 0, installed->type,
+            installed->bytes.data(), static_cast<DWORD>(installed->bytes.size())) : RegDeleteValueW(key, name);
+        if (status != ERROR_SUCCESS) undo_.pop_back();
+        return status;
+    }
+    LONG DeleteKey(std::wstring_view path) {
+        HKEY raw{};
+        auto status = RegOpenKeyExW(HKEY_CURRENT_USER, std::wstring(path).c_str(), 0, KEY_READ, &raw);
+        if (status != ERROR_SUCCESS) return status;
+        UniqueRegKey key(raw);
+        DeletedKey entry{std::wstring(path), {}};
+        status = ReadKeyValues(key.get(), entry.previous);
+        if (status != ERROR_SUCCESS) return status;
+        undo_.push_back(std::move(entry));
+        key.reset();
+        status = RegDeleteKeyW(HKEY_CURRENT_USER, std::wstring(path).c_str());
+        if (status != ERROR_SUCCESS) undo_.pop_back();
+        return status;
+    }
+    LONG DeleteTree(std::wstring_view path) {
+        for (;;) {
+            HKEY raw{};
+            auto status = RegOpenKeyExW(HKEY_CURRENT_USER, std::wstring(path).c_str(), 0, KEY_READ, &raw);
+            if (status != ERROR_SUCCESS) return status;
+            UniqueRegKey key(raw);
+            wchar_t name[256]{}; DWORD size = static_cast<DWORD>(std::size(name));
+            status = RegEnumKeyExW(key.get(), 0, name, &size, nullptr, nullptr, nullptr, nullptr);
+            key.reset();
+            if (status == ERROR_NO_MORE_ITEMS) return DeleteKey(path);
+            if (status != ERROR_SUCCESS) return status;
+            status = DeleteTree(JoinRegistryPath(path, name));
+            if (status != ERROR_SUCCESS) return status;
+        }
+    }
+    LONG Rollback() {
+        LONG first_error = ERROR_SUCCESS;
+        for (auto it = undo_.rbegin(); it != undo_.rend(); ++it) {
+            const auto status = std::visit([&](const auto& entry) -> LONG {
+                using T = std::decay_t<decltype(entry)>;
+                HKEY raw{};
+                if constexpr (std::is_same_v<T, DeletedKey>) {
+                    DWORD disposition{};
+                    auto error = RegCreateKeyExW(HKEY_CURRENT_USER, entry.path.c_str(), 0, nullptr, 0,
+                        KEY_READ | KEY_WRITE | WRITE_DAC, nullptr, &raw, &disposition);
+                    if (error != ERROR_SUCCESS) return error;
+                    UniqueRegKey key(raw);
+                    if (disposition != REG_CREATED_NEW_KEY) return ERROR_REVISION_MISMATCH;
+                    for (const auto& [name, value] : entry.previous.values) {
+                        error = RegSetValueExW(key.get(), name.c_str(), 0, value.type,
+                            value.bytes.data(), static_cast<DWORD>(value.bytes.size()));
+                        if (error != ERROR_SUCCESS) return error;
+                    }
+                    SECURITY_DESCRIPTOR_CONTROL control{}; DWORD revision{};
+                    const auto security = reinterpret_cast<PSECURITY_DESCRIPTOR>(
+                        const_cast<BYTE*>(entry.previous.security.data()));
+                    if (!GetSecurityDescriptorControl(security, &control, &revision)) return GetLastError();
+                    return RegSetKeySecurity(key.get(), DACL_SECURITY_INFORMATION |
+                        ((control & SE_DACL_PROTECTED) ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION), security);
+                } else {
+                    auto error = RegOpenKeyExW(HKEY_CURRENT_USER, entry.path.c_str(), 0,
+                        KEY_READ | KEY_SET_VALUE, &raw);
+                    if (error != ERROR_SUCCESS) return error;
+                    UniqueRegKey key(raw);
+                    if constexpr (std::is_same_v<T, CreatedKey>) {
+                        DWORD children{}, values{};
+                        error = RegQueryInfoKeyW(key.get(), nullptr, nullptr, nullptr, &children,
+                            nullptr, nullptr, &values, nullptr, nullptr, nullptr, nullptr);
+                        key.reset();
+                        if (error != ERROR_SUCCESS) return error;
+                        if (children || values) return ERROR_REVISION_MISMATCH;
+                        return RegDeleteKeyW(HKEY_CURRENT_USER, entry.path.c_str());
+                    } else {
+                        std::optional<RegistryValue> current;
+                        error = ReadRawValue(key.get(), entry.name.c_str(), current);
+                        if (error != ERROR_SUCCESS) return error;
+                        if (current != entry.installed) return ERROR_REVISION_MISMATCH;
+                        return entry.previous ? RegSetValueExW(key.get(), entry.name.c_str(), 0,
+                            entry.previous->type, entry.previous->bytes.data(), static_cast<DWORD>(entry.previous->bytes.size())) :
+                            RegDeleteValueW(key.get(), entry.name.c_str());
+                    }
+                }
+            }, *it);
+            if (status != ERROR_SUCCESS && first_error == ERROR_SUCCESS) first_error = status;
+        }
+        undo_.clear(); finished_ = true;
+        return first_error;
+    }
+    FileAssociationResult Finish(FileAssociationResult result, bool notify) {
+        if (result) { result.changed = !undo_.empty(); undo_.clear(); finished_ = true; }
+        else {
+            const auto error = Rollback();
+            result.changed = error != ERROR_SUCCESS;
+            result.rollback_failed = result.changed;
+            if (error != ERROR_SUCCESS) result.message += i18n::Text(L"\n部分关联恢复失败，请重试。恢复错误：") + Win32Message(error);
+        }
+        if (active_journal == this) active_journal = nullptr;
+        if (result.changed && notify) FileAssociationBackend::NotifyShellAssociationsChanged();
+        return result;
+    }
+};
+LONG SetRegistryValue(HKEY key, const wchar_t* name, DWORD type, const BYTE* data, DWORD size) {
+    if (!active_journal) return RegSetValueExW(key, name, 0, type, data, size);
+    RegistryValue value{type, {}};
+    if (size) value.bytes.assign(data, data + size);
+    return active_journal->Write(key, name, value);
+}
+LONG DeleteRegistryValue(HKEY key, const wchar_t* name) {
+    return active_journal ? active_journal->Write(key, name, std::nullopt) : RegDeleteValueW(key, name);
+}
+LONG DeleteRegistryKey(std::wstring_view path) {
+    return active_journal ? active_journal->DeleteKey(path) : RegDeleteKeyW(HKEY_CURRENT_USER, std::wstring(path).c_str());
+}
+LONG DeleteRegistryTree(std::wstring_view path) {
+    return active_journal ? active_journal->DeleteTree(path) : RegDeleteTreeW(HKEY_CURRENT_USER, std::wstring(path).c_str());
+}
+
 [[nodiscard]] LONG OpenKey(std::wstring_view path, REGSAM access,
                            UniqueRegKey& key) {
     HKEY raw = nullptr;
@@ -140,11 +377,13 @@ struct ManagedChange {
                                       std::wstring(path).c_str(), 0, access,
                                       &raw);
     key.reset(raw);
+    if (active_journal && status == ERROR_SUCCESS) active_journal->Track(raw, path);
     return status;
 }
 
 [[nodiscard]] LONG CreateKey(std::wstring_view path, UniqueRegKey& key,
                              bool& existed) {
+    const auto missing = active_journal ? RegistryJournal::MissingParents(path) : std::vector<std::wstring>{};
     HKEY raw = nullptr;
     DWORD disposition = 0;
     const LONG status = RegCreateKeyExW(
@@ -154,6 +393,10 @@ struct ManagedChange {
         nullptr, &raw, &disposition);
     key.reset(raw);
     existed = disposition == REG_OPENED_EXISTING_KEY;
+    if (active_journal) {
+        active_journal->RecordCreated(missing);
+        if (status == ERROR_SUCCESS) active_journal->Track(raw, path);
+    }
     return status;
 }
 
@@ -195,18 +438,18 @@ struct ManagedChange {
 [[nodiscard]] LONG WriteStringValue(HKEY key, const wchar_t* name,
                                     std::wstring_view value) {
     const DWORD bytes = static_cast<DWORD>((value.size() + 1U) * sizeof(wchar_t));
-    return RegSetValueExW(key, name, 0, REG_SZ,
+    return SetRegistryValue(key, name, REG_SZ,
                           reinterpret_cast<const BYTE*>(value.data()), bytes);
 }
 
 [[nodiscard]] LONG WriteDwordValue(HKEY key, const wchar_t* name, DWORD value) {
-    return RegSetValueExW(key, name, 0, REG_DWORD,
+    return SetRegistryValue(key, name, REG_DWORD,
                           reinterpret_cast<const BYTE*>(&value), sizeof(value));
 }
 
 [[nodiscard]] LONG DeleteValueIfPresent(HKEY key,
                                         const wchar_t* name) noexcept {
-    const LONG status = RegDeleteValueW(key, name);
+    const LONG status = DeleteRegistryValue(key, name);
     return status == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : status;
 }
 
@@ -293,9 +536,7 @@ struct ManagedValueNames {
                              i18n::Literal(L"read association owner"), status), false};
     }
     if (owner && !EqualInsensitive(*owner, owner_identity)) {
-        return {Win32Failure(FileAssociationError::registry,
-                             i18n::Literal(L"association key is managed by another executable"),
-                             ERROR_SHARING_VIOLATION), false};
+        return {OwnershipConflict(path, *owner, owner_identity), false};
     }
 
     std::optional<std::wstring> previous;
@@ -415,7 +656,7 @@ struct ManagedValueNames {
         if (backup_present.value_or(0U) != 0U && backup) {
             status = WriteStringValue(key.get(), value_name, *backup);
         } else {
-            status = RegDeleteValueW(key.get(), value_name);
+            status = DeleteRegistryValue(key.get(), value_name);
             if (status == ERROR_FILE_NOT_FOUND) status = ERROR_SUCCESS;
         }
         if (status != ERROR_SUCCESS) {
@@ -447,7 +688,7 @@ struct ManagedValueNames {
                               values == 0 && key_existed.value_or(1U) == 0U;
     key.reset();
     if (delete_empty) {
-        status = RegDeleteKeyW(HKEY_CURRENT_USER, std::wstring(path).c_str());
+        status = DeleteRegistryKey(path);
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
             return {Win32Failure(FileAssociationError::registry,
                                  i18n::Literal(L"remove empty association key"), status),
@@ -507,7 +748,7 @@ struct ManagedValueNames {
         return failure(i18n::Literal(L"read legacy UserChoice backup owner"), status);
     if (owner && !EqualInsensitive(*owner, owner_identity)) {
         if (!enabled) return {Success(), false};
-        return failure(i18n::Literal(L"legacy UserChoice backup belongs to another installation"), ERROR_SHARING_VIOLATION);
+        return {OwnershipConflict(backup_path, *owner, owner_identity), false};
     }
     if (!owner) {
         if (!enabled) return {Success(), false};
@@ -519,7 +760,7 @@ struct ManagedValueNames {
     }
     if (enabled) {
         if (!choice_exists) return {Success(), false};
-        status = RegDeleteKeyW(HKEY_CURRENT_USER, path.c_str());
+        status = DeleteRegistryKey(path);
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
             return failure(i18n::Literal(L"remove legacy UserChoice key"), status);
         return {Success(true), true};
@@ -541,7 +782,7 @@ struct ManagedValueNames {
                 if (status != ERROR_SUCCESS) {
                     choice.reset();
                     // Keep the backup retryable if creating the value failed.
-                    RegDeleteKeyW(HKEY_CURRENT_USER, path.c_str());
+                    DeleteRegistryKey(path);
                 }
             }
             if (status != ERROR_SUCCESS) return failure(i18n::Literal(L"restore legacy UserChoice"), status);
@@ -557,7 +798,7 @@ struct ManagedValueNames {
     const bool empty = status == ERROR_SUCCESS && subkeys == 0 && values == 0;
     backup.reset();
     if (empty) {
-        status = RegDeleteKeyW(HKEY_CURRENT_USER, backup_path.c_str());
+        status = DeleteRegistryKey(backup_path);
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
             return failure(i18n::Literal(L"remove legacy UserChoice backup"), status, changed);
     }
@@ -667,11 +908,193 @@ FileAssociationResult SetOpenWith(const FileAssociationBackendOptions& options,
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
         return Win32Failure(FileAssociationError::registry, i18n::Literal(L"query OpenWithProgids"), status);
     if ((add && status == ERROR_SUCCESS) || (!add && status == ERROR_FILE_NOT_FOUND)) return Success();
-    status = add ? RegSetValueExW(key.get(), prog_id.c_str(), 0, REG_NONE, nullptr, 0)
-                 : RegDeleteValueW(key.get(), prog_id.c_str());
+    status = add ? SetRegistryValue(key.get(), prog_id.c_str(), REG_NONE, nullptr, 0)
+                 : DeleteRegistryValue(key.get(), prog_id.c_str());
     // Never delete the extension key or other applications' named entries.
     return status == ERROR_SUCCESS ? Success(true) : Win32Failure(
         FileAssociationError::registry, i18n::Literal(L"update OpenWithProgids"), status);
+}
+
+struct AssociationScope { std::wstring path; bool recursive{}, owners{true}, writable{true}; };
+struct AssociationOwner { std::wstring path, name, executable; };
+void AddScope(std::vector<AssociationScope>& scopes, std::wstring path,
+              bool recursive = false, bool owners = true, bool writable = true) {
+    const auto found = std::find_if(scopes.begin(), scopes.end(), [&](const auto& item) {
+        return EqualInsensitive(item.path, path);
+    });
+    if (found == scopes.end()) scopes.push_back({std::move(path), recursive, owners, writable});
+    else { found->recursive |= recursive; found->owners |= owners; found->writable |= writable; }
+}
+void ExtensionScopes(std::vector<AssociationScope>& scopes,
+                     const FileAssociationBackendOptions& options, std::wstring_view extension) {
+    AddScope(scopes, JoinRegistryPath(options.current_user_classes_subkey, ManagedProgId(options, extension)), true);
+    const auto ext = JoinRegistryPath(options.current_user_classes_subkey, L"." + std::wstring(extension));
+    AddScope(scopes, ext);
+    AddScope(scopes, ext + L"\\OpenWithProgids", false, false);
+    if (AssociationMode(options) != FileAssociationMode::user_choice) {
+        AddScope(scopes, ExplorerExtensionPath(options, extension));
+        if (AssociationMode(options) == FileAssociationMode::vista_windows7)
+            AddScope(scopes, ExplorerExtensionPath(options, extension) + L"\\UserChoice", false, false, false);
+    }
+}
+void ApplicationScopes(std::vector<AssociationScope>& scopes, const FileAssociationBackendOptions& options) {
+    AddScope(scopes, CapabilitiesPath(options), true);
+    AddScope(scopes, RegisteredApplicationsPath(options), false, false);
+}
+void ShellScopes(std::vector<AssociationScope>& scopes, const FileAssociationBackendOptions& options,
+                 ShellIntegrationTarget target) {
+    const auto shell = JoinRegistryPath(options.current_user_classes_subkey,
+        target == ShellIntegrationTarget::audio_cd ? L"AudioCD\\shell" : L"Directory\\shell");
+    if (target == ShellIntegrationTarget::audio_cd) AddScope(scopes, shell);
+    const auto verb = shell + (target == ShellIntegrationTarget::audio_cd ? L"\\open" : L"\\Playback");
+    AddScope(scopes, verb); AddScope(scopes, verb + L"\\command");
+    AddScope(scopes, shell + L"\\PlayList"); AddScope(scopes, shell + L"\\PlayList\\command");
+}
+FileAssociationResult DiscoverManagedScopes(std::vector<AssociationScope>& scopes,
+                                           const FileAssociationBackendOptions& options) {
+    ApplicationScopes(scopes, options);
+    UniqueRegKey classes;
+    auto status = OpenKey(options.current_user_classes_subkey, KEY_READ, classes);
+    if (status != ERROR_FILE_NOT_FOUND && status != ERROR_SUCCESS)
+        return Win32Failure(FileAssociationError::registry, i18n::Literal(L"读取现有文件关联"), status);
+    if (classes) for (DWORD index = 0;; ++index) {
+        wchar_t name[256]{}; DWORD size = static_cast<DWORD>(std::size(name));
+        status = RegEnumKeyExW(classes.get(), index, name, &size, nullptr, nullptr, nullptr, nullptr);
+        if (status == ERROR_NO_MORE_ITEMS) break;
+        if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, i18n::Literal(L"枚举现有文件关联"), status);
+        const std::wstring candidate(name), prefix = ManagedProgId(options, {});
+        const bool current = candidate.size() > prefix.size() && EqualInsensitive(candidate.substr(0, prefix.size()), prefix);
+        const bool legacy = candidate.size() > 6 && EqualInsensitive(candidate.substr(0, 6), L"Audio.");
+        if (!current && !legacy) continue;
+        if (legacy && !current) {
+            // Audio.* can belong to the original player. Only the rebuild's
+            // explicit ownership marker permits migrating such an old record.
+            UniqueRegKey key;
+            if (OpenKey(JoinRegistryPath(options.current_user_classes_subkey, candidate), KEY_QUERY_VALUE, key) != ERROR_SUCCESS) continue;
+            std::optional<std::wstring> owner;
+            if (ReadStringValue(key.get(), kOwnerValue, owner) != ERROR_SUCCESS || !owner) continue;
+        }
+        const auto extension = NormalizeExtension(candidate.substr(current ? prefix.size() : 6));
+        if (extension.empty()) continue;
+        ExtensionScopes(scopes, options, extension);
+        if (legacy && !current) AddScope(scopes, JoinRegistryPath(options.current_user_classes_subkey, candidate), true);
+    }
+    ShellScopes(scopes, options, ShellIntegrationTarget::audio_cd);
+    ShellScopes(scopes, options, ShellIntegrationTarget::directory);
+    return Success();
+}
+FileAssociationResult InspectScope(const AssociationScope& scope, std::vector<AssociationOwner>& owners,
+                                  unsigned depth = 0) {
+    if (depth > 32) return Win32Failure(FileAssociationError::registry, scope.path, ERROR_BAD_PATHNAME);
+    UniqueRegKey key;
+    auto status = OpenKey(scope.path, KEY_READ, key);
+    if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) {
+        if (!scope.writable) return Success();
+        auto parent = scope.path;
+        for (auto slash = parent.find_last_of(L'\\'); slash != std::wstring::npos; slash = parent.find_last_of(L'\\')) {
+            parent.resize(slash);
+            status = OpenKey(parent, KEY_QUERY_VALUE | KEY_CREATE_SUB_KEY, key);
+            if (status == ERROR_SUCCESS) return Success();
+            if (status != ERROR_FILE_NOT_FOUND && status != ERROR_PATH_NOT_FOUND)
+                return Win32Failure(FileAssociationError::registry, parent, status);
+        }
+        return Win32Failure(FileAssociationError::registry, scope.path, status);
+    }
+    if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, scope.path, status);
+    if (scope.writable) {
+        UniqueRegKey writable;
+        status = OpenKey(scope.path, KEY_QUERY_VALUE | KEY_SET_VALUE, writable);
+        if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, scope.path, status);
+    }
+    if (scope.owners) for (DWORD index = 0;; ++index) {
+        wchar_t name[16384]{}; DWORD size = static_cast<DWORD>(std::size(name));
+        status = RegEnumValueW(key.get(), index, name, &size, nullptr, nullptr, nullptr, nullptr);
+        if (status == ERROR_NO_MORE_ITEMS) break;
+        if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, scope.path, status);
+        const std::wstring value_name(name), prefix = std::wstring(kOwnerValue) + L".";
+        if (!EqualInsensitive(value_name, kOwnerValue) &&
+            !(value_name.size() > prefix.size() && EqualInsensitive(value_name.substr(0, prefix.size()), prefix))) continue;
+        std::optional<std::wstring> owner;
+        status = ReadStringValue(key.get(), name, owner);
+        if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, scope.path, status);
+        if (owner) owners.push_back({scope.path, value_name, *owner});
+    }
+    if (scope.recursive) for (DWORD index = 0;; ++index) {
+        wchar_t name[256]{}; DWORD size = static_cast<DWORD>(std::size(name));
+        status = RegEnumKeyExW(key.get(), index, name, &size, nullptr, nullptr, nullptr, nullptr);
+        if (status == ERROR_NO_MORE_ITEMS) break;
+        if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, scope.path, status);
+        const auto result = InspectScope({JoinRegistryPath(scope.path, name), true, scope.owners, scope.writable}, owners, depth + 1);
+        if (!result) return result;
+    }
+    return Success();
+}
+FileAssociationResult PreflightAssociations(const std::vector<AssociationScope>& scopes,
+    std::wstring_view executable, bool handover, std::vector<AssociationOwner>& owners, bool enforce_ownership = true) {
+    FileAssociationResult conflict;
+    for (const auto& scope : scopes) {
+        auto result = InspectScope(scope, owners);
+        if (!result) return result;
+    }
+    if (!enforce_ownership || handover) return Success();
+    for (const auto& owner : owners) if (!EqualInsensitive(owner.executable, executable)) {
+        if (conflict) conflict = OwnershipConflict(owner.path, owner.executable, executable);
+        else if (std::none_of(conflict.conflicting_installations.begin(), conflict.conflicting_installations.end(),
+            [&](const auto& previous) { return EqualInsensitive(previous, owner.executable); }))
+            conflict.conflicting_installations.push_back(owner.executable);
+    }
+    return conflict;
+}
+FileAssociationResult TransferAssociationOwners(const std::vector<AssociationOwner>& owners,
+    const FileAssociationBackendOptions& options, const std::filesystem::path& executable) {
+    for (const auto& owner : owners) {
+        if (EqualInsensitive(owner.executable, executable.wstring())) continue;
+        UniqueRegKey key;
+        auto status = OpenKey(owner.path, KEY_QUERY_VALUE | KEY_SET_VALUE, key);
+        if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, owner.path, status);
+        std::optional<std::wstring> verified;
+        status = ReadStringValue(key.get(), owner.name.c_str(), verified);
+        if (status != ERROR_SUCCESS || !verified || *verified != owner.executable)
+            return Win32Failure(FileAssociationError::registry, owner.path, status == ERROR_SUCCESS ? ERROR_REVISION_MISMATCH : status);
+        const bool capability = EqualInsensitive(owner.path, CapabilitiesPath(options));
+        const bool choice_backup = owner.path.ends_with(L"\\LegacyUserChoiceBackup");
+        if (capability) {
+            std::optional<std::wstring> icon;
+            status = ReadStringValue(key.get(), L"ApplicationIcon", icon);
+            if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+                return Win32Failure(FileAssociationError::registry, owner.path, status);
+            if (icon && EqualInsensitive(*icon, DefaultIcon(owner.executable)))
+                status = WriteStringValue(key.get(), L"ApplicationIcon", DefaultIcon(executable));
+            else status = ERROR_SUCCESS;
+        } else if (!choice_backup) {
+            const std::wstring suffix = owner.name.substr(std::wstring_view(kOwnerValue).size());
+            const std::wstring value_name = suffix.empty() ? L"" : suffix.substr(1);
+            const auto installed_name = std::wstring(kInstalledValue) + suffix;
+            std::optional<std::wstring> installed, current;
+            status = ReadStringValue(key.get(), installed_name.c_str(), installed);
+            if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+                return Win32Failure(FileAssociationError::registry, owner.path, status);
+            status = ReadStringValue(key.get(), value_name.c_str(), current);
+            if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+                return Win32Failure(FileAssociationError::registry, owner.path, status);
+            status = ERROR_SUCCESS;
+            if (installed && current == installed) {
+                std::optional<std::wstring> replacement;
+                if (EqualInsensitive(*installed, OpenCommand(owner.executable, false))) replacement = OpenCommand(executable, false);
+                else if (EqualInsensitive(*installed, OpenCommand(owner.executable, true))) replacement = OpenCommand(executable, true);
+                else if (EqualInsensitive(*installed, DefaultIcon(owner.executable))) replacement = DefaultIcon(executable);
+                if (replacement) {
+                    status = WriteStringValue(key.get(), value_name.c_str(), *replacement);
+                    if (status == ERROR_SUCCESS) status = WriteStringValue(key.get(), installed_name.c_str(), *replacement);
+                }
+            }
+        }
+        if (status == ERROR_SUCCESS) status = WriteStringValue(key.get(), owner.name.c_str(), executable.wstring());
+        if (status != ERROR_SUCCESS) return Win32Failure(FileAssociationError::registry, owner.path, status);
+        // Backup/BackupPresent/KeyExisted remain untouched: B inherits A's
+        // original third-party recovery record instead of backing up A itself.
+    }
+    return Success();
 }
 
 [[nodiscard]] std::filesystem::path CanonicalForCompare(
@@ -807,6 +1230,140 @@ FileAssociationBackend::FileAssociationBackend(
            options_.current_user_classes_subkey.back() == L'\\') {
         options_.current_user_classes_subkey.pop_back();
     }
+}
+
+FileAssociationResult FileAssociationBackend::ApplyChanges(
+    const AssociationUpdate& update, const ShellVerbLabels& labels) {
+    if (active_journal) return Invalid(i18n::Literal(L"文件关联提交"), i18n::Literal(L"不允许嵌套的关联批次"));
+    RegistryJournal journal;
+    if (!journal.initial_result) return journal.initial_result;
+    std::vector<AssociationScope> scopes;
+    for (const auto& format : update.register_formats) {
+        const auto extension = NormalizeExtension(format.extension);
+        if (extension.empty()) return journal.Finish(Invalid(i18n::Literal(L"文件关联提交"), i18n::Literal(L"invalid extension")), false);
+        ExtensionScopes(scopes, options_, extension);
+    }
+    if (!update.register_formats.empty()) ApplicationScopes(scopes, options_);
+    for (const auto& change : update.extensions) {
+        const auto extension = NormalizeExtension(change.extension);
+        if (extension.empty()) return journal.Finish(Invalid(i18n::Literal(L"文件关联提交"), i18n::Literal(L"invalid extension")), false);
+        ExtensionScopes(scopes, options_, extension);
+        if (!change.icon_only && change.enabled && AssociationMode(options_) == FileAssociationMode::user_choice)
+            ApplicationScopes(scopes, options_);
+    }
+    for (const auto& change : update.shell) ShellScopes(scopes, options_, change.target);
+    if (update.handover) {
+        const auto discover = DiscoverManagedScopes(scopes, options_);
+        if (!discover) return journal.Finish(discover, options_.notify_shell);
+    }
+    std::vector<AssociationOwner> owners;
+    const bool claims_ownership = !update.register_formats.empty() ||
+        std::any_of(update.extensions.begin(), update.extensions.end(), [](const auto& change) { return change.enabled || change.icon_only; }) ||
+        std::any_of(update.shell.begin(), update.shell.end(), [](const auto& change) { return change.enabled; });
+    auto result = PreflightAssociations(scopes, executable_.wstring(), update.handover, owners, claims_ownership);
+    if (!result) {
+        if (result.error == FileAssociationError::ownership_conflict) {
+            // The consent covers the shared registration, so name every old
+            // directory that handover would affect (including a historical
+            // split Capabilities/ProgID state), not just the first failure.
+            std::vector<AssociationScope> existing;
+            if (DiscoverManagedScopes(existing, options_)) {
+                for (auto& scope : existing) scope.writable = false;
+                std::vector<AssociationOwner> all_owners;
+                if (PreflightAssociations(existing, executable_.wstring(), true, all_owners))
+                    for (const auto& owner : all_owners)
+                        if (!EqualInsensitive(owner.executable, executable_.wstring()) &&
+                            std::none_of(result.conflicting_installations.begin(), result.conflicting_installations.end(),
+                                [&](const auto& previous) { return EqualInsensitive(previous, owner.executable); }))
+                            result.conflicting_installations.push_back(owner.executable);
+            }
+        }
+        return journal.Finish(result, options_.notify_shell);
+    }
+    if (update.handover) result = TransferAssociationOwners(owners, options_, executable_);
+    auto quiet = options_; quiet.notify_shell = false;
+    FileAssociationBackend backend(executable_, application_name_, quiet);
+    if (result && !update.register_formats.empty()) result = backend.RegisterApplicationImpl(update.register_formats);
+    bool requires_choice = false;
+    for (const auto& change : update.extensions) {
+        if (!result) break;
+        if (change.icon_only) result = backend.SetExtensionIconImpl(change.extension, change.icon);
+        else result = backend.SetExtensionAssociationImpl(change.extension, change.enabled,
+            change.description, change.icon, labels);
+        requires_choice |= result.requires_user_choice;
+    }
+    for (const auto& change : update.shell) {
+        if (!result) break;
+        result = backend.SetShellIntegrationImpl(change.target, change.enabled, labels);
+    }
+    result.requires_user_choice |= requires_choice;
+    return journal.Finish(result, options_.notify_shell);
+}
+FileAssociationResult FileAssociationBackend::SetExtensionAssociation(
+    std::wstring_view extension, bool enabled, std::wstring_view description,
+    std::wstring_view icon, const ShellVerbLabels& labels) {
+    AssociationUpdate update;
+    update.extensions.push_back({std::wstring(extension), enabled, std::wstring(description), std::wstring(icon), false});
+    return ApplyChanges(update, labels);
+}
+FileAssociationResult FileAssociationBackend::RegisterApplication(const std::vector<AssociableExtension>& formats) {
+    AssociationUpdate update; update.register_formats = formats;
+    return ApplyChanges(update);
+}
+FileAssociationResult FileAssociationBackend::SetExtensionIcon(std::wstring_view extension, std::wstring_view icon) {
+    AssociationUpdate update;
+    update.extensions.push_back({std::wstring(extension), true, {}, std::wstring(icon), true});
+    return ApplyChanges(update);
+}
+FileAssociationResult FileAssociationBackend::SetShellIntegration(
+    ShellIntegrationTarget target, bool enabled, const ShellVerbLabels& labels) {
+    AssociationUpdate update; update.shell.push_back({target, enabled});
+    return ApplyChanges(update, labels);
+}
+FileAssociationResult FileAssociationBackend::UnregisterApplication(const std::vector<AssociableExtension>& formats) {
+    return UnregisterAssociations(formats, false);
+}
+FileAssociationResult FileAssociationBackend::UnregisterAllAssociations(const std::vector<AssociableExtension>& formats) {
+    return UnregisterAssociations(formats, true);
+}
+FileAssociationResult FileAssociationBackend::UnregisterAssociations(
+    const std::vector<AssociableExtension>& formats, bool include_shell) {
+    if (active_journal) return Invalid(i18n::Literal(L"取消文件关联"), i18n::Literal(L"不允许嵌套的关联批次"));
+    RegistryJournal journal;
+    if (!journal.initial_result) return journal.initial_result;
+    // An old installer/uninstaller must leave the successor's complete shared
+    // registration alone, including OpenWithProgids (which has no owner value).
+    UniqueRegKey key;
+    auto status = OpenKey(CapabilitiesPath(options_), KEY_QUERY_VALUE, key);
+    if (status == ERROR_SUCCESS) {
+        std::optional<std::wstring> owner;
+        status = ReadStringValue(key.get(), kOwnerValue, owner);
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+            return journal.Finish(Win32Failure(FileAssociationError::registry, CapabilitiesPath(options_), status), options_.notify_shell);
+        if (owner && !EqualInsensitive(*owner, executable_.wstring())) return journal.Finish(Success(), false);
+    } else if (status != ERROR_FILE_NOT_FOUND && status != ERROR_PATH_NOT_FOUND)
+        return journal.Finish(Win32Failure(FileAssociationError::registry, CapabilitiesPath(options_), status), options_.notify_shell);
+    std::vector<AssociationScope> scopes;
+    auto result = DiscoverManagedScopes(scopes, options_);
+    if (!result) return journal.Finish(result, options_.notify_shell);
+    for (const auto& format : formats) {
+        const auto extension = NormalizeExtension(format.extension);
+        if (extension.empty()) return journal.Finish(Invalid(i18n::Literal(L"取消文件关联"), i18n::Literal(L"invalid extension")), false);
+        ExtensionScopes(scopes, options_, extension);
+        auto legacy = options_; legacy.prog_id_prefix = L"Audio";
+        AddScope(scopes, JoinRegistryPath(options_.current_user_classes_subkey, ManagedProgId(legacy, extension)), true);
+    }
+    std::vector<AssociationOwner> owners;
+    result = PreflightAssociations(scopes, executable_.wstring(), false, owners, false);
+    if (!result) return journal.Finish(result, options_.notify_shell);
+    auto quiet = options_; quiet.notify_shell = false;
+    FileAssociationBackend backend(executable_, application_name_, quiet);
+    result = backend.UnregisterApplicationImpl(formats);
+    if (include_shell) for (const auto target : {ShellIntegrationTarget::audio_cd, ShellIntegrationTarget::directory}) {
+        if (!result) break;
+        result = backend.SetShellIntegrationImpl(target, false, {});
+    }
+    return journal.Finish(result, options_.notify_shell);
 }
 
 AssociationQuery FileAssociationBackend::QueryExtension(
@@ -1016,7 +1573,7 @@ FileAssociationResult FileAssociationBackend::SetLegacyExtensionAssociation(
     return result;
 }
 
-FileAssociationResult FileAssociationBackend::SetExtensionIcon(
+FileAssociationResult FileAssociationBackend::SetExtensionIconImpl(
     std::wstring_view extension, std::wstring_view icon) {
     AssociationQuery query = QueryExtension(extension);
     if (!query.result) return query.result;
@@ -1057,7 +1614,7 @@ DefaultAppsTarget SelectDefaultAppsTarget(DWORD major, DWORD minor, DWORD build,
     return DefaultAppsTarget::settings;
 }
 
-FileAssociationResult FileAssociationBackend::RegisterApplication(
+FileAssociationResult FileAssociationBackend::RegisterApplicationImpl(
     const std::vector<AssociableExtension>& formats) {
     if (executable_.empty()) return Invalid(i18n::Literal(L"register default program"), i18n::Literal(L"executable is empty"));
     // Validate the complete input before changing any keys.
@@ -1073,7 +1630,7 @@ FileAssociationResult FileAssociationBackend::RegisterApplication(
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
             return Win32Failure(FileAssociationError::registry, i18n::Literal(L"read capabilities owner"), status);
         if (owner && !EqualInsensitive(*owner, executable_.wstring()))
-            return Win32Failure(FileAssociationError::registry, i18n::Literal(L"default program belongs to another installation"), ERROR_SHARING_VIOLATION);
+            return OwnershipConflict(capabilities, *owner, executable_.wstring());
     } else if (status != ERROR_FILE_NOT_FOUND) {
         return Win32Failure(FileAssociationError::registry, i18n::Literal(L"open capabilities"), status);
     }
@@ -1085,7 +1642,7 @@ FileAssociationResult FileAssociationBackend::RegisterApplication(
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
             return Win32Failure(FileAssociationError::registry, i18n::Literal(L"read RegisteredApplications"), status);
         if (registered && !EqualInsensitive(*registered, capabilities))
-            return Win32Failure(FileAssociationError::registry, i18n::Literal(L"registered application name already in use"), ERROR_SHARING_VIOLATION);
+            return OwnershipConflict(RegisteredApplicationsPath(options_), *registered, executable_.wstring());
     } else if (status != ERROR_FILE_NOT_FOUND) {
         return Win32Failure(FileAssociationError::registry, i18n::Literal(L"open RegisteredApplications"), status);
     }
@@ -1140,7 +1697,7 @@ FileAssociationResult FileAssociationBackend::RegisterApplication(
     return Success(changed);
 }
 
-FileAssociationResult FileAssociationBackend::SetExtensionAssociation(
+FileAssociationResult FileAssociationBackend::SetExtensionAssociationImpl(
     std::wstring_view extension, bool enabled, std::wstring_view description,
     std::wstring_view icon, const ShellVerbLabels& labels) {
     if (AssociationMode(options_) != FileAssociationMode::user_choice)
@@ -1149,10 +1706,10 @@ FileAssociationResult FileAssociationBackend::SetExtensionAssociation(
     if (normalized.empty()) return Invalid(i18n::Literal(L"set extension association"), i18n::Literal(L"invalid extension"));
     FileAssociationResult result;
     if (enabled) {
-        result = RegisterApplication({{normalized, std::wstring(description), {}}});
+        result = RegisterApplicationImpl({{normalized, std::wstring(description), {}}});
         if (!result) return result;
         if (!icon.empty()) {
-            const auto update = SetExtensionIcon(normalized, icon);
+            const auto update = SetExtensionIconImpl(normalized, icon);
             if (!update) return update;
             result.changed = result.changed || update.changed;
         }
@@ -1219,7 +1776,7 @@ FileAssociationResult FileAssociationBackend::OpenDefaultPrograms(HWND owner) co
         ? L"folders" : L"/name Microsoft.DefaultPrograms /page pageDefaultProgram");
 }
 
-FileAssociationResult FileAssociationBackend::UnregisterApplication(
+FileAssociationResult FileAssociationBackend::UnregisterApplicationImpl(
     const std::vector<AssociableExtension>& legacy_formats) {
     std::unordered_set<std::wstring> extensions;
     for (const auto& format : legacy_formats) {
@@ -1236,8 +1793,9 @@ FileAssociationResult FileAssociationBackend::UnregisterApplication(
     if (has_capabilities) {
         std::optional<std::wstring> owner;
         status = ReadStringValue(key.get(), kOwnerValue, owner);
-        if (status != ERROR_SUCCESS || !owner || !EqualInsensitive(*owner, executable_.wstring()))
-            return Win32Failure(FileAssociationError::registry, i18n::Literal(L"capabilities belong to another installation"), ERROR_ACCESS_DENIED);
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+            return Win32Failure(FileAssociationError::registry, i18n::Literal(L"read capabilities owner"), status);
+        if (!owner || !EqualInsensitive(*owner, executable_.wstring())) return Success();
     }
     key.reset();
     status = OpenKey(capabilities + L"\\FileAssociations", KEY_QUERY_VALUE, key);
@@ -1262,6 +1820,17 @@ FileAssociationResult FileAssociationBackend::UnregisterApplication(
     legacy_options.notify_shell = false;
     FileAssociationBackend legacy(executable_, application_name_, legacy_options);
     for (const auto& extension : extensions) {
+        UniqueRegKey owned_class;
+        std::optional<std::wstring> class_owner;
+        const auto class_status = OpenKey(JoinRegistryPath(options_.current_user_classes_subkey,
+            ManagedProgId(options_, extension)), KEY_QUERY_VALUE, owned_class);
+        if (class_status == ERROR_SUCCESS) {
+            const auto read = ReadStringValue(owned_class.get(), kOwnerValue, class_owner);
+            if (read != ERROR_SUCCESS && read != ERROR_FILE_NOT_FOUND)
+                return Win32Failure(FileAssociationError::registry, i18n::Literal(L"read association owner"), read);
+        } else if (class_status != ERROR_FILE_NOT_FOUND)
+            return Win32Failure(FileAssociationError::registry, i18n::Literal(L"read association owner"), class_status);
+        const bool remove_open_with = class_owner && EqualInsensitive(*class_owner, executable_.wstring());
         auto result = SetLegacyExtensionAssociation(extension, false, {}, {}, {});
         if (!result) return result;
         changed = changed || result.changed;
@@ -1270,9 +1839,11 @@ FileAssociationResult FileAssociationBackend::UnregisterApplication(
         result = legacy.SetLegacyExtensionAssociation(extension, false, {}, {}, {});
         if (!result) return result;
         changed = changed || result.changed;
-        result = SetOpenWith(options_, extension, ManagedProgId(options_, extension), false);
-        if (!result) return result;
-        changed = changed || result.changed;
+        if (remove_open_with) {
+            result = SetOpenWith(options_, extension, ManagedProgId(options_, extension), false);
+            if (!result) return result;
+            changed = changed || result.changed;
+        }
     }
     if (!has_capabilities) {
         if (changed && options_.notify_shell) NotifyShellAssociationsChanged();
@@ -1283,12 +1854,12 @@ FileAssociationResult FileAssociationBackend::UnregisterApplication(
         std::optional<std::wstring> value;
         status = ReadStringValue(key.get(), L"TTPlayerRebuild", value);
         if (status == ERROR_SUCCESS && value && *value == capabilities)
-            status = RegDeleteValueW(key.get(), L"TTPlayerRebuild");
+            status = DeleteRegistryValue(key.get(), L"TTPlayerRebuild");
     }
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
         return Win32Failure(FileAssociationError::registry, i18n::Literal(L"remove RegisteredApplications entry"), status);
     // Exact private key, checked against the stored executable owner above.
-    status = RegDeleteTreeW(HKEY_CURRENT_USER, capabilities.c_str());
+    status = DeleteRegistryTree(capabilities);
     if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
         return Win32Failure(FileAssociationError::registry, i18n::Literal(L"remove capabilities"), status);
     if (options_.notify_shell) NotifyShellAssociationsChanged();
@@ -1312,7 +1883,7 @@ ShellIntegrationQuery FileAssociationBackend::QueryShellIntegration(
     return query;
 }
 
-FileAssociationResult FileAssociationBackend::SetShellIntegration(
+FileAssociationResult FileAssociationBackend::SetShellIntegrationImpl(
     ShellIntegrationTarget target, bool enabled,
     const ShellVerbLabels& labels) {
     if (executable_.empty())
