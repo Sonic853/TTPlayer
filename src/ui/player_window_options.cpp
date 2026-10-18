@@ -1,3 +1,4 @@
+#include "ttplayer/audio/native_output_contract.h"
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/taskbar_icon.h"
 #include "ttplayer/ui/wtl_menu.h"
@@ -237,23 +238,29 @@ std::wstring DeviceKeyString(DWORD data1) {
 }
 
 int DeviceBackendFromKey(std::wstring_view text, UINT& wave_device_id) {
-    if (text.starts_with(L"wasapi:shared:")) return 4;
-    if (text.starts_with(L"wasapi:exclusive:")) return 5;
-    GUID key{};
-    const std::wstring terminated(text);
-    if (terminated.empty() ||
-        FAILED(CLSIDFromString(terminated.c_str(), &key))) {
-        return 1;
-    }
-    const bool zero_tail = key.Data2 == 0 && key.Data3 == 0 &&
-        std::all_of(std::begin(key.Data4), std::end(key.Data4),
-                    [](BYTE value) { return value == 0; });
-    if (!zero_tail) return 1;
-    const WORD backend = HIWORD(key.Data1);
-    if (backend == 2 || backend == 3) return backend;
-    const WORD ordinal = LOWORD(key.Data1);
-    wave_device_id = ordinal == 0 ? WAVE_MAPPER : ordinal - 1;
-    return 0;
+    const auto key = audio::ParseOutputDeviceKey(text);
+    if (!key) return 1;
+    if (key->backend == audio::OutputBackend::wave_out)
+        wave_device_id = key->ordinal == 0 ? WAVE_MAPPER : key->ordinal - 1;
+    return static_cast<int>(key->backend);
+}
+
+template<class Entry>
+detail::LegacyOutputDevice OutputDeviceIdentity(const Entry& entry) {
+    detail::LegacyOutputDevice device;
+    device.key = entry.key; device.module = entry.module;
+    device.class_id = entry.identifier; device.has_class_id = entry.has_identifier;
+    device.backend = entry.backend; device.wave_device_id = entry.wave_device_id;
+    return device;
+}
+
+template<class Entry>
+bool OutputDeviceRowMatchesKey(const Entry& entry, std::wstring_view key) {
+    if (detail::OutputDeviceMatchesKey(OutputDeviceIdentity(entry), key)) return true;
+    // An unplugged configured device is deliberately an inert row. Preserve
+    // its setting in this UI without making it resolvable for playback.
+    return entry.details_resolved && entry.module.empty() && !entry.has_identifier &&
+        _wcsicmp(entry.key.c_str(), std::wstring(key).c_str()) == 0;
 }
 
 std::optional<size_t> SelectedOutputDeviceEntry(HWND dialog,
@@ -5049,10 +5056,10 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             std::any_of(options_device_entries_.begin(),
                         options_device_entries_.end(),
                         [this](const DeviceOptionEntry& entry) {
-                return _wcsicmp(entry.key.c_str(),
-                                settings_.device.device_type.c_str()) == 0;
+                return OutputDeviceRowMatchesKey(entry, settings_.device.device_type);
             });
-        if ((!complete_catalog || settings_.device.device_type.starts_with(L"wasapi:")) &&
+        if ((!complete_catalog || settings_.device.device_type.starts_with(L"wasapi:") ||
+             settings_.device.device_type.starts_with(L"native:")) &&
             !configured_present) {
             // The isolated full scan failed after settings had selected a
             // KS/ASIO (or now-unplugged DirectSound) key.  Keep that choice
@@ -5125,8 +5132,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                 const LRESULT inserted = SendMessageW(
                     devices, CBEM_INSERTITEMW, 0,
                     reinterpret_cast<LPARAM>(&item));
-                if (_wcsicmp(entry.key.c_str(),
-                             settings_.device.device_type.c_str()) == 0) {
+                if (OutputDeviceRowMatchesKey(entry, settings_.device.device_type)) {
                     selected = inserted >= 0
                         ? static_cast<int>(inserted)
                         : static_cast<int>(index);
@@ -5704,7 +5710,7 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         if (const auto device = SelectedOutputDeviceEntry(
                 dialog, options_device_entries_.size())) {
             settings_.device.device_type =
-                options_device_entries_[*device].key;
+                StableOutputDeviceKey(OutputDeviceIdentity(options_device_entries_[*device]));
         }
         settings_.device.buffer_duration = GetInteger(dialog, 1071,
             settings_.device.buffer_duration, 100, 10000);
@@ -6045,7 +6051,7 @@ bool PlayerWindow::CommitOptionsControl(
             if (const auto selected = SelectedOutputDeviceEntry(
                     dialog, options_device_entries_.size())) {
                 settings_.device.device_type =
-                    options_device_entries_[*selected].key;
+                    StableOutputDeviceKey(OutputDeviceIdentity(options_device_entries_[*selected]));
             }
             break;
         }

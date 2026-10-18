@@ -10,6 +10,24 @@ namespace ttplayer::audio {
 
 std::optional<OutputDeviceKey> ParseOutputDeviceKey(std::wstring_view text) {
     OutputDeviceKey result;
+    if (text.starts_with(L"native:asio:")) {
+        const auto id = text.substr(12);
+        if (id.empty() || id.size() > 64 || id.find(L'\0') != std::wstring_view::npos ||
+            FAILED(CLSIDFromString(std::wstring(id).c_str(), &result.identifier)) ||
+            IsEqualGUID(result.identifier, GUID{})) return std::nullopt;
+        result.backend = OutputBackend::asio;
+        result.stable_native = true;
+        return result;
+    }
+    if (text.starts_with(L"native:ks:")) {
+        const auto path = text.substr(10);
+        if (path.empty() || path.size() > 32767 ||
+            path.find(L'\0') != std::wstring_view::npos) return std::nullopt;
+        result.backend = OutputBackend::kernel_streaming;
+        result.endpoint_id = path;
+        result.stable_native = true;
+        return result;
+    }
     if (text.starts_with(L"wasapi:")) {
         constexpr std::wstring_view shared = L"wasapi:shared:";
         constexpr std::wstring_view exclusive = L"wasapi:exclusive:";
@@ -50,6 +68,32 @@ std::optional<OutputDeviceKey> ParseOutputDeviceKey(std::wstring_view text) {
     default: result.backend = OutputBackend::unknown; break;
     }
     return result;
+}
+
+std::uint32_t LegacyOutputChannelMask(unsigned channels) noexcept {
+    switch (channels) {
+    case 1: return 0x4;
+    case 2: return 0x3;
+    case 4: return 0x33;
+    case 6: return 0x3f;
+    case 8: return 0xff;
+    default: return 0;
+    }
+}
+
+bool IsKsPcmDataRange(const GUID& major, const GUID& subformat,
+                      const GUID& specifier) noexcept {
+    constexpr GUID audio{0x73647561, 0, 0x10, {0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71}};
+    constexpr GUID pcm{1, 0, 0x10, {0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71}};
+    constexpr GUID wave{0x05589f81, 0xc356, 0x11ce, {0xbf, 1, 0, 0xaa, 0, 0x55, 0x59, 0x5a}};
+    const auto matches = [](const GUID& value, const GUID& wanted) {
+        return IsEqualGUID(value, wanted) || IsEqualGUID(value, GUID{});
+    };
+    return matches(major, audio) && matches(subformat, pcm) && matches(specifier, wave);
+}
+
+bool KsProbeDeadlineExpired(std::uint64_t deadline, std::uint64_t now) noexcept {
+    return deadline != 0 && now >= deadline;
 }
 
 std::optional<AsioChannelLayout> ResolveAsioChannelLayout(

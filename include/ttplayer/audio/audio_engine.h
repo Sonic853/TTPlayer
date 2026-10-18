@@ -130,6 +130,8 @@ struct PlaybackOptions {
     // and Data1.high as the backend discriminator (0 waveOut, 2 KS, 3 ASIO);
     // a non-zero tail denotes DirectSound. WASAPI uses a separate
     // wasapi:shared:/wasapi:exclusive: prefix plus an opaque endpoint ID.
+    // New native selections persist native:asio:<CLSID> / native:ks:<path>;
+    // legacy ordinal keys still load and migrate when the device page saves.
     // Empty keeps the reconstruction's
     // backwards-compatible WAVE_MAPPER default.
     std::wstring device_type;

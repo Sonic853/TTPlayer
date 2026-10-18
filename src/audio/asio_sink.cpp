@@ -10,6 +10,8 @@
 #include <limits>
 #include <mutex>
 #include <objbase.h>
+#include <sstream>
+#include <utility>
 #include <vector>
 
 namespace ttplayer::audio {
@@ -49,6 +51,13 @@ struct RawIAsio {
 
 constexpr long kAsioOk = 0;
 
+std::wstring ResultError(std::wstring_view stage, long code) {
+    std::wostringstream text;
+    text << stage << L" failed (" << std::dec << code << L", 0x"
+         << std::hex << static_cast<unsigned long>(code) << L")";
+    return text.str();
+}
+
 class ComAsioDriver final : public AsioDriver {
 public:
     explicit ComAsioDriver(RawIAsio* value, HMODULE library = nullptr)
@@ -57,52 +66,110 @@ public:
         if (value_) value_->Release();
         if (library_) FreeLibrary(library_);
     }
-    bool Init(HWND window) override { return value_->init(window) != 0; }
-    bool Start() override { return value_->start() == kAsioOk; }
-    bool Stop() override { return value_->stop() == kAsioOk; }
-    bool GetChannels(long& i, long& o) override { return value_->getChannels(&i, &o) == kAsioOk; }
-    bool GetBufferSize(long& a, long& b, long& c, long& d) override { return value_->getBufferSize(&a, &b, &c, &d) == kAsioOk; }
-    bool CanSampleRate(double rate) override { return value_->canSampleRate(rate) == kAsioOk; }
-    bool SetSampleRate(double rate) override { return value_->setSampleRate(rate) == kAsioOk; }
-    bool GetChannelInfo(AsioChannelInfo& info) override { return value_->getChannelInfo(&info) == kAsioOk; }
-    bool CreateBuffers(AsioBufferInfo* b, long n, long f, AsioCallbacks* c) override { return value_->createBuffers(b, n, f, c) == kAsioOk; }
-    bool DisposeBuffers() override { return value_->disposeBuffers() == kAsioOk; }
+    bool Init(HWND window) override {
+        if (value_->init(window) != 0) { error_.clear(); return true; }
+        error_ = L"IASIO::init returned false";
+        return false;
+    }
+    bool Start() override { return Check(L"IASIO::start", value_->start()); }
+    bool Stop() override { return Check(L"IASIO::stop", value_->stop()); }
+    bool GetChannels(long& i, long& o) override { return Check(L"IASIO::getChannels", value_->getChannels(&i, &o)); }
+    bool GetBufferSize(long& a, long& b, long& c, long& d) override { return Check(L"IASIO::getBufferSize", value_->getBufferSize(&a, &b, &c, &d)); }
+    bool CanSampleRate(double rate) override { return Check(L"IASIO::canSampleRate", value_->canSampleRate(rate)); }
+    bool SetSampleRate(double rate) override { return Check(L"IASIO::setSampleRate", value_->setSampleRate(rate)); }
+    bool GetChannelInfo(AsioChannelInfo& info) override { return Check(L"IASIO::getChannelInfo", value_->getChannelInfo(&info)); }
+    bool CreateBuffers(AsioBufferInfo* b, long n, long f, AsioCallbacks* c) override { return Check(L"IASIO::createBuffers", value_->createBuffers(b, n, f, c)); }
+    bool DisposeBuffers() override { return Check(L"IASIO::disposeBuffers", value_->disposeBuffers()); }
+    // outputReady runs on the realtime callback. Its optional unsupported
+    // result must not allocate or mutate the worker's diagnostic string.
     bool OutputReady() override { return value_->outputReady() == kAsioOk; }
+    std::wstring Diagnostic() const override { return error_; }
 private:
+    bool Check(std::wstring_view stage, long result) {
+        if (result == kAsioOk) { error_.clear(); return true; }
+        error_ = ResultError(stage, result);
+        return false;
+    }
     RawIAsio* value_{};
     HMODULE library_{};
+    std::wstring error_;
 };
+
+std::wstring DriverError(const AsioDriver& driver, std::wstring fallback) {
+    const auto detail = driver.Diagnostic();
+    return detail.empty() ? std::move(fallback) : detail;
+}
 
 std::unique_ptr<AsioDriver> ActivateAsio(const std::wstring& name,
     const std::wstring& module, const GUID& class_id, std::wstring& error) {
-    RawIAsio* raw{};
-    if (_wcsicmp(name.c_str(), L"ASIO Kernel-Streaming driver") == 0 && !module.empty()) {
-        HMODULE library = LoadLibraryW(module.c_str());
-        if (!library) { error = L"ASIO Kernel-Streaming driver module could not be loaded"; return {}; }
-        using GetClassObject = HRESULT (STDAPICALLTYPE*)(REFCLSID, REFIID, void**);
-        const auto get_class_object = reinterpret_cast<GetClassObject>(
-            GetProcAddress(library, "DllGetClassObject"));
-        IClassFactory* factory{};
-        const HRESULT result = get_class_object
-            ? get_class_object(class_id, IID_IClassFactory, reinterpret_cast<void**>(&factory))
-            : E_NOINTERFACE;
-        if (FAILED(result) || !factory ||
-            FAILED(factory->CreateInstance(nullptr, class_id, reinterpret_cast<void**>(&raw))) || !raw) {
-            if (factory) factory->Release();
-            FreeLibrary(library);
-            error = L"ASIO Kernel-Streaming driver DllGetClassObject activation failed";
+    struct LibraryOwner {
+        HMODULE value{};
+        ~LibraryOwner() { if (value) FreeLibrary(value); }
+    } library;
+    using GetClassObject = HRESULT (STDAPICALLTYPE*)(REFCLSID, REFIID, void**);
+    GetClassObject get_class_object{};
+    AsioActivationAttempts attempts;
+    attempts.class_factory = [&](bool& direct_retry, std::wstring& failure) -> std::unique_ptr<AsioDriver> {
+        direct_retry = false;
+        library.value = LoadLibraryW(module.c_str());
+        if (!library.value) {
+            failure = ResultError(L"ASIO LoadLibrary", static_cast<long>(GetLastError())) + L"; module=" + module;
             return {};
         }
+        get_class_object = reinterpret_cast<GetClassObject>(
+            GetProcAddress(library.value, "DllGetClassObject"));
+        if (!get_class_object) {
+            failure = ResultError(L"ASIO DllGetClassObject lookup", static_cast<long>(GetLastError()));
+            return {};
+        }
+        IClassFactory* factory{};
+        const HRESULT queried = get_class_object(class_id, IID_IClassFactory,
+                                                  reinterpret_cast<void**>(&factory));
+        if (FAILED(queried) || !factory) {
+            if (factory) factory->Release();
+            direct_retry = true;
+            failure = ResultError(L"ASIO DllGetClassObject(IClassFactory)", FAILED(queried) ? queried : E_NOINTERFACE);
+            return {};
+        }
+        RawIAsio* raw{};
+        const HRESULT created = factory->CreateInstance(nullptr, class_id, reinterpret_cast<void**>(&raw));
         factory->Release();
-        return std::make_unique<ComAsioDriver>(raw, library);
-    }
-    const HRESULT result = CoCreateInstance(class_id, nullptr, CLSCTX_INPROC_SERVER,
-                                             class_id, reinterpret_cast<void**>(&raw));
-    if (FAILED(result) || !raw) {
-        error = L"ASIO CoCreateInstance(CLSID, IID=CLSID) failed";
-        return {};
-    }
-    return std::make_unique<ComAsioDriver>(raw);
+        if (FAILED(created) || !raw) {
+            if (raw) raw->Release();
+            failure = ResultError(L"ASIO IClassFactory::CreateInstance", FAILED(created) ? created : E_NOINTERFACE);
+            return {};
+        }
+        auto driver = std::make_unique<ComAsioDriver>(raw, library.value);
+        library.value = nullptr;
+        return driver;
+    };
+    attempts.direct_export = [&](std::wstring& failure) -> std::unique_ptr<AsioDriver> {
+        RawIAsio* raw{};
+        const HRESULT created = get_class_object(class_id, class_id, reinterpret_cast<void**>(&raw));
+        if (FAILED(created) || !raw) {
+            if (raw) raw->Release();
+            failure = ResultError(L"ASIO DllGetClassObject(IID=CLSID)", FAILED(created) ? created : E_NOINTERFACE);
+            return {};
+        }
+        auto driver = std::make_unique<ComAsioDriver>(raw, library.value);
+        library.value = nullptr;
+        return driver;
+    };
+    attempts.registered_class = [&](std::wstring& failure) -> std::unique_ptr<AsioDriver> {
+        // FUN_004E207B drops the exceptional module before generic activation.
+        if (library.value) { FreeLibrary(library.value); library.value = nullptr; }
+        RawIAsio* raw{};
+        const HRESULT created = CoCreateInstance(class_id, nullptr, CLSCTX_INPROC_SERVER,
+                                                  class_id, reinterpret_cast<void**>(&raw));
+        if (FAILED(created) || !raw) {
+            if (raw) raw->Release();
+            failure = ResultError(L"ASIO CoCreateInstance(CLSID, IID=CLSID)", FAILED(created) ? created : E_NOINTERFACE);
+            return {};
+        }
+        return std::make_unique<ComAsioDriver>(raw);
+    };
+    return ActivateAsioWithFallback(attempts,
+        _wcsicmp(name.c_str(), L"ASIO Kernel-Streaming driver") == 0 && !module.empty(), error);
 }
 
 bool ValidSource(const WAVEFORMATEX& f) noexcept {
@@ -126,7 +193,7 @@ void WriteInteger(std::byte* p, const AsioChannelLayout& layout, double sample) 
     const auto max = (std::int64_t{1} << (layout.valid_bits - 1)) - 1;
     const auto min = -(std::int64_t{1} << (layout.valid_bits - 1));
     const auto value = std::clamp<std::int64_t>(
-        static_cast<std::int64_t>(std::llround(sample * static_cast<double>(max))), min, max);
+        static_cast<std::int64_t>(std::llround(sample * static_cast<double>(std::int64_t{1} << (layout.valid_bits - 1)))), min, max);
     std::uint64_t raw = static_cast<std::uint64_t>(value);
     const unsigned bytes = static_cast<unsigned>(layout.container_bits / 8);
     if (layout.big_endian) {
@@ -154,6 +221,38 @@ void WriteSample(std::byte* p, const AsioChannelLayout& layout, double sample) n
     }
 }
 } // namespace
+
+std::unique_ptr<AsioDriver> ActivateAsioWithFallback(
+    const AsioActivationAttempts& attempts, bool special_driver, std::wstring& error) {
+    error.clear();
+    std::wstring failure;
+    const auto retain_failure = [&] {
+        if (!error.empty()) error += L"; ";
+        error += failure.empty() ? L"ASIO activation returned no driver" : failure;
+        failure.clear();
+    };
+    if (special_driver && attempts.class_factory) {
+        bool direct_retry{};
+        if (auto driver = attempts.class_factory(direct_retry, failure)) {
+            error.clear(); return driver;
+        }
+        retain_failure();
+        if (direct_retry && attempts.direct_export) {
+            if (auto driver = attempts.direct_export(failure)) {
+                error.clear(); return driver;
+            }
+            retain_failure();
+        }
+    }
+    if (attempts.registered_class) {
+        if (auto driver = attempts.registered_class(failure)) {
+            error.clear(); return driver;
+        }
+        retain_failure();
+    }
+    if (error.empty()) error = L"ASIO activation has no available provider";
+    return {};
+}
 
 bool QueryAsioDriverCapabilities(AsioDriver& driver,
     AsioDriverCapabilities& capabilities, HWND window) noexcept {
@@ -236,6 +335,17 @@ struct AsioSink::State {
     std::uint32_t capacity{};
     std::uint32_t frames{};
     std::atomic<std::uint64_t> consumed{};
+    // PCM retained until the corresponding driver buffer is returned. A
+    // bufferSwitch(i) releases the OLD contents of i; the data written by
+    // that callback is still waiting for the device and must not count as played.
+    std::array<std::vector<std::byte>, 2> period_source;
+    std::array<size_t, 2> period_bytes{};
+    std::array<std::uint64_t, 2> period_sequence{};
+    std::uint64_t next_sequence{};
+    std::atomic<unsigned> notifications{};
+    std::atomic<double> changed_rate{};
+    bool output_ready{};
+    bool primed{};
     bool running{};
     bool closing{};
     unsigned callbacks{};
@@ -243,46 +353,76 @@ struct AsioSink::State {
     HANDLE activity_event{};
     ~State() { if (activity_event) CloseHandle(activity_event); }
 
+    void ClearDriverBuffers() noexcept {
+        for (size_t channel = 0; channel < buffers.size(); ++channel)
+            for (unsigned index = 0; index != 2; ++index)
+                if (auto* target = buffers[channel].buffers[index])
+                    std::memset(target, 0, size_t{frames} * layouts[channel].container_bits / 8);
+    }
+
+    // Called with mutex held. All per-period storage was allocated at open;
+    // this routine neither allocates nor invokes a driver.
+    void Fill(unsigned index) noexcept {
+        const size_t frame_bytes = source.nBlockAlign;
+        const size_t available = (queue.size() - read_offset) / frame_bytes;
+        const size_t count = std::min<size_t>(frames, available);
+        const size_t used = count * frame_bytes;
+        if (used) std::memcpy(period_source[index].data(), queue.data() + read_offset, used);
+        period_bytes[index] = used;
+        period_sequence[index] = next_sequence++;
+        const unsigned input_bytes = source.wBitsPerSample / 8;
+        for (size_t channel = 0; channel < buffers.size(); ++channel) {
+            auto* out = static_cast<std::byte*>(buffers[channel].buffers[index]);
+            const auto& layout = layouts[channel];
+            const size_t output_bytes = layout.container_bits / 8;
+            for (size_t frame = 0; frame < count; ++frame) {
+                double sample{};
+                if (channel < source.nChannels || source.nChannels == 1) {
+                    const size_t input_channel = source.nChannels == 1 ? 0 : channel;
+                    const auto* input = period_source[index].data() + frame * frame_bytes + input_channel * input_bytes;
+                    sample = ReadPcm(input, source.wBitsPerSample);
+                }
+                WriteSample(out + frame * output_bytes, layout, sample);
+            }
+            if (count < frames) std::memset(out + count * output_bytes, 0,
+                                            (frames - count) * output_bytes);
+        }
+        read_offset += used;
+        if (read_offset == queue.size()) { queue.clear(); read_offset = 0; }
+        else if (read_offset > capacity / 2) {
+            queue.erase(queue.begin(), queue.begin() + static_cast<std::ptrdiff_t>(read_offset));
+            read_offset = 0;
+        }
+    }
+
+    // Stop has returned and realtime callbacks no longer mutate the queue.
+    // Recover every unacknowledged period in submission order for pause/resume.
+    // Seek discards this data separately after the clock has stopped.
+    void RequeueDriverBuffers() {
+        std::vector<std::byte> pending;
+        pending.reserve(period_bytes[0] + period_bytes[1] + queue.size() - read_offset);
+        const unsigned first = period_sequence[0] < period_sequence[1] ? 0 : 1;
+        for (const unsigned index : {first, 1u - first})
+            pending.insert(pending.end(), period_source[index].begin(),
+                period_source[index].begin() + static_cast<std::ptrdiff_t>(period_bytes[index]));
+        pending.insert(pending.end(), queue.begin() + static_cast<std::ptrdiff_t>(read_offset), queue.end());
+        queue.swap(pending);
+        read_offset = 0;
+        period_bytes = {};
+        primed = false;
+        ClearDriverBuffers();
+    }
+
     void Consume(long index) noexcept {
-        bool output_ready{};
-        HANDLE event{};
         {
             std::scoped_lock lock(mutex);
-            if (closing || index < 0 || static_cast<size_t>(index) > 1) return;
-            const size_t frame_bytes = source.nBlockAlign;
-            const size_t available = (queue.size() - read_offset) / frame_bytes;
-            const size_t count = std::min<size_t>(frames, available);
-            const unsigned input_bytes = source.wBitsPerSample / 8;
-            for (size_t channel = 0; channel < buffers.size(); ++channel) {
-                auto* out = static_cast<std::byte*>(buffers[channel].buffers[index]);
-                if (!out) continue;
-                const auto& layout = layouts[channel];
-                const size_t output_bytes = layout.container_bits / 8;
-                for (size_t frame = 0; frame < count; ++frame) {
-                    double sample{};
-                    if (channel < source.nChannels || source.nChannels == 1) {
-                        const size_t input_channel = source.nChannels == 1 ? 0 : channel;
-                        const auto* input = queue.data() + read_offset + frame * frame_bytes + input_channel * input_bytes;
-                        sample = ReadPcm(input, source.wBitsPerSample);
-                    }
-                    WriteSample(out + frame * output_bytes, layout, sample);
-                }
-                if (count < frames) std::memset(out + count * output_bytes, 0,
-                                                (frames - count) * output_bytes);
-            }
-            const size_t used = count * frame_bytes;
-            read_offset += used;
-            consumed.fetch_add(used, std::memory_order_relaxed);
-            if (read_offset == queue.size()) { queue.clear(); read_offset = 0; }
-            else if (read_offset > capacity / 2) {
-                queue.erase(queue.begin(), queue.begin() + static_cast<std::ptrdiff_t>(read_offset));
-                read_offset = 0;
-            }
-            output_ready = driver != nullptr;
-            event = activity_event;
+            if (closing || !running || index < 0 || index > 1) return;
+            const auto slot = static_cast<unsigned>(index);
+            consumed.fetch_add(period_bytes[slot], std::memory_order_relaxed);
+            Fill(slot);
         }
         if (output_ready) static_cast<void>(driver->OutputReady());
-        if (event) SetEvent(event);
+        if (activity_event) SetEvent(activity_event);
     }
 };
 
@@ -297,30 +437,47 @@ AsioSink::~AsioSink() { Close(); }
 
 bool AsioSink::OpenDevice(const std::wstring& name, const std::wstring& module,
     const GUID& class_id, const WAVEFORMATEX& source, std::uint32_t requested, HWND window) {
-    Close(); error_.clear();
+    Close(); error_.clear(); diagnostic_.clear();
     auto driver = ActivateAsio(name, module, class_id, error_);
     return driver && OpenDriver(std::move(driver), source, requested, window);
 }
 
 bool AsioSink::OpenDriver(std::unique_ptr<AsioDriver> driver, const WAVEFORMATEX& source,
     std::uint32_t requested, HWND window) {
-    Close(); error_.clear();
+    Close(); error_.clear(); diagnostic_.clear();
     if (!driver || !ValidSource(source)) { error_ = L"ASIO requires 16/24/32-bit integer PCM"; return false; }
+    {
+        std::scoped_lock lock(g_callback_mutex);
+        if (g_active_sink) { error_ = L"Only one active ASIO callback owner is supported"; return false; }
+    }
     auto state = std::make_unique<State>();
     state->driver = std::move(driver); state->source = source;
     state->activity_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!state->activity_event) { error_ = L"Unable to create ASIO callback event"; return false; }
-    if (!state->driver->Init(window)) { error_ = L"IASIO::init failed"; return false; }
+    if (!state->driver->Init(window)) { error_ = DriverError(*state->driver, L"IASIO::init failed"); return false; }
     long inputs{}, outputs{}, minimum{}, maximum{}, preferred{}, granularity{};
-    if (!state->driver->GetChannels(inputs, outputs) || outputs < 2 || outputs > 64 ||
-        !state->driver->GetBufferSize(minimum, maximum, preferred, granularity)) {
-        error_ = L"IASIO channel or buffer-size query failed"; return false;
+    if (!state->driver->GetChannels(inputs, outputs)) {
+        error_ = DriverError(*state->driver, L"IASIO::getChannels failed"); return false;
+    }
+    if (outputs < 2 || outputs > 4096) {
+        error_ = L"IASIO::getChannels returned unusable output count " + std::to_wstring(outputs); return false;
+    }
+    if (!state->driver->GetBufferSize(minimum, maximum, preferred, granularity)) {
+        error_ = DriverError(*state->driver, L"IASIO::getBufferSize failed"); return false;
     }
     const auto plan = PlanAsioBuffers(requested, source.nBlockAlign, preferred);
-    if (!plan || preferred < minimum || preferred > maximum) { error_ = L"IASIO preferred buffer size is invalid"; return false; }
-    if (!state->driver->CanSampleRate(static_cast<double>(source.nSamplesPerSec)) ||
-        !state->driver->SetSampleRate(static_cast<double>(source.nSamplesPerSec))) {
-        error_ = L"IASIO sample rate is unsupported"; return false;
+    if (!plan || preferred < minimum || preferred > maximum ||
+        plan->queued_source_bytes > 64u * 1024 * 1024) {
+        error_ = L"IASIO preferred buffer size is invalid or exceeds the bounded PCM queue"; return false;
+    }
+    // The original open path calls setSampleRate; capability queries must not
+    // veto a rate that the driver can actually select.
+    if (!state->driver->CanSampleRate(static_cast<double>(source.nSamplesPerSec)))
+        diagnostic_ = DriverError(*state->driver, L"IASIO::canSampleRate did not confirm the requested rate") +
+            L"; attempting setSampleRate at " + std::to_wstring(source.nSamplesPerSec) + L" Hz";
+    if (!state->driver->SetSampleRate(static_cast<double>(source.nSamplesPerSec))) {
+        error_ = DriverError(*state->driver, L"IASIO::setSampleRate failed") + L"; requested=" +
+            std::to_wstring(source.nSamplesPerSec) + L" Hz"; return false;
     }
     // 004E1610 creates max(2, min(source channels, driver outputs)) buffers,
     // not every physical output offered by the driver.  A mono source is
@@ -334,11 +491,19 @@ bool AsioSink::OpenDriver(std::unique_ptr<AsioDriver> driver, const WAVEFORMATEX
         auto& info = state->buffers[static_cast<size_t>(channel)];
         info.is_input = 0; info.channel_num = channel;
         AsioChannelInfo channel_info{}; channel_info.channel = channel; channel_info.is_input = 0;
-        if (!state->driver->GetChannelInfo(channel_info)) { error_ = L"IASIO output-channel query failed"; return false; }
+        if (!state->driver->GetChannelInfo(channel_info)) {
+            error_ = DriverError(*state->driver, L"IASIO::getChannelInfo failed") +
+                L"; output=" + std::to_wstring(channel); return false;
+        }
         const auto layout = ResolveAsioChannelLayout(source.wBitsPerSample, channel_info.type);
-        if (!layout) { error_ = L"IASIO output sample type is unsupported"; return false; }
+        if (!layout) {
+            error_ = L"IASIO output sample type " + std::to_wstring(channel_info.type) +
+                L" is unsupported; output=" + std::to_wstring(channel); return false;
+        }
         state->layouts[static_cast<size_t>(channel)] = *layout;
     }
+    const size_t period_bytes = size_t{state->frames} * source.nBlockAlign;
+    for (auto& pcm : state->period_source) pcm.resize(period_bytes);
     state->callback_table = {&BufferSwitch, &SampleRateDidChange, &AsioMessage,
                              &BufferSwitchTimeInfo};
     if (!state->driver->CreateBuffers(state->buffers.data(), stream_channels, preferred,
@@ -346,17 +511,33 @@ bool AsioSink::OpenDriver(std::unique_ptr<AsioDriver> driver, const WAVEFORMATEX
         // A driver is permitted to allocate a subset before reporting an
         // error. Match 004E1383's disposal-before-release ordering even on
         // this failed open path.
+        error_ = DriverError(*state->driver, L"IASIO::createBuffers failed");
         static_cast<void>(state->driver->DisposeBuffers());
-        error_ = L"IASIO::createBuffers failed"; return false;
+        return false;
     }
-    {
-        std::scoped_lock lock(g_callback_mutex);
-        if (g_active_sink) {
+    for (const auto& buffer : state->buffers) {
+        if (!buffer.buffers[0] || !buffer.buffers[1]) {
+            error_ = L"IASIO::createBuffers returned a null output buffer";
             static_cast<void>(state->driver->DisposeBuffers());
-            error_ = L"Only one active ASIO callback owner is supported";
             return false;
         }
-        g_active_sink = state.get();
+    }
+    state->ClearDriverBuffers();
+    state->output_ready = state->driver->OutputReady();
+    bool claimed{};
+    {
+        std::scoped_lock lock(g_callback_mutex);
+        if (!g_active_sink) {
+            g_active_sink = state.get();
+            claimed = true;
+        }
+    }
+    if (!claimed) {
+        // Dispose can reenter a callback. Never call it under the global
+        // callback lock even when another opener won the ownership race.
+        static_cast<void>(state->driver->DisposeBuffers());
+        error_ = L"Only one active ASIO callback owner is supported";
+        return false;
     }
     state_ = std::move(state);
     return true;
@@ -366,8 +547,9 @@ bool AsioSink::Submit(std::span<const std::byte> source, float left_gain, float 
     if (!state_ || source.empty() || source.size() % state_->source.nBlockAlign ||
         !std::isfinite(left_gain) || !std::isfinite(right_gain)) { error_ = L"Invalid ASIO source packet"; return false; }
     std::scoped_lock lock(state_->mutex);
-    const size_t pending = state_->queue.size() - state_->read_offset;
-    if (source.size() > state_->capacity - pending) { error_ = L"ASIO source queue is full"; return false; }
+    const size_t pending = state_->queue.size() - state_->read_offset +
+        state_->period_bytes[0] + state_->period_bytes[1];
+    if (pending > state_->capacity || source.size() > state_->capacity - pending) { error_ = L"ASIO source queue is full"; return false; }
     // Gain is applied in source PCM before the callback so each driver buffer
     // sees stable frame data.  The callback remains bounded and allocation-free.
     std::vector<std::byte> copy(source.begin(), source.end());
@@ -389,47 +571,68 @@ bool AsioSink::Submit(std::span<const std::byte> source, float left_gain, float 
 
 bool AsioSink::SetPaused(bool paused) {
     if (!state_) { error_ = L"ASIO stream is not open"; return false; }
-    bool previous{};
+    if (!CheckStatus()) return false;
     const bool requested_running = !paused;
     {
         std::scoped_lock lock(state_->mutex);
         if (state_->closing) { error_ = L"ASIO stream is closing"; return false; }
-        previous = state_->running;
-        if (previous == requested_running) return true;
-        // Publish the desired clock state before entering a driver.  IASIO
-        // stop/start can synchronously wait for bufferSwitch; that callback
-        // takes this mutex to move PCM, so never hold it across the call.
+        if (state_->running == requested_running) return true;
+        if (requested_running && !state_->primed) {
+            // FUN_004E19E5 fills buffer B before start. The initial callback
+            // fills A while B is playing; no bytes have completed yet.
+            state_->ClearDriverBuffers();
+            state_->Fill(1);
+            state_->primed = true;
+        }
         state_->running = requested_running;
     }
+    // Drivers may synchronously invoke callbacks from Start/Stop. Do not hold
+    // the PCM mutex while entering either operation.
     const bool succeeded = paused ? state_->driver->Stop() : state_->driver->Start();
     if (!succeeded) {
-        std::scoped_lock lock(state_->mutex);
-        if (!state_->closing && state_->running == requested_running)
-            state_->running = previous;
-        error_ = paused ? L"IASIO::stop failed" : L"IASIO::start failed";
+        error_ = DriverError(*state_->driver, paused ? L"IASIO::stop failed" : L"IASIO::start failed");
+        {
+            std::scoped_lock lock(state_->mutex);
+            if (!state_->closing) state_->running = !requested_running;
+        }
+        if (requested_running) {
+            // A driver may partially start before returning an error. Quiesce
+            // it before restoring unplayed PCM, preserving the start error.
+            static_cast<void>(state_->driver->Stop());
+            std::scoped_lock lock(state_->mutex);
+            state_->RequeueDriverBuffers();
+        }
         return false;
+    }
+    if (paused) {
+        std::scoped_lock lock(state_->mutex);
+        state_->RequeueDriverBuffers();
     }
     return true;
 }
 
 bool AsioSink::Reset() {
     if (!state_) { error_ = L"ASIO stream is not open"; return false; }
-    bool was_running{};
-    {
-        std::scoped_lock lock(state_->mutex);
-        if (state_->closing) { error_ = L"ASIO stream is closing"; return false; }
-        was_running = state_->running;
-        state_->running = false;
-        state_->queue.clear(); state_->read_offset = 0;
-        state_->consumed.store(0, std::memory_order_relaxed);
-    }
-    if (was_running && !state_->driver->Stop()) {
-        std::scoped_lock lock(state_->mutex);
-        if (!state_->closing) state_->running = true;
-        error_ = L"IASIO::stop for reset failed";
-        return false;
-    }
+    if (!SetPaused(true)) return false;
+    std::scoped_lock lock(state_->mutex);
+    state_->queue.clear(); state_->read_offset = 0;
+    state_->period_bytes = {};
+    state_->primed = false;
+    state_->consumed.store(0, std::memory_order_relaxed);
+    state_->ClearDriverBuffers();
     return true;
+}
+
+bool AsioSink::CheckStatus() {
+    if (!state_) { error_ = L"ASIO stream is not open"; return false; }
+    const unsigned notifications = state_->notifications.load(std::memory_order_acquire);
+    if (!notifications) return true;
+    if (notifications & 1u)
+        error_ = L"ASIO driver requested reinitialization; restart playback to reopen the selected device";
+    else
+        error_ = L"ASIO driver sample clock changed to " + std::to_wstring(state_->changed_rate.load()) +
+            L" Hz; restart playback to reopen the selected device";
+    return false;
 }
 
 void AsioSink::Close() noexcept {
@@ -469,8 +672,30 @@ void AsioSink::BufferSwitch(long index, AsioBool) noexcept {
     state->Consume(index);
     { std::scoped_lock lock(g_callback_mutex); if (--state->callbacks == 0) g_callback_idle.notify_all(); }
 }
-void AsioSink::SampleRateDidChange(double) noexcept {}
-long AsioSink::AsioMessage(long, long, void*, double*) noexcept { return 0; }
+void AsioSink::SampleRateDidChange(double rate) noexcept {
+    std::scoped_lock lock(g_callback_mutex);
+    auto* state = static_cast<State*>(g_active_sink);
+    if (!state || rate == static_cast<double>(state->source.nSamplesPerSec)) return;
+    state->changed_rate.store(rate, std::memory_order_relaxed);
+    state->notifications.fetch_or(2u, std::memory_order_release);
+    if (state->activity_event) SetEvent(state->activity_event);
+}
+long AsioSink::AsioMessage(long selector, long value, void*, double*) noexcept {
+    // Engine version and time-info are actually implemented. Do not advertise
+    // timecode/resync/latency features which the host does not consume.
+    if (selector == 1) return value == 2 || value == 3 || value == 7 ? 1 : 0;
+    if (selector == 2) return 2;
+    if (selector == 7) return 1;
+    if (selector != 3) return 0;
+    std::scoped_lock lock(g_callback_mutex);
+    auto* state = static_cast<State*>(g_active_sink);
+    if (!state) return 0;
+    // The worker tears down the clock and presents the actionable error; the
+    // realtime driver thread never reenters COM/disposeBuffers.
+    state->notifications.fetch_or(1u, std::memory_order_release);
+    if (state->activity_event) SetEvent(state->activity_event);
+    return 1;
+}
 AsioTime* AsioSink::BufferSwitchTimeInfo(AsioTime*, long index, AsioBool direct) noexcept { BufferSwitch(index, direct); return nullptr; }
 
 } // namespace ttplayer::audio

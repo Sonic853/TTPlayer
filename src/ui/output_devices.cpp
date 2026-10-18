@@ -548,7 +548,7 @@ bool QueryKsAudioCapabilities(std::wstring_view path,
     ULONG maximum_rate{};
     bool found_render_audio{};
     for (ULONG pin = 0; pin < pin_count; ++pin) {
-        if (GetTickCount64() >= deadline) return false;
+        if (audio::KsProbeDeadlineExpired(deadline, GetTickCount64())) return false;
         KSPIN_DATAFLOW flow{};
         KSPIN_COMMUNICATION communication{};
         if (!QueryKsPinValue(filter.value, pin, KSPROPERTY_PIN_DATAFLOW, flow,
@@ -581,11 +581,16 @@ bool QueryKsAudioCapabilities(std::wstring_view path,
                 range->FormatSize > ranges.size() - offset) {
                 break;
             }
-            if (IsEqualGUID(range->MajorFormat, kKsDataFormatTypeAudio) &&
-                IsEqualGUID(range->SubFormat, kKsDataFormatSubtypePcm) &&
-                IsEqualGUID(range->Specifier,
-                            kKsDataFormatSpecifierWaveFormatEx) &&
-                range->FormatSize >= sizeof(KSDATARANGE_AUDIO)) {
+            if (audio::IsKsPcmDataRange(range->MajorFormat, range->SubFormat,
+                                        range->Specifier)) {
+                // FUN_004F01E4 accepts GUID_NULL wildcards. A generic range
+                // may omit the audio-specific limits; actual KsCreatePin is
+                // still the authority for each concrete PCM format.
+                found_render_audio = true;
+                if (range->FormatSize < sizeof(KSDATARANGE_AUDIO)) {
+                    offset += range->FormatSize;
+                    continue;
+                }
                 const auto* audio = reinterpret_cast<const KSDATARANGE_AUDIO*>(
                     range);
                 found_render_audio = true;
@@ -619,12 +624,41 @@ bool QueryKsAudioCapabilities(std::wstring_view path,
                 std::to_wstring(maximum_rate) + L" Hz";
     }
     const auto hardware_volume = QueryKsHardwareVolume(filter.value, deadline);
-    if (!hardware_volume) return false;
-    details[3] = *hardware_volume ? L"1" : L"0";
+    // Topology/volume is optional. Its absence must not discard a filter
+    // whose standard render pin accepts PCM; the sink has software gain.
+    details[3] = hardware_volume ? (*hardware_volume ? L"1" : L"0")
+                                 : i18n::Literal(L"Unknown");
     return true;
 }
 
 } // namespace
+
+std::wstring StableOutputDeviceKey(const LegacyOutputDevice& device) {
+    if (device.backend == 3 && device.has_class_id &&
+        !IsEqualGUID(device.class_id, GUID{}))
+        return L"native:asio:" + GuidString(device.class_id);
+    if (device.backend == 2 && !device.module.empty() &&
+        device.module.find(L'\0') == std::wstring::npos)
+        return L"native:ks:" + device.module;
+    return device.key;
+}
+
+bool OutputDeviceMatchesKey(const LegacyOutputDevice& device, std::wstring_view text) {
+    const auto key = audio::ParseOutputDeviceKey(text);
+    if (!key || device.backend != static_cast<int>(key->backend)) return false;
+    if (key->stable_native) {
+        if (key->backend == audio::OutputBackend::asio)
+            return device.has_class_id && IsEqualGUID(device.class_id, key->identifier);
+        return !device.module.empty() &&
+            _wcsicmp(device.module.c_str(), key->endpoint_id.c_str()) == 0;
+    }
+    const auto entry = audio::ParseOutputDeviceKey(device.key);
+    if (!entry || entry->stable_native || entry->backend != key->backend) return false;
+    if (key->backend == audio::OutputBackend::wasapi_shared ||
+        key->backend == audio::OutputBackend::wasapi_exclusive)
+        return _wcsicmp(entry->endpoint_id.c_str(), key->endpoint_id.c_str()) == 0;
+    return IsEqualGUID(entry->identifier, key->identifier) != FALSE;
+}
 
 NativeOutputResolution ResolveLegacyNativeOutputDevice(
     std::wstring_view text, std::span<const LegacyOutputDevice> catalog) {
@@ -637,9 +671,13 @@ NativeOutputResolution ResolveLegacyNativeOutputDevice(
 
     const LegacyOutputDevice* found{};
     for (const auto& entry : catalog) {
-        const auto entry_key = audio::ParseOutputDeviceKey(entry.key);
-        if (!entry_key || !IsEqualGUID(entry_key->identifier, key->identifier))
-            continue;
+        if (key->stable_native) {
+            if (!OutputDeviceMatchesKey(entry, text)) continue;
+        } else {
+            const auto entry_key = audio::ParseOutputDeviceKey(entry.key);
+            if (!entry_key || entry_key->stable_native ||
+                !IsEqualGUID(entry_key->identifier, key->identifier)) continue;
+        }
         if (found) return {{}, NativeOutputResolutionError::ambiguous_device};
         found = &entry;
     }

@@ -1,4 +1,5 @@
 #include "ttplayer/audio/kernel_streaming_sink.h"
+#include "ttplayer/audio/native_output_contract.h"
 
 #include <ksmedia.h>
 #include <algorithm>
@@ -198,7 +199,12 @@ std::unique_ptr<KsStreamTransport> CreateNativeTransport(const std::wstring& pat
             PinIdentifier(filter, pin, KSPROPERTY_PIN_MEDIUMS, kDevio,
                           KSMEDIUM_TYPE_ANYINSTANCE)) pins.push_back(pin);
     }
+    if (pins.empty()) {
+        error = L"KS pin discovery: selected filter has no standard PCM render pin: " + path;
+        return {};
+    }
     DWORD last_error = ERROR_NOT_SUPPORTED;
+    ULONG last_pin{};
     // FUN_004E029E / 004F066E: original-width format variants first, then
     // 16-bit variants. Every attempt stays on this selected native filter.
     for (int fallback = 0; fallback != (source.wBitsPerSample > 16 ? 2 : 1); ++fallback) {
@@ -230,11 +236,11 @@ std::unique_ptr<KsStreamTransport> CreateNativeTransport(const std::wstring& pat
                     wave->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
                     wave->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
                     wave->Samples.wValidBitsPerSample = format.wBitsPerSample;
-                    wave->dwChannelMask = format.nChannels == 1 ? SPEAKER_FRONT_CENTER :
-                        format.nChannels == 2 ? SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT : 0;
+                    wave->dwChannelMask = LegacyOutputChannelMask(format.nChannels);
                     wave->SubFormat = kPcmType;
                 }
                 HANDLE opened{INVALID_HANDLE_VALUE};
+                last_pin = pin;
                 last_error = create_pin(filter, connect, GENERIC_WRITE, &opened);
                 if (last_error == ERROR_SUCCESS && opened != INVALID_HANDLE_VALUE) {
                     selected = format;
@@ -243,7 +249,10 @@ std::unique_ptr<KsStreamTransport> CreateNativeTransport(const std::wstring& pat
             }
         }
     }
-    error = KsError(L"KsCreatePin (selected filter has no usable PCM render pin)", last_error);
+    error = KsError(L"KsCreatePin", last_error) + L"; pin=" + std::to_wstring(last_pin) +
+        L", requested=" + std::to_wstring(source.nSamplesPerSec) + L" Hz/" +
+        std::to_wstring(source.wBitsPerSample) + L" bit/" +
+        std::to_wstring(source.nChannels) + L" channels; filter=" + path;
     return {};
 }
 } // namespace

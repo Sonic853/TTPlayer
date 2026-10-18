@@ -2128,7 +2128,7 @@ WaveOutSelection ResolveWaveOutSelection(const PlaybackOptions& options) {
     if (!key) {
         result.requested_backend = LegacyOutputBackend::unknown;
         result.error =
-            L"The configured DeviceType is not a valid 16-byte device key";
+            L"The configured DeviceType is not a valid output device key";
         return result;
     }
 
@@ -3111,9 +3111,9 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             if (!stop_requested_) SetError(asio_sink->Error());
             return;
         }
-        // IASIO owns a fixed period; the worker keeps exactly four source
-        // packets in the recovered bounded queue rather than passing these
-        // buffers to waveOut.
+        if (!asio_sink->Diagnostic().empty()) RecordDiagnostic(asio_sink->Diagnostic());
+        // Recycle queued source packets only after a driver period completes.
+        // EOF waits for the final submitted period, including a short tail.
         buffer_bytes = static_cast<size_t>(asio_sink->PeriodFrames()) *
                        wave_format.nBlockAlign;
     }

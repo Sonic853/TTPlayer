@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -60,7 +61,20 @@ public:
                                AsioCallbacks* callbacks) = 0;
     virtual bool DisposeBuffers() = 0;
     virtual bool OutputReady() = 0;
+    // Exact driver result and stage, retained by the native adapter.
+    virtual std::wstring Diagnostic() const { return {}; }
 };
+
+// Testable activation order. The native adapter supplies the actual COM/DLL
+// operations; deterministic tests can exercise every recovered fallback without
+// registering or loading a hardware driver.
+struct AsioActivationAttempts {
+    std::function<std::unique_ptr<AsioDriver>(bool& direct_retry, std::wstring&)> class_factory;
+    std::function<std::unique_ptr<AsioDriver>(std::wstring&)> direct_export;
+    std::function<std::unique_ptr<AsioDriver>(std::wstring&)> registered_class;
+};
+[[nodiscard]] std::unique_ptr<AsioDriver> ActivateAsioWithFallback(
+    const AsioActivationAttempts& attempts, bool special_driver, std::wstring& error);
 
 // FUN_004E207B fills the four cached fields displayed by the output-device
 // options page.  The sample-rate table is DAT_00541714 verbatim; ASIOError
@@ -113,15 +127,20 @@ public:
                 float right_gain = 1.0F);
     bool SetPaused(bool paused);
     bool Reset();
+    // Consume driver control notifications on the playback worker, never
+    // initialize/dispose a driver from its realtime callback.
+    bool CheckStatus();
     void Close() noexcept;
     [[nodiscard]] std::uint32_t PeriodFrames() const noexcept;
     [[nodiscard]] std::uint32_t CapacitySourceBytes() const noexcept;
+    // Completed driver periods, not bytes merely copied into its buffers.
     [[nodiscard]] std::uint64_t ConsumedSourceBytes() const noexcept;
     // Auto-reset event signalled after each driver callback so the owning
     // decoder worker can refill promptly without polling at device-period
     // granularity.
     [[nodiscard]] HANDLE ActivityEvent() const noexcept;
     [[nodiscard]] const std::wstring& Error() const noexcept { return error_; }
+    [[nodiscard]] const std::wstring& Diagnostic() const noexcept { return diagnostic_; }
 
 private:
     struct State;
@@ -131,6 +150,7 @@ private:
     static AsioTime* BufferSwitchTimeInfo(AsioTime*, long, AsioBool) noexcept;
     std::unique_ptr<State> state_;
     std::wstring error_;
+    std::wstring diagnostic_;
 };
 
 } // namespace ttplayer::audio

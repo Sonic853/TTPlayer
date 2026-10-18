@@ -31,6 +31,12 @@ struct LegacyOutputDevice {
     std::array<std::wstring, 4> details;
 };
 
+// Native settings persist the selected physical path/CLSID, while catalogue
+// keys keep their legacy ordinals for old settings and worker snapshots.
+[[nodiscard]] std::wstring StableOutputDeviceKey(const LegacyOutputDevice& device);
+[[nodiscard]] bool OutputDeviceMatchesKey(const LegacyOutputDevice& device,
+                                          std::wstring_view key);
+
 enum class NativeOutputResolutionError {
     none, invalid_key, wrong_backend, missing_device, ambiguous_device,
     invalid_descriptor
