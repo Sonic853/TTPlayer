@@ -2,6 +2,7 @@
 #include "file_info_probe_client.h"
 
 #include "ttplayer/core/text.h"
+#include "ttplayer/audio/archive_member.h"
 
 #include <algorithm>
 #include <chrono>
@@ -22,7 +23,7 @@
 namespace ttplayer::ui {
 namespace {
 
-enum class PlaylistInfoState { success, failed, unavailable };
+enum class PlaylistInfoState { success, provisional, failed, unavailable };
 
 struct PlaylistInfoResult {
     std::uint64_t info_revision{};
@@ -147,7 +148,7 @@ PlaylistInfoResult ReadPlaylistInfoIsolated(
     }
     if (FAILED(probe->status)) return result;
 
-    result.state = PlaylistInfoState::success;
+    result.state = probe->status == S_FALSE ? PlaylistInfoState::provisional : PlaylistInfoState::success;
     result.duration_ms = static_cast<int>(std::clamp<std::int64_t>(
         probe->duration_ms, 0, INT_MAX));
 
@@ -230,6 +231,11 @@ void PlayerWindow::RequestPlaylistTrackInfo(size_t playlist_index, size_t row,
     const auto key = RequestKey(slot, track.path, track.subtrack);
     const auto checked = playlist_info_checked_.find(key);
     if (checked != playlist_info_checked_.end() && GetTickCount64() - checked->second < 5000) return;
+    if (playlist_info_verifying_ && RequestKey(playlist_info_verifying_->playlist_slot,
+            playlist_info_verifying_->path, playlist_info_verifying_->subtrack) == key) {
+        playlist_info_verifying_->visible_only &= visible_only;
+        return;
+    }
     if (playlist_info_active_ && RequestKey(playlist_info_active_->playlist_slot,
             playlist_info_active_->path, playlist_info_active_->subtrack) == key) {
         playlist_info_active_->visible_only &= visible_only;
@@ -282,7 +288,51 @@ void PlayerWindow::PollPlaylistInfo() {
 }
 
 void PlayerWindow::StartNextPlaylistInfoRead() {
+    audio::ArchiveMemberPath archive;
+    const auto state = audio_->State();
+    const bool playback_priority = opened_track_ &&
+        audio::ParseArchiveMemberPath(opened_track_->path.native(), archive) &&
+        (state == audio::PlaybackState::opening ||
+         ((state == audio::PlaybackState::playing || state == audio::PlaybackState::paused) &&
+          audio_->DownloadedPercent() < 100));
+    if (playback_priority) {
+        // The isolated helper cannot share the player's in-process Task.
+        // Retire its own session while the foreground prefix is inflating.
+        // Preserve the queued work and never wait on an untrusted decoder UI-side.
+        if (playlist_info_active_ && !playlist_info_verifying_)
+            playlist_info_verifying_ = playlist_info_active_;
+        if (playlist_info_receiver_) {
+            playlist_info_receiver_->stop.request_stop();
+            {
+                std::scoped_lock lock(playlist_info_receiver_->mutex);
+                playlist_info_receiver_->stopped = true;
+                playlist_info_receiver_->target = nullptr;
+            }
+            playlist_info_receiver_->wake.notify_one();
+            playlist_info_receiver_.reset();
+            MSG message{};
+            while (PeekMessageW(&message, window_, detail::kMsgPlaylistInfoReady,
+                                detail::kMsgPlaylistInfoReady, PM_REMOVE))
+                delete reinterpret_cast<PlaylistInfoResult*>(message.lParam);
+        }
+        playlist_info_active_.reset();
+        playlist_info_working_ = false;
+        return;
+    }
     if (playlist_info_working_) return;
+    if (playlist_info_verifying_) {
+        if (GetTickCount64() < playlist_info_verify_tick_) return;
+        auto request = std::move(*playlist_info_verifying_);
+        playlist_info_verifying_.reset();
+        const auto key = RequestKey(request.playlist_slot, request.path, request.subtrack);
+        const auto found = playlist_info_queued_keys_.find(key);
+        if (found != playlist_info_queued_keys_.end()) {
+            playlist_info_pending_.erase(found->second);
+            playlist_info_queued_keys_.erase(found);
+        }
+        playlist_info_pending_.push_front(std::move(request));
+        playlist_info_queued_keys_[key] = playlist_info_pending_.begin();
+    }
     if (settings_.playlist.read_info_mode == 2 || !sound_library_) {
         playlist_info_pending_.clear(); playlist_info_queued_keys_.clear(); return;
     }
@@ -367,6 +417,12 @@ LRESULT PlayerWindow::ApplyPlaylistInfoResult(LPARAM value) {
     std::unique_ptr<PlaylistInfoResult> result(reinterpret_cast<PlaylistInfoResult*>(value));
     const auto active = std::move(playlist_info_active_);
     playlist_info_active_.reset(); playlist_info_working_ = false;
+    if (result && active && result->state == PlaylistInfoState::provisional) {
+        // Keep -2 (not verified), show the available tags/format, and retry the
+        // same cached member rather than evicting it with the next item.
+        playlist_info_verifying_ = *active;
+        playlist_info_verify_tick_ = GetTickCount64() + 250;
+    }
     if (result && settings_.playlist.read_info_mode != 2) {
         const auto index = playlists_.IndexOfSlot(result->playlist_slot);
         if (index) {
@@ -392,7 +448,8 @@ LRESULT PlayerWindow::ApplyPlaylistInfoResult(LPARAM value) {
                     bool changed{};
                     if (result->state == PlaylistInfoState::failed) changed = list.SetDuration(row, -1);
                     else {
-                        changed |= list.SetDuration(row, result->duration_ms);
+                        if (result->state != PlaylistInfoState::provisional)
+                            changed |= list.SetDuration(row, result->duration_ms);
                         changed |= list.SetMetadata(row, result->title, result->artist, result->album);
                         changed |= list.SetExtendedMetadata(row, result->metadata, result->media_type,
                             result->bitrate_bps, result->sample_rate_hz);
@@ -421,6 +478,7 @@ void PlayerWindow::ShutdownPlaylistInfoLoading() {
     extension_corrections_.clear();
     playlist_info_pending_.clear(); playlist_info_queued_keys_.clear();
     playlist_info_checked_.clear(); playlist_info_index_.reset();
+    playlist_info_verifying_.reset(); playlist_info_verify_tick_ = 0;
     if (playlist_info_receiver_) {
         playlist_info_receiver_->stop.request_stop();
         {

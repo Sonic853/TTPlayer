@@ -72,9 +72,12 @@ HRESULT CreateStandardContent(IStream* stream, DWORD write_type,
 
 // Uses an independent cursor on a clonable stream (including archive members).
 // Shares the disk MPEG/WAVE parsers and always returns read-only metadata.
+// wave_header_only reads only the first WAVE fmt/data description. Its caller
+// must publish a provisional result and arrange final archive CRC validation.
 [[nodiscard]] HRESULT ReadBuiltinStreamInfo(
     IStream* stream, const std::filesystem::path& logical_path,
-    const Mp3TagPolicy& policy, BuiltinFileInfo& result) noexcept;
+    const Mp3TagPolicy& policy, BuiltinFileInfo& result,
+    bool wave_header_only = false) noexcept;
 
 [[nodiscard]] BuiltinTagWriteResult WriteBuiltinFileInfo(
     const std::filesystem::path& path, const Mp3TagPolicy& policy,

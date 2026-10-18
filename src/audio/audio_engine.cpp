@@ -1,4 +1,4 @@
-﻿#include <ttpcomm/client.h>
+#include <ttpcomm/client.h>
 #include <ttpcomm/runtime_pcm.h>
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/audio_engine.h"
@@ -886,6 +886,9 @@ private:
                 data_bytes_ = size;
                 have_data = true;
             }
+            // 5.7.9 004E83AD accepts the data extent here. Reading a later
+            // LIST chunk would wait for an entire compressed WAV to inflate.
+            if (have_format && have_data) break;
             cursor = payload + size + (size & 1U);
         }
         return have_format && have_data ? FinishOpen(L"WAVE") : fail();
@@ -1086,8 +1089,11 @@ class RecoveredFileSource final : public DecodedAudioSource {
 public:
     RecoveredFileSource(const plugins::PluginManager* manager, HMODULE comm)
         : manager_(manager), comm_(comm) {}
+    ~RecoveredFileSource() override { StopMetadataWorker(); }
     bool Open(const std::filesystem::path& path, const PlaybackOptions& options) override {
+        StopMetadataWorker();
         source_.reset(); metadata_ = {}; error_.clear(); result_ = E_FAIL;
+        metadata_revision_ = 0;
         metadata_override_ = false;
         ArchiveMemberPath member;
         const bool archive = ParseArchiveMemberPath(path.native(), member);
@@ -1114,7 +1120,9 @@ public:
             }
             source_ = std::move(candidate);
             metadata_ = source_->Metadata();
-            if (builtin_tags) {
+            const bool deferred_wave = archive && builtin_tags &&
+                (hint == L".wav" || hint == L".wave");
+            if (builtin_tags && !deferred_wave) {
                 BuiltinFileInfo info;
                 const auto status = archive
                     ? ReadBuiltinStreamInfo(archive_stream_.Get(), path, {}, info)
@@ -1137,12 +1145,14 @@ public:
                     metadata_.thumbnail_interface = true;
                 }
             }
-            if (archive && metadata_.thumbnail.empty()) {
-                metadata_.thumbnail = ReadArchiveSidecarCover(path,comm_,options.network_canceled);
-                if (!metadata_.thumbnail.empty()) {
-                    metadata_.thumbnail_interface = true;
-                    metadata_override_ = true;
-                }
+            if (archive) {
+                // Capture the decoder's metadata on its owning thread. RAR
+                // auxiliary enumeration shares the decoder lock, so it must
+                // never be a prerequisite for publishing the first PCM.
+                metadata_override_ = true;
+                metadata_.thumbnail_interface = true;
+                if (deferred_wave || metadata_.thumbnail.empty())
+                    StartMetadataWorker(path, options.network_canceled, deferred_wave);
             }
             result_ = S_OK; error_.clear(); return true;
         };
@@ -1209,9 +1219,68 @@ public:
     std::wstring Error() const override { return !error_.empty() ? error_ : source_ ? source_->Error() : error_; }
     HRESULT ErrorResult() const override { return FAILED(result_) ? result_ : source_ ? source_->ErrorResult() : result_; }
     AudioMetadata Metadata() const override {
-        return source_ && !metadata_override_ ? source_->Metadata() : metadata_;
+        if (source_ && !metadata_override_) return source_->Metadata();
+        std::scoped_lock lock(metadata_mutex_);
+        return metadata_;
     }
+    uint64_t MetadataRevision() const noexcept override { return metadata_revision_.load(); }
 private:
+    void StopMetadataWorker() {
+        if (metadata_worker_.joinable()) {
+            metadata_worker_.request_stop();
+            metadata_worker_.join();
+        }
+    }
+    void StartMetadataWorker(const std::filesystem::path& path,
+                             std::function<bool()> upstream_cancel, bool wave_tags) {
+        ComPtr<IStream> cursor;
+        if (FAILED(archive_stream_->Clone(&cursor))) return;
+        auto initial = metadata_;
+        try {
+            metadata_worker_ = std::jthread([this, path, cursor = std::move(cursor),
+                initial = std::move(initial), upstream_cancel = std::move(upstream_cancel),
+                wave_tags](std::stop_token stop) mutable {
+                const auto canceled = [&] {
+                    return stop.stop_requested() || (upstream_cancel && upstream_cancel());
+                };
+                try {
+                    HRESULT status{};
+                    // No tail reads compete with the first audio prefix.
+                    while (!canceled()) {
+                        const int progress = ArchiveMemberProgress(cursor.Get(), comm_, &status);
+                        if (FAILED(status)) return;
+                        if (progress == 100) break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    }
+                    if (canceled()) return;
+                    if (wave_tags) {
+                        BuiltinFileInfo info;
+                        if (SUCCEEDED(ReadBuiltinStreamInfo(cursor.Get(), path, {}, info))) {
+                            for (auto& field : info.metadata) {
+                                if (MetadataKeyEquals(field.name, L"title")) initial.title = field.value;
+                                else if (MetadataKeyEquals(field.name, L"artist")) initial.artist = field.value;
+                                else if (MetadataKeyEquals(field.name, L"album")) initial.album = field.value;
+                                initial.entries.emplace_back(std::move(field.name), std::move(field.value));
+                            }
+                            if (!info.cover.empty()) initial.thumbnail = std::move(info.cover);
+                        }
+                    }
+                    if (canceled()) return;
+                    if (initial.thumbnail.empty()) {
+                        try { initial.thumbnail = ReadArchiveSidecarCover(path, comm_, canceled); }
+                        catch (const ArchiveError&) { /* Keep usable tags when optional artwork fails. */ }
+                    }
+                    if (canceled()) return;
+                    initial.thumbnail_interface = true;
+                    {
+                        std::scoped_lock lock(metadata_mutex_);
+                        metadata_ = std::move(initial);
+                        ++metadata_revision_;
+                    }
+                } catch (...) { /* Optional artwork must not fail playback. */ }
+            });
+        } catch (const std::system_error&) { /* Playback can proceed without artwork. */ }
+    }
     bool CheckArchive() {
         HRESULT hr{};if(archive_stream_)(void)ArchiveMemberProgress(archive_stream_.Get(),comm_,&hr);
         if(FAILED(hr)){result_=hr;error_=ArchiveError(hr).Message();return false;}return true;
@@ -1220,6 +1289,9 @@ private:
     ComPtr<IStream> archive_stream_;
     std::unique_ptr<DecodedAudioSource> source_;
     AudioMetadata metadata_;
+    mutable std::mutex metadata_mutex_;
+    std::atomic<uint64_t> metadata_revision_{};
+    std::jthread metadata_worker_;
     bool metadata_override_{};
     std::wstring error_; HRESULT result_{E_FAIL};
 };
@@ -1523,7 +1595,19 @@ public:
     [[nodiscard]] AudioFormat DisplayFormat() const override { return display_format_; }
     [[nodiscard]] std::chrono::milliseconds Duration() const override { return duration_; }
     [[nodiscard]] std::wstring Error() const override { return error_; }
-    [[nodiscard]] AudioMetadata Metadata() const override { return metadata_; }
+    [[nodiscard]] AudioMetadata Metadata() const override {
+        auto value = metadata_;
+        // CUE owns the per-track tags and gain; inherit only the disc artwork.
+        if (inner_) {
+            auto image = inner_->Metadata();
+            value.thumbnail = std::move(image.thumbnail);
+            value.thumbnail_interface = image.thumbnail_interface;
+        }
+        return value;
+    }
+    uint64_t MetadataRevision() const noexcept override {
+        return inner_ ? inner_->MetadataRevision() : 0;
+    }
 
     int DownloadedPercent() override { return inner_ ? inner_->DownloadedPercent() : -1; }
     HRESULT ErrorResult() const override { return FAILED(archive_error_) ? archive_error_ : inner_ ? inner_->ErrorResult() : E_FAIL; }
@@ -2486,6 +2570,16 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         return;
     }
     const auto source_metadata = source->Metadata();
+    std::atomic<uint64_t> source_metadata_revision{source->MetadataRevision()};
+    const auto refresh_metadata = [&] {
+        const auto revision = source->MetadataRevision();
+        if (!IsNetworkMediaLocation(path) && revision == source_metadata_revision) return;
+        auto metadata = source->Metadata();
+        std::scoped_lock lock(mutex_);
+        metadata_ = std::move(metadata);
+        source_metadata_revision = revision;
+        ++metadata_revision_;
+    };
     const bool analyze_replay_gain = replay_gain_commit.Prepare(
         plugin_manager_, path, subtrack, options.auto_scan_gain);
     RecoveredProcessorChain processors(
@@ -2677,10 +2771,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                 return false;
             }
-            if (IsNetworkMediaLocation(path)) {
-                const auto metadata=source->Metadata();
-                std::scoped_lock lock(mutex_);metadata_=metadata;
-            }
+            refresh_metadata();
             const uint64_t latest_revision = processor_revision_.load();
             if (latest_revision != direct_processor_revision) {
                 PlaybackOptions current;
@@ -2767,6 +2858,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             backend_ = Backend::direct_sound;
             ApplyVolumeLocked();
             metadata_ = source->Metadata();
+            ++metadata_revision_;
         }
         sound_buffer->SetCurrentPosition(0);
         result = sound_buffer->Play(0, 0, DSBPLAY_LOOPING);
@@ -2828,6 +2920,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         bool natural_replay_gain_end{};
         while (usable && !stop_requested_) {
             ProcessLyricWrite(*source);
+            if (!IsNetworkMediaLocation(path)) refresh_metadata();
             source->SetPaused(state_.load() == PlaybackState::paused);
             const auto request = TakeSeekRequest();
             const int64_t requested = request.position_ms;
@@ -3104,10 +3197,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                     if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                     return false;
                 }
-                if (IsNetworkMediaLocation(path)) {
-                    const auto metadata=source->Metadata();
-                    std::scoped_lock lock(mutex_);metadata_=metadata;
-                }
+                refresh_metadata();
                 if (stop_requested_) return false;
                 const uint64_t latest_revision = processor_revision_.load();
                 if (latest_revision != processor_revision) {
@@ -3269,6 +3359,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         {
             std::scoped_lock lock(mutex_);
             metadata_ = source->Metadata();
+            ++metadata_revision_;
         }
         if ((ks_sink && !ks_sink->SetPaused(false)) ||
             (asio_sink && !asio_sink->SetPaused(false))) {
@@ -3290,6 +3381,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     bool natural_replay_gain_end{};
     while (usable && !stop_requested_) {
         ProcessLyricWrite(*source);
+        if (!IsNetworkMediaLocation(path)) refresh_metadata();
         source->SetPaused(state_.load() == PlaybackState::paused);
         const auto request = TakeSeekRequest();
         const int64_t requested = request.position_ms;

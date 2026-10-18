@@ -1,4 +1,4 @@
-﻿#include "ttplayer/audio/disc_media.h"
+#include "ttplayer/audio/disc_media.h"
 #include "ttplayer/platform/optional_windows_api.h"
 #include <ttpcomm/runtime_client.h>
 #include "ttplayer/app/file_info_worker.h"
@@ -159,7 +159,8 @@ bool IsDirectBuiltinPath(const std::filesystem::path& path) {
 HRESULT TryBuiltinRead(const std::filesystem::path& path,
                        const ttplayer::ui::detail::FileInfoProbeMp3Policy& policy,
                        ttplayer::ui::detail::FileInfoProbeReadResult& result,
-                       bool allow_system_fallback = true, HMODULE comm = nullptr);
+                       bool allow_system_fallback = true, HMODULE comm = nullptr,
+                       bool provisional_archive = false);
 
 // Header-only metadata reads must still wait for the member's final CRC. A
 // private cursor leaves a plugin's stream position untouched.
@@ -188,7 +189,7 @@ void CloseArchiveLibrary(HMODULE comm) {
 HRESULT TryBuiltinRead(const std::filesystem::path& path,
                        const ttplayer::ui::detail::FileInfoProbeMp3Policy& policy,
                        ttplayer::ui::detail::FileInfoProbeReadResult& result,
-                       bool allow_system_fallback, HMODULE comm) {
+                       bool allow_system_fallback, HMODULE comm, bool provisional_archive) {
     using namespace ttplayer;
     audio::ArchiveMemberPath archive;
     if (audio::ParseArchiveMemberPath(path.native(), archive)) {
@@ -196,6 +197,20 @@ HRESULT TryBuiltinRead(const std::filesystem::path& path,
             Microsoft::WRL::ComPtr<IStream> stream;
             stream.Attach(audio::OpenArchiveMemberStream(archive, comm));
             audio::BuiltinFileInfo builtin;
+            HRESULT initial_status{};
+            const int initial_progress = audio::ArchiveMemberProgress(stream.Get(), comm, &initial_status);
+            if (FAILED(initial_status)) return initial_status;
+            if (provisional_archive && initial_progress < 100) {
+                const HRESULT prefix = audio::ReadBuiltinStreamInfo(
+                    stream.Get(), path, ConvertPolicy(policy), builtin, true);
+                if (SUCCEEDED(prefix)) {
+                    (void)audio::ArchiveMemberProgress(stream.Get(), comm, &initial_status);
+                    if (FAILED(initial_status)) return initial_status;
+                    PopulateBuiltinResult(std::move(builtin), result);
+                    return S_FALSE; // Prefix only, never a cached/verified success.
+                }
+                if (audio::IsTerminalAudioOpenError(prefix)) return prefix;
+            }
             HRESULT status = audio::ReadBuiltinStreamInfo(
                 stream.Get(), path, ConvertPolicy(policy), builtin);
             HRESULT archive_status{};
@@ -359,6 +374,62 @@ public:
     std::filesystem::path addin, comm_path;
     HMODULE comm{};
     bool load_attempted{};
+    struct CueVolumeStamp {
+        std::filesystem::path path;
+        BY_HANDLE_FILE_INFORMATION info{};
+    };
+    std::filesystem::path cue_path;
+    std::vector<CueVolumeStamp> cue_volumes;
+    std::optional<ttplayer::audio::CueSheet> cue_sheet;
+    static bool Stamp(const std::filesystem::path& path, BY_HANDLE_FILE_INFORMATION& info) {
+        const HANDLE file = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return false;
+        const bool ok = GetFileInformationByHandle(file, &info) != FALSE;
+        CloseHandle(file);
+        return ok;
+    }
+    bool CueSnapshotFresh() const {
+        return !cue_volumes.empty() && std::all_of(cue_volumes.begin(), cue_volumes.end(), [](const auto& saved) {
+            BY_HANDLE_FILE_INFORMATION now{};
+            return Stamp(saved.path, now) &&
+                saved.info.dwVolumeSerialNumber == now.dwVolumeSerialNumber &&
+                saved.info.nFileIndexHigh == now.nFileIndexHigh && saved.info.nFileIndexLow == now.nFileIndexLow &&
+                saved.info.nFileSizeHigh == now.nFileSizeHigh && saved.info.nFileSizeLow == now.nFileSizeLow &&
+                CompareFileTime(&saved.info.ftLastWriteTime, &now.ftLastWriteTime) == 0 &&
+                CompareFileTime(&saved.info.ftCreationTime, &now.ftCreationTime) == 0;
+        });
+    }
+    ttplayer::audio::CueSheet ReadCue(const std::filesystem::path& path,
+                                     const ttplayer::audio::ArchiveMemberPath& member) {
+        if (cue_sheet && cue_path == path && CueSnapshotFresh()) return *cue_sheet;
+        cue_sheet.reset(); cue_volumes.clear();
+        // Snapshot all actual volume identities before starting the referenced
+        // audio task. Re-reading a tiny CUE during inflation would wait on the
+        // same RAR engine lock; a stamp of the first volume alone is unsafe.
+        TtpCommArchiveGroupApi group{};
+        if (ttpcomm::host::QueryArchiveGroups(ArchiveLibrary(), group)) {
+            auto volumes = ttplayer::audio::ArchiveVolumeOptions(nullptr);
+            const HRESULT status = ttplayer::audio::WithArchivePassword(member.archive, [&](const wchar_t* password) {
+                cue_volumes.clear();
+                TtpCommArchiveOptions options{}; options.size = sizeof(options); options.password = password;
+                return group.volumes(member.archive.c_str(), &options, &volumes,
+                    [](void* opaque, const wchar_t* actual) -> BOOL {
+                        auto& self = *static_cast<PlaylistReaderContext*>(opaque);
+                        try {
+                            CueVolumeStamp saved; saved.path = actual;
+                            if (!Stamp(saved.path, saved.info)) return FALSE;
+                            self.cue_volumes.push_back(std::move(saved)); return TRUE;
+                        } catch (...) { return FALSE; }
+                    }, this);
+            });
+            if (FAILED(status)) cue_volumes.clear();
+        }
+        auto sheet = ttplayer::audio::CueSheet::LoadFromMemory(
+            ttplayer::audio::ReadArchiveMember(member, ArchiveLibrary()), path);
+        if (CueSnapshotFresh()) { cue_path = path; cue_sheet = sheet; }
+        return sheet;
+    }
     HRESULT loaded{E_FAIL};
     PlaylistReaderContext(std::filesystem::path directory, std::filesystem::path library)
         : addin(std::move(directory)), comm_path(std::move(library)) {}
@@ -389,8 +460,7 @@ ttplayer::ui::detail::FileInfoProbeReadResult ReadPlaylistMetadata(
         try {
             audio::ArchiveMemberPath member;
             const bool archived = audio::ParseArchiveMemberPath(logical_path.native(), member);
-            const auto sheet = archived ? audio::CueSheet::LoadFromMemory(
-                audio::ReadArchiveMember(member, context.ArchiveLibrary()), logical_path)
+            const auto sheet = archived ? context.ReadCue(logical_path, member)
                 : audio::CueSheet::Load(logical_path);
             const auto* track = sheet.FindTrack(subtrack);
             if (!track || !track->has_index01) {
@@ -438,7 +508,7 @@ ttplayer::ui::detail::FileInfoProbeReadResult ReadPlaylistMetadata(
         ? context.ArchiveLibrary() : nullptr;
     bool completed{};
     if (comm || IsDirectBuiltinPath(logical_path)) {
-        result.status = TryBuiltinRead(logical_path, policy, result, false, comm);
+        result.status = TryBuiltinRead(logical_path, policy, result, false, comm, !include_cover);
         completed = SUCCEEDED(result.status);
     }
     if (!completed && SUCCEEDED(context.Load())) {
@@ -454,7 +524,7 @@ ttplayer::ui::detail::FileInfoProbeReadResult ReadPlaylistMetadata(
             completed = true;
         } else result.status = FAILED(opened) ? opened : E_NOINTERFACE;
     }
-    if (!completed) result.status = TryBuiltinRead(logical_path, policy, result, true, comm);
+    if (!completed) result.status = TryBuiltinRead(logical_path, policy, result, true, comm, !include_cover);
     if (comm && include_cover && SUCCEEDED(result.status) && result.cover.empty()) {
         result.cover = audio::ReadArchiveSidecarCover(logical_path,comm);
         result.cover_writable = 0;

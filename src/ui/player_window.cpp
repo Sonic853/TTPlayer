@@ -7681,33 +7681,72 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
 }
 
 void PlayerWindow::PollNetworkPlayback() {
-    if (!opened_track_ || !audio::AudioEngine::IsNetworkMediaLocation(opened_track_->path)) return;
-    const auto state=audio_->State();
+    if (!opened_track_) return;
+    audio::ArchiveMemberPath member;
+    const bool network = audio::AudioEngine::IsNetworkMediaLocation(opened_track_->path);
+    if (!network && !audio::ParseArchiveMemberPath(opened_track_->path.native(), member)) return;
+    const auto state = audio_->State();
     if (network_open_pending_) {
-        if(state==audio::PlaybackState::opening) return;
-        network_open_pending_=false;
-        if(state==audio::PlaybackState::playing || state==audio::PlaybackState::paused) {
-            const auto track=*opened_track_;
+        if (state == audio::PlaybackState::opening) return;
+        network_open_pending_ = false;
+        if (state == audio::PlaybackState::playing || state == audio::PlaybackState::paused) {
+            const auto track = *opened_track_;
             CompletePlaybackOpen(track);
+            playback_metadata_revision_ = 0;
         }
         return;
     }
-    if(!playback_source_open_ || (state!=audio::PlaybackState::playing && state!=audio::PlaybackState::paused)) return;
-    const auto metadata=audio_->Metadata();
-    if(metadata.title.empty()) return;
-    const auto title=core::WideToUtf8(metadata.title), artist=core::WideToUtf8(metadata.artist);
-    if(opened_track_->title==title && opened_track_->artist==artist) return;
-    opened_track_->title=title;opened_track_->artist=artist;
-    if(HasPlaybackTrack() && PlaybackPlaylist().Tracks()[*current_].path==opened_track_->path) {
-        PlaybackPlaylist().SetMetadata(*current_,title,artist,{});
-        if(playing_playlist_index_) playlists_.MarkDirty(*playing_playlist_index_);
+    if (!playback_source_open_ || (state != audio::PlaybackState::playing &&
+                                  state != audio::PlaybackState::paused)) return;
+    const auto revision = audio_->MetadataRevision();
+    if (revision == playback_metadata_revision_) return;
+    playback_metadata_revision_ = revision;
+    const auto metadata = audio_->Metadata();
+    const auto title = core::WideToUtf8(metadata.title);
+    const auto artist = core::WideToUtf8(metadata.artist);
+    const auto album = core::WideToUtf8(metadata.album);
+    const bool text_changed = (!title.empty() && opened_track_->title != title) ||
+        (!artist.empty() && opened_track_->artist != artist) ||
+        (!album.empty() && opened_track_->album != album);
+    if (!title.empty()) opened_track_->title = title;
+    if (!artist.empty()) opened_track_->artist = artist;
+    if (!album.empty()) opened_track_->album = album;
+    bool metadata_changed = text_changed;
+    if (!network && !metadata.entries.empty()) {
+        std::vector<std::pair<std::string, std::string>> entries;
+        entries.reserve(metadata.entries.size());
+        for (const auto& [name, value] : metadata.entries)
+            entries.emplace_back(core::WideToUtf8(name), core::WideToUtf8(value));
+        if (entries != opened_track_->metadata) {
+            opened_track_->metadata = std::move(entries);
+            metadata_changed = true;
+        }
+    }
+    if (metadata_changed && HasPlaybackTrack() &&
+        PlaybackPlaylist().Tracks()[*current_].path == opened_track_->path &&
+        PlaybackPlaylist().Tracks()[*current_].subtrack == opened_track_->subtrack) {
+        PlaybackPlaylist().SetMetadata(*current_, title, artist, album);
+        if (!network && !metadata.entries.empty()) {
+            const auto& track = PlaybackPlaylist().Tracks()[*current_];
+            PlaybackPlaylist().SetExtendedMetadata(*current_, opened_track_->metadata,
+                track.media_type, track.bitrate_bps, track.sample_rate_hz);
+        }
+        if (playing_playlist_index_) playlists_.MarkDirty(*playing_playlist_index_);
         RefreshPlaylist();
     }
-    display_title_=DisplayName(*opened_track_);display_artist_=metadata.artist;
-    if(title_) SetWindowTextW(title_,display_title_.c_str());
-    if(artist_) SetWindowTextW(artist_,display_artist_.c_str());
-    RebuildSkinInfoItems(true);ResetSkinInfoScroll();UpdateMainWindowCaption(true);
-    system_media_controls_.SetSource(window_,BuildSystemMediaMetadata(*opened_track_,metadata),taskbar_preview_.CoverBitmap());
+    if (metadata_changed) {
+        display_title_ = DisplayName(*opened_track_);
+        display_artist_ = core::Utf8ToWide(opened_track_->artist);
+        if (title_) SetWindowTextW(title_, display_title_.c_str());
+        if (artist_) SetWindowTextW(artist_, display_artist_.c_str());
+        RebuildSkinInfoItems(true); ResetSkinInfoScroll(); UpdateMainWindowCaption(true);
+    }
+    // Source-owned metadata cannot outlive a track change. This also updates
+    // artwork-only results, whose title can legitimately be empty.
+    if (!network) taskbar_preview_.SetSource(window_, opened_track_->path, metadata);
+    if (text_changed || !network)
+        system_media_controls_.SetSource(window_, BuildSystemMediaMetadata(*opened_track_, metadata),
+                                         taskbar_preview_.CoverBitmap());
 }
 
 void PlayerWindow::ClearPersistedPlaybackIdentity() noexcept {

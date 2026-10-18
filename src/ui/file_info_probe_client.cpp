@@ -391,7 +391,7 @@ std::optional<FileInfoProbeReadResult> PlaylistInfoProbeSession::Read(
     const auto after = State::Fingerprint(path, subtrack);
     if (stamp && (!after || !(*stamp == *after)))
         return fail(FileInfoProbeProcessState::cancelled); // File changed during decoding; retry later.
-    if (stamp && SUCCEEDED(result.status)) {
+    if (stamp && result.status == S_OK) { // S_FALSE is unverified archive prefix information.
         size_t memory = sizeof(State::Cached) + key.size() * sizeof(wchar_t) +
             result.codec.size() * sizeof(wchar_t) + result.metadata.size() * sizeof(FileInfoProbeMetadata);
         for (const auto& field : result.metadata) memory += (field.name.size() + field.value.size()) * sizeof(wchar_t);

@@ -829,6 +829,7 @@ private:
     bool PlayCurrent();
     bool CompletePlaybackOpen(const playlist::Track& track);
     void PollNetworkPlayback();
+    uint64_t playback_metadata_revision_{};
     void PollNetworkDownloads();
     void ConfigureNetworkDownloads();
     void QueueNetworkDownload(const playlist::Track& track);
@@ -1302,6 +1303,9 @@ private:
     ULONGLONG playlist_info_poll_tick_{};
     std::shared_ptr<PlaylistInfoReceiver> playlist_info_receiver_;
     bool playlist_info_working_{};
+    // Retain the provisional member in the helper until final verification.
+    std::optional<PlaylistInfoRequest> playlist_info_verifying_;
+    ULONGLONG playlist_info_verify_tick_{};
     std::deque<audio::ExtensionCorrection> extension_corrections_;
     std::set<std::wstring> extension_corrections_seen_;
     bool extension_correction_open_{};

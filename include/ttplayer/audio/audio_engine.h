@@ -195,6 +195,8 @@ public:
     [[nodiscard]] virtual std::wstring Error() const = 0;
     [[nodiscard]] virtual HRESULT ErrorResult() const { return E_FAIL; }
     [[nodiscard]] virtual AudioMetadata Metadata() const { return {}; }
+    // Changes when deferred container metadata becomes available.
+    [[nodiscard]] virtual uint64_t MetadataRevision() const noexcept { return 0; }
     // Removable sources identify the medium actually opened, for deferred writes.
     [[nodiscard]] virtual std::wstring SourceIdentity() const { return {}; }
     // CPlayerWnd retains an outgoing reader only when (capabilities & 9) == 0.
@@ -299,6 +301,7 @@ public:
     [[nodiscard]] std::wstring LastDiagnostic() const;
     [[nodiscard]] AudioFormat Format() const;
     [[nodiscard]] AudioMetadata Metadata() const;
+    [[nodiscard]] uint64_t MetadataRevision() const noexcept { return metadata_revision_.load(); }
     // nullopt: no matching live source, caller may open a metadata reader.
     // A live-source failure must not retry through a conflicting file handle.
     std::optional<HRESULT> WriteCurrentLyrics(const std::filesystem::path& path,
@@ -374,6 +377,7 @@ private:
     std::wstring diagnostic_;
     AudioFormat format_{};
     AudioMetadata metadata_{};
+    std::atomic<uint64_t> metadata_revision_{};
     mutable std::mutex visualization_mutex_;
     VisualizationSamples visualization_{};
     PlaybackOptions options_{};

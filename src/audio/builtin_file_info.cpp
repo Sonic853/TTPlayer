@@ -1050,7 +1050,7 @@ std::wstring RiffInfoName(std::string_view identifier) {
 }
 
 template <class File>
-HRESULT ReadWaveSource(File file, BuiltinFileInfo& result) {
+HRESULT ReadWaveSource(File file, BuiltinFileInfo& result, bool header_only = false) {
     std::uint64_t file_size{};
     std::array<unsigned char, 12> riff{};
     if (!FileSize(file, file_size) || file_size < riff.size() ||
@@ -1099,6 +1099,7 @@ HRESULT ReadWaveSource(File file, BuiltinFileInfo& result) {
                 }
             }
         }
+        if (header_only && data_bytes && result.format.nAvgBytesPerSec) break;
         offset = begin + size + (size & 1U);
     }
     if (!result.format.nChannels || !result.format.nSamplesPerSec ||
@@ -2116,7 +2117,7 @@ HRESULT ReadBuiltinMpegFileInfo(const std::filesystem::path& path,
 HRESULT ReadBuiltinStreamInfo(IStream* stream,
                               const std::filesystem::path& logical_path,
                               const Mp3TagPolicy& policy,
-                              BuiltinFileInfo& result) noexcept {
+                              BuiltinFileInfo& result, bool wave_header_only) noexcept {
     if (!stream) return E_POINTER;
     try {
         Microsoft::WRL::ComPtr<IStream> cursor;
@@ -2126,6 +2127,15 @@ HRESULT ReadBuiltinStreamInfo(IStream* stream,
         status = ProbeAudioFormatHint(cursor.Get(), hint);
         if (FAILED(status)) return status;
         BuiltinFileInfo decoded;
+        if (wave_header_only) {
+            if (hint != L".wav" && hint != L".wave") return E_NOTIMPL;
+            status = ReadWaveSource(cursor.Get(), decoded, true);
+            if (SUCCEEDED(status)) {
+                decoded.capabilities &= ~4U;
+                result = std::move(decoded);
+            }
+            return status;
+        }
         // An extension selects the first reader, not the final format. Both
         // parsers validate their content, including consecutive MPEG frames.
         if (hint == L".wav" || hint == L".wave") {
