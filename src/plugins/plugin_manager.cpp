@@ -1,5 +1,6 @@
 #include "ttplayer/plugins/plugin_manager.h"
 #include "nero_config_layout.h"
+#include "builtin_mpeg_decoder.h"
 #include "ttplayer/audio/format_probe.h"
 #include "ttplayer/audio/file_mutation.h"
 #include "ttplayer/i18n/i18n.h"
@@ -1157,6 +1158,7 @@ struct LegacyReaderSession::Impl {
     void* metadata{};
     void* thumbnail_object{};
     std::unique_ptr<LegacyDecoderSession> decoder;
+    bool decoder_input_ended{};
     std::vector<std::byte> encoded_format;
     // Keep the complete cbSize-qualified format alive.  A by-value
     // WAVEFORMATEX loses WAVEFORMATEXTENSIBLE's valid-bit count, channel mask
@@ -1226,7 +1228,8 @@ HRESULT LegacyReaderSession::Read(size_t requested_bytes,
         // encoded input is required, fill the persistent input buffer through
         // reader slot 14 and submit it to decoder slot 7; then ask slot 6
         // whether PCM is available and drain it through slot 8.
-        const HRESULT needs_input = impl_->decoder->NeedsInput();
+        const HRESULT needs_input = impl_->decoder_input_ended
+            ? S_FALSE : impl_->decoder->NeedsInput();
         if (needs_input == S_OK) {
             DWORD decoder_input{}, decoder_output{};
             HRESULT result = impl_->decoder->BufferSizes(
@@ -1249,6 +1252,14 @@ HRESULT LegacyReaderSession::Read(size_t requested_bytes,
             result = InvokeReaderRead(impl_->reader, &encoded_buffer);
             if (result != S_OK) {
                 output.clear();
+                if (SUCCEEDED(result)) {
+                    const HRESULT finished = impl_->decoder->FinishInput();
+                    if (finished == S_OK) {
+                        impl_->decoder_input_ended = true;
+                        goto drain_decoder;
+                    }
+                    if (FAILED(finished)) return finished;
+                }
                 // ASF's shipped reader returns the positive status 0x26 on
                 // exhaustion rather than S_FALSE.  FUN_004E3D60 treats every
                 // non-zero result as terminal.
@@ -1270,11 +1281,16 @@ HRESULT LegacyReaderSession::Read(size_t requested_bytes,
             return needs_input;
         }
 
+drain_decoder:
         const HRESULT available = impl_->decoder->OutputAvailable();
         if (available == S_OK)
             return impl_->decoder->ReadOutput(
                 requested_bytes, output, end_of_stream);
         output.clear();
+        if (available == S_FALSE && impl_->decoder_input_ended) {
+            end_of_stream = true;
+            return S_FALSE;
+        }
         return FAILED(available) ? available : S_OK;
     }
 
@@ -1323,6 +1339,7 @@ HRESULT LegacyReaderSession::Seek(DWORD& position_ms) noexcept {
     if (!impl_ || !impl_->reader || impl_->metadata_committed) return E_UNEXPECTED;
     const HRESULT result = InvokeReaderSeek(impl_->reader, &position_ms);
     if (FAILED(result) || !impl_->decoder) return result;
+    impl_->decoder_input_ended = false;
     return impl_->decoder->Reset();
 }
 
@@ -1518,6 +1535,7 @@ HRESULT LegacyReaderSession::CommitMetadata() noexcept {
 
 struct LegacyDecoderSession::Impl {
     void* decoder{};
+    bool builtin_mpeg{};
     alignas(WAVEFORMATEX) std::array<std::byte, 0x28> output_format{};
     DWORD input_bytes{};
     DWORD output_bytes{};
@@ -1582,6 +1600,12 @@ HRESULT LegacyDecoderSession::PushInput(
         static_cast<DWORD>(impl_->input_storage.size());
     return InvokeDecoderBuffer(
         impl_->decoder, 7, &impl_->input_buffer);
+}
+
+HRESULT LegacyDecoderSession::FinishInput() noexcept {
+    if (!impl_ || !impl_->decoder) return E_UNEXPECTED;
+    return impl_->builtin_mpeg
+        ? detail::FinishBuiltinMpegDecoder(impl_->decoder) : S_FALSE;
 }
 
 HRESULT LegacyDecoderSession::ReadOutput(
@@ -2341,8 +2365,15 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderWithFlags(
         if (copied)
             std::memcpy(&format, encoded_format.data(), sizeof(format));
         if (allocated_format) CoTaskMemFree(allocated_format);
+        // ASF can legitimately leave the average encoded bitrate unset for
+        // VBR MP3 (the original reader returns zero as well). PCM requires a
+        // concrete byte rate; compressed formats are checked again after the
+        // decoder has negotiated their actual PCM output.
+        const bool missing_pcm_rate = copied && format.nAvgBytesPerSec == 0 &&
+            IsDecodedPcmFormat(*reinterpret_cast<const WAVEFORMATEX*>(
+                encoded_format.data()));
         if (!copied || format.nChannels == 0 || format.nSamplesPerSec == 0 ||
-            format.nAvgBytesPerSec == 0 || format.nBlockAlign == 0) {
+            missing_pcm_rate || format.nBlockAlign == 0) {
             Release(reader);
             last_result = FAILED(current) ? current : E_UNEXPECTED;
             if (diagnostic) *diagnostic = L"reader slot 6 GetFormat";
@@ -2542,6 +2573,7 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderWithFlags(
 
 bool PluginManager::HasDecoderForFormat(
     const WAVEFORMATEX& format) const noexcept {
+    if (detail::SupportsBuiltinMpegDecoder(format)) return true;
     const GUID subtype = WaveSubtype(format);
     for (const auto& factory : decoder_factories_) {
         void* creator = ResolveCategoryInterface(
@@ -2572,24 +2604,39 @@ std::unique_ptr<LegacyDecoderSession> PluginManager::OpenDecoder(
     const GUID subtype = WaveSubtype(encoded_format);
     HRESULT last_result = E_NOTIMPL;
     bool matched{};
-    for (const auto& factory : decoder_factories_) {
-        void* creator = ResolveCategoryInterface(
-            factory.module_index, factory.enumeration_index,
-            kDecoderCreatorCategory, factory.provider);
-        if (!creator) {
-            last_result = E_NOINTERFACE;
-            continue;
-        }
-        const HRESULT supported = InvokeSubtypeSupport(creator, &subtype);
-        if (FAILED(supported)) {
-            Release(creator);
-            continue;
-        }
-        matched = true;
-
+    for (size_t candidate = 0; candidate <= decoder_factories_.size(); ++candidate) {
+        const bool builtin = candidate == 0;
+        if (builtin && !detail::SupportsBuiltinMpegDecoder(encoded_format)) continue;
+        const auto* factory = builtin ? nullptr : &decoder_factories_[candidate - 1];
+        std::filesystem::path decoder_module;
+        HRESULT supported = S_OK;
         void* decoder{};
-        HRESULT current = InvokeCreateReader(creator, &decoder);
-        Release(creator);
+        HRESULT current{};
+        if (builtin) {
+            // 004CA86C registers the dedicated 004C9AC1 MPEG creator before
+            // the general decoder candidates. Its 004C9748 instance uses
+            // ttpcomm ordinals 10..14, independently of ASF/DMO and ACM.
+            matched = true;
+            current = detail::CreateBuiltinMpegDecoder(&decoder, decoder_module);
+        } else {
+            void* creator = ResolveCategoryInterface(
+                factory->module_index, factory->enumeration_index,
+                kDecoderCreatorCategory, factory->provider);
+            if (!creator) {
+                last_result = E_NOINTERFACE;
+                continue;
+            }
+            supported = InvokeSubtypeSupport(creator, &subtype);
+            if (FAILED(supported)) {
+                Release(creator);
+                continue;
+            }
+            matched = true;
+
+            current = InvokeCreateReader(creator, &decoder);
+            Release(creator);
+            decoder_module = factory->info.module_path;
+        }
         if (FAILED(current) || !decoder) {
             if (SUCCEEDED(current)) current = E_NOINTERFACE;
             if (decoder) Release(decoder);
@@ -2599,15 +2646,29 @@ std::unique_ptr<LegacyDecoderSession> PluginManager::OpenDecoder(
         }
 
         alignas(WAVEFORMATEX) std::array<std::byte, 0x28> output_format{};
-        reinterpret_cast<WAVEFORMATEX*>(output_format.data())->wFormatTag =
-            requested_output_tag;
+        auto* negotiated_format =
+            reinterpret_cast<WAVEFORMATEX*>(output_format.data());
+        negotiated_format->wFormatTag = requested_output_tag;
+        // 004E3A3D passes 0x28 to 004B0908, which sets cbSize to size-0x12.
+        // Decoder slot 3 uses this as the available extension capacity on
+        // input. The WM/DMO decoder needs all 40 bytes to negotiate 24-bit
+        // and multichannel WAVEFORMATEXTENSIBLE without falling back to 16-bit.
+        negotiated_format->cbSize = static_cast<WORD>(
+            output_format.size() - sizeof(WAVEFORMATEX));
         current = InvokeDecoderInitialize(
-            decoder, &encoded_format,
-            reinterpret_cast<WAVEFORMATEX*>(output_format.data()));
+            decoder, &encoded_format, negotiated_format);
         if (FAILED(current)) {
             Release(decoder);
             last_result = current;
             if (diagnostic) *diagnostic = L"decoder slot 3 initialize";
+            continue;
+        }
+
+        if (sizeof(WAVEFORMATEX) + negotiated_format->cbSize >
+                output_format.size()) {
+            Release(decoder);
+            last_result = E_UNEXPECTED;
+            if (diagnostic) *diagnostic = L"decoder returned an oversized format";
             continue;
         }
 
@@ -2625,11 +2686,12 @@ std::unique_ptr<LegacyDecoderSession> PluginManager::OpenDecoder(
         try {
             auto implementation = std::make_unique<LegacyDecoderSession::Impl>();
             implementation->decoder = decoder;
+            implementation->builtin_mpeg = builtin;
             decoder = nullptr;
             implementation->output_format = output_format;
             implementation->input_bytes = input_bytes;
             implementation->output_bytes = output_bytes;
-            implementation->module_path = factory.info.module_path;
+            implementation->module_path = std::move(decoder_module);
             auto session = std::unique_ptr<LegacyDecoderSession>(
                 new LegacyDecoderSession(std::move(implementation)));
             // FUN_004CD045 returns the successful creator slot-5 status;

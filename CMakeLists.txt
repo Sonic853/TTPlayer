@@ -122,6 +122,7 @@ add_library(ttplayer_core
   src/platform/optional_windows_api.cpp
   src/platform/windows_features.cpp
   src/plugins/plugin_manager.cpp
+  src/plugins/builtin_mpeg_decoder.cpp
   src/plugins/legacy_host_exports.cpp
   src/plugins/nero_config_layout.cpp
   src/settings/file_association.cpp
