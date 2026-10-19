@@ -1,11 +1,11 @@
 # Release 插件包
 
-更新日期：2026-10-06。
+更新日期：2026-10-20。
 
 ## 下载与安装
 
 在 **Actions → Manual Windows Build** 勾选 **Release a Version (GitHub)** 或
-**Publish Release to Gitee** 时，播放器构建成功后会下载下面 9 个仓库的最新正式版，
+**Publish Release to Gitee** 时，播放器构建成功后会下载下面 17 个仓库的最新正式版，
 分成两组插件包。两端发布同一组文件；同时选中两个平台时，插件只下载和打包一次。
 
 最终 Release 有四个附件：
@@ -34,8 +34,18 @@ ExtraAddIn 的 `i18n` 目录也放在 EXE 旁，用于多语言插件读取翻�
 | [TTPlayerEnc](https://github.com/TTPlayerRebuild/TTPlayerEnc) | `AddIn/ttp_enc.dll` |
 | [TTPlayerOGG](https://github.com/TTPlayerRebuild/TTPlayerOGG) | `AddIn/ttp_ogg.dll` |
 | [TTPlayerAAC](https://github.com/TTPlayerRebuild/TTPlayerAAC) | `AddIn/ttp_aac.dll` |
+| [TTPlayerMpc](https://github.com/TTPlayerRebuild/TTPlayerMpc) | `AddIn/ttp_mpc.dll` |
+| [TTPlayer_AC_130_dts](https://github.com/TTPlayerRebuild/TTPlayer_AC_130_dts) | `AddIn/ttp_ac3dts.dll` |
+| [TTPlayerMod](https://github.com/TTPlayerRebuild/TTPlayerMod) | `AddIn/ttp_mod.dll` |
+| [TTPlayerClienc](https://github.com/TTPlayerRebuild/TTPlayerClienc) | `AddIn/ttp_clienc.dll` |
+| [TTPlayerAsf](https://github.com/TTPlayerRebuild/TTPlayerAsf) | `AddIn/ttp_asf.dll` |
+| [TTPlayerTak](https://github.com/TTPlayerRebuild/TTPlayerTak) | `AddIn/ttp_tak.dll` |
+| [TTPlayerRm](https://github.com/TTPlayerRebuild/TTPlayerRm) | `AddIn/ttp_rm.dll` |
+| [TTPlayerVqf](https://github.com/TTPlayerRebuild/TTPlayerVqf) | `AddIn/ttp_vqf.dll` |
 
-包内仅有以上 6 个 DLL 和 `SHA256SUMS.txt`。这是编解码插件合集，不包含第三方 DSP 滤镜。
+包内仅有以上 14 个 DLL 和 `SHA256SUMS.txt`。这是编解码插件合集，不包含第三方 DSP 滤镜。
+新增八项的仓库名取自各工程 Git origin；特别是 AC3/DTS 的仓库名为 `TTPlayer_AC_130_dts`，
+其运行附件仍使用 `ttp_ac3dts-上游版本.zip`。
 
 ## ExtraAddIn
 
@@ -56,15 +66,16 @@ ExtraAddIn 的 `i18n` 目录也放在 EXE 旁，用于多语言插件读取翻�
 
 1. 每个仓库只请求一次 GitHub `/releases/latest`，接受正式发布的有效日期版本，拒绝草稿／预发行。
 2. 精确选择 `ttp_名称-上游版本.zip`；I18n 为 `ttp_i18n-x86-上游版本.zip`。
-   AAC 的 `-source.zip` 和 GitHub 自动源码附件不会被选中。
+   AAC、AC3/DTS、TAK、RM、VQF 等组件的 `-source.zip` 和 GitHub 自动源码附件不会被选中。
 3. 保存本次选中的标签、Release ID、附件 ID、地址及摘要。后续使用该标签的下载地址，
    并验证 GitHub API 提供的 ZIP SHA-256 和长度；同一任务中不再次切换至后来发布的版本。
 4. 检查 ZIP 路径、重复条目、文件类型、大小上限、CRC 及包内 SHA-256。
    只读取约定的 DLL、翻译资源及清单，拒绝目录越界、未知 DLL、符号链接和加密 ZIP。
 5. 静态检查每个 DLL 为 x86 PE32、XP 可加载的系统／子系统版本；复用 YY-Thunks
    的 XP 5.1.2600 和 Win7 6.1.7600 导出表审计导入，不执行下载的 DLL。
-6. 9 个组件全部验证成功后才输出两个完整插件 ZIP。下载或校验失败会使发布准备失败，
+6. 17 个组件全部验证成功后才输出两个完整插件 ZIP。下载或校验失败会使发布准备失败，
    不发布缺少插件的合集，也不从已有本地 DLL 回退。
+   上游返回 404 时明确显示仓库名及“先发布日期版本运行 ZIP”的提示。
 7. 为两个 ZIP 内的文件重新生成 SHA-256；外部 Release 清单同时校验播放器及两个插件 ZIP。
    准备任务和两个发布任务均在上传前复核三个 ZIP。
 
@@ -80,7 +91,7 @@ Release 说明自动列出每个插件的实际版本及对应上游 Release 链
 在 `rebuild` 目录运行，先准备好播放器构建使用的 YY-Thunks 导出表：
 
 ```powershell
-python cmake/package_addin_bundles.py --version 2026.10.06 --output build/Release `
+python cmake/package_addin_bundles.py --version 2026.10.20 --output build/Release `
   --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt `
   --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/6.1.7600.txt
 ```
@@ -119,3 +130,27 @@ python cmake/package_addin_bundles.py --version 2026.10.06 --output build/Releas
 
 新增测试及下载样本仅位于本地 `tests/addin_bundles`，不进入 Actions 和发行包。
 本次验证未创建远程 Release，也未重新执行这些已发布插件的完整播放／界面测试。
+
+## 2026-10-20 新插件接入与验证
+
+新增 MPC、AC3/DTS、MOD、CLI Encoder、ASF、TAK、RM、VQF 八项，编解码合集从 6 个扩为
+14 个 DLL；ExtraAddIn 保持 3 个组件。GitHub／Gitee 发行说明和来源表随新清单更新。
+构建仍从上游下载已发布 DLL，不编译这些独立插件，也不运行私有测试。
+
+实际通过 GitHub API 核对了所有仓库：八个新仓库均存在，但其 `/releases/latest` 均返回 404，
+尚无可供合集下载的正式版。因此**需要先在各新插件工程发布首个正式 Release，再执行播放器发布**。
+每个 Release 使用日期标签和对应的 `ttp_名称-标签.zip`；仅上传源码或只创建 Git tag 不够。
+播放器 Action 会按仓库名给出失败原因，不会跳过这些组件。此次未创建远程 Release。
+
+本地验证将两种来源明确分开：
+
+- 原有 9 个组件：实际下载当前正式 Release 并校验。Waskin 为 `2026.10.13`，其余版本同上节表格。
+- 新增 8 个组件：使用 2026-10-19 已构建的真实运行 ZIP，配合仅供测试的模拟 Release 元数据；
+  不把这些元数据或生成的测试合集作为远程已发布产物。
+- 17 个 DLL 的包内外 SHA-256、x86 PE32、XP／Win7 导入审计通过。
+- 13 项本地打包回归通过，覆盖源码附件排除、重复打包一致性、缺失上游保留既有输出、
+  最后一个组件损坏时不输出不完整合集，以及原有路径、摘要和翻译检查。
+- Actionlint 与 14 段 PowerShell 语法检查通过；以模拟发布命令执行工作流的准备与发布步骤，
+  确认 GitHub／Gitee 均保留三个 ZIP 和一份外部校验清单，发行说明列出 17 个插件。
+
+本轮测试、缓存与模拟附件仅在 `rebuild/tests/addin_bundles`，没有加入 Actions 或发行包。

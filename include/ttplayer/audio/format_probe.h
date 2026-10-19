@@ -6,6 +6,7 @@
 #include <string_view>
 #include <windows.h>
 #include <objidl.h>
+#include <ttpcomm/audio_format_probe.h>
 
 namespace ttplayer::audio {
 
@@ -20,8 +21,10 @@ namespace ttplayer::audio {
 // Both overloads preserve the actual filename. The IStream overload preserves
 // its caller's position, including on short reads and failed probes.
 [[nodiscard]] HRESULT ProbeAudioFormatHint(
-    const std::filesystem::path& path, std::wstring& extension);
-[[nodiscard]] HRESULT ProbeAudioFormatHint(IStream* stream, std::wstring& extension);
+    const std::filesystem::path& path, std::wstring& extension,
+    ttp::format::Result* builtin = nullptr);
+[[nodiscard]] HRESULT ProbeAudioFormatHint(IStream* stream, std::wstring& extension,
+    ttp::format::Result* builtin = nullptr);
 [[nodiscard]] bool IsTerminalAudioOpenError(HRESULT result) noexcept;
 
 } // namespace ttplayer::audio

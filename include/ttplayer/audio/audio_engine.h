@@ -1,4 +1,5 @@
 #pragma once
+#include <ttpcomm/audio_format_probe.h>
 
 #include <array>
 #include <atomic>
@@ -95,6 +96,8 @@ struct AudioMetadata {
     std::vector<std::pair<std::wstring, std::wstring>> entries;
     bool thumbnail_interface{};
     std::vector<unsigned char> thumbnail;
+    std::optional<ttp::format::Result> source_format;
+    std::wstring source_format_version;
 };
 
 // The original visualization pipeline asks the sound player for two blocks

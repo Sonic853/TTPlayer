@@ -25,6 +25,10 @@ BUNDLES = {
         ('TTPlayerWebM', 'ttp_webm'), ('TTPlayerAPE', 'ttp_ape'),
         ('TTPlayerFLAC', 'ttp_flac'), ('TTPlayerEnc', 'ttp_enc'),
         ('TTPlayerOGG', 'ttp_ogg'), ('TTPlayerAAC', 'ttp_aac'),
+        ('TTPlayerMpc', 'ttp_mpc'), ('TTPlayer_AC_130_dts', 'ttp_ac3dts'),
+        ('TTPlayerMod', 'ttp_mod'), ('TTPlayerClienc', 'ttp_clienc'),
+        ('TTPlayerAsf', 'ttp_asf'), ('TTPlayerTak', 'ttp_tak'),
+        ('TTPlayerRm', 'ttp_rm'), ('TTPlayerVqf', 'ttp_vqf'),
     ),
     'ExtraAddIn': (
         ('TTPlayerWaskin', 'ttp_waskin'), ('TTPlayerMaki', 'ttp_maki'),
@@ -215,7 +219,12 @@ def package_bundles(version, output, export_paths):
     resolved = {}
     for components in BUNDLES.values():
         for repository, target in components:
-            release = json.loads(download(API_ROOT + repository + '/releases/latest', 2 * 1024 * 1024, api=True))
+            try:
+                release = json.loads(download(API_ROOT + repository + '/releases/latest', 2 * 1024 * 1024, api=True))
+            except urllib.error.HTTPError as error:
+                detail = ('no accessible stable release; publish a date-versioned runtime ZIP first'
+                          if error.code == 404 else f'GitHub release API returned HTTP {error.code}')
+                raise ValueError(f'{repository}: {detail}') from error
             asset = select_asset(repository, target, release)
             resolved[repository] = (release, asset)
     output.mkdir(parents=True, exist_ok=True)

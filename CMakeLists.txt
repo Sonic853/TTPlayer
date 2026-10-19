@@ -333,6 +333,20 @@ endif()
 # Standalone development/test front ends only. The shipped player embeds all
 # three workers and relaunches itself in private modes for fault isolation;
 # building/distributing ttplayer_rebuild does not require any helper EXE.
+if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/audio/audio_format_probe_tests.cpp")
+  add_executable(audio_format_probe_tests tests/audio/audio_format_probe_tests.cpp src/app/exports.cpp)
+  target_compile_definitions(audio_format_probe_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(audio_format_probe_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  target_link_libraries(audio_format_probe_tests PRIVATE ttplayer_core)
+  if(TTPLAYER_XP_RUNTIME_CONFIGURED)
+    add_dependencies(audio_format_probe_tests ttplayer_legacy_ttpcomm_import)
+    target_link_libraries(audio_format_probe_tests PRIVATE "${ttpcomm_import_library}")
+    target_link_options(audio_format_probe_tests PRIVATE /INCLUDE:__imp__srand48)
+  endif()
+  add_test(NAME audio_format_probe_tests COMMAND audio_format_probe_tests --self)
+  set_tests_properties(audio_format_probe_tests PROPERTIES TIMEOUT 30)
+endif()
+
 if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/audio/extension_correction_tests.cpp")
   add_executable(extension_correction_tests tests/audio/extension_correction_tests.cpp)
   target_compile_definitions(extension_correction_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

@@ -66,7 +66,10 @@ void PlayerWindow::CheckExtensionCorrection(const std::filesystem::path& path,in
     // request supersedes prompts deferred by an options/modal window.
     extension_corrections_.clear();
     if (!settings_.general.prompt_extension_correction) return;
-    if (auto correction=audio::FindExtensionCorrection(path,subtrack))
+    const auto metadata = audio_->Metadata();
+    if (auto correction=audio::FindExtensionCorrection(path,subtrack,
+            metadata.source_format ? &*metadata.source_format : nullptr,
+            metadata.source_format_version))
         QueueExtensionCorrection(std::move(*correction));
 }
 

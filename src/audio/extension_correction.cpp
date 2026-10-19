@@ -1,4 +1,6 @@
 #include "ttplayer/audio/extension_correction.h"
+#include <ttpcomm/audio_format_probe_impl.h>
+#include "ttplayer/audio/file_mutation.h"
 #include "ttplayer/audio/format_probe.h"
 #include "ttplayer/audio/osz_archive.h"
 #include <ttpcomm/archive_format.h>
@@ -135,10 +137,11 @@ std::optional<MediaFileStamp> ReadMediaFileStamp(const std::filesystem::path& pa
     return Stamp(file.value);
 }
 
-std::optional<ExtensionCorrection> FindExtensionCorrection(const std::filesystem::path& input, int subtrack) {
+std::optional<ExtensionCorrection> FindExtensionCorrection(const std::filesystem::path& input, int subtrack, const ttp::format::Result* opened_format, std::wstring_view expected_version) {
     const auto value=input.native();const auto pipe=value.find(L'|');
     if (value.find(L"://")!=std::wstring::npos || input.empty()) return {};
     const std::filesystem::path path=pipe==std::wstring::npos?input:std::filesystem::path(value.substr(0,pipe));
+    if (!expected_version.empty() && CaptureFileSourceVersion(path)!=expected_version) return {};
     const auto archive=ttpcomm::archive_format::Header(path.c_str());
     if ((subtrack!=0 || pipe!=std::wstring::npos) && archive==ttpcomm::archive_format::Kind::unknown) return {};
     // Do not rename links or CUE/CD tracks to their underlying stream type.
@@ -164,6 +167,15 @@ std::optional<ExtensionCorrection> FindExtensionCorrection(const std::filesystem
         if(existing==archive || archive==K::gzip && existing==K::targzip)return {};
         auto target=path;target.replace_extension(suffix);if(Stamp(file.value)!=before)return {};
         return ExtensionCorrection{path,target,name,*before};
+    }
+    // Only an opened reader can authorize a suggestion; archive handling above
+    // deliberately uses the outer package, never the member codec.
+    if (opened_format && ttp::format::Valid(*opened_format) &&
+        opened_format->confidence == ttp::format::Opened) {
+        if (ttp::format::Accepts(*opened_format, path.extension().c_str())) return {};
+        auto target=path; target.replace_extension(opened_format->extension);
+        if (Stamp(file.value)!=before) return {};
+        return ExtensionCorrection{path,target,opened_format->display,*before};
     }
     std::array<unsigned char,65536> bytes{};
     DWORD count{};

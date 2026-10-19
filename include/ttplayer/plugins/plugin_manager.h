@@ -1,4 +1,5 @@
 #pragma once
+#include <ttpcomm/audio_format_probe.h>
 
 #include <cstddef>
 #include <filesystem>
@@ -102,6 +103,7 @@ public:
     [[nodiscard]] DWORD EncodedBitsPerSecond() const noexcept;
     [[nodiscard]] DWORD Capabilities() const noexcept;
     [[nodiscard]] const std::wstring& CodecName() const noexcept;
+    [[nodiscard]] const std::optional<ttp::format::Result>& DetectedFormat() const noexcept;
     [[nodiscard]] const std::filesystem::path& ModulePath() const noexcept;
     [[nodiscard]] const std::vector<MetadataEntry>& Metadata() const noexcept;
     // ISoundThumbnail {B5E770AF-DFB0-43E5-9B0C-3EE98E7B6248}.  Presence is
@@ -294,6 +296,8 @@ public:
     [[nodiscard]] std::shared_ptr<PluginManager>
         RetainForBackground() const noexcept;
     [[nodiscard]] bool HasReaderForPath(const std::filesystem::path& path) const;
+    // Worker-only bounded local probe; file dialogs retain the cheap pattern query.
+    [[nodiscard]] bool HasReaderForContent(const std::filesystem::path& path) const;
     [[nodiscard]] std::unique_ptr<LegacyReaderSession> OpenReader(
         const std::filesystem::path& path, HRESULT* result = nullptr,
         std::wstring* diagnostic = nullptr) const;

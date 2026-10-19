@@ -2,6 +2,7 @@
 #include <ttpcomm/runtime_pcm.h>
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/audio_engine.h"
+#include "ttplayer/audio/file_mutation.h"
 #include "ttplayer/audio/legacy_equalizer.h"
 #include "ttplayer/audio/builtin_file_info.h"
 #include "ttplayer/audio/directshow_source.h"
@@ -687,6 +688,7 @@ public:
         duration_ = std::chrono::milliseconds(
             reader_->DurationMilliseconds());
 
+        metadata_.source_format = reader_->DetectedFormat();
         for (const auto& entry : reader_->Metadata()) {
             metadata_.entries.emplace_back(entry.name, entry.value);
             if (MetadataKeyEquals(entry.name, L"title")) metadata_.title = entry.value;
@@ -1207,6 +1209,7 @@ public:
         metadata_override_ = false;
         ArchiveMemberPath member;
         const bool archive = ParseArchiveMemberPath(path.native(), member);
+        const auto format_source_version = archive ? std::wstring{} : CaptureFileSourceVersion(path);
         archive_stream_.Reset();
         if(archive) {
             try {
@@ -1216,8 +1219,9 @@ public:
             catch(const ArchiveError& e){error_=e.Message();result_=e.Result();return false;}
         }
         std::wstring hint = AudioExtensionHint(path);
-        result_ = archive ? ProbeAudioFormatHint(archive_stream_.Get(), hint)
-                          : ProbeAudioFormatHint(path, hint);
+        ttp::format::Result detected_builtin;
+        result_ = archive ? ProbeAudioFormatHint(archive_stream_.Get(), hint, &detected_builtin)
+                          : ProbeAudioFormatHint(path, hint, &detected_builtin);
         if (FAILED(result_)) { error_ = HResultMessage(L"Open media file", result_); return false; }
         const auto attempt = [&](std::unique_ptr<DecodedAudioSource> candidate, bool builtin_tags) {
             if(archive_stream_) {
@@ -1257,6 +1261,15 @@ public:
                     metadata_.thumbnail = std::move(info.cover);
                     metadata_.thumbnail_interface = true;
                 }
+            }
+            if (!metadata_.source_format && detected_builtin.confidence == ttp::format::Strong) {
+                detected_builtin.confidence = ttp::format::Opened;
+                metadata_.source_format = detected_builtin;
+                metadata_override_ = true;
+            }
+            if (metadata_.source_format) {
+                metadata_.source_format_version = format_source_version;
+                metadata_override_ = true;
             }
             if (archive) {
                 // Capture the decoder's metadata on its owning thread. RAR
@@ -1836,7 +1849,7 @@ public:
         if (attributes == INVALID_FILE_ATTRIBUTES ||
             (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
             return false;
-        if (subtrack == 0 && !manager->HasReaderForPath(path)) {
+        if (subtrack == 0 && !manager->HasReaderForContent(path)) {
             BuiltinFileInfo info;
             if (FAILED(ReadBuiltinMpegFileInfo(path, {}, info))) return false;
         }

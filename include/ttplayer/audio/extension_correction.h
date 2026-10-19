@@ -1,10 +1,12 @@
 #pragma once
+#include <ttpcomm/audio_format_probe.h>
 
 #include <windows.h>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace ttplayer::audio {
 
@@ -24,7 +26,9 @@ struct ExtensionCorrection {
 // Unlike routing hints, this verifies the container/frame header and accepts
 // legitimate aliases. Unknown containers produce no suggestion.
 std::optional<ExtensionCorrection> FindExtensionCorrection(
-    const std::filesystem::path& path, int subtrack = 0);
+    const std::filesystem::path& path, int subtrack = 0,
+    const ttp::format::Result* opened_format = nullptr,
+    std::wstring_view expected_version = {});
 std::optional<MediaFileStamp> ReadMediaFileStamp(const std::filesystem::path& path);
 
 enum class ExtensionCollision { fail, number, overwrite };

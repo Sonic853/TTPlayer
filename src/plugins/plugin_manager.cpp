@@ -1,4 +1,5 @@
 #include "ttplayer/plugins/plugin_manager.h"
+#include <ttpcomm/audio_format_probe_impl.h>
 #include "nero_config_layout.h"
 #include "builtin_mpeg_decoder.h"
 #include "ttplayer/audio/format_probe.h"
@@ -649,6 +650,24 @@ HRESULT InvokeQueryInterface(void* object, REFIID iid, void** result) noexcept {
 #endif
 }
 
+HRESULT InvokeFormatProbe(void* object, const ttp::format::Request* request,
+                          ttp::format::Result* result) noexcept {
+#if defined(_MSC_VER)
+    __try { return static_cast<ttp::format::Probe*>(object)->ProbeFormat(request, result); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return E_UNEXPECTED; }
+#else
+    return static_cast<ttp::format::Probe*>(object)->ProbeFormat(request, result);
+#endif
+}
+HRESULT InvokeFormatInfo(void* object, ttp::format::Result* result) noexcept {
+#if defined(_MSC_VER)
+    __try { return static_cast<ttp::format::SourceInfo*>(object)->GetFormatInfo(result); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return E_UNEXPECTED; }
+#else
+    return static_cast<ttp::format::SourceInfo*>(object)->GetFormatInfo(result);
+#endif
+}
+
 HRESULT InvokeMetadataCount(void* metadata, DWORD* count) noexcept {
     auto table = Vtable(metadata);
     if (!table || !table[3] || !count) return E_POINTER;
@@ -1171,6 +1190,7 @@ struct LegacyReaderSession::Impl {
     DWORD encoded_bits_per_second{};
     DWORD capabilities{};
     std::wstring codec_name;
+    std::optional<ttp::format::Result> detected_format;
     std::filesystem::path module_path;
     std::vector<MetadataEntry> metadata_entries;
     std::vector<unsigned char> thumbnail;
@@ -1364,6 +1384,11 @@ DWORD LegacyReaderSession::EncodedBitsPerSecond() const noexcept {
 
 DWORD LegacyReaderSession::Capabilities() const noexcept {
     return impl_ ? impl_->capabilities : 0;
+}
+
+const std::optional<ttp::format::Result>& LegacyReaderSession::DetectedFormat() const noexcept {
+    static const std::optional<ttp::format::Result> empty;
+    return impl_ ? impl_->detected_format : empty;
 }
 
 const std::wstring& LegacyReaderSession::CodecName() const noexcept {
@@ -2216,6 +2241,35 @@ bool PluginManager::HasReaderForPath(const std::filesystem::path& path) const {
     });
 }
 
+bool PluginManager::HasReaderForContent(const std::filesystem::path& path) const {
+    if (HasReaderForPath(path)) return true;
+    if (path.native().find(L"://") != std::wstring::npos ||
+        path.native().find(L'|') != std::wstring::npos) return false;
+    IStream* stream{};
+    if (FAILED(CreateNamedFileStream(path, STGM_READ | STGM_SHARE_DENY_NONE, &stream)) || !stream)
+        return false;
+    ttp::format::Snapshot snapshot;
+    const auto sampled = ttp::format::ReadSnapshot(stream, snapshot);
+    stream->Release();
+    if (sampled != S_OK) return false;
+    for (const auto& factory : reader_factories_) {
+        void* creator = ResolveCategoryInterface(factory.module_index,
+            factory.enumeration_index, kReaderCreatorCategory, factory.provider);
+        if (!creator) continue;
+        void* probe{};
+        bool matched{};
+        if (InvokeQueryInterface(creator, ttp::format::iid_probe, &probe) == S_OK && probe) {
+            ttp::format::Result result;
+            matched = InvokeFormatProbe(probe, &snapshot.request, &result) == S_OK &&
+                ttp::format::Valid(result) && result.confidence >= ttp::format::Tentative;
+        }
+        if (probe) Release(probe);
+        Release(creator);
+        if (matched) return true;
+    }
+    return false;
+}
+
 std::unique_ptr<LegacyReaderSession> PluginManager::OpenReader(
     const std::filesystem::path& path, HRESULT* result,
     std::wstring* diagnostic) const {
@@ -2308,7 +2362,14 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderWithFlags(
     // 004CBC1F uses 004CBA11's corrected hint to select creators, while the
     // IStream/Stat filename remains the real file (also for archive members).
     auto extension = audio::AudioExtensionHint(logical_path);
-    const HRESULT probed = audio::ProbeAudioFormatHint(stream, extension);
+    ttp::format::Snapshot snapshot;
+    const HRESULT probed = ttp::format::ReadSnapshot(stream, snapshot);
+    if (probed == S_OK) {
+        extension = audio::RecoverAudioFormatHint(extension,
+            {snapshot.request.data, snapshot.request.bytes});
+        const auto builtin = ttp::format::Identify(snapshot.request, ttp::format::Builtin);
+        if (builtin.confidence >= ttp::format::Strong) extension = builtin.extension;
+    }
     if (FAILED(probed)) {
         if (result) *result = probed;
         if (diagnostic) *diagnostic = L"probing reader input stream";
@@ -2318,8 +2379,33 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderWithFlags(
     routing_path.replace_extension(extension);
     HRESULT last_result = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
     bool matched{};
+    struct Candidate { const ReaderFactory* factory; unsigned priority; };
+    std::vector<Candidate> candidates;
     for (const auto& factory : reader_factories_) {
-        if (!PatternMatchesPath(factory.format.pattern, routing_path)) continue;
+        unsigned priority = PatternMatchesPath(factory.format.pattern, routing_path) ? 1 : 0;
+        if (probed == S_OK) {
+            void* creator = ResolveCategoryInterface(factory.module_index,
+                factory.enumeration_index, kReaderCreatorCategory, factory.provider);
+            if (creator) {
+                void* probe{};
+                if (InvokeQueryInterface(creator, ttp::format::iid_probe, &probe) == S_OK && probe) {
+                    ttp::format::Result detected;
+                    if (InvokeFormatProbe(probe, &snapshot.request, &detected) == S_OK &&
+                        ttp::format::Valid(detected)) {
+                        if (detected.confidence == ttp::format::Strong) priority = 3;
+                        else if (detected.confidence == ttp::format::Tentative) priority = 2;
+                    }
+                }
+                if (probe) Release(probe);
+                Release(creator);
+            }
+        }
+        if (priority) candidates.push_back({&factory, priority});
+    }
+    std::stable_sort(candidates.begin(), candidates.end(),
+        [](const Candidate& a, const Candidate& b) { return a.priority > b.priority; });
+    for (const auto& candidate : candidates) {
+        const auto& factory = *candidate.factory;
         matched = true;
 
         void* creator = ResolveCategoryInterface(
@@ -2516,8 +2602,18 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderWithFlags(
             while (!codec.empty() && iswspace(codec.back())) codec.pop_back();
         }
 
+        std::optional<ttp::format::Result> detected_format;
+        void* format_info{};
+        if (InvokeQueryInterface(reader, ttp::format::iid_info, &format_info) == S_OK && format_info) {
+            ttp::format::Result detected;
+            if (InvokeFormatInfo(format_info, &detected) == S_OK &&
+                ttp::format::Valid(detected) && detected.confidence == ttp::format::Opened)
+                detected_format = detected;
+        }
+        if (format_info) Release(format_info);
         try {
             auto implementation = std::make_unique<LegacyReaderSession::Impl>();
+            implementation->detected_format = detected_format;
             // Transfer ownership immediately: any later string/path allocation
             // failure now releases the private reader through Impl::~Impl.
             implementation->reader = reader;

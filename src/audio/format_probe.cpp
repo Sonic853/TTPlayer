@@ -1,4 +1,5 @@
 #include "ttplayer/audio/format_probe.h"
+#include <ttpcomm/audio_format_probe_impl.h>
 
 #include <algorithm>
 #include <array>
@@ -87,29 +88,59 @@ std::wstring RecoverAudioFormatHint(
     return result;
 }
 
-HRESULT ProbeAudioFormatHint(const std::filesystem::path& path, std::wstring& extension) {
+HRESULT ProbeAudioFormatHint(const std::filesystem::path& path, std::wstring& extension,
+                             ttp::format::Result* builtin) {
+    if (builtin) *builtin = {};
     extension = AudioExtensionHint(path);
     if (path.native().find(L"://") != std::wstring::npos) return S_FALSE;
     const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return HRESULT_FROM_WIN32(GetLastError());
-    std::array<unsigned char, 4096> header{};
+    std::array<unsigned char, 8192> header{};
     DWORD count{};
-    BOOL read = ReadFile(file, header.data(), 16, &count, nullptr);
-    if (read && count == 16 && header[0] == 0x1a && header[1] == 0x45 && header[2] == 0xdf && header[3] == 0xa3) {
-        DWORD extra{};
-        read = ReadFile(file, header.data() + count, static_cast<DWORD>(header.size()) - count, &extra, nullptr);
-        count += extra;
+    BOOL read = ReadFile(file, header.data(), static_cast<DWORD>(header.size()), &count, nullptr);
+    if (read) extension = RecoverAudioFormatHint(extension, {header.data(), count});
+    LARGE_INTEGER size{};
+    ttp::format::Request request;
+    if (GetFileSizeEx(file, &size)) request.file_size = size.QuadPart;
+    if (read && Id3Header({header.data(), count})) {
+        const uint64_t offset = 10ull + (uint64_t(header[6]) << 21) +
+            (uint64_t(header[7]) << 14) + (uint64_t(header[8]) << 7) + header[9] +
+            (header[3] == 4 && (header[5] & 16) ? 10 : 0);
+        if (offset <= 1024 * 1024 && offset < request.file_size) {
+            LARGE_INTEGER at{}; at.QuadPart = offset;
+            read = SetFilePointerEx(file, at, nullptr, FILE_BEGIN) &&
+                ReadFile(file, header.data(), static_cast<DWORD>(header.size()), &count, nullptr);
+            request.data_offset = offset;
+        }
     }
     const HRESULT status = read ? S_OK : HRESULT_FROM_WIN32(GetLastError());
     CloseHandle(file);
-    if (SUCCEEDED(status)) extension = RecoverAudioFormatHint(extension, {header.data(), count});
+    if (SUCCEEDED(status)) {
+        request.data = header.data(); request.bytes = count;
+        const auto detected = ttp::format::Identify(request, ttp::format::Builtin);
+        if (builtin) *builtin = detected;
+        if (detected.confidence >= ttp::format::Strong) extension = detected.extension;
+    }
     return status;
 }
 
-HRESULT ProbeAudioFormatHint(IStream* stream, std::wstring& extension) {
+HRESULT ProbeAudioFormatHint(IStream* stream, std::wstring& extension,
+                             ttp::format::Result* builtin) {
+    if (builtin) *builtin = {};
     if (!stream) return E_POINTER;
+    ttp::format::Snapshot snapshot;
+    const auto sampled = ttp::format::ReadSnapshot(stream, snapshot);
+    if (FAILED(sampled)) return sampled;
+    if (sampled == S_OK) {
+        extension = RecoverAudioFormatHint(extension,
+            {snapshot.request.data, snapshot.request.bytes});
+        const auto detected = ttp::format::Identify(snapshot.request, ttp::format::Builtin);
+        if (builtin) *builtin = detected;
+        if (detected.confidence >= ttp::format::Strong) extension = detected.extension;
+        return S_OK;
+    }
     LARGE_INTEGER zero{};
     ULARGE_INTEGER saved{};
     HRESULT status = stream->Seek(zero, STREAM_SEEK_CUR, &saved);

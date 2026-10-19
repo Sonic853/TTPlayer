@@ -11,6 +11,11 @@ media library, tags, CD/VCD, URL, associations, settings and startup is in
 [`MAJOR_FEATURE_RECOVERY.md`](docs/MAJOR_FEATURE_RECOVERY.md).
 Build instructions and recovery documentation are collected in [docs/](docs/).
 
+For a new standalone audio decoder plugin, start with the
+[audio plugin development guide](docs/AUDIO_PLUGIN_DEVELOPMENT_GUIDE.md).
+The [format probe implementation report](docs/AUDIO_FORMAT_PROBE_IMPLEMENTATION_20261020.md)
+describes optional detection interfaces, extension correction and compatibility tests.
+
 The player no longer requires sidecar helper EXEs. File metadata/cover/tag jobs,
 DSP discovery/configuration and output-device discovery/details are embedded
 private modes of the player EXE, with process isolation retained. The original
@@ -119,7 +124,7 @@ features are selected at runtime. The player EXE does not require the modern VC+
 original add-ins can still require their own VC++ 2012 x86 runtime.
 See [unified build changes and system feature matrix](docs/UNIFIED_WINDOWS_BUILD.md).
 
-Release runs also provide `CodecAddIn-Rebuild-<version>.zip` (six codec add-ins)
+Release runs also provide `CodecAddIn-Rebuild-<version>.zip` (14 codec add-ins)
 and `ExtraAddIn-<version>.zip` (Winamp skins, MAKI, and translations), downloaded
 from each component's latest stable GitHub release. Both GitHub and Gitee receive
 the same bundles. Close the player, merge `AddIn`, and place `i18n` beside the EXE.
