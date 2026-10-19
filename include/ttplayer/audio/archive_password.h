@@ -5,6 +5,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <cstdint>
+#include <vector>
 #include <ttpcomm/archive_api.h>
 
 namespace ttplayer::audio {
@@ -35,6 +37,12 @@ using ArchiveVolumePrompt=std::function<std::optional<std::filesystem::path>(
 void ConfigureArchiveVolumes(ArchiveVolumePrompt prompt={});
 void DiscardArchiveVolumes(const std::filesystem::path& archive);
 void AliasArchiveSession(const std::filesystem::path& before,const std::filesystem::path& after);
+// Cache provenance: no password bytes escape through this API. Configuration,
+// accepted credentials, volume remapping and integrity failures advance the epoch.
+struct ArchiveVolumeMappingIdentity { std::filesystem::path expected, actual; };
+uint64_t ArchiveSessionGeneration() noexcept;
+std::vector<ArchiveVolumeMappingIdentity> ArchiveSessionVolumeMappings(
+    const std::filesystem::path& archive);
 // Synchronous ABI 3 calls only: canceled must outlive the function call.
 TtpCommArchiveVolumeOptions ArchiveVolumeOptions(const std::function<bool()>* canceled);
 }

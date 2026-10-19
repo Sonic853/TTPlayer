@@ -25,6 +25,7 @@ namespace ttplayer::testing { struct ProgressSeekAccess; struct MidiPlaybackAcce
 
 namespace ttplayer::audio {
 class WinampDspChain;
+class ArchivePlaybackSession;
 enum class PlaybackState { stopped, opening, playing, paused, failed };
 
 struct PlaybackClockSnapshot {
@@ -153,6 +154,11 @@ struct PlaybackOptions {
     // HTTP I/O runs on decoder threads; cancellation is observed during every
     // async wait, including Open. This callback must outlive the source.
     std::function<bool()> network_canceled;
+    // An explicitly handed-off archive consumer survives the outgoing reader's
+    // cancellation. It is never used for a different backing member.
+    std::shared_ptr<ArchivePlaybackSession> archive_session;
+    // Publish the backing member before a far CUE position waits for bytes.
+    std::function<void(const std::shared_ptr<ArchivePlaybackSession>&)> archive_opened;
     int network_timeout_ms{15000};
     int network_proxy_type{1}, network_proxy_port{};
     std::wstring network_proxy_server, network_proxy_username, network_proxy_password;
@@ -191,6 +197,7 @@ public:
     // Content downloaded, not the short playout buffer; -1 means unavailable.
     // Queried on the decoder thread. UI consumes the engine's atomic snapshot.
     virtual int DownloadedPercent() { return -1; }
+    [[nodiscard]] virtual std::shared_ptr<ArchivePlaybackSession> ArchiveSession() const { return {}; }
     [[nodiscard]] virtual const WAVEFORMATEX& OutputFormat() const = 0;
     [[nodiscard]] virtual AudioFormat DisplayFormat() const = 0;
     [[nodiscard]] virtual std::chrono::milliseconds Duration() const = 0;
@@ -224,6 +231,8 @@ public:
     AudioEngine& operator=(const AudioEngine&) = delete;
 
     bool Play(const std::filesystem::path& path, int subtrack = 0);
+    void PrepareArchiveTrackChange(const std::filesystem::path& path, int subtrack);
+    void CancelArchiveTrackChange();
     // A stable second session lets the old sound finish its stop fade while
     // the new sound opens/fades in (CPlayerWnd +0x4344 / +0x4348).
     [[nodiscard]] std::shared_ptr<AudioEngine> CreateSuccessor() const;
@@ -231,7 +240,7 @@ public:
     // WaveOut volume can be shared across handles. Fade on the current
     // handle, then let the UI open the successor after TryReapStopped().
     [[nodiscard]] bool BeginWaveOutTrackChange();
-    void StopAsync() noexcept { RequestStop(); }
+    void StopAsync() noexcept;
     [[nodiscard]] bool TryReapStopped() noexcept;
     bool PlayWave(const std::filesystem::path& path) { return Play(path); }
     // Device-page changes reopen the current source with a new output object.
@@ -254,7 +263,7 @@ public:
     // Close starts the same fade but must not synchronously stop when the
     // option/backend/state gate is false. The window message loop polls the
     // lock-free flag while continuing to dispatch paint/timer messages.
-    [[nodiscard]] bool BeginStopFade(bool detach_dsp = false);
+    [[nodiscard]] bool BeginStopFade(bool detach_dsp = false, bool preserve_archive = false);
     [[nodiscard]] bool StopFadePending() const noexcept {
         return stop_fade_pending_.load(std::memory_order_acquire);
     }
@@ -279,7 +288,7 @@ public:
     [[nodiscard]] static bool IsRecoveredFormatPath(const std::filesystem::path& path);
     [[nodiscard]] static bool IsNetworkMediaLocation(
         const std::filesystem::path& path) noexcept;
-    [[nodiscard]] PlaybackState State() const noexcept { return state_.load(); }
+    [[nodiscard]] PlaybackState State() const noexcept;
     // Read position and its seek generation together: even a one-millisecond
     // seek must be distinguishable from an ordinary output-clock refresh.
     [[nodiscard]] PlaybackClockSnapshot ClockSnapshot() const;
@@ -294,7 +303,7 @@ public:
     [[nodiscard]] std::chrono::milliseconds Duration() const noexcept {
         return std::chrono::milliseconds(duration_ms_.load());
     }
-    [[nodiscard]] int DownloadedPercent() const noexcept { return downloaded_percent_.load(); }
+    [[nodiscard]] int DownloadedPercent() const noexcept;
     [[nodiscard]] std::wstring LastError() const;
     [[nodiscard]] HRESULT LastErrorResult() const;
     // Successful fallback is intentionally separate from LastError: choosing
@@ -319,8 +328,10 @@ private:
         int64_t position_ms{-1};
         uint64_t revision{};
     };
-    void PlaybackWorker(std::filesystem::path path, int subtrack);
-    void WaveOutWorker(const std::filesystem::path& path, int subtrack);
+    void PlaybackWorker(std::filesystem::path path, int subtrack,
+                        std::shared_ptr<ArchivePlaybackSession> archive = {});
+    void WaveOutWorker(const std::filesystem::path& path, int subtrack,
+                       std::shared_ptr<ArchivePlaybackSession> archive = {});
     struct LyricWriteRequest {
         std::wstring text;
         HRESULT result{E_PENDING};
@@ -379,6 +390,7 @@ private:
     std::wstring diagnostic_;
     AudioFormat format_{};
     AudioMetadata metadata_{};
+    std::shared_ptr<ArchivePlaybackSession> archive_session_, archive_handoff_;
     std::atomic<uint64_t> metadata_revision_{};
     mutable std::mutex visualization_mutex_;
     VisualizationSamples visualization_{};

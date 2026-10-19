@@ -13,6 +13,11 @@ namespace ttplayer::audio {
 
 using CueMetadata = std::vector<std::pair<std::wstring, std::wstring>>;
 
+// 004E2F69 rounds each 75 fps endpoint to the nearest millisecond. This is
+// display time only; PCM positioning and clipping must keep the frame values.
+// Values outside the signed millisecond range saturate instead of overflowing.
+[[nodiscard]] std::int64_t CueFrameToMilliseconds(std::uint64_t frame) noexcept;
+
 struct CueTrack {
     int number{}; // One-based position in the parsed array (004DD69E/004E323B).
     std::filesystem::path audio_path;

@@ -2,6 +2,7 @@
 #include "ttplayer/audio/archive_password.h"
 #include "ttplayer/audio/osz_archive.h"
 #include <ttpcomm/archive_format.h>
+#include <ttpcomm/archive_volumes.h>
 
 #include <ttpcomm/runtime_client.h>
 
@@ -12,9 +13,119 @@
 #include <wrl/client.h>
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <list>
 
 namespace ttplayer::audio {
+class ArchiveCacheIdentityState {
+public:
+    struct File { std::filesystem::path path; BY_HANDLE_FILE_INFORMATION info{}; uint64_t change{}; };
+    std::filesystem::path source, first;
+    uint64_t generation{}; size_t cost{sizeof(ArchiveCacheIdentityState)};
+    std::vector<File> files;
+    std::vector<ArchiveVolumeMappingIdentity> mappings;
+};
 namespace {
+constexpr size_t kSmallCacheBytes = 16U * 1024 * 1024;
+constexpr size_t kSmallMemberBytes = 4U * 1024 * 1024;
+constexpr size_t kDirectoryCacheBytes = 4U * 1024 * 1024;
+constexpr size_t kCacheEntries = 128, kArchiveIdentities = 32;
+struct SmallMemberCacheEntry {
+    ArchiveCacheIdentity identity; std::wstring member; std::vector<unsigned char> bytes; size_t cost{};
+};
+struct DirectoryCacheEntry {
+    ArchiveCacheIdentity identity; std::vector<std::wstring> names; size_t cost{};
+};
+std::mutex small_cache_mutex;
+std::list<ArchiveCacheIdentity> archive_identities;
+std::list<std::shared_ptr<const SmallMemberCacheEntry>> small_members;
+std::list<std::shared_ptr<const DirectoryCacheEntry>> small_directories;
+size_t small_member_bytes{}, small_directory_bytes{}, identity_bytes{};
+void CheckCacheCancellation(const std::function<bool()>& canceled) {
+    if(canceled && canceled())throw ArchiveError(HRESULT_FROM_WIN32(ERROR_CANCELLED));
+}
+std::filesystem::path CacheArchivePath(const std::filesystem::path& path) {
+    const auto outer=path.native().substr(0,path.native().find(L'|'));
+    const auto canonical=ttpcomm::archive_format::Canonical(outer.c_str());
+    std::error_code error;auto full=std::filesystem::absolute(canonical,error);
+    return (error?std::filesystem::path(canonical):full).lexically_normal();
+}
+bool EqualCachePath(const std::filesystem::path& a,const std::filesystem::path& b) {
+    return !_wcsicmp(a.c_str(),b.c_str());
+}
+std::wstring CacheMemberName(std::wstring name) {
+    std::replace(name.begin(),name.end(),L'/',L'\\');return name;
+}
+bool FileStamp(const std::filesystem::path& path,ArchiveCacheIdentityState::File& out) {
+    const HANDLE file=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
+    if(file==INVALID_HANDLE_VALUE)return false;
+    const bool okay=GetFileInformationByHandle(file,&out.info)!=FALSE &&
+        !(out.info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY);
+    out.change=ttpcomm::archive_volumes::ChangeTime(file);CloseHandle(file);out.path=path;
+    return okay && out.change!=0;
+}
+bool SameFileStamp(const ArchiveCacheIdentityState::File& a,const ArchiveCacheIdentityState::File& b) {
+    return a.change==b.change && a.info.dwVolumeSerialNumber==b.info.dwVolumeSerialNumber &&
+        a.info.nFileIndexHigh==b.info.nFileIndexHigh && a.info.nFileIndexLow==b.info.nFileIndexLow &&
+        a.info.nFileSizeHigh==b.info.nFileSizeHigh && a.info.nFileSizeLow==b.info.nFileSizeLow &&
+        CompareFileTime(&a.info.ftLastWriteTime,&b.info.ftLastWriteTime)==0 &&
+        CompareFileTime(&a.info.ftCreationTime,&b.info.ftCreationTime)==0;
+}
+ArchiveCacheIdentity FindCacheIdentity(const std::filesystem::path& path,const std::function<bool()>& canceled) {
+    std::vector<ArchiveCacheIdentity> candidates;
+    {std::lock_guard lock(small_cache_mutex);for(const auto& item:archive_identities)
+        if(EqualCachePath(item->source,path))candidates.push_back(item);}
+    for(const auto& item:candidates)if(ArchiveCacheIdentityFresh(item,canceled))return item;
+    return {};
+}
+void RememberCacheIdentity(const ArchiveCacheIdentity& identity) {
+    if(!identity)return;std::lock_guard lock(small_cache_mutex);
+    for(auto i=archive_identities.begin();i!=archive_identities.end();)if(EqualCachePath((*i)->source,identity->source)){
+        identity_bytes-=(*i)->cost;i=archive_identities.erase(i);}else ++i;
+    identity_bytes+=identity->cost;archive_identities.push_front(identity);
+    while(archive_identities.size()>kArchiveIdentities || identity_bytes>4U*1024*1024){identity_bytes-=archive_identities.back()->cost;archive_identities.pop_back();}
+}
+void RememberSmallMember(const ArchiveCacheIdentity& identity,const std::wstring& member,
+                         const std::vector<unsigned char>& bytes,const std::function<bool()>& canceled) {
+    if(!identity || bytes.size()>kSmallMemberBytes || !ArchiveCacheIdentityFresh(identity,canceled))return;
+    const size_t cost=sizeof(SmallMemberCacheEntry)+identity->cost+(member.size()+1)*sizeof(wchar_t)+bytes.size();
+    if(cost>kSmallCacheBytes)return;
+    auto entry=std::make_shared<SmallMemberCacheEntry>();entry->identity=identity;entry->member=member;entry->bytes=bytes;entry->cost=cost;
+    CheckCacheCancellation(canceled);std::lock_guard lock(small_cache_mutex);
+    for(auto i=small_members.begin();i!=small_members.end();)if(EqualCachePath((*i)->identity->source,identity->source) &&
+        !_wcsicmp((*i)->member.c_str(),member.c_str())){small_member_bytes-=(*i)->cost;i=small_members.erase(i);}else ++i;
+    while(!small_members.empty() && (small_members.size()>=kCacheEntries || small_member_bytes+cost>kSmallCacheBytes)){
+        small_member_bytes-=small_members.back()->cost;small_members.pop_back();}
+    small_member_bytes+=cost;small_members.push_front(std::move(entry));
+}
+bool FindCachedDirectory(const std::filesystem::path& path,std::vector<std::wstring>& names,
+                         ArchiveCacheIdentity& identity,const std::function<bool()>& canceled) {
+    std::vector<std::shared_ptr<const DirectoryCacheEntry>> candidates;
+    {std::lock_guard lock(small_cache_mutex);for(const auto& item:small_directories)
+        if(EqualCachePath(item->identity->source,path))candidates.push_back(item);}
+    for(const auto& item:candidates)if(ArchiveCacheIdentityFresh(item->identity,canceled)){
+        names=item->names;identity=item->identity;CheckCacheCancellation(canceled);
+        std::lock_guard lock(small_cache_mutex);auto at=std::find(small_directories.begin(),small_directories.end(),item);
+        if(at!=small_directories.end())small_directories.splice(small_directories.begin(),small_directories,at);return true;
+    }
+    return false;
+}
+void RememberDirectory(const ArchiveCacheIdentity& identity,const std::vector<std::wstring>& names,
+                       const std::function<bool()>& canceled) {
+    if(!identity || !ArchiveCacheIdentityFresh(identity,canceled))return;
+    size_t cost=sizeof(DirectoryCacheEntry)+identity->cost;if(cost>kDirectoryCacheBytes)return;for(const auto& n:names){
+        const size_t bytes=sizeof(std::wstring)+(n.size()+1)*sizeof(wchar_t);
+        if(bytes>kDirectoryCacheBytes-cost)return;cost+=bytes;}
+    auto entry=std::make_shared<DirectoryCacheEntry>();entry->identity=identity;entry->names=names;entry->cost=cost;
+    CheckCacheCancellation(canceled);std::lock_guard lock(small_cache_mutex);
+    for(auto i=small_directories.begin();i!=small_directories.end();)if(EqualCachePath((*i)->identity->source,identity->source)){
+        small_directory_bytes-=(*i)->cost;i=small_directories.erase(i);}else ++i;
+    while(!small_directories.empty() && (small_directories.size()>=kArchiveIdentities || small_directory_bytes+cost>kDirectoryCacheBytes)){
+        small_directory_bytes-=small_directories.back()->cost;small_directories.pop_back();}
+    small_directory_bytes+=cost;small_directories.push_front(std::move(entry));
+}
+
 
 bool HasCoverSignature(const std::vector<unsigned char>& bytes) {
     return (bytes.size() >= 24 && !memcmp(bytes.data(),"\x89PNG\r\n\x1a\n",8)) ||
@@ -173,6 +284,77 @@ IStream* OpenMember(const ArchiveMemberPath& path,HMODULE module,
 
 } // namespace
 
+namespace {
+bool CacheIdentityFilesFresh(const ArchiveCacheIdentity& identity,const std::function<bool()>& canceled) noexcept {
+    try {
+        if(!identity || identity->files.empty())return false;
+        for(const auto& file:identity->files){CheckCacheCancellation(canceled);ArchiveCacheIdentityState::File current;
+            if(!FileStamp(file.path,current) || !SameFileStamp(file,current))return false;}
+        // A volume restored at its expected path takes precedence over a prior
+        // replacement even when the previously selected replacement is intact.
+        for(const auto& mapping:identity->mappings)if(!EqualCachePath(mapping.expected,mapping.actual)){
+            CheckCacheCancellation(canceled);const auto attributes=GetFileAttributesW(mapping.expected.c_str());
+            if(attributes!=INVALID_FILE_ATTRIBUTES && !(attributes&FILE_ATTRIBUTE_DIRECTORY))return false;
+        }
+        CheckCacheCancellation(canceled);return true;
+    }catch(...){return false;}
+}
+}
+bool ArchiveCacheIdentityFresh(const ArchiveCacheIdentity& identity,const std::function<bool()>& canceled) noexcept {
+    return identity && identity->generation==ArchiveSessionGeneration() &&
+        CacheIdentityFilesFresh(identity,canceled) && identity->generation==ArchiveSessionGeneration();
+}
+ArchiveCacheIdentity CaptureArchiveCacheIdentity(const std::filesystem::path& archive,HMODULE module,
+                                               const std::function<bool()>& canceled) {
+    CheckCacheCancellation(canceled);const auto source=CacheArchivePath(archive);
+    if(auto known=FindCacheIdentity(source,canceled))return known;
+    const auto group=GroupApi(module);if(!group.volumes)return {};
+    std::vector<std::wstring> actual;auto volumes=ArchiveVolumeOptions(&canceled);
+    const auto hr=WithArchivePassword(source,[&](const wchar_t* password){
+        actual.clear();TtpCommArchiveOptions limits{};limits.size=sizeof(limits);limits.password=password;
+        limits.context=const_cast<std::function<bool()>*>(&canceled);
+        limits.progress=[](void* p,uint64_t,uint64_t)->BOOL{const auto& stop=*static_cast<std::function<bool()>*>(p);return !stop || !stop();};
+        return group.volumes(source.c_str(),&limits,&volumes,[](void* p,const wchar_t* path)->BOOL{
+            try{auto& files=*static_cast<std::vector<std::wstring>*>(p);if(files.size()>=4096)return FALSE;files.emplace_back(path);return TRUE;}catch(...){return FALSE;}
+        },&actual);
+    },canceled);
+    if(FAILED(hr))throw ArchiveError(hr);CheckCacheCancellation(canceled);if(actual.empty())return {};
+    auto result=std::make_shared<ArchiveCacheIdentityState>();result->source=source;result->first=actual.front();
+    result->generation=ArchiveSessionGeneration();result->mappings=ArchiveSessionVolumeMappings(source);
+    // Keep only mappings actually used by this volume set. A restored expected
+    // file supersedes a stale session replacement without disabling caching.
+    std::erase_if(result->mappings,[&](const auto& mapping){
+        const auto contains=[&](const auto& path){return std::any_of(actual.begin(),actual.end(),[&](const auto& file){return EqualCachePath(file,path);});};
+        return !contains(mapping.actual) || contains(mapping.expected);
+    });
+    result->cost+=(result->source.native().size()+result->first.native().size()+2)*sizeof(wchar_t);
+    for(const auto& m:result->mappings)result->cost+=sizeof(m)+(m.expected.native().size()+m.actual.native().size()+2)*sizeof(wchar_t);
+    if(result->cost>512U*1024)return {};
+    for(const auto& file:actual){CheckCacheCancellation(canceled);ArchiveCacheIdentityState::File stamp;
+        if(!FileStamp(file,stamp))return {};
+        result->cost+=sizeof(stamp)+(stamp.path.native().size()+1)*sizeof(wchar_t);
+        if(result->cost>512U*1024)return {};
+        result->files.push_back(std::move(stamp));}
+    if(!ArchiveCacheIdentityFresh(result,canceled))return {};
+    RememberCacheIdentity(result);return result;
+}
+bool TryReadCachedArchiveMember(const ArchiveMemberPath& path,std::vector<unsigned char>& bytes,
+                               ArchiveCacheIdentity* identity,const std::function<bool()>& canceled) noexcept {
+    bytes.clear();if(identity)identity->reset();
+    try {
+        CheckCacheCancellation(canceled);const auto source=CacheArchivePath(path.archive);const auto name=CacheMemberName(path.member);
+        std::vector<std::shared_ptr<const SmallMemberCacheEntry>> candidates;
+        {std::lock_guard lock(small_cache_mutex);for(const auto& item:small_members)
+            if(EqualCachePath(item->identity->source,source) && !_wcsicmp(item->member.c_str(),name.c_str()))candidates.push_back(item);}
+        for(const auto& item:candidates)if(ArchiveCacheIdentityFresh(item->identity,canceled)){
+            bytes=item->bytes;CheckCacheCancellation(canceled);if(identity)*identity=item->identity;
+            std::lock_guard lock(small_cache_mutex);auto at=std::find(small_members.begin(),small_members.end(),item);
+            if(at!=small_members.end())small_members.splice(small_members.begin(),small_members,at);return true;
+        }
+    }catch(...){bytes.clear();if(identity)identity->reset();}
+    return false;
+}
+
 ArchiveError::ArchiveError(HRESULT result)
     : std::runtime_error("Archive operation failed: " + std::to_string(static_cast<unsigned long>(result))),result_(result) {}
 
@@ -263,12 +445,19 @@ std::filesystem::path MakeArchiveMemberPath(
 
 IStream* OpenArchiveMemberStream(const ArchiveMemberPath& path, HMODULE ttpcomm,
                                  const std::function<bool()>& canceled) {
+    // Seed known volume identity before a producer takes the RAR engine lock.
+    // Cached CUE/directory lookups then need only filesystem stamp checks.
+    static_cast<void>(CaptureArchiveCacheIdentity(path.archive,ttpcomm,canceled));
     return OpenMember(path,ttpcomm,canceled,true,0);
 }
 
 std::vector<unsigned char> ReadArchiveMember(const ArchiveMemberPath& path, HMODULE ttpcomm,
                                              const std::function<bool()>& canceled) {
-    // Text reads must not evict the shared backing audio of adjacent CUE rows.
+    std::vector<unsigned char> cached;
+    if(TryReadCachedArchiveMember(path,cached,nullptr,canceled))return cached;
+    CheckCacheCancellation(canceled);
+    auto identity=CaptureArchiveCacheIdentity(path.archive,ttpcomm,canceled);
+    // Text/image reads must not evict the shared backing audio of adjacent CUE rows.
     constexpr uint64_t limit=16ULL*1024*1024;
     Microsoft::WRL::ComPtr<IStream> stream;
     stream.Attach(OpenMember(path,ttpcomm,canceled,false,limit));
@@ -280,6 +469,14 @@ std::vector<unsigned char> ReadArchiveMember(const ArchiveMemberPath& path, HMOD
     if(FAILED(result) || read!=bytes.size()) throw ArchiveError(FAILED(result) ? result : STG_E_READFAULT);
     unsigned char end{};result=stream->Read(&end,1,&read); // Empty members also require final verification.
     if(FAILED(result) || read)throw ArchiveError(FAILED(result)?result:STG_E_READFAULT);
+    CheckCacheCancellation(canceled);
+    // Credential acceptance during extraction can advance the session epoch.
+    // Refresh only after this small member has fully passed CRC/authentication.
+    if(!ArchiveCacheIdentityFresh(identity,canceled)) {
+        if(CacheIdentityFilesFresh(identity,canceled))identity=CaptureArchiveCacheIdentity(path.archive,ttpcomm,canceled);
+        else identity.reset();
+    }
+    RememberSmallMember(identity,CacheMemberName(path.member),bytes,canceled);
     return bytes;
 }
 
@@ -327,6 +524,15 @@ std::vector<unsigned char> ReadArchiveSidecarCover(const std::filesystem::path& 
 std::vector<std::wstring> ListArchiveMembers(const std::filesystem::path& archive, HMODULE ttpcomm,
     const std::function<bool()>& canceled, const std::function<void(uint64_t,uint64_t)>& progress,
     std::filesystem::path* resolved_archive) {
+    CheckCacheCancellation(canceled);
+    std::vector<std::wstring> cached;ArchiveCacheIdentity identity;
+    const auto source=CacheArchivePath(archive);
+    if(FindCachedDirectory(source,cached,identity,canceled)){
+        if(progress)progress(cached.size(),cached.size());CheckCacheCancellation(canceled);
+        if(resolved_archive){AliasArchiveSession(archive,identity->first);*resolved_archive=identity->first;}
+        return cached;
+    }
+    identity=CaptureArchiveCacheIdentity(archive,ttpcomm,canceled);
     std::filesystem::path resolved=archive;
     struct Context {
         std::vector<std::wstring> names; std::exception_ptr error;
@@ -368,6 +574,12 @@ std::vector<std::wstring> ListArchiveMembers(const std::filesystem::path& archiv
     if(context.error) std::rethrow_exception(context.error);
     if(FAILED(result)){if(result!=TTPCOMM_ARCHIVE_PASSWORD && result!=TTPCOMM_ARCHIVE_BAD_PASSWORD)DiscardArchiveVolumes(archive);throw ArchiveError(result);}
     if(resolved_archive){AliasArchiveSession(archive,resolved);*resolved_archive=std::move(resolved);}
+    CheckCacheCancellation(canceled);
+    if(!ArchiveCacheIdentityFresh(identity,canceled)) {
+        if(CacheIdentityFilesFresh(identity,canceled))identity=CaptureArchiveCacheIdentity(archive,ttpcomm,canceled);
+        else identity.reset();
+    }
+    RememberDirectory(identity,context.names,canceled);
     // 00473338 and 00474051 retain the archive's order. Never alphabetize here.
     return std::move(context.names);
 }

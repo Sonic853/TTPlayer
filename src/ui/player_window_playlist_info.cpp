@@ -4,6 +4,7 @@
 
 #include "ttplayer/core/text.h"
 #include "ttplayer/audio/archive_member.h"
+#include "ttplayer/audio/archive_verified_info.h"
 
 #include <algorithm>
 #include <chrono>
@@ -79,6 +80,41 @@ PlaylistInfoResult ReadPlaylistInfoIsolated(
     result.row_hint = row_hint;
     result.path = path;
     result.subtrack = subtrack;
+
+    // The foreground WAV stream and isolated information worker otherwise
+    // inflate the same archive member into two separate process-local tasks.
+    // Reuse only complete, identity-checked foreground results; third-party
+    // readers and all cache misses retain the existing isolation boundary.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    for (;;) {
+        if (stop.stop_requested()) {
+            result.state = PlaylistInfoState::unavailable;
+            return result;
+        }
+        if (auto info = audio::TryReadVerifiedArchiveInfo(path, subtrack)) {
+            detail::FileInfoProbeReadResult probe;
+            probe.status = S_OK;
+            probe.capabilities = info->capabilities;
+            probe.format = info->format;
+            probe.duration_ms = info->duration_ms;
+            probe.encoded_bits_per_second = info->encoded_bits_per_second;
+            probe.codec = std::move(info->codec);
+            for (auto& field : info->metadata)
+                probe.metadata.push_back({std::move(field.name), std::move(field.value)});
+            result.state = detail::ApplyFileInfoProbeToTrack(
+                result, std::move(probe), detail::FileInfoProbeProcessState::completed);
+            return result;
+        }
+        if (!audio::IsArchiveInfoVerificationPending(path, subtrack)) break;
+        if (std::chrono::steady_clock::now() >= deadline) {
+            // Completion can reach 100% just before final metadata publishes.
+            // Keep the row unread and retry through the normal queue timer;
+            // never start a duplicate helper merely because that job is slow.
+            result.state = PlaylistInfoState::unavailable;
+            return result;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 
     detail::FileInfoProbeProcessState process_state{};
     const auto probe = session.Read(

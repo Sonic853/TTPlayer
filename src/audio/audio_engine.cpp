@@ -9,6 +9,7 @@
 #include "ttplayer/audio/midi_player.h"
 #include "ttplayer/audio/playback_clock.h"
 #include "ttplayer/audio/archive_member.h"
+#include "ttplayer/audio/archive_verified_info.h"
 #include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/audio/cda_source.h"
 #include "ttplayer/core/text.h"
@@ -60,6 +61,107 @@
 #include <dsound.h>
 
 namespace ttplayer::audio {
+// The archive task belongs to the playing session, not to one CUE slice.
+// Its independent cancellation context lets the next consumer take ownership
+// before the old decoder is stopped, including serialized WaveOut fades.
+class ArchivePlaybackSession final {
+public:
+    ArchivePlaybackSession(const std::filesystem::path& path, HMODULE comm,
+        ArchiveCacheIdentity identity, AudioMetadata initial, bool wave_tags)
+        : path_(path), comm_(comm), identity_(std::move(identity)),
+          metadata_(std::move(initial)), canceled_(std::make_shared<std::atomic_bool>()) {
+        ArchiveMemberPath member;
+        if (!ParseArchiveMemberPath(path.native(), member)) throw ArchiveError(E_INVALIDARG);
+        stream_.Attach(OpenArchiveMemberStream(member, comm,
+            [cancel = canceled_] { return cancel->load(); }));
+        auto pending = wave_tags ? BeginArchiveInfoVerification(path, identity_) : ArchiveInfoVerification{};
+        worker_ = std::jthread([this, wave_tags, pending = std::move(pending)](std::stop_token stop) mutable {
+            const auto canceled = [&] { return stop.stop_requested() || canceled_->load(); };
+            try {
+                HRESULT status{};
+                while (!canceled()) {
+                    const auto percent = ArchiveMemberProgress(stream_.Get(), comm_, &status);
+                    if (FAILED(status)) { result_ = status; return; }
+                    if (percent == 100) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                }
+                if (canceled()) return;
+                result_ = S_OK;
+                auto initial = Metadata();
+                if (wave_tags) {
+                    BuiltinFileInfo info;
+                    if (SUCCEEDED(ReadBuiltinStreamInfo(stream_.Get(), path_, {}, info))) {
+                        PublishVerifiedArchiveInfo(path_, info, identity_);
+                        for (const auto& field : info.metadata) {
+                            if (!_wcsicmp(field.name.c_str(), L"title")) initial.title = field.value;
+                            else if (!_wcsicmp(field.name.c_str(), L"artist")) initial.artist = field.value;
+                            else if (!_wcsicmp(field.name.c_str(), L"album")) initial.album = field.value;
+                            initial.entries.emplace_back(field.name, field.value);
+                        }
+                        if (!info.cover.empty()) initial.thumbnail = std::move(info.cover);
+                    }
+                }
+                // List information becomes reusable before optional sidecar I/O.
+                pending.reset();
+                if (canceled()) return;
+                if (initial.thumbnail.empty()) {
+                    try { initial.thumbnail = ReadArchiveSidecarCover(path_, comm_, canceled); }
+                    catch (const ArchiveError&) { /* Artwork is optional. */ }
+                }
+                if (canceled()) return;
+                initial.thumbnail_interface = true;
+                { std::scoped_lock lock(mutex_); metadata_ = std::move(initial); }
+                ++revision_;
+            } catch (...) { /* Metadata failure cannot invalidate verified PCM. */ }
+        });
+    }
+    ~ArchivePlaybackSession() {
+        *canceled_ = true;
+        if (worker_.joinable()) { worker_.request_stop(); worker_.join(); }
+        // Release with our cancellation already set so the last consumer
+        // cancels unfinished work rather than leaving a retained producer.
+        stream_.Reset();
+    }
+    bool Matches(const std::filesystem::path& path, int subtrack) const {
+        if (!ArchiveCacheIdentityFresh(identity_)) return false;
+        if (!_wcsicmp(path_.c_str(), path.c_str())) return true;
+        ArchiveMemberPath member;
+        if (!ParseArchiveMemberPath(path.native(), member) ||
+            _wcsicmp(std::filesystem::path(member.member).extension().c_str(), L".cue")) return false;
+        std::vector<unsigned char> bytes;
+        if (!TryReadCachedArchiveMember(member, bytes)) return false;
+        try {
+            const auto cue = CueSheet::LoadFromMemory(bytes, path);
+            const auto* track = subtrack > 0 ? cue.FindTrack(subtrack) :
+                cue.Tracks().empty() ? nullptr : &cue.Tracks().front();
+            if (track) {
+                const auto candidates = cue.AudioCandidates(*track);
+                // A fallback cannot outrank an explicit FILE we have not opened.
+                if (!candidates.empty() && !_wcsicmp(candidates.front().c_str(), path_.c_str())) return true;
+            }
+        } catch (...) {}
+        return false;
+    }
+    HRESULT Result() const noexcept {
+        HRESULT hr{};
+        (void)ArchiveMemberProgress(stream_.Get(), comm_, &hr);
+        return FAILED(hr) ? hr : result_.load();
+    }
+    AudioMetadata Metadata() const { std::scoped_lock lock(mutex_); return metadata_; }
+    uint64_t Revision() const noexcept { return revision_.load(); }
+    int Progress() const noexcept { return ArchiveMemberProgress(stream_.Get(), comm_); }
+private:
+    std::filesystem::path path_;
+    HMODULE comm_{};
+    ArchiveCacheIdentity identity_;
+    mutable std::mutex mutex_;
+    AudioMetadata metadata_;
+    std::atomic<uint64_t> revision_{};
+    std::atomic<HRESULT> result_{S_FALSE};
+    std::shared_ptr<std::atomic_bool> canceled_;
+    Microsoft::WRL::ComPtr<IStream> stream_;
+    std::jthread worker_;
+};
 namespace {
 
 // Decoder creation is synchronous from the caller's point of view, but it is
@@ -1091,17 +1193,26 @@ class RecoveredFileSource final : public DecodedAudioSource {
 public:
     RecoveredFileSource(const plugins::PluginManager* manager, HMODULE comm)
         : manager_(manager), comm_(comm) {}
-    ~RecoveredFileSource() override { StopMetadataWorker(); }
+    ~RecoveredFileSource() override {
+        // The independent consumer must be released last. If nobody inherited
+        // it, its explicit cancellation then reaches the final task consumer.
+        source_.reset();
+        archive_stream_.Reset();
+        archive_session_.reset();
+    }
     bool Open(const std::filesystem::path& path, const PlaybackOptions& options) override {
-        StopMetadataWorker();
-        source_.reset(); metadata_ = {}; error_.clear(); result_ = E_FAIL;
-        metadata_revision_ = 0;
+        source_.reset(); archive_stream_.Reset(); archive_session_.reset();
+        metadata_ = {}; error_.clear(); result_ = E_FAIL;
+        ArchiveCacheIdentity identity;
         metadata_override_ = false;
         ArchiveMemberPath member;
         const bool archive = ParseArchiveMemberPath(path.native(), member);
         archive_stream_.Reset();
         if(archive) {
-            try { archive_stream_.Attach(OpenArchiveMemberStream(member,comm_,options.network_canceled)); }
+            try {
+                identity = CaptureArchiveCacheIdentity(member.archive, comm_, options.network_canceled);
+                archive_stream_.Attach(OpenArchiveMemberStream(member,comm_,options.network_canceled));
+            }
             catch(const ArchiveError& e){error_=e.Message();result_=e.Result();return false;}
         }
         std::wstring hint = AudioExtensionHint(path);
@@ -1153,8 +1264,14 @@ public:
                 // never be a prerequisite for publishing the first PCM.
                 metadata_override_ = true;
                 metadata_.thumbnail_interface = true;
-                if (deferred_wave || metadata_.thumbnail.empty())
-                    StartMetadataWorker(path, options.network_canceled, deferred_wave);
+                if (options.archive_session && options.archive_session->Matches(path, 0))
+                    archive_session_ = options.archive_session;
+                else {
+                    try { archive_session_ = std::make_shared<ArchivePlaybackSession>(
+                        path, comm_, identity, metadata_, deferred_wave); }
+                    catch (const std::exception&) { /* Keep the decoder's cancellation/CRC checks. */ }
+                }
+                if (archive_session_ && options.archive_opened) options.archive_opened(archive_session_);
             }
             result_ = S_OK; error_.clear(); return true;
         };
@@ -1218,71 +1335,23 @@ public:
     AudioFormat DisplayFormat() const override { return source_ ? source_->DisplayFormat() : AudioFormat{}; }
     std::chrono::milliseconds Duration() const override { return source_ ? source_->Duration() : std::chrono::milliseconds{}; }
     int DownloadedPercent() override {return archive_stream_?ArchiveMemberProgress(archive_stream_.Get(),comm_):source_?source_->DownloadedPercent():-1;}
-    std::wstring Error() const override { return !error_.empty() ? error_ : source_ ? source_->Error() : error_; }
-    HRESULT ErrorResult() const override { return FAILED(result_) ? result_ : source_ ? source_->ErrorResult() : result_; }
+    std::wstring Error() const override {
+        if (archive_session_ && FAILED(archive_session_->Result())) return ArchiveError(archive_session_->Result()).Message();
+        return !error_.empty() ? error_ : source_ ? source_->Error() : error_;
+    }
+    HRESULT ErrorResult() const override {
+        if (archive_session_ && FAILED(archive_session_->Result())) return archive_session_->Result();
+        return FAILED(result_) ? result_ : source_ ? source_->ErrorResult() : result_;
+    }
     AudioMetadata Metadata() const override {
-        if (source_ && !metadata_override_) return source_->Metadata();
-        std::scoped_lock lock(metadata_mutex_);
-        return metadata_;
+        if (archive_session_) return archive_session_->Metadata();
+        return source_ && !metadata_override_ ? source_->Metadata() : metadata_;
     }
-    uint64_t MetadataRevision() const noexcept override { return metadata_revision_.load(); }
+    uint64_t MetadataRevision() const noexcept override {
+        return archive_session_ ? archive_session_->Revision() : 0;
+    }
+    std::shared_ptr<ArchivePlaybackSession> ArchiveSession() const override { return archive_session_; }
 private:
-    void StopMetadataWorker() {
-        if (metadata_worker_.joinable()) {
-            metadata_worker_.request_stop();
-            metadata_worker_.join();
-        }
-    }
-    void StartMetadataWorker(const std::filesystem::path& path,
-                             std::function<bool()> upstream_cancel, bool wave_tags) {
-        ComPtr<IStream> cursor;
-        if (FAILED(archive_stream_->Clone(&cursor))) return;
-        auto initial = metadata_;
-        try {
-            metadata_worker_ = std::jthread([this, path, cursor = std::move(cursor),
-                initial = std::move(initial), upstream_cancel = std::move(upstream_cancel),
-                wave_tags](std::stop_token stop) mutable {
-                const auto canceled = [&] {
-                    return stop.stop_requested() || (upstream_cancel && upstream_cancel());
-                };
-                try {
-                    HRESULT status{};
-                    // No tail reads compete with the first audio prefix.
-                    while (!canceled()) {
-                        const int progress = ArchiveMemberProgress(cursor.Get(), comm_, &status);
-                        if (FAILED(status)) return;
-                        if (progress == 100) break;
-                        std::this_thread::sleep_for(std::chrono::milliseconds(25));
-                    }
-                    if (canceled()) return;
-                    if (wave_tags) {
-                        BuiltinFileInfo info;
-                        if (SUCCEEDED(ReadBuiltinStreamInfo(cursor.Get(), path, {}, info))) {
-                            for (auto& field : info.metadata) {
-                                if (MetadataKeyEquals(field.name, L"title")) initial.title = field.value;
-                                else if (MetadataKeyEquals(field.name, L"artist")) initial.artist = field.value;
-                                else if (MetadataKeyEquals(field.name, L"album")) initial.album = field.value;
-                                initial.entries.emplace_back(std::move(field.name), std::move(field.value));
-                            }
-                            if (!info.cover.empty()) initial.thumbnail = std::move(info.cover);
-                        }
-                    }
-                    if (canceled()) return;
-                    if (initial.thumbnail.empty()) {
-                        try { initial.thumbnail = ReadArchiveSidecarCover(path, comm_, canceled); }
-                        catch (const ArchiveError&) { /* Keep usable tags when optional artwork fails. */ }
-                    }
-                    if (canceled()) return;
-                    initial.thumbnail_interface = true;
-                    {
-                        std::scoped_lock lock(metadata_mutex_);
-                        metadata_ = std::move(initial);
-                        ++metadata_revision_;
-                    }
-                } catch (...) { /* Optional artwork must not fail playback. */ }
-            });
-        } catch (const std::system_error&) { /* Playback can proceed without artwork. */ }
-    }
     bool CheckArchive() {
         HRESULT hr{};if(archive_stream_)(void)ArchiveMemberProgress(archive_stream_.Get(),comm_,&hr);
         if(FAILED(hr)){result_=hr;error_=ArchiveError(hr).Message();return false;}return true;
@@ -1291,9 +1360,7 @@ private:
     ComPtr<IStream> archive_stream_;
     std::unique_ptr<DecodedAudioSource> source_;
     AudioMetadata metadata_;
-    mutable std::mutex metadata_mutex_;
-    std::atomic<uint64_t> metadata_revision_{};
-    std::jthread metadata_worker_;
+    std::shared_ptr<ArchivePlaybackSession> archive_session_;
     bool metadata_override_{};
     std::wstring error_; HRESULT result_{E_FAIL};
 };
@@ -1504,7 +1571,7 @@ public:
                 metadata_.replay_peak = MetadataNumber(value);
         }
         const auto start = std::chrono::milliseconds(
-            static_cast<int64_t>(track_.start_frame * 1000 / 75));
+            CueFrameToMilliseconds(track_.start_frame));
         duration_frames_.reset();
         duration_ = {};
         if (inner_->Duration().count() > 0 && start > inner_->Duration()) {
@@ -1518,7 +1585,7 @@ public:
             }
             duration_frames_ = *track_.end_frame - track_.start_frame;
             duration_ = std::chrono::milliseconds(
-                static_cast<int64_t>(*duration_frames_ * 1000 / 75));
+                track_.DurationMilliseconds());
         } else {
             if (inner_->Duration() > start)
                 duration_ = inner_->Duration() - start;
@@ -1642,6 +1709,9 @@ public:
         return inner_ ? inner_->MetadataRevision() : 0;
     }
 
+    std::shared_ptr<ArchivePlaybackSession> ArchiveSession() const override {
+        return inner_ ? inner_->ArchiveSession() : nullptr;
+    }
     int DownloadedPercent() override { return inner_ ? inner_->DownloadedPercent() : -1; }
     HRESULT ErrorResult() const override { return FAILED(archive_error_) ? archive_error_ : inner_ ? inner_->ErrorResult() : E_FAIL; }
 
@@ -2199,7 +2269,21 @@ std::shared_ptr<AudioEngine> AudioEngine::CreateSuccessor() const {
     // DAT_00546C64 is shared for the application lifetime in the original.
     // Keep one DSP Init/Quit lifetime and serialize callbacks across tails.
     next->dsp_chain_ = dsp_chain_;
+    next->archive_handoff_ = archive_handoff_;
     return next;
+}
+
+void AudioEngine::PrepareArchiveTrackChange(const std::filesystem::path& path, int subtrack) {
+    std::shared_ptr<ArchivePlaybackSession> candidate;
+    { std::scoped_lock lock(mutex_); candidate = archive_session_ ? archive_session_ : archive_handoff_; }
+    if (candidate && !candidate->Matches(path, subtrack)) candidate.reset();
+    std::shared_ptr<ArchivePlaybackSession> previous;
+    { std::scoped_lock lock(mutex_); previous = std::exchange(archive_handoff_, std::move(candidate)); }
+}
+
+void AudioEngine::CancelArchiveTrackChange() {
+    std::shared_ptr<ArchivePlaybackSession> previous;
+    { std::scoped_lock lock(mutex_); previous = std::move(archive_handoff_); }
 }
 
 bool AudioEngine::CanRetainForTrackChange() const {
@@ -2223,10 +2307,13 @@ bool AudioEngine::BeginWaveOutTrackChange() {
     // mode never tries opening a second stream on its own occupied device.
     if (backend_.load() != Backend::wave_out &&
         backend_.load() != Backend::wasapi) return false;
-    return BeginStopFade();
+    return BeginStopFade(false, true);
 }
 
 bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
+    PrepareArchiveTrackChange(path, subtrack);
+    std::shared_ptr<ArchivePlaybackSession> handoff;
+    { std::scoped_lock lock(mutex_); handoff = std::move(archive_handoff_); }
     Stop();
     // The worker may have returned immediately after Stop exhausted its
     // bounded wait.  Reap that completed thread before deciding that a new
@@ -2268,8 +2355,8 @@ bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
         track_gain_ = 1.0F;
     }
     try {
-        worker_ = std::jthread([this, path, subtrack] {
-            PlaybackWorker(path, subtrack);
+        worker_ = std::jthread([this, path, subtrack, handoff = std::move(handoff)]() mutable {
+            PlaybackWorker(path, subtrack, std::move(handoff));
         });
     } catch (const std::system_error&) {
         SetError(L"Unable to create the audio playback worker");
@@ -2337,7 +2424,8 @@ void AudioEngine::RestoreAfterOutputRestart(
     }
 }
 
-void AudioEngine::PlaybackWorker(std::filesystem::path path, int subtrack) {
+void AudioEngine::PlaybackWorker(std::filesystem::path path, int subtrack,
+                                std::shared_ptr<ArchivePlaybackSession> archive) {
     int priority = THREAD_PRIORITY_HIGHEST;
     {
         std::scoped_lock lock(mutex_);
@@ -2354,7 +2442,7 @@ void AudioEngine::PlaybackWorker(std::filesystem::path path, int subtrack) {
         const HRESULT media_result = platform::MFStartup(MF_VERSION, MFSTARTUP_LITE);
         // Native readers and original AddIns do not require Media Foundation.
         // If an MF-only format is chosen, its reader reports the missing API.
-        WaveOutWorker(path, subtrack);
+        WaveOutWorker(path, subtrack, std::move(archive));
         if (SUCCEEDED(media_result)) platform::MFShutdown();
     }
     if (SUCCEEDED(com_result)) CoUninitialize();
@@ -2378,7 +2466,7 @@ void AudioEngine::PlaybackWorker(std::filesystem::path path, int subtrack) {
 }
 
 void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
-                                int subtrack) {
+                                int subtrack, std::shared_ptr<ArchivePlaybackSession> archive) {
     // Declared before source/processors so its destructor runs after both:
     // the 004B1A5C writer may only be queued once the playback reader has
     // released its deny-write IStream.
@@ -2392,6 +2480,11 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         options = options_;
     }
     options.network_canceled = [this] { return stop_requested_.load(); };
+    options.archive_session = std::move(archive);
+    options.archive_opened = [this](const std::shared_ptr<ArchivePlaybackSession>& session) {
+        std::scoped_lock lock(mutex_);
+        if (!stop_requested_) archive_session_ = session;
+    };
     WaveOutSelection output = ResolveWaveOutSelection(options);
     if (!output.error.empty()) {
         if (!stop_requested_) SetError(std::move(output.error));
@@ -2401,12 +2494,17 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
         return;
     }
+    options.archive_session.reset();
     if (stop_requested_) return;
     LyricSourceRegistration lyric_registration{*this};
     {
         std::scoped_lock lock(mutex_);
+        // Stop removes the task owner under this same lock. Do not publish a
+        // newly opened session after that cancellation has already won.
+        if (stop_requested_) return;
         lyric_source_path_ = path;
         lyric_source_subtrack_ = subtrack;
+        archive_session_ = source->ArchiveSession();
         source_can_overlap_ = source->CanOverlapPlayback() &&
                               !IsNetworkMediaLocation(path);
     }
@@ -3777,6 +3875,7 @@ void AudioEngine::SeekImpl(std::chrono::milliseconds position,
 }
 
 void AudioEngine::RequestStop() noexcept {
+    std::shared_ptr<ArchivePlaybackSession> previous;
     stop_requested_ = true;
     state_ = PlaybackState::stopped;
     ClearVisualization();
@@ -3789,6 +3888,7 @@ void AudioEngine::RequestStop() noexcept {
     }
     {
         std::scoped_lock lock(mutex_);
+        previous = std::move(archive_session_);
         CancelSeekLocked();
         fade_pending_ = false;
         ++fade_generation_;
@@ -3820,6 +3920,7 @@ bool AudioEngine::ReapWorker(std::chrono::milliseconds timeout) noexcept {
 }
 
 void AudioEngine::Stop() {
+    CancelArchiveTrackChange();
     RequestStop();
     // Wake a caller which is synchronously awaiting decoder creation before
     // spending the bounded teardown budget.
@@ -3838,7 +3939,13 @@ void AudioEngine::StopWithFade() {
     Stop();
 }
 
-bool AudioEngine::BeginStopFade(bool detach_dsp) {
+void AudioEngine::StopAsync() noexcept {
+    CancelArchiveTrackChange();
+    RequestStop();
+}
+
+bool AudioEngine::BeginStopFade(bool detach_dsp, bool preserve_archive) {
+    if (!preserve_archive) CancelArchiveTrackChange();
     std::unique_lock lock(mutex_);
     const bool supported = backend_.load() == Backend::wave_out ||
                            backend_.load() == Backend::direct_sound ||
@@ -4052,12 +4159,28 @@ void AudioEngine::ApplyVolumeLocked() {
 
 std::wstring AudioEngine::LastError() const {
     std::scoped_lock lock(mutex_);
+    if (archive_session_ && FAILED(archive_session_->Result()))
+        return ArchiveError(archive_session_->Result()).Message();
     return error_;
 }
 
 HRESULT AudioEngine::LastErrorResult() const {
     std::scoped_lock lock(mutex_);
+    if (archive_session_ && FAILED(archive_session_->Result())) return archive_session_->Result();
     return error_result_;
+}
+
+PlaybackState AudioEngine::State() const noexcept {
+    std::scoped_lock lock(mutex_);
+    // A short CUE can finish before the member's final CRC. Keep that result
+    // observable until explicit Stop or a different source replaces the session.
+    if (archive_session_ && FAILED(archive_session_->Result())) return PlaybackState::failed;
+    return state_.load();
+}
+
+int AudioEngine::DownloadedPercent() const noexcept {
+    std::scoped_lock lock(mutex_);
+    return archive_session_ ? archive_session_->Progress() : downloaded_percent_.load();
 }
 
 std::wstring AudioEngine::LastDiagnostic() const {
@@ -4105,8 +4228,11 @@ void AudioEngine::RecordDiagnostic(std::wstring message) {
 }
 
 void AudioEngine::SetError(std::wstring message, HRESULT result) {
+    std::shared_ptr<ArchivePlaybackSession> previous, handoff;
     {
         std::scoped_lock lock(mutex_);
+        previous = std::move(archive_session_);
+        handoff = std::move(archive_handoff_);
         error_ = std::move(message);
         error_result_ = result;
         CancelSeekLocked();

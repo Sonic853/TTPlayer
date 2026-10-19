@@ -75,6 +75,7 @@ add_library(ttplayer_core
   src/app/file_info_worker.cpp
   src/app/output_device_worker.cpp
   src/audio/archive_member.cpp
+  src/audio/archive_verified_info.cpp
   src/audio/osz_archive.cpp
   src/audio/archive_password.cpp
   src/ui/archive_password_dialog.cpp

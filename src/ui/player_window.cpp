@@ -7401,7 +7401,8 @@ void PlayerWindow::PollFadingAudio(bool cancel) {
     }
 }
 
-void PlayerWindow::CancelWaveTrackChange() {
+void PlayerWindow::CancelWaveTrackChange(bool preserve_archive) {
+    if (!preserve_archive) audio_->CancelArchiveTrackChange();
     pending_wave_track_change_.reset();
     wave_track_change_deadline_ = 0;
     if (window_) KillTimer(window_, kWaveTrackChangeTimer);
@@ -7418,7 +7419,7 @@ void PlayerWindow::PollWaveTrackChange() {
     const bool still_requested = requested &&
         _wcsicmp(requested->path.c_str(), pending_wave_track_change_->path.c_str()) == 0 &&
         requested->subtrack == pending_wave_track_change_->subtrack;
-    CancelWaveTrackChange();
+    CancelWaveTrackChange(still_requested);
     if (still_requested) static_cast<void>(PlayCurrent());
 }
 
@@ -7513,6 +7514,7 @@ bool PlayerWindow::PlayCurrent() {
         SetTimer(window_, kNaturalPlayTimer, 10, nullptr);
         return true;
     }
+    audio_->PrepareArchiveTrackChange(requested_track.path, requested_track.subtrack);
     if (!PrepareTrackChange(same_item)) {
         pending_wave_track_change_ = requested_track;
         RefreshPlaybackUi();

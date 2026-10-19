@@ -1053,7 +1053,7 @@ private:
     void PollFadingAudio(bool cancel = false);
     [[nodiscard]] bool PrepareTrackChange(bool same_item);
     void PollWaveTrackChange();
-    void CancelWaveTrackChange();
+    void CancelWaveTrackChange(bool preserve_archive = false);
     playlist::PlaylistStore playlists_;
     std::vector<plugins::ReaderFormat> reader_formats_;
     const plugins::PluginManager* sound_library_{};

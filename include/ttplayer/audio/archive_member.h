@@ -8,6 +8,7 @@
 #include <objidl.h>
 #include <stdexcept>
 #include <functional>
+#include <memory>
 
 namespace ttplayer::audio {
 
@@ -60,6 +61,22 @@ private:
                                           ArchiveMemberPath& result);
 [[nodiscard]] std::filesystem::path MakeArchiveMemberPath(
     const std::filesystem::path& archive, std::wstring_view member);
+// A process-local verified identity of all actual archive volumes. Capture can
+// discover volumes on a cache miss: call before starting a long member reader.
+// Fresh and TryReadCachedArchiveMember only inspect known file identities; they
+// never enumerate/decompress an archive or prompt for a password/volume.
+class ArchiveCacheIdentityState;
+using ArchiveCacheIdentity = std::shared_ptr<const ArchiveCacheIdentityState>;
+[[nodiscard]] ArchiveCacheIdentity CaptureArchiveCacheIdentity(
+    const std::filesystem::path& archive, HMODULE ttpcomm = nullptr,
+    const std::function<bool()>& canceled = {});
+[[nodiscard]] bool ArchiveCacheIdentityFresh(
+    const ArchiveCacheIdentity& identity,
+    const std::function<bool()>& canceled = {}) noexcept;
+[[nodiscard]] bool TryReadCachedArchiveMember(
+    const ArchiveMemberPath& path, std::vector<unsigned char>& bytes,
+    ArchiveCacheIdentity* identity = nullptr,
+    const std::function<bool()>& canceled = {}) noexcept;
 [[nodiscard]] std::vector<unsigned char> ReadArchiveMember(
     const ArchiveMemberPath& path, HMODULE ttpcomm,
     const std::function<bool()>& canceled = {});

@@ -219,9 +219,22 @@ std::vector<unsigned char> EncodeCueText(const std::wstring& text, int encoding)
 
 } // namespace
 
+std::int64_t CueFrameToMilliseconds(std::uint64_t frame) noexcept {
+    // MulDiv(frame, 1000, 75) in 004E2F69, without its signed 32-bit result limit.
+    // Splitting seconds and the remainder also avoids a frame * 1000 overflow.
+    constexpr auto maximum = static_cast<std::uint64_t>(
+        std::numeric_limits<std::int64_t>::max());
+    const auto seconds = frame / 75;
+    const auto remainder = (frame % 75 * 1000 + 37) / 75;
+    if (seconds > (maximum - remainder) / 1000)
+        return std::numeric_limits<std::int64_t>::max();
+    return static_cast<std::int64_t>(seconds * 1000 + remainder);
+}
+
 std::int64_t CueTrack::DurationMilliseconds() const noexcept {
     if (!has_index01 || !end_frame || *end_frame < start_frame) return -1;
-    return static_cast<std::int64_t>((*end_frame - start_frame) * 1000 / 75);
+    // 004E323B converts the two endpoints separately before subtracting them.
+    return CueFrameToMilliseconds(*end_frame) - CueFrameToMilliseconds(start_frame);
 }
 
 CueSheet CueSheet::Parse(std::span<const unsigned char> bytes,

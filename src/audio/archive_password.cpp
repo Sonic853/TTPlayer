@@ -5,6 +5,7 @@
 #include <wincrypt.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <fstream>
 #include <mutex>
 #include <vector>
@@ -15,6 +16,7 @@ using Bytes=std::vector<unsigned char>;
 constexpr size_t kMaximumFile=2*1024*1024,kMaximumRecords=256;
 struct Record {std::wstring path,name,md5,sha,password;};
 std::mutex mutex;
+std::atomic<uint64_t> session_generation{1};
 std::filesystem::path storage;
 ArchivePasswordPrompt prompt;
 std::function<void(HRESULT)> storage_error;
@@ -133,6 +135,11 @@ void Accept(Record identity,const std::wstring& password,bool remember){
         std::lock_guard lock(mutex);
         if(identity.password.empty())result=HRESULT_FROM_WIN32(protection_error?protection_error:ERROR_ENCRYPTION_FAILED);
         else {
+            bool already_current=false;
+            if(!session.empty() && Same(session.back().path,identity.path)) {
+                auto old=Unprotect(session.back().password);already_current=old && *old==password;if(old)Wipe(*old);
+            }
+            if(!already_current)++session_generation;
             std::erase_if(session,[&](const Record& r){if(!Same(r.path,identity.path))return false;
                 auto old=Unprotect(r.password);const bool same=old && *old==password;if(old)Wipe(*old);return same;});
             session.push_back(identity);if(session.size()>kMaximumRecords)session.erase(session.begin());
@@ -154,18 +161,24 @@ ScopedArchiveBackgroundRead::ScopedArchiveBackgroundRead() noexcept { ++backgrou
 ScopedArchiveBackgroundRead::~ScopedArchiveBackgroundRead() { --background_reads; }
 void ConfigureArchivePasswords(const std::filesystem::path& path,ArchivePasswordPrompt callback,std::function<void(HRESULT)> error){
     std::lock_guard lock(mutex);storage=path;prompt=std::move(callback);storage_error=std::move(error);
-    session.clear();fingerprints.clear();storage_result=S_OK;Load();
+    session.clear();fingerprints.clear();++session_generation;storage_result=S_OK;Load();
 }
-void ConfigureArchiveVolumes(ArchiveVolumePrompt callback){std::lock_guard lock(mutex);volume_prompt=std::move(callback);volume_mappings.clear();}
+void ConfigureArchiveVolumes(ArchiveVolumePrompt callback){std::lock_guard lock(mutex);volume_prompt=std::move(callback);volume_mappings.clear();++session_generation;}
 void DiscardArchiveVolumes(const std::filesystem::path& archive){const auto key=Key(archive);std::lock_guard lock(mutex);
-    std::erase_if(volume_mappings,[&](const auto& v){return Same(v.archive,key);});
+    std::erase_if(volume_mappings,[&](const auto& v){return Same(v.archive,key);});++session_generation;
 }
 void AliasArchiveSession(const std::filesystem::path& before,const std::filesystem::path& after){
-    const auto a=Key(before),b=Key(after);if(Same(a,b))return;std::lock_guard lock(mutex);
-    auto mapped=volume_mappings;for(auto& v:mapped)if(Same(v.archive,a)){v.archive=b;volume_mappings.push_back(std::move(v));}
+    const auto a=Key(before),b=Key(after);if(Same(a,b))return;std::lock_guard lock(mutex);bool changed=false;
+    auto mapped=volume_mappings;for(auto& v:mapped)if(Same(v.archive,a)){
+        if(std::none_of(volume_mappings.begin(),volume_mappings.end(),[&](const auto& old){return Same(old.archive,b) && Same(old.expected,v.expected) && Same(old.actual,v.actual);})){v.archive=b;volume_mappings.push_back(std::move(v));changed=true;}}
     if(volume_mappings.size()>4096)volume_mappings.erase(volume_mappings.begin(),volume_mappings.end()-4096);
-    auto passwords=session;for(auto& r:passwords)if(Same(r.path,a)){r.path=b;r.name=std::filesystem::path(b).filename().native();session.push_back(std::move(r));}
+    auto passwords=session;for(auto& r:passwords)if(Same(r.path,a)){
+        bool exists=false;auto candidate=Unprotect(r.password);
+        for(const auto& old:session)if(Same(old.path,b)){auto pw=Unprotect(old.password);exists=pw && candidate && *pw==*candidate;if(pw)Wipe(*pw);if(exists)break;}
+        if(candidate)Wipe(*candidate);
+        if(!exists){r.path=b;r.name=std::filesystem::path(b).filename().native();session.push_back(std::move(r));changed=true;}}
     if(session.size()>kMaximumRecords)session.erase(session.begin(),session.end()-kMaximumRecords);
+    if(changed)++session_generation;
 }
 TtpCommArchiveVolumeOptions ArchiveVolumeOptions(const std::function<bool()>* canceled){
     TtpCommArchiveVolumeOptions options{};options.size=sizeof(options);options.context=const_cast<std::function<bool()>*>(canceled);
@@ -194,6 +207,9 @@ TtpCommArchiveVolumeOptions ArchiveVolumeOptions(const std::function<bool()>* ca
             if(actual.native().size()>=capacity)return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
             {
                 std::lock_guard lock(mutex);
+                const bool unchanged=std::any_of(volume_mappings.begin(),volume_mappings.end(),[&](const auto& v){
+                    return Same(v.archive,key) && Same(v.expected,expected) && Same(v.actual,actual.native());});
+                if(!unchanged)++session_generation;
                 std::erase_if(volume_mappings,[&](const auto& v){return Same(v.archive,key) && Same(v.expected,expected);});
                 volume_mappings.push_back({key,expected,actual.native()});
                 if(volume_mappings.size()>4096)volume_mappings.erase(volume_mappings.begin());
@@ -201,6 +217,12 @@ TtpCommArchiveVolumeOptions ArchiveVolumeOptions(const std::function<bool()>* ca
             wcscpy_s(replacement,capacity,actual.c_str());return S_OK;
         }catch(const std::bad_alloc&){return E_OUTOFMEMORY;}catch(...){return E_FAIL;}
     };return options;
+}
+uint64_t ArchiveSessionGeneration() noexcept { return session_generation.load(); }
+std::vector<ArchiveVolumeMappingIdentity> ArchiveSessionVolumeMappings(const std::filesystem::path& archive) {
+    const auto key=Key(archive);std::vector<ArchiveVolumeMappingIdentity> out;std::lock_guard lock(mutex);
+    for(const auto& v:volume_mappings)if(Same(v.archive,key))out.push_back({v.expected,v.actual});
+    return out;
 }
 HRESULT ArchivePasswordStorageResult(){std::lock_guard lock(mutex);return storage_result;}
 HRESULT WithArchivePassword(const std::filesystem::path& path,const std::function<HRESULT(const wchar_t*)>& operation,const std::function<bool()>& canceled){
@@ -281,32 +303,44 @@ std::wstring ExportArchivePasswordPacket(const std::filesystem::path& logical,co
     for(auto& pw:passwords)Wipe(pw);return blob;
 }
 void ImportArchivePasswordPacket(const std::filesystem::path& logical,std::wstring_view packet){
-    {std::lock_guard lock(mutex);session.clear();}
-    if(logical.native().find(L'|')==std::wstring::npos || packet.empty())return;
-    if(auto decoded=Unprotect(packet)){
+    std::vector<Record> next;std::vector<VolumeMapping> decoded_volumes;
+    std::wstring accepted_key;bool replace_volumes=false;
+    if(logical.native().find(L'|')!=std::wstring::npos && !packet.empty())if(auto decoded=Unprotect(packet)) {
         auto bytes=Unhex(*decoded);Wipe(*decoded);size_t at=0;std::wstring key,count;unsigned passwords=8;
-        const bool valid=Get(bytes,at,key);const bool version2=key==L"TTPlayerArchiveSession/2";
-        bool header=valid;
+        bool header=Get(bytes,at,key);const bool version2=key==L"TTPlayerArchiveSession/2";
         if(version2){header=Get(bytes,at,key) && Get(bytes,at,count) && count.size()==1 && count[0]>=L'0' && count[0]<=L'8';if(header)passwords=count[0]-L'0';}
         if(header && Same(key,Key(Outer(logical)))) {
-            for(unsigned i=0;at<bytes.size() && i<passwords;++i){std::wstring pw;if(!Get(bytes,at,pw)){header=false;break;}
-                Record r;r.path=key;r.name=Outer(logical).filename().native();Accept(std::move(r),pw,false);Wipe(pw);}
-            if(header && version2){std::vector<VolumeMapping> decoded_volumes;
-                while(at<bytes.size() && decoded_volumes.size()<4096){std::wstring expected,actual;
-                    if(!Get(bytes,at,expected) || !Get(bytes,at,actual) || !std::filesystem::path(expected).is_absolute() || !std::filesystem::path(actual).is_absolute()){header=false;break;}
-                    decoded_volumes.push_back({key,std::move(expected),std::move(actual)});
-                }
-                if(header && at==bytes.size()){std::lock_guard lock(mutex);std::erase_if(volume_mappings,[&](const auto& v){return Same(v.archive,key);});
-                    volume_mappings.insert(volume_mappings.end(),decoded_volumes.begin(),decoded_volumes.end());}
+            for(unsigned i=0;i<passwords && (version2 || at<bytes.size());++i){std::wstring pw;if(!Get(bytes,at,pw)){header=false;break;}
+                Record r;r.path=key;r.name=Outer(logical).filename().native();r.password=Protect(pw);Wipe(pw);
+                if(r.password.empty()){header=false;break;}next.push_back(std::move(r));}
+            if(header && version2)while(at<bytes.size() && decoded_volumes.size()<4096){std::wstring expected,actual;
+                if(!Get(bytes,at,expected) || !Get(bytes,at,actual) || !std::filesystem::path(expected).is_absolute() || !std::filesystem::path(actual).is_absolute()){header=false;break;}
+                decoded_volumes.push_back({key,std::move(expected),std::move(actual)});
             }
+            if(header && at==bytes.size()){accepted_key=key;replace_volumes=version2;}else next.clear();
         }
         SecureZeroMemory(bytes.data(),bytes.size());
+    }
+    std::lock_guard lock(mutex);
+    bool same=session.size()==next.size();
+    for(size_t i=0;same && i<next.size();++i){
+        auto a=Unprotect(session[i].password),b=Unprotect(next[i].password);
+        same=Same(session[i].path,next[i].path) && a && b && *a==*b;
+        if(a)Wipe(*a);if(b)Wipe(*b);
+    }
+    if(!same){session=std::move(next);++session_generation;}
+    if(replace_volumes){
+        std::vector<VolumeMapping> previous;for(const auto& v:volume_mappings)if(Same(v.archive,accepted_key))previous.push_back(v);
+        bool equal=previous.size()==decoded_volumes.size();
+        for(size_t i=0;equal && i<previous.size();++i)equal=Same(previous[i].expected,decoded_volumes[i].expected) && Same(previous[i].actual,decoded_volumes[i].actual);
+        if(!equal){std::erase_if(volume_mappings,[&](const auto& v){return Same(v.archive,accepted_key);});
+            volume_mappings.insert(volume_mappings.end(),decoded_volumes.begin(),decoded_volumes.end());++session_generation;}
     }
 }
 void RenameArchivePasswordSession(const std::filesystem::path& before,const std::filesystem::path& after){
     const auto a=Key(before),b=Key(after);std::function<void(HRESULT)> report;HRESULT error=S_OK;
     {
-        std::lock_guard lock(mutex);bool changed=false;
+        std::lock_guard lock(mutex);bool changed=false;++session_generation;
         for(auto& r:session)if(Same(r.path,a)){
             for(auto& saved:remembered)if(!r.md5.empty() && r.md5==saved.md5 && r.sha==saved.sha && Same(saved.name,r.name)){
                 saved.name=after.filename().native();changed=true;

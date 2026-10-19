@@ -485,7 +485,7 @@ ttplayer::ui::detail::FileInfoProbeReadResult ReadPlaylistMetadata(
                     return result;
             }
             if (FAILED(result.status)) return result;
-            const auto start = static_cast<std::int64_t>(track->start_frame * 1000U / 75U);
+            const auto start = audio::CueFrameToMilliseconds(track->start_frame);
             if (result.duration_ms && start > result.duration_ms) {
                 result.status = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
                 return result;
