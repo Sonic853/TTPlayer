@@ -3,7 +3,7 @@
 #include "dsp_imports.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/update/update.h"
-#include "../update/json.h"
+#include "ttplayer/core/json.h"
 
 #include <algorithm>
 #include <array>
@@ -262,19 +262,19 @@ struct FileRegistry::Impl {
         if (lease == INVALID_HANDLE_VALUE) throw std::runtime_error("Plugin configuration is busy or read-only");
         try {
             if (std::filesystem::exists(file)) {
-                const auto json = update::detail::JsonReader(Read(file),kMaximumFile).Read();
+                const auto json = core::JsonReader(Read(file),kMaximumFile).Read();
                 const auto version = json["formatVersion"].Integer();
                 if (version == 3 && json["registryView"].Integer() == 32) {
                     LoadTree(json["keys"], tree);
-                    if (json["maskedKeys"].kind != update::detail::Json::array) throw std::runtime_error("Invalid registry masks");
+                    if (json["maskedKeys"].kind != core::Json::array) throw std::runtime_error("Invalid registry masks");
                     for (const auto& item : json["maskedKeys"].items) {
-                        if (item.kind != update::detail::Json::string) throw std::runtime_error("Invalid registry mask");
+                        if (item.kind != core::Json::string) throw std::runtime_error("Invalid registry mask");
                         masked_keys.insert(Normal(core::Utf8ToWide(item.String())));
                     }
                 } else if (version == 1) {
                     LoadTree(json["keys"], tree, L"hkey_current_user\\");
                     ++revision;
-                } else if (version == 2 && json["plugins"].kind == update::detail::Json::object) {
+                } else if (version == 2 && json["plugins"].kind == core::Json::object) {
                     for (const auto& [name, profile] : json["plugins"].fields) {
                         if (name == "Ozone") LoadTree(profile["keys"], tree, L"hkey_current_user\\", true);
                         else if (name == "Dsp_Dfx" && profile["registryView"].Integer() == 32)
@@ -296,13 +296,13 @@ struct FileRegistry::Impl {
                 throw std::runtime_error("Cannot schedule plugin configuration saves");
         } catch (...) { CloseHandle(lease); throw; }
     }
-    void LoadTree(const update::detail::Json& keys, Tree& target, std::wstring_view prefix = {}, bool merge = false) {
-        if (keys.kind != update::detail::Json::array)
+    void LoadTree(const core::Json& keys, Tree& target, std::wstring_view prefix = {}, bool merge = false) {
+        if (keys.kind != core::Json::array)
             throw std::runtime_error("Invalid plugin registry keys");
         for (const auto& node : keys.items) {
             const auto path_value = Normal(std::wstring(prefix) + core::Utf8ToWide(node["path"].String()));
-            if (node["path"].kind != update::detail::Json::string ||
-                node["values"].kind != update::detail::Json::array || (!merge && target.contains(path_value)))
+            if (node["path"].kind != core::Json::string ||
+                node["values"].kind != core::Json::array || (!merge && target.contains(path_value)))
                 throw std::runtime_error("Invalid plugin registry key");
             auto& values = target[path_value];
             storage_cost += KeyCost(path_value);
@@ -310,13 +310,13 @@ struct FileRegistry::Impl {
                 const auto name = ValueName(core::Utf8ToWide(item["name"].String()).c_str());
                 const auto type = item["type"].Integer();
                 if (item["deleted"].True()) {
-                    if (item["name"].kind != update::detail::Json::string || values.contains(name)) throw std::runtime_error("Invalid registry tombstone");
+                    if (item["name"].kind != core::Json::string || values.contains(name)) throw std::runtime_error("Invalid registry tombstone");
                     values.emplace(name, Value{0, {}, core::Utf8ToWide(item["name"].String()), true});
                     continue;
                 }
-                if (item["name"].kind != update::detail::Json::string ||
-                    item["type"].kind != update::detail::Json::number || type > MAXDWORD ||
-                    item["dataHex"].kind != update::detail::Json::string || values.contains(name))
+                if (item["name"].kind != core::Json::string ||
+                    item["type"].kind != core::Json::number || type > MAXDWORD ||
+                    item["dataHex"].kind != core::Json::string || values.contains(name))
                     throw std::runtime_error("Invalid plugin registry value");
                 auto bytes = Unhex(item["dataHex"].String());
                 storage_cost += ValueCost(name, bytes.size());

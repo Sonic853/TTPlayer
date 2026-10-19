@@ -390,12 +390,17 @@ private:
     void LaunchOptionsDspConfiguration(HWND dialog,
                                        const std::filesystem::path& module);
     void UpdateOptionsDeviceDetails(HWND dialog);
+    void StartOptionsDeviceProbe(HWND dialog, bool details);
+    void PollOptionsDeviceProbe(HWND dialog);
+    void CancelOptionsDeviceProbe();
+    void PopulateOptionsDeviceCatalog(HWND dialog, bool complete_catalog);
     void ShowVisualOptions();
     static INT_PTR CALLBACK VisualOptionsDialogProc(HWND, UINT, WPARAM, LPARAM);
     INT_PTR HandleVisualOptionsDialog(HWND, UINT, WPARAM, LPARAM);
     void InvokeVisualAction(POINT point);
     void ShowVisualContextMenu(POINT screen_point);
     HMENU CreateVisualContextMenu(bool detached, int mode, int type);
+    void PrepareFullscreenMenuState(HMENU menu, int mode) const;
     [[nodiscard]] bool VisualFallbackHit(POINT point) const;
     void SetFullScreenMode(int mode, HWND origin = nullptr, int visual_type_override = -1);
     [[nodiscard]] MONITORINFOEXW FullScreenMonitorInfo(HWND origin = nullptr) const;
@@ -563,10 +568,9 @@ private:
     // when playback is stopped. This is not a per-list history marker.
     [[nodiscard]] std::optional<size_t> VisiblePlaylistPlaybackRow() const;
     [[nodiscard]] std::optional<size_t> VisiblePlaylistPlayingRow() const;
-    bool UpdateMediaLibraryTrackFromProperties(
-        size_t index, const playlist::Track& updated);
-    bool UpdateMediaLibraryTrackByIdentity(
-        const playlist::Track& source, const playlist::Track& updated);
+    // Publish file metadata to all copies of this logical song. Rating belongs
+    // to the playlist/library and must survive a stale property-sheet snapshot.
+    bool PublishTrackMetadata(const playlist::Track& updated);
     [[nodiscard]] std::wstring PlaylistDisplayText(
         const playlist::Track& track) const;
     void ActivateMediaLibraryResult(size_t index, bool start_playback);
@@ -706,6 +710,10 @@ private:
     void ConvertLyricEditorText(DWORD mapping);
     void ShowLyricFindDialog(bool replace);
     void HandleLyricFindRequest(const FINDREPLACEW& request);
+    void SetLyricFindMode(bool replace);
+    void CaptureLyricFindState();
+    void UpdateLyricFindButtons();
+    static INT_PTR CALLBACK LyricFindDialogProc(HWND, UINT, WPARAM, LPARAM);
     [[nodiscard]] std::optional<std::wstring> ReadEmbeddedLyrics() const;
     bool WriteEmbeddedLyrics(std::wstring_view text, bool deleting, bool silent = false);
     void LoadCurrentLyrics(bool force = false);
@@ -946,6 +954,8 @@ private:
     ULONGLONG options_dsp_scan_started_{};
     bool options_dsp_scan_complete_{};
     std::vector<DeviceOptionEntry> options_device_entries_;
+    struct OptionsDeviceProbeState;
+    std::shared_ptr<OptionsDeviceProbeState> options_device_probe_;
     HIMAGELIST options_device_images_{};
     std::vector<std::unique_ptr<AssociationOptionNode>>
         options_association_nodes_;
@@ -1029,7 +1039,6 @@ private:
     bool fullscreen_lyric_detached_{};
     HWND fullscreen_lyric_input_{};
     bool fullscreen_lyric_input_updating_{};
-    bool fullscreen_lyric_window_was_visible_{};
     bool fullscreen_saved_lyric_transparent_{};
     bool fullscreen_lyric_desktop_mode_{};
     HWND fullscreen_lyric_parent_{};
@@ -1037,7 +1046,6 @@ private:
     LONG_PTR fullscreen_lyric_saved_style_{};
     LONG_PTR fullscreen_lyric_saved_exstyle_{};
     bool fullscreen_lyric_was_empty_{};
-    bool fullscreen_desktop_lyric_was_visible_{};
     std::shared_ptr<audio::AudioEngine> audio_{std::make_shared<audio::AudioEngine>()};
     // At most one audible outgoing sound, plus an older canceled worker still
     // unwinding. Never destroy a session on the UI thread before it exits.
@@ -1247,10 +1255,12 @@ private:
     bool lyrics_embedded_{};
     int lyric_adjustment_ms_{1000}; // 0053B9A0 initial adjustment-dialog value.
     FINDREPLACEW lyric_find_{};
-    wchar_t lyric_find_text_[256]{};
-    wchar_t lyric_replace_text_[256]{};
+    std::wstring lyric_find_text_, lyric_replace_text_;
+    std::array<std::vector<std::wstring>, 2> lyric_find_history_;
     HWND lyric_find_dialog_{};
     bool lyric_find_replace_{};
+    bool lyric_find_selection_only_{};
+    int lyric_find_row_height_{};
     std::wstring tooltip_text_;
     std::string tooltip_text_ansi_;
     std::list<ToolTipTool> tooltip_tools_;

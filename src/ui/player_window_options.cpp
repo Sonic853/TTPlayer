@@ -24,6 +24,8 @@
 #include "ttplayer/ui/player_runtime_policy.h"
 
 #include <algorithm>
+#include <atomic>
+#include <thread>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -147,6 +149,7 @@ constexpr UINT_PTR kOptionsDspStateTimer = 0x4454;
 constexpr UINT kOptionsDspPollMilliseconds = 60;
 constexpr ULONGLONG kOptionsDspScanTimeoutMilliseconds = 120000;
 constexpr DWORD kOptionsDeviceProbeTimeoutMilliseconds = 4000;
+constexpr UINT_PTR kOptionsDevicePollTimer = 0x4455;
 constexpr UINT kSwitchNestedOptionsPage = WM_APP + 0x311;
 constexpr UINT kExportSkinPreview = WM_APP + 0x312;
 constexpr UINT kInitializeRegistrationSheet = WM_APP + 0x313;
@@ -608,21 +611,38 @@ std::optional<std::vector<DspProbeResult>> ReadDspResults(
 }
 
 std::optional<std::vector<LegacyOutputDevice>> RunOutputDeviceProbe(
-    const LegacyOutputDevice* selected_device = nullptr) {
+    const LegacyOutputDevice* selected_device, const std::atomic_bool& cancelled,
+    bool names_only = false) {
+    if (cancelled.load(std::memory_order_relaxed)) return std::nullopt;
     const auto helper = app::CurrentExecutablePath();
     if (helper.empty()) return std::nullopt;
-    const auto request = selected_device ? DspTemporaryFile()
-                                         : std::filesystem::path{};
-    const auto output = DspTemporaryFile();
+    // The worker owns every handle and file, including exception paths while
+    // parsing a driver-supplied result. Nothing here references a page HWND.
+    struct Resources {
+        std::filesystem::path request, output;
+        PROCESS_INFORMATION process{};
+        HANDLE job{};
+        ~Resources() {
+            if (process.hProcess && WaitForSingleObject(process.hProcess, 0) != WAIT_OBJECT_0) {
+                if (job) TerminateJobObject(job, ERROR_CANCELLED);
+                else TerminateProcess(process.hProcess, ERROR_CANCELLED);
+            }
+            if (process.hThread) CloseHandle(process.hThread);
+            if (process.hProcess) CloseHandle(process.hProcess);
+            if (job) CloseHandle(job);
+            if (!request.empty()) DeleteFileW(request.c_str());
+            if (!output.empty()) DeleteFileW(output.c_str());
+        }
+    } owned;
+    if (selected_device) owned.request = DspTemporaryFile();
+    owned.output = DspTemporaryFile();
+    const auto& request = owned.request;
+    const auto& output = owned.output;
     if (output.empty() || (selected_device && request.empty())) {
-        if (!request.empty()) DeleteFileW(request.c_str());
-        if (!output.empty()) DeleteFileW(output.c_str());
         return std::nullopt;
     }
     if (selected_device && !WriteLegacyOutputDeviceProbe(
             request, std::vector<LegacyOutputDevice>{*selected_device})) {
-        DeleteFileW(request.c_str());
-        DeleteFileW(output.c_str());
         return std::nullopt;
     }
 
@@ -631,18 +651,18 @@ std::optional<std::vector<LegacyOutputDevice>> RunOutputDeviceProbe(
     if (selected_device) {
         command += L" --details " + QuoteDspArgument(request.wstring());
     }
+    if (names_only) command += L" --names";
     command += L" " + QuoteDspArgument(output.wstring());
     STARTUPINFOW startup{sizeof(startup)};
-    PROCESS_INFORMATION process{};
+    auto& process = owned.process;
     if (!CreateProcessW(helper.c_str(), command.data(), nullptr, nullptr, FALSE,
                         CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr,
                         helper.parent_path().c_str(), &startup, &process)) {
-        if (!request.empty()) DeleteFileW(request.c_str());
-        DeleteFileW(output.c_str());
         return std::nullopt;
     }
 
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    auto& job = owned.job;
+    job = CreateJobObjectW(nullptr, nullptr);
     if (job) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
         limits.BasicLimitInformation.LimitFlags =
@@ -658,28 +678,31 @@ std::optional<std::vector<LegacyOutputDevice>> RunOutputDeviceProbe(
 
     const DWORD resumed = ResumeThread(process.hThread);
     CloseHandle(process.hThread);
-    DWORD wait = resumed == static_cast<DWORD>(-1)
-        ? WAIT_FAILED
-        : WaitForSingleObject(process.hProcess,
-                              kOptionsDeviceProbeTimeoutMilliseconds);
+    process.hThread = nullptr;
+    DWORD wait = WAIT_FAILED;
+    const ULONGLONG started = GetTickCount64();
+    if (resumed != static_cast<DWORD>(-1)) {
+        while (!cancelled.load(std::memory_order_relaxed)) {
+            wait = WaitForSingleObject(process.hProcess, 50);
+            if (wait != WAIT_TIMEOUT || GetTickCount64() - started >=
+                kOptionsDeviceProbeTimeoutMilliseconds) break;
+        }
+    }
     if (wait != WAIT_OBJECT_0) {
-        if (job)
-            TerminateJobObject(job, ERROR_TIMEOUT);
-        else
-            TerminateProcess(process.hProcess, ERROR_TIMEOUT);
+        const DWORD reason = cancelled.load(std::memory_order_relaxed)
+            ? ERROR_CANCELLED : ERROR_TIMEOUT;
+        if (job) TerminateJobObject(job, reason);
+        else TerminateProcess(process.hProcess, reason);
+        // This runs only on the detached worker, never on the page thread.
         static_cast<void>(WaitForSingleObject(process.hProcess, 1000));
     }
 
     std::optional<std::vector<LegacyOutputDevice>> result;
     DWORD exit_code{};
-    if (wait == WAIT_OBJECT_0 &&
+    if (!cancelled.load(std::memory_order_relaxed) && wait == WAIT_OBJECT_0 &&
         GetExitCodeProcess(process.hProcess, &exit_code) && exit_code == 0) {
         result = ReadLegacyOutputDeviceProbe(output);
     }
-    CloseHandle(process.hProcess);
-    if (job) CloseHandle(job);
-    if (!request.empty()) DeleteFileW(request.c_str());
-    DeleteFileW(output.c_str());
     return result;
 }
 
@@ -3819,7 +3842,208 @@ void PlayerWindow::SetOptionsAssociationIcon(HWND dialog, const std::wstring& ic
     RefreshOptionsAssociationIcon(dialog);
 }
 
+struct PlayerWindow::OptionsDeviceProbeState {
+    HWND dialog{};
+    bool details{}, complete_catalog{};
+    size_t row{};
+    LegacyOutputDevice request;
+    std::atomic_bool cancelled{}, ready{};
+    std::optional<std::vector<LegacyOutputDevice>> result;
+};
+
+void PlayerWindow::CancelOptionsDeviceProbe() {
+    if (auto pending = std::exchange(options_device_probe_, {})) {
+        pending->cancelled.store(true, std::memory_order_relaxed);
+        if (IsWindow(pending->dialog)) KillTimer(pending->dialog, kOptionsDevicePollTimer);
+    }
+}
+
+void PlayerWindow::StartOptionsDeviceProbe(HWND dialog, bool details) {
+    CancelOptionsDeviceProbe();
+    auto pending = std::make_shared<OptionsDeviceProbeState>();
+    pending->dialog = dialog;
+    pending->details = details;
+    if (details) {
+        const auto row = SelectedOutputDeviceEntry(dialog, options_device_entries_.size());
+        if (!row) return;
+        pending->row = *row;
+        pending->request = OutputDeviceIdentity(options_device_entries_[*row]);
+        pending->request.name = options_device_entries_[*row].name;
+        pending->request.details = options_device_entries_[*row].details;
+    } else EnableWindow(GetDlgItem(dialog, 1059), FALSE);
+    options_device_probe_ = pending;
+    if (!SetTimer(dialog, kOptionsDevicePollTimer, 50, nullptr)) {
+        CancelOptionsDeviceProbe();
+        EnableWindow(GetDlgItem(dialog, 1059), TRUE);
+        return;
+    }
+    try {
+        std::thread([pending] {
+            try {
+                pending->result = RunOutputDeviceProbe(
+                    pending->details ? &pending->request : nullptr, pending->cancelled);
+                pending->complete_catalog = pending->result.has_value();
+                if (!pending->details && !pending->result &&
+                    !pending->cancelled.load(std::memory_order_relaxed)) {
+                    // Even the safe name-only fallback stays inside a bounded
+                    // helper: a driver callback has no in-process cancel API.
+                    pending->result = RunOutputDeviceProbe(nullptr, pending->cancelled, true);
+                }
+            } catch (...) { pending->result.reset(); }
+            pending->ready.store(true, std::memory_order_release);
+        }).detach();
+    } catch (...) {
+        CancelOptionsDeviceProbe();
+        EnableWindow(GetDlgItem(dialog, 1059), TRUE);
+    }
+}
+
+void PlayerWindow::PollOptionsDeviceProbe(HWND dialog) {
+    const auto pending = options_device_probe_;
+    if (!pending || pending->dialog != dialog) return;
+    if (!pending->ready.load(std::memory_order_acquire)) return;
+    KillTimer(dialog, kOptionsDevicePollTimer);
+    options_device_probe_.reset();
+    if (pending->cancelled.load(std::memory_order_relaxed) || !IsWindow(dialog)) return;
+    if (pending->details) {
+        const auto row = SelectedOutputDeviceEntry(dialog, options_device_entries_.size());
+        if (!row || *row != pending->row) return;
+        auto& entry = options_device_entries_[*row];
+        if (entry.backend != pending->request.backend ||
+            _wcsicmp(entry.key.c_str(), pending->request.key.c_str()) != 0) return;
+        // Cache both a completed failure and success. Canceled/obsolete work
+        // never marks a row resolved, so returning to it can retry.
+        entry.details_resolved = true;
+        if (pending->result && pending->result->size() == 1) {
+            auto& result = pending->result->front();
+            if (result.backend == entry.backend &&
+                _wcsicmp(result.key.c_str(), entry.key.c_str()) == 0)
+                entry.details = std::move(result.details);
+        }
+        UpdateOptionsDeviceDetails(dialog);
+        return;
+    }
+    options_device_entries_.clear();
+    if (pending->result) for (auto& source : *pending->result) {
+        DeviceOptionEntry entry;
+        entry.backend = source.backend;
+        entry.wave_device_id = source.wave_device_id;
+        entry.key = std::move(source.key);
+        entry.name = std::move(source.name);
+        entry.module = std::move(source.module);
+        entry.identifier = source.class_id;
+        entry.has_identifier = source.has_class_id;
+        entry.details = std::move(source.details);
+        entry.details_resolved = entry.backend == 0 || entry.backend == 2 ||
+            std::any_of(entry.details.begin(), entry.details.end(),
+                        [](const auto& value) { return !value.empty(); });
+        options_device_entries_.push_back(std::move(entry));
+    }
+    PopulateOptionsDeviceCatalog(dialog, pending->complete_catalog);
+    EnableWindow(GetDlgItem(dialog, 1059), TRUE);
+    UpdateOptionsDeviceDetails(dialog);
+}
+
+void PlayerWindow::PopulateOptionsDeviceCatalog(HWND dialog, bool complete_catalog) {
+    const auto resources = ResourceModule();
+    // Ignore synthetic combo notifications while replacing the row mapping.
+    const bool ready = RemovePropW(dialog, kPageReadyProperty) != nullptr;
+    const bool configured_present = settings_.device.device_type.empty() ||
+        std::any_of(options_device_entries_.begin(),
+                    options_device_entries_.end(),
+                    [this](const DeviceOptionEntry& entry) {
+            return OutputDeviceRowMatchesKey(entry, settings_.device.device_type);
+        });
+    if ((!complete_catalog || settings_.device.device_type.starts_with(L"wasapi:") ||
+         settings_.device.device_type.starts_with(L"native:")) &&
+        !configured_present) {
+        // The isolated full scan failed after settings had selected a
+        // KS/ASIO (or now-unplugged DirectSound) key.  Keep that choice
+        // visible and inert rather than silently rewriting it to row 0
+        // when the user closes the page.
+        DeviceOptionEntry configured;
+        configured.key = settings_.device.device_type;
+        configured.backend = DeviceBackendFromKey(
+            configured.key, configured.wave_device_id);
+        configured.name = configured.key;
+        configured.details_resolved = true;
+        options_device_entries_.push_back(std::move(configured));
+    }
+
+    if (options_device_entries_.empty()) {
+        // A missing/timed-out/malformed helper is not evidence that the
+        // configured device became Wave Mapper.  Publish one inert row
+        // carrying the existing key so Close/Apply cannot silently
+        // overwrite Device/@DeviceType after a discovery failure.
+        DeviceOptionEntry fallback;
+        fallback.key = settings_.device.device_type;
+        fallback.backend = DeviceBackendFromKey(
+            fallback.key, fallback.wave_device_id);
+        fallback.name = fallback.key;
+        if (fallback.name.empty()) fallback.name = i18n::Literal(L"Unavailable device");
+        fallback.details_resolved = true;
+        options_device_entries_.push_back(std::move(fallback));
+    }
+    // Group each output backend while preserving its device order. Include
+    // retained unavailable selections so a shared WASAPI device cannot
+    // appear after the exclusive group. Selection is restored by key below.
+    std::stable_sort(options_device_entries_.begin(),
+                     options_device_entries_.end(),
+                     [](const DeviceOptionEntry& left,
+                        const DeviceOptionEntry& right) {
+        return left.backend < right.backend;
+    });
+    const HWND devices = GetDlgItem(dialog, 1059);
+    if (devices) {
+        SendMessageW(devices, CB_RESETCONTENT, 0, 0);
+        if (options_device_images_) {
+            SendMessageW(devices, CBEM_SETIMAGELIST, 0, 0);
+            if (const HWND details = GetDlgItem(dialog, 1064))
+                ListView_SetImageList(details, nullptr, LVSIL_SMALL);
+            ImageList_Destroy(options_device_images_);
+            options_device_images_ = nullptr;
+        }
+        options_device_images_ = ImageList_LoadImageW(
+            resources, MAKEINTRESOURCEW(0x167), 16, 1,
+            RGB(192, 192, 192), IMAGE_BITMAP, LR_CREATEDIBSECTION);
+        if (options_device_images_)
+            SendMessageW(devices, CBEM_SETIMAGELIST, 0,
+                         reinterpret_cast<LPARAM>(options_device_images_));
+        if (const HWND details = GetDlgItem(dialog, 1064);
+            details && options_device_images_) {
+            ListView_SetImageList(details, options_device_images_,
+                                  LVSIL_SMALL);
+        }
+        int selected = 0;
+        for (size_t index = 0; index < options_device_entries_.size();
+             ++index) {
+            auto& entry = options_device_entries_[index];
+            COMBOBOXEXITEMW item{};
+            item.mask = CBEIF_TEXT | CBEIF_LPARAM;
+            if (options_device_images_) {
+                item.mask |= CBEIF_IMAGE | CBEIF_SELECTEDIMAGE;
+                item.iImage = entry.backend >= 4 ? 1 : entry.backend;
+                item.iSelectedImage = item.iImage;
+            }
+            item.iItem = static_cast<int>(index);
+            item.pszText = entry.name.data();
+            item.lParam = static_cast<LPARAM>(index);
+            const LRESULT inserted = SendMessageW(
+                devices, CBEM_INSERTITEMW, 0,
+                reinterpret_cast<LPARAM>(&item));
+            if (OutputDeviceRowMatchesKey(entry, settings_.device.device_type)) {
+                selected = inserted >= 0
+                    ? static_cast<int>(inserted)
+                    : static_cast<int>(index);
+            }
+        }
+        SendMessageW(devices, CB_SETCURSEL, selected, 0);
+    }
+    if (ready) SetPropW(dialog, kPageReadyProperty, reinterpret_cast<HANDLE>(1));
+}
+
 void PlayerWindow::CloseOptions() {
+    CancelOptionsDeviceProbe();
     CancelOptionsDspScan();
     if (options_window_ && IsWindow(options_window_)) {
         FlushDeferredOptionsRuntime();
@@ -4148,6 +4372,7 @@ LRESULT PlayerWindow::HandleOptionsSheetMessage(
             if (options_skin_preview_) DeleteObject(options_skin_preview_);
             options_skin_preview_ = nullptr;
             CancelOptionsDspScan();
+            CancelOptionsDeviceProbe();
             options_dsp_paths_.clear();
             options_dsp_scan_complete_ = false;
             options_device_entries_.clear();
@@ -5015,131 +5240,8 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
     }
     case 260: {
         options_device_entries_.clear();
-
-        // FUN_004991F1 performs waveOut, DirectSound, KS and ASIO discovery in
-        // that order.  Preserve the resulting synchronous page snapshot, but
-        // isolate every driver call in a same-bitness kill-on-close helper:
-        // SetupDi/CreateFile/DirectSound callbacks themselves have no usable
-        // in-process cancellation contract if a legacy driver stalls.
-        auto discovered = RunOutputDeviceProbe();
-        const bool complete_catalog = discovered.has_value();
-        const auto append_devices = [this](
-                std::vector<LegacyOutputDevice> sources) {
-            for (auto& source : sources) {
-                DeviceOptionEntry entry;
-                entry.backend = source.backend;
-                entry.wave_device_id = source.wave_device_id;
-                entry.key = std::move(source.key);
-                entry.name = std::move(source.name);
-                entry.module = std::move(source.module);
-                entry.identifier = source.class_id;
-                entry.has_identifier = source.has_class_id;
-                entry.details = std::move(source.details);
-                entry.details_resolved = entry.backend == 0 ||
-                    entry.backend == 2 || std::any_of(
-                        entry.details.begin(), entry.details.end(),
-                        [](const std::wstring& value) {
-                            return !value.empty();
-                        });
-                options_device_entries_.push_back(std::move(entry));
-            }
-        };
-        if (discovered) append_devices(std::move(*discovered));
-
-        // A timed-out/missing helper must not erase the safe first half of
-        // FUN_004991F1.  These calls enumerate names only and never activate
-        // a DirectSound, KS or ASIO endpoint.
-        if (options_device_entries_.empty())
-            append_devices(EnumerateWaveAndDirectSoundOutputDevices());
-
-        const bool configured_present = settings_.device.device_type.empty() ||
-            std::any_of(options_device_entries_.begin(),
-                        options_device_entries_.end(),
-                        [this](const DeviceOptionEntry& entry) {
-                return OutputDeviceRowMatchesKey(entry, settings_.device.device_type);
-            });
-        if ((!complete_catalog || settings_.device.device_type.starts_with(L"wasapi:") ||
-             settings_.device.device_type.starts_with(L"native:")) &&
-            !configured_present) {
-            // The isolated full scan failed after settings had selected a
-            // KS/ASIO (or now-unplugged DirectSound) key.  Keep that choice
-            // visible and inert rather than silently rewriting it to row 0
-            // when the user closes the page.
-            DeviceOptionEntry configured;
-            configured.key = settings_.device.device_type;
-            configured.backend = DeviceBackendFromKey(
-                configured.key, configured.wave_device_id);
-            configured.name = configured.key;
-            configured.details_resolved = true;
-            options_device_entries_.push_back(std::move(configured));
-        }
-
-        if (options_device_entries_.empty()) {
-            // A missing/timed-out/malformed helper is not evidence that the
-            // configured device became Wave Mapper.  Publish one inert row
-            // carrying the existing key so Close/Apply cannot silently
-            // overwrite Device/@DeviceType after a discovery failure.
-            DeviceOptionEntry fallback;
-            fallback.key = settings_.device.device_type;
-            fallback.backend = DeviceBackendFromKey(
-                fallback.key, fallback.wave_device_id);
-            fallback.name = fallback.key;
-            if (fallback.name.empty()) fallback.name = i18n::Literal(L"Unavailable device");
-            fallback.details_resolved = true;
-            options_device_entries_.push_back(std::move(fallback));
-        }
-        // Group each output backend while preserving its device order. Include
-        // retained unavailable selections so a shared WASAPI device cannot
-        // appear after the exclusive group. Selection is restored by key below.
-        std::stable_sort(options_device_entries_.begin(),
-                         options_device_entries_.end(),
-                         [](const DeviceOptionEntry& left,
-                            const DeviceOptionEntry& right) {
-            return left.backend < right.backend;
-        });
-        const HWND devices = GetDlgItem(dialog, 1059);
-        if (devices) {
-            SendMessageW(devices, CB_RESETCONTENT, 0, 0);
-            if (options_device_images_) {
-                ImageList_Destroy(options_device_images_);
-                options_device_images_ = nullptr;
-            }
-            options_device_images_ = ImageList_LoadImageW(
-                resources, MAKEINTRESOURCEW(0x167), 16, 1,
-                RGB(192, 192, 192), IMAGE_BITMAP, LR_CREATEDIBSECTION);
-            if (options_device_images_)
-                SendMessageW(devices, CBEM_SETIMAGELIST, 0,
-                             reinterpret_cast<LPARAM>(options_device_images_));
-            if (const HWND details = GetDlgItem(dialog, 1064);
-                details && options_device_images_) {
-                ListView_SetImageList(details, options_device_images_,
-                                      LVSIL_SMALL);
-            }
-            int selected = 0;
-            for (size_t index = 0; index < options_device_entries_.size();
-                 ++index) {
-                auto& entry = options_device_entries_[index];
-                COMBOBOXEXITEMW item{};
-                item.mask = CBEIF_TEXT | CBEIF_LPARAM;
-                if (options_device_images_) {
-                    item.mask |= CBEIF_IMAGE | CBEIF_SELECTEDIMAGE;
-                    item.iImage = entry.backend >= 4 ? 1 : entry.backend;
-                    item.iSelectedImage = item.iImage;
-                }
-                item.iItem = static_cast<int>(index);
-                item.pszText = entry.name.data();
-                item.lParam = static_cast<LPARAM>(index);
-                const LRESULT inserted = SendMessageW(
-                    devices, CBEM_INSERTITEMW, 0,
-                    reinterpret_cast<LPARAM>(&item));
-                if (OutputDeviceRowMatchesKey(entry, settings_.device.device_type)) {
-                    selected = inserted >= 0
-                        ? static_cast<int>(inserted)
-                        : static_cast<int>(index);
-                }
-            }
-            SendMessageW(devices, CB_SETCURSEL, selected, 0);
-        }
+        PopulateOptionsDeviceCatalog(dialog, false);
+        StartOptionsDeviceProbe(dialog, false);
         SetInteger(dialog, 1071, settings_.device.buffer_duration);
         SetSpinRange(dialog, 1072, 100, 10000);
         auto bit_labels = IntegerLabels({8,16,24,32}, L" Bits");
@@ -6312,35 +6414,7 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
     }
     if (all || template_id == 251 || template_id == 258 || template_id == 259 ||
         template_id == 260) {
-        audio_->Configure({settings_.playback.file_buffer,
-                          settings_.device.buffer_duration,
-                          settings_.device.output_bits,
-                          settings_.device.resample_rate,
-                          settings_.playback.thread_priority,
-                          settings_.player.balance,
-                          settings_.playback.auto_gain,
-                          settings_.playback.auto_scan_gain,
-                          settings_.playback.skip_scan_gain,
-                          settings_.equalizer.profile,
-                          settings_.equalizer.surround,
-                          settings_.equalizer.current,
-                          settings_.device.device_type,
-                          settings_.device.hardware_buffer,
-                          settings_.device.create_primary,
-                          settings_.device.ssrc_mode,
-                          settings_.device.dither,
-                          settings_.plugin.folder,
-                          settings_.plugin.modules,
-                          nullptr,
-                          settings_.playback.sound_fade_mode,
-                          settings_.playback.fade_duration,
-                          settings_.playback.track_fade_duration,
-                          {}, 15000, settings_.network.proxy_type, settings_.network.proxy_port,
-                          settings_.network.proxy_server, settings_.network.proxy_username,
-                          settings_.network.proxy_password,
-                          settings_.network.cache_enabled, settings_.network.cache_folder,
-                          settings_.network.cache_space_size, settings_.network.download_folder,
-                      (settings_.source_path.empty() ? PlayerRuntimeDirectory() : settings_.source_path.parent_path()) / L"HttpDownloads" / L"cachelist.xml"});
+        audio_->Configure(PlaybackOptionsFromSettings(settings_, PlayerRuntimeDirectory()));
         audio_->SetVolume(settings_.player.mute ? 0.0F :
             static_cast<float>(settings_.player.volume) / 100.0F);
     }
@@ -6386,15 +6460,16 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
         InvalidateRect(lyric_window_, nullptr, FALSE);
     }
     if (all || template_id == 256) {
-        // Lyric/AutoLoadLyric and Folders_* are consumed by the next track
-        // selection.  A live page apply also re-evaluates the current item,
-        // while an explicitly loaded/embedded lyric remains authoritative.
-        if (!lyric_path_.empty()) {
+        // 00490276 changes the page-256 policy flags without reloading the
+        // document. In particular SaveCompress must not discard unsaved
+        // timing adjustments. A full reset may refresh a clean document,
+        // but an active editor or a dirty display document owns its draft.
+        const bool draft = lyric_document_modified_ || lyric_editor_;
+        if (all && !draft && !lyric_path_.empty()) {
             const bool associated = !associated_lyric_path_.empty() &&
-                _wcsicmp(lyric_path_.c_str(),
-                          associated_lyric_path_.c_str()) == 0;
+                _wcsicmp(lyric_path_.c_str(), associated_lyric_path_.c_str()) == 0;
             LoadLyricsFrom(lyric_path_, associated);
-        } else if (lyrics_.lines.empty() &&
+        } else if (!draft && lyrics_.lines.empty() &&
                    settings_.lyric.auto_load_lyric) {
             LoadCurrentLyrics();
         } else {
@@ -6532,28 +6607,14 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
     if (!selected) return;
 
     auto& entry = options_device_entries_[*selected];
-    if (!entry.details_resolved) {
-        // 0049989D probes DirectSound/ASIO only for the selected row.  Keep
-        // the call in the isolated helper and remember both success and
-        // failure so merely repainting the page cannot repeatedly load a
-        // broken legacy driver.
-        entry.details_resolved = true;
-        LegacyOutputDevice request;
-        request.backend = entry.backend;
-        request.wave_device_id = entry.wave_device_id;
-        request.key = entry.key;
-        request.name = entry.name;
-        request.module = entry.module;
-        request.class_id = entry.identifier;
-        request.has_class_id = entry.has_identifier;
-        request.details = entry.details;
-        auto resolved = RunOutputDeviceProbe(&request);
-        if (resolved && resolved->size() == 1 &&
-            (*resolved)[0].backend == entry.backend &&
-            _wcsicmp((*resolved)[0].key.c_str(), entry.key.c_str()) == 0) {
-            entry.details = std::move((*resolved)[0].details);
-        }
-    }
+    if (options_device_probe_ && options_device_probe_->details &&
+        (options_device_probe_->dialog != dialog ||
+         options_device_probe_->row != *selected ||
+         options_device_probe_->request.backend != entry.backend ||
+         _wcsicmp(options_device_probe_->request.key.c_str(), entry.key.c_str()) != 0))
+        CancelOptionsDeviceProbe();
+    if (!entry.details_resolved && !options_device_probe_)
+        StartOptionsDeviceProbe(dialog, true);
     const UINT detail_resource = entry.backend == 0 ? 0x812a
         : entry.backend == 1 ? 0x812b
         : entry.backend == 2 ? 0x812c : 0x812d;
@@ -6920,6 +6981,10 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         }
         return TRUE;
     case WM_TIMER:
+        if (template_id == 260 && wparam == kOptionsDevicePollTimer) {
+            PollOptionsDeviceProbe(dialog);
+            return TRUE;
+        }
         if (template_id == 259 && wparam == kOptionsDspStateTimer) {
             UpdateDspButtons(dialog, audio_.get(), options_dsp_paths_);
             return TRUE;
@@ -8037,6 +8102,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         break;
     }
     case WM_DESTROY: {
+        if (template_id == 260) CancelOptionsDeviceProbe();
         if (template_id == 381 || template_id == 382) {
             auto& child = options_network_pages_[template_id - 381];
             if (child == dialog) child = nullptr;

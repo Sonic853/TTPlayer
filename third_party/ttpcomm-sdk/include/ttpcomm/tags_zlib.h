@@ -5,7 +5,7 @@
 namespace ttpcomm::tags {
 inline std::optional<View> DecodePayload(
     View data, unsigned char major,
-    unsigned char flags, bool tag_unsynchronized, std::vector<unsigned char>& storage,
+    unsigned char flags, bool input_unsynchronized, std::vector<unsigned char>& storage,
     std::uint64_t& inflate_budget) {
     if (major < 2 || major > 4) return std::nullopt;
     if (major == 2) return data;
@@ -14,6 +14,13 @@ inline std::optional<View> DecodePayload(
     const bool grouped = (flags & (major == 3 ? 0x20U : 0x40U)) != 0;
     if (encrypted || (flags & (major == 3 ? 0x1fU : 0xb0U)))
         return std::nullopt;
+    // v2.4 unsynchronizes everything after the frame header, including
+    // grouping/DLI bytes. Undo it before reading those fields. The boolean
+    // means the input was already transformed, not that the tag bit is set.
+    if (major == 4 && (flags & 0x02U) && !input_unsynchronized) {
+        storage = RemoveUnsynchronization(data);
+        data = View(storage.data(), storage.size());
+    }
     std::uint32_t decoded_size{};
     if (major == 3 && compressed) {
         if (data.size() < 4) return std::nullopt;
@@ -31,10 +38,6 @@ inline std::optional<View> DecodePayload(
             decoded_size = bytes::Synchsafe32(data.data());
             if (decoded_size == UINT32_MAX) return std::nullopt;
             data = data.subspan(4);
-        }
-        if ((flags & 0x02U) && !tag_unsynchronized) {
-            storage = RemoveUnsynchronization(data);
-            data = View(storage.data(), storage.size());
         }
     }
     if (!compressed) return data;

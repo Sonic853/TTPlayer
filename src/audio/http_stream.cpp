@@ -1,5 +1,5 @@
 #include "ttplayer/audio/http_stream.h"
-#include "ttplayer/net/ttp_https.h"
+#include "ttplayer/net/https_provider.h"
 #include <shlwapi.h>
 #include <wincrypt.h>
 #include <algorithm>
@@ -38,10 +38,6 @@ struct File {
     HANDLE value{INVALID_HANDLE_VALUE};
     void Close(){if(value!=INVALID_HANDLE_VALUE) CloseHandle(value);value=INVALID_HANDLE_VALUE;}
     ~File(){Close();}
-};
-struct Module {
-    HMODULE value{};
-    ~Module(){if(value) FreeLibrary(value);}
 };
 // A reader is a lease, not the producer. Its cancellation callback is called
 // only under clients_mutex_; Detach waits for an in-flight callback before the
@@ -113,12 +109,8 @@ private:
     void Open() {
         Guard();
         if(const auto hash=url_.find(L'#');hash!=url_.npos) url_.resize(hash);
-        wchar_t exe[32768];const auto n=GetModuleFileNameW(nullptr,exe,32768);Require(n && n<32768);
-        const auto dll=std::filesystem::path(exe).parent_path()/L"AddIn"/L"ttp_https.dll";
-        module_.value=LoadLibraryExW(dll.c_str(),nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
-        if(!module_.value) throw Failure{HRESULT_FROM_WIN32(GetLastError())};
-        auto get=reinterpret_cast<ttp_https_get_api_fn>(GetProcAddress(module_.value,"ttp_https_get_api"));
-        const auto* base=get?get(TTP_HTTPS_STREAM_ABI_VERSION):nullptr;
+        if(!module_.Load()) throw Failure{HRESULT_FROM_WIN32(module_.Error())};
+        const auto* base=module_.Api(TTP_HTTPS_STREAM_ABI_VERSION);
         if(!base || base->abi_version!=TTP_HTTPS_STREAM_ABI_VERSION || base->size<sizeof(ttp_https_api_v7))
             throw Failure{E_NOINTERFACE};
         api_=reinterpret_cast<const ttp_https_api_v7*>(base);
@@ -501,7 +493,7 @@ private:
     std::atomic<bool> ready_{},shareable_{};bool accepting_{true};
     std::thread worker_;std::atomic<bool> stopping_{},restart_{},sequential_{};
     std::wstring url_;std::string validator_;PlaybackOptions options_;
-    Module module_;const ttp_https_api_v7* api_{};ttp_https_stream* request_{};
+    net::HttpsProvider module_;const ttp_https_api_v7* api_{};ttp_https_stream* request_{};
     File cache_;std::array<unsigned char,16384> buffer_{};
     bool opened_{},ranged_{},worker_done_{},persisted_{};
     unsigned retries_{};

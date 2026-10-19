@@ -1,5 +1,6 @@
 #include "player_window_internal.h"
 #include "file_info_probe_client.h"
+#include "track_metadata.h"
 
 #include "ttplayer/core/text.h"
 #include "ttplayer/audio/archive_member.h"
@@ -23,23 +24,13 @@
 namespace ttplayer::ui {
 namespace {
 
-enum class PlaylistInfoState { success, provisional, failed, unavailable };
+using PlaylistInfoState = detail::TrackInfoState;
 
-struct PlaylistInfoResult {
+struct PlaylistInfoResult : playlist::Track {
     std::uint64_t info_revision{};
     size_t playlist_slot{};
     size_t row_hint{};
-    std::filesystem::path path;
-    int subtrack{};
     PlaylistInfoState state{PlaylistInfoState::failed};
-    int duration_ms{-2};
-    std::string title;
-    std::string artist;
-    std::string album;
-    std::string media_type;
-    std::uint32_t bitrate_bps{};
-    std::uint32_t sample_rate_hz{};
-    std::vector<std::pair<std::string, std::string>> metadata;
 };
 
 bool LooksLikeNetworkPath(std::wstring_view value) {
@@ -65,42 +56,6 @@ std::wstring RequestKey(size_t playlist_slot,
     key.push_back(L'\x1e');
     key += SourceKey(path, subtrack);
     return key;
-}
-
-bool EqualsAsciiInsensitive(std::wstring_view left,
-                            std::wstring_view right) {
-    if (left.size() != right.size()) return false;
-    for (size_t index = 0; index < left.size(); ++index) {
-        wchar_t lhs = left[index];
-        wchar_t rhs = right[index];
-        if (lhs >= L'A' && lhs <= L'Z') lhs += L'a' - L'A';
-        if (rhs >= L'A' && rhs <= L'Z') rhs += L'a' - L'A';
-        if (lhs != rhs) return false;
-    }
-    return true;
-}
-
-std::string Utf8(std::wstring_view value) {
-    if (value.empty()) return {};
-    try { return core::WideToUtf8(value); }
-    catch (const std::exception&) { return {}; }
-}
-
-std::wstring MetadataValue(
-    const detail::FileInfoProbeReadResult& probe, std::wstring_view name) {
-    const auto found = std::find_if(probe.metadata.begin(),
-        probe.metadata.end(),
-        [name](const auto& entry) {
-            return EqualsAsciiInsensitive(entry.name, name);
-        });
-    return found == probe.metadata.end() ? std::wstring{} : found->value;
-}
-
-bool ReaderUnavailable(HRESULT status) {
-    // The pre-open HasReaderForPath check is encoded as NOT_SUPPORTED by the
-    // helper.  E_NOINTERFACE can instead be a matched creator/Open failure and
-    // therefore follows 00481759's ordinary failed-item (-1) path.
-    return status == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
 }
 
 std::filesystem::path RuntimeDirectory() {
@@ -129,49 +84,7 @@ PlaylistInfoResult ReadPlaylistInfoIsolated(
     const auto probe = session.Read(
         stop, helper, addin_directory, path, ttpcomm_path, subtrack, 15000,
         &process_state, policy);
-    if (!probe) {
-        // A missing helper means this build cannot inspect the source.  A
-        // launched helper which times out, crashes or emits a partial packet
-        // did match the transaction but failed, so 00481759's -2 -> -1
-        // failure transition must run and the following queue item can start.
-        result.state = process_state ==
-                detail::FileInfoProbeProcessState::launch_failed || process_state ==
-                detail::FileInfoProbeProcessState::cancelled
-            ? PlaylistInfoState::unavailable
-            : PlaylistInfoState::failed;
-        return result;
-    }
-    if (ReaderUnavailable(probe->status) || probe->status==HRESULT(0x8004A001L) ||
-        probe->status==HRESULT(0x8004A002L) || probe->status==HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
-        result.state = PlaylistInfoState::unavailable;
-        return result;
-    }
-    if (FAILED(probe->status)) return result;
-
-    result.state = probe->status == S_FALSE ? PlaylistInfoState::provisional : PlaylistInfoState::success;
-    result.duration_ms = static_cast<int>(std::clamp<std::int64_t>(
-        probe->duration_ms, 0, INT_MAX));
-
-    result.title = Utf8(MetadataValue(*probe, L"title"));
-    auto artist = MetadataValue(*probe, L"artist");
-    if (artist.empty()) artist = MetadataValue(*probe, L"author");
-    result.artist = Utf8(artist);
-    result.album = Utf8(MetadataValue(*probe, L"album"));
-    result.media_type = Utf8(probe->codec);
-    const std::uint64_t encoded = probe->encoded_bits_per_second != 0
-        ? probe->encoded_bits_per_second
-        : static_cast<std::uint64_t>(probe->format.nAvgBytesPerSec) * 8U;
-    // CPlayItem reserves bit 31 for the VBR display flag.
-    result.bitrate_bps = static_cast<std::uint32_t>(
-        std::min<std::uint64_t>(encoded, 0x7fffffffU));
-    result.sample_rate_hz = probe->format.nSamplesPerSec;
-    result.metadata.reserve(probe->metadata.size());
-    for (const auto& entry : probe->metadata) {
-        auto name = Utf8(entry.name);
-        auto value = Utf8(entry.value);
-        if (!name.empty())
-            result.metadata.emplace_back(std::move(name), std::move(value));
-    }
+    result.state = detail::ApplyFileInfoProbeToTrack(result, probe, process_state);
     return result;
 }
 
@@ -448,11 +361,10 @@ LRESULT PlayerWindow::ApplyPlaylistInfoResult(LPARAM value) {
                     bool changed{};
                     if (result->state == PlaylistInfoState::failed) changed = list.SetDuration(row, -1);
                     else {
-                        if (result->state != PlaylistInfoState::provisional)
-                            changed |= list.SetDuration(row, result->duration_ms);
-                        changed |= list.SetMetadata(row, result->title, result->artist, result->album);
-                        changed |= list.SetExtendedMetadata(row, result->metadata, result->media_type,
-                            result->bitrate_bps, result->sample_rate_hz);
+                        playlist::Track updated = *result;
+                        updated.path = list.Tracks()[row].path;
+                        updated.rating = list.Tracks()[row].rating;
+                        changed = list.SetTrack(row, std::move(updated));
                     }
                     if (changed) changed_rows.push_back(row);
                 }

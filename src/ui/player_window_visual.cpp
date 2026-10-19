@@ -206,7 +206,9 @@ std::vector<unsigned char> ReadId3Picture(std::ifstream& input,
     if (version < 2 || version > 4 || !tag_size || tag_size > kMaximumPictureBytes) return {};
     std::vector<unsigned char> tag(tag_size);
     if (!ReadExact(input, tag.data(), tag.size())) return {};
-    const bool unsynchronized = (header[5] & 0x80U) != 0;
+    // v2.4 sizes describe stored frames; removing bytes from the whole tag
+    // would shift later headers. Decode unsynchronization inside each frame.
+    const bool unsynchronized = version < 4 && (header[5] & 0x80U) != 0;
     if (unsynchronized) tag = ttpcomm::host::tags::RemoveUnsynchronization({tag.data(), tag.size()});
     const auto start = ttpcomm::host::tags::FrameStart({tag.data(), tag.size()}, version, header[5]);
     if (!start) return {};
@@ -2198,11 +2200,7 @@ void PlayerWindow::SetFullScreenMode(int mode, HWND origin, int visual_type_over
             settings_.lyric.fullscreen_transparent;
         fullscreen_main_was_iconic_ = IsIconic(window_) != FALSE;
         fullscreen_main_was_visible_ = IsWindowVisible(window_) != FALSE;
-        fullscreen_lyric_window_was_visible_ =
-            lyric_window_ && IsWindowVisible(lyric_window_);
-        fullscreen_desktop_lyric_was_visible_ =
-            desktop_lyric_mode_ && desktop_lyrics_.Visible();
-        if (fullscreen_desktop_lyric_was_visible_)
+        if (desktop_lyric_mode_ && desktop_lyrics_.Visible())
             desktop_lyrics_.Show(false);
         if (lyric_editor_) LeaveLyricEditor(true);
         if (lyric_window_) ShowWindow(lyric_window_, SW_HIDE);
@@ -2253,7 +2251,6 @@ void PlayerWindow::LeaveFullScreen() {
     // Keep ActiveLyricVisible as the current intent rather than copying the
     // entry-time HWND snapshot back over the new track's visibility.
     if (lyric_window_) ShowWindow(lyric_window_, SW_HIDE);
-    fullscreen_desktop_lyric_was_visible_ = false;
     fullscreen_lyric_desktop_mode_ = false;
     UpdateVisualWindowLayout();
     UpdateVisualFrame();
@@ -2276,6 +2273,17 @@ void PlayerWindow::LeaveFullScreen() {
     UnregisterHotKey(window_, kFullscreenEscapeHotkey);
 }
 
+void PlayerWindow::PrepareFullscreenMenuState(HMENU menu, int mode) const {
+    const bool may_enter =
+        audio_->State() == audio::PlaybackState::playing;
+    EnableCommand(menu, kCmdFullscreenLyrics, may_enter);
+    EnableCommand(menu, kCmdFullscreenVisual, may_enter);
+    EnableCommand(menu, kCmdFullscreenAll, may_enter);
+    CheckCommand(menu, kCmdFullscreenLyrics, mode == 1);
+    CheckCommand(menu, kCmdFullscreenVisual, mode == 2);
+    CheckCommand(menu, kCmdFullscreenAll, mode == 3);
+}
+
 HMENU PlayerWindow::CreateVisualContextMenu(bool detached,int mode,int type) {
     const HMODULE resources = ResourceModule();
     HMENU popup = DetachFirstPopup(
@@ -2290,14 +2298,7 @@ HMENU PlayerWindow::CreateVisualContextMenu(bool detached,int mode,int type) {
         if (!SetMenuItemInfoW(popup, kMenuFullscreen, FALSE, &information))
             DestroyMenu(fullscreen);
     }
-    const bool may_enter =
-        audio_->State() == audio::PlaybackState::playing;
-    EnableCommand(popup, kCmdFullscreenLyrics, may_enter);
-    EnableCommand(popup, kCmdFullscreenVisual, may_enter);
-    EnableCommand(popup, kCmdFullscreenAll, may_enter);
-    CheckCommand(popup, kCmdFullscreenLyrics, mode == 1);
-    CheckCommand(popup, kCmdFullscreenVisual, mode == 2);
-    CheckCommand(popup, kCmdFullscreenAll, mode == 3);
+    PrepareFullscreenMenuState(popup, mode);
 
     if (detached) {
         // FUN_00458020 owns the detached-window path.  Its positional and

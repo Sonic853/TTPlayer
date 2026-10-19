@@ -26,6 +26,7 @@ enum class ReplayGainScanStatus {
 
 struct ReplayGainScanResult {
     std::wstring source_identity; // Actual opened CD; checked again before cache writes.
+    std::wstring source_version; // Physical file(s) actually analyzed; never infer it at commit time.
     ReplayGainScanStatus status{ReplayGainScanStatus::decode_error};
     double gain_db{};
     double peak{};
@@ -50,6 +51,11 @@ using ReplayGainProgress =
 // Called before opening/reading the source and before committing metadata.
 // A UI may wait here while paused; false requests cooperative cancellation.
 using ReplayGainCheckpoint = std::function<bool()>;
+
+// Includes a CUE's referenced physical sources. A changed file is a conflict,
+// even if its suffix or size is unchanged; stale analysis is never persisted.
+[[nodiscard]] std::wstring CaptureReplayGainSourceVersion(
+    const std::filesystem::path& path, int subtrack = 0) noexcept;
 
 // Snapshot verified reader binaries once per batch. Unknown/replaced plug-ins
 // retain serial scanning; matching a filename or extension is not sufficient.

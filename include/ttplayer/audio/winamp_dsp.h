@@ -47,7 +47,7 @@ public:
     [[nodiscard]] bool IsActive(const std::filesystem::path& module) const;
     [[nodiscard]] std::vector<HWND> Windows() const;
 
-    // Winamp's ABI is signed 16-bit interleaved PCM.  The original player
+    // This host's recovered Winamp bridge uses signed 16-bit PCM. The original player
     // converts other decoded sample formats to 16-bit around this call.  The
     // return value from ModifySamples is intentionally ignored, as it is by
     // FUN_004280CD; TTPlayer treats the processor as an in-place transform.

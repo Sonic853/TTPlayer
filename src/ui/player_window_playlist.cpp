@@ -8,6 +8,7 @@
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
 #include "file_info_probe_client.h"
+#include "track_metadata.h"
 
 #include "ttplayer/core/text.h"
 #include "ttplayer/audio/builtin_file_info.h"
@@ -108,10 +109,8 @@ std::wstring PlaylistMetadataValue(const playlist::Track& track,
 // 00485C92 and 0048713E do not reuse the lyric currently displayed by the
 // player for every selected row.  Each CPlayItem is looked up independently
 // in the lyric association/search state (the same state filled by
-// CLyric::_SearchLocalLyricFileProc at 00486B78).  The rebuild does not yet
-// persist that private map, so reproduce its deterministic local-file side:
-// exact adjacent names, enabled lyric-search folders, and the one explicit
-// association that belongs to the currently playing item.  This helper is
+// CLyric::_SearchLocalLyricFileProc at 00486B78). Callers query the persisted
+// association by song identity, including songs that are not playing. This helper is
 // deliberately read-only and never returns a directory or URL.
 std::vector<std::filesystem::path> FindPlaylistAssociatedLyrics(
     const playlist::Track& track,
@@ -119,6 +118,7 @@ std::vector<std::filesystem::path> FindPlaylistAssociatedLyrics(
     const std::filesystem::path& explicit_association = {}) {
     std::vector<std::filesystem::path> result;
     std::set<std::wstring> unique;
+    if (explicit_association == lyrics::kNoLyric) return result;
 
     const auto append_existing = [&](const std::filesystem::path& path) {
         if (path.empty() || LooksLikeUrl(path.wstring())) return;
@@ -141,9 +141,8 @@ std::vector<std::filesystem::path> FindPlaylistAssociatedLyrics(
         (source_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return result;
 
     // An explicitly associated lyric may have a nonstandard file name, so it
-    // must be considered before the name-based search.  Callers pass it only
-    // when this Track is the playing item to avoid borrowing another row's
-    // association.  Requiring a live source prevents a stale playlist entry
+    // must be considered before the name-based search. Requiring a live
+    // source prevents a stale playlist entry
     // from deleting or copying an otherwise unrelated lyric by itself.
     append_existing(explicit_association);
 
@@ -5374,29 +5373,10 @@ bool PlayerWindow::FindNextPlaylistTrack(DWORD flags, bool all) {
             // Normal search's 004AE7FD(...,1) can refresh unread tag data.
             // Keep quick locate cache-only and keep decoder I/O off the UI.
             if (track.duration_ms==-2 && !LooksLikeUrl(track.path.wstring())) {
-                const DWORD attributes=GetFileAttributesW(track.path.c_str());
-                if (attributes!=INVALID_FILE_ATTRIBUTES && !(attributes&FILE_ATTRIBUTE_DIRECTORY)) {
-                    const auto probe=reader.Read(stop,{},runtime/L"AddIn",track.path,
-                        runtime/L"ttpcomm.dll",track.subtrack,15000,nullptr,mp3);
-                    if (probe && SUCCEEDED(probe->status)) {
-                        refreshed=true;
-                        track.duration_ms=static_cast<int>(std::min<DWORD>(probe->duration_ms,INT_MAX));
-                        track.media_type=core::WideToUtf8(probe->codec);
-                        track.bitrate_bps=probe->encoded_bits_per_second;
-                        track.sample_rate_hz=probe->format.nSamplesPerSec;
-                        track.channels=probe->format.nChannels;
-                        track.bits_per_sample=probe->format.wBitsPerSample;
-                        for (const auto& field:probe->metadata) {
-                            const auto key=core::WideToUtf8(field.name), value=core::WideToUtf8(field.value);
-                            if (_wcsicmp(field.name.c_str(),L"Title")==0) track.title=value;
-                            if (_wcsicmp(field.name.c_str(),L"Artist")==0) track.artist=value;
-                            if (_wcsicmp(field.name.c_str(),L"Album")==0) track.album=value;
-                            std::erase_if(track.metadata,[&](const auto& old) { return _stricmp(old.first.c_str(),key.c_str())==0; });
-                            track.metadata.emplace_back(key,value);
-                        }
-                        if (track.artist.empty()) track.artist=core::WideToUtf8(PlaylistMetadataValue(track,"Author"));
-                    }
-                }
+                const auto probe=reader.Read(stop,{},runtime/L"AddIn",track.path,
+                    runtime/L"ttpcomm.dll",track.subtrack,15000,nullptr,mp3);
+                const auto read_state=ApplyFileInfoProbeToTrack(track,probe);
+                refreshed=read_state==TrackInfoState::success || read_state==TrackInfoState::provisional;
             }
             if (stop.stop_requested()) break;
             const auto display=FormatPlaylistTitle(track,display_settings,unknown).text;
@@ -5954,7 +5934,8 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
                     {path}, playlists_.ActiveIndex(), std::nullopt, false,
                     ImportPlayback::none));
             }
-        }, std::move(display_titles));
+        }, std::move(display_titles),
+           PlaybackOptionsFromSettings(settings_, PlayerRuntimeDirectory()));
         return true;
     }
     if (command == kPlaylistReplayGainScan) {
@@ -6088,6 +6069,7 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
             std::transform(key.begin(), key.end(), key.begin(), towlower);
             if (unique.insert(std::move(key)).second) files.push_back(path);
         };
+        EnsureLyricAssociationsLoaded();
         for (const auto& track : selected_tracks) {
             auto extension = track.path.extension().wstring();
             std::transform(extension.begin(), extension.end(),
@@ -6101,8 +6083,9 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
                     PlaylistTrackIdentity(track) == *playing_identity;
                 const auto associated = FindPlaylistAssociatedLyrics(
                     track, settings_.lyric,
-                    is_playing_item ? associated_lyric_path_
-                                    : std::filesystem::path{});
+                    lyric_associations_.Find({track.path, track.subtrack})
+                        .value_or(is_playing_item ? associated_lyric_path_
+                                                 : std::filesystem::path{}));
                 for (const auto& lyric : associated)
                     append_existing(lyric);
             }
@@ -6534,10 +6517,9 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
             command - kPlaylistRatingFirst + 1);
         unsigned int changed{};
         for (const size_t row : playlist_selected_rows_) {
-            if (ActivePlaylist().SetRating(row, rating)) ++changed;
+            if (SetVisiblePlaylistRating(row, rating)) ++changed;
         }
         if (changed != 0) {
-            playlists_.MarkDirty(playlists_.ActiveIndex(), changed);
             if (playlist_window_)
                 InvalidateRect(playlist_window_, nullptr, FALSE);
         }
@@ -6599,7 +6581,7 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
             playing_identity = PlaylistTrackIdentity(
                 PlaybackPlaylist().Tracks()[*current_]);
         }
-        const auto explicit_lyric = associated_lyric_path_;
+        EnsureLyricAssociationsLoaded();
 
         // Resolve lyric sources while the audio paths still exist.  A Shell
         // target is allowed to return MOVE; after that Drop the original
@@ -6625,8 +6607,9 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
                 *playing_identity == PlaylistTrackIdentity(track);
             for (const auto& lyric : FindPlaylistAssociatedLyrics(
                     track, settings_.lyric,
-                    is_playing_item ? explicit_lyric
-                                    : std::filesystem::path{})) {
+                    lyric_associations_.Find({track.path, track.subtrack})
+                        .value_or(is_playing_item ? associated_lyric_path_
+                                                 : std::filesystem::path{}))) {
                 append_lyric(lyric);
             }
         }

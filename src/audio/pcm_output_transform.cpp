@@ -1,6 +1,8 @@
 #include <ttpcomm/client.h>
 #include <ttpcomm/runtime_pcm.h>
 #include "ttplayer/audio/pcm_output_transform.h"
+#include "ttplayer/audio/pcm_effects.h"
+#include "ttplayer/audio/winamp_dsp.h"
 
 #include <algorithm>
 #include <array>
@@ -11,6 +13,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <utility>
 
 namespace ttplayer::audio {
 namespace {
@@ -32,6 +35,11 @@ struct PcmOutputTransform::Impl {
     bool input_ended{};
     const TtpCommRuntimeApi* runtime{};
     void* quantizer{};
+    void* dsp_quantizer{};
+    WinampDspChain* dsp{};
+    bool dsp_enabled{true};
+    int dither_mode{};
+    std::vector<std::wstring> diagnostics;
 
 #if defined(_MSC_VER) && defined(_M_IX86)
     static void Destroy(void* object) noexcept {
@@ -54,13 +62,14 @@ struct PcmOutputTransform::Impl {
 #endif
 
     ~Impl() {
-        if(runtime) runtime->quantizer_destroy(quantizer);
+        if(runtime) { runtime->quantizer_destroy(quantizer); runtime->quantizer_destroy(dsp_quantizer); }
 #if defined(_MSC_VER) && defined(_M_IX86)
         Destroy(resampler);
 #endif
     }
 
     bool InitializeDither(int configured) {
+        dither_mode=configured;
         runtime=ttpcomm::host::Runtime();
         const auto format=ttpcomm::host::pcm::Format(output);
         quantizer=runtime?runtime->quantizer_create(&format,configured):nullptr;
@@ -105,11 +114,9 @@ bool PcmOutputTransform::Open(const WAVEFORMATEX& input,
     impl_->input_floating_point = encoding.floating_point;
     impl_->input_valid_bits = encoding.valid_bits;
     impl_->input_channel_mask = encoding.channel_mask;
-    const int requested_bits = options.output_bits;
-    const WORD bits = options.floating_point ? 64 :
-        requested_bits == 8 || requested_bits == 16 ||
-                      requested_bits == 24 || requested_bits == 32
-        ? static_cast<WORD>(requested_bits) : 16;
+    const WORD bits = options.floating_point ? 64 : static_cast<WORD>(ResolveOutputBits(
+        options.output_bits, options.source_bits ? options.source_bits :
+        (encoding.floating_point ? 0 : encoding.valid_bits)));
     const DWORD rate = options.resample_rate > 0
         ? static_cast<DWORD>(options.resample_rate) : input.nSamplesPerSec;
     if (rate < 1000 || rate > 768000) {
@@ -241,16 +248,51 @@ bool PcmOutputTransform::ProcessSamples(std::vector<double> samples,
     static_cast<void>(end_of_stream);
 #endif
     impl_->input_ended = end_of_stream;
+    if (impl_->dsp_enabled && impl_->dsp && impl_->dsp->ActiveCount() && !samples.empty()) {
+        // 004AC166 quantizes to 16 bits WITH the configured dither before
+        // ModifySamples. 004AA8B0 subsequently expands/truncates those exact
+        // integers; it neither recovers lost source bits nor dithers twice.
+        if (!impl_->dsp_quantizer) {
+            auto format=ttpcomm::host::pcm::Format(impl_->output);
+            format.bits=format.valid_bits=16;format.floating_point=0;
+            format.block_align=format.channels*2;
+            impl_->dsp_quantizer=impl_->runtime->quantizer_create(&format,impl_->dither_mode);
+        }
+        if(!impl_->dsp_quantizer){impl_->error=L"Unable to create the Winamp PCM quantizer";return false;}
+        std::vector<std::int16_t> pcm(samples.size());uint32_t written{};
+        if(pcm.size()>UINT32_MAX/2 || impl_->runtime->quantizer_encode(impl_->dsp_quantizer,
+            samples.data(),static_cast<uint32_t>(samples.size()),pcm.data(),static_cast<uint32_t>(pcm.size()*2),
+            &written)!=TTPCOMM_OK || written!=pcm.size()*2){impl_->error=L"Winamp PCM quantization failed";return false;}
+        impl_->dsp->Process(pcm,impl_->output.nChannels,static_cast<int>(impl_->output.nSamplesPerSec),&impl_->diagnostics);
+        if(impl_->output.wFormatTag==WAVE_FORMAT_IEEE_FLOAT) {
+            for(size_t i=0;i<pcm.size();++i)samples[i]=pcm[i]/65536.0;
+            return ttpcomm::host::pcm::EncodeHalf(samples,impl_->output,output);
+        }
+        const unsigned bytes=impl_->output.wBitsPerSample/8;
+        output.resize(pcm.size()*bytes);
+        for(size_t i=0;i<pcm.size();++i) {
+            const uint32_t value=bytes==1 ? static_cast<uint32_t>((pcm[i]>>8)+128) :
+                static_cast<uint32_t>(static_cast<int32_t>(pcm[i])) << (8*(bytes-2));
+            for(unsigned b=0;b<bytes;++b)output[i*bytes+b]=std::byte((value>>(8*b))&255);
+        }
+        return true;
+    }
     return impl_->Encode(samples, output);
 }
 
+void PcmOutputTransform::SetWinampDsp(WinampDspChain* chain, bool enabled) noexcept {
+    if(impl_){impl_->dsp=chain;impl_->dsp_enabled=enabled;}
+}
+std::vector<std::wstring> PcmOutputTransform::TakeDiagnostics() {
+    return impl_ ? std::exchange(impl_->diagnostics,{}) : std::vector<std::wstring>{};
+}
 void PcmOutputTransform::Reset() noexcept {
     if (!impl_) return;
     impl_->input_ended = false;
 #if defined(_MSC_VER) && defined(_M_IX86)
     Impl::ResetObject(impl_->resampler);
 #endif
-    if(impl_->runtime) impl_->runtime->quantizer_reset(impl_->quantizer);
+    if(impl_->runtime) { impl_->runtime->quantizer_reset(impl_->quantizer); impl_->runtime->quantizer_reset(impl_->dsp_quantizer); }
 }
 
 WAVEFORMATEX PcmOutputTransform::OutputFormat() const noexcept {

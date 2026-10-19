@@ -1,5 +1,5 @@
 #include "ttplayer/update/update.h"
-#include "ttplayer/net/ttp_https.h"
+#include "ttplayer/net/https_provider.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/update_build_config.h"
 #include <winhttp.h>
@@ -49,25 +49,21 @@ std::wstring TokenUrl(const std::wstring& url) {
 }
 struct Http::Impl {
     settings::NetworkSettings network;
-    HMODULE module{};
+    net::HttpsProvider module;
     const ttp_https_api* api{};
     const ttp_https_api_v3* streaming{};
     explicit Impl(const std::filesystem::path& runtime,settings::NetworkSettings n):network(std::move(n)) {
-        const auto path=std::filesystem::absolute(runtime/L"AddIn"/L"ttp_https.dll");
-        module=LoadLibraryExW(path.c_str(),nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
-        if(!module) return;
-        const auto get=reinterpret_cast<ttp_https_get_api_fn>(GetProcAddress(module,"ttp_https_get_api"));
-        if(get) {
-            api=get(TTP_HTTPS_ABI_VERSION);
+        if(!module.Load(runtime)) return;
+        {
+            api=module.Api(TTP_HTTPS_ABI_VERSION);
             if(!api || api->size!=sizeof(*api) || api->abi_version!=TTP_HTTPS_ABI_VERSION || !api->get || !api->release) api=nullptr;
-            const auto next=get(TTP_HTTPS_DOWNLOAD_ABI_VERSION);
+            const auto next=module.Api(TTP_HTTPS_DOWNLOAD_ABI_VERSION);
             if(next && next->size==sizeof(ttp_https_api_v3) && next->abi_version==TTP_HTTPS_DOWNLOAD_ABI_VERSION) {
                 streaming=reinterpret_cast<const ttp_https_api_v3*>(next);
                 if(!streaming->download) streaming=nullptr;
             }
         }
     }
-    ~Impl(){if(module) FreeLibrary(module);}
     static int __cdecl Canceled(void* data) noexcept {
         try {const auto& f=*static_cast<const Cancel*>(data);return f && f();} catch(...){return 1;}
     }

@@ -6,8 +6,8 @@
 #include <string_view>
 #include <vector>
 
-namespace ttplayer::update::detail {
-// Bounded JSON reader: only the release fields selected by the caller have
+namespace ttplayer::core {
+// Bounded JSON reader: only the fields selected by the caller have
 // meaning. Unknown fields are parsed and ignored, never interpreted as code.
 struct Json {
     enum Kind { null, boolean, number, string, array, object } kind{null};
@@ -31,7 +31,7 @@ struct Json {
 class JsonReader {
     std::string_view input;
     size_t at{},nodes{};
-    [[noreturn]] void Fail() const { throw std::runtime_error("Invalid release JSON"); }
+    [[noreturn]] void Fail() const { throw std::runtime_error("Invalid JSON"); }
     void Space() { while(at<input.size() && (input[at]==' ' || input[at]=='\r' || input[at]=='\n' || input[at]=='\t')) ++at; }
     bool Eat(char c) { Space(); if(at<input.size() && input[at]==c) { ++at;return true; } return false; }
     unsigned Hex() {

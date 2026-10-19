@@ -101,6 +101,7 @@ struct FileInfoRecord {
     std::string media_type;
     std::uint32_t bitrate_bps{};
     std::uint32_t sample_rate_hz{};
+    std::uint16_t channel_count{}, bits_per_sample{};
     int duration_ms{-2};
     bool reader_opened{};
     DWORD cover_maximum_bytes{};
@@ -153,10 +154,7 @@ struct FileInfoContext : std::enable_shared_from_this<FileInfoContext> {
     std::filesystem::path ttpcomm_path;
     settings::GeneralSettings* general_settings{};
     settings::HistorySettings* history_settings{};
-    size_t playlist_index{};
-    bool library_mode{};
     bool explicit_playback_track{};
-    std::optional<playlist::Track> explicit_source;
     std::vector<playlist::Track> tracks;
     std::vector<size_t> rows;
     FileInfoStrings strings;
@@ -188,6 +186,8 @@ struct FileInfoContext : std::enable_shared_from_this<FileInfoContext> {
     bool advanced_mode{};
     std::function<void(const std::vector<std::filesystem::path>&, bool)> begin_file_access;
     std::function<void()> end_file_access;
+    std::function<void(const std::vector<playlist::Track>&,
+                       const std::set<size_t>&)> publish_tracks;
 
     ~FileInfoContext() {
         if (cover_bitmap) DeleteObject(cover_bitmap);
@@ -381,6 +381,8 @@ FileInfoRecord ReadFileInfoRecord(
             record.metadata.emplace_back(name, SafeUtf8(entry.value));
     }
     const WAVEFORMATEX& format = probe->format;
+    record.channel_count = format.nChannels;
+    record.bits_per_sample = format.wBitsPerSample;
     record.codec = probe->codec;
     if (const auto separator = record.codec.find(L'|'); separator != std::wstring::npos)
         record.codec.erase(0, separator + 1);
@@ -912,6 +914,12 @@ void UpdateSheetState(FileInfoContext& context) {
                  single && row + 1 < context.tracks.size());
 }
 
+void PublishUpdatedTracks(FileInfoContext& context) {
+    if (context.publish_tracks && !context.touched_rows.empty())
+        context.publish_tracks(context.tracks, context.touched_rows);
+    context.touched_rows.clear();
+}
+
 void ApplyReadResult(FileInfoContext& context, FileInfoReadResult result) {
     if (result.generation != context.generation || context.closing) return;
     context.originals = result.records;
@@ -933,9 +941,12 @@ void ApplyReadResult(FileInfoContext& context, FileInfoReadResult result) {
         track.media_type = record.media_type;
         track.bitrate_bps = record.bitrate_bps;
         track.sample_rate_hz = record.sample_rate_hz;
+        track.channels = record.channel_count;
+        track.bits_per_sample = record.bits_per_sample;
         track.duration_ms = record.duration_ms;
         context.touched_rows.insert(record.row);
     }
+    PublishUpdatedTracks(context);
     context.loaded = true;
     context.loading = false;
     PopulatePropertiesPage(context);
@@ -1242,6 +1253,9 @@ void ApplyWriteResult(FileInfoContext& context,
         context.touched_rows.insert(item.row);
     }
     const int navigation = std::exchange(context.navigation_after_save, 0);
+    // Only successfully saved fields are in result.items. Publish before
+    // reopening playback, including partial success from a batch save.
+    PublishUpdatedTracks(context);
     if (context.end_file_access) context.end_file_access();
     if (FAILED(result.error)) {
         const auto message = detail::FileInfoSaveErrorText(context.strings.save_failure, result.error);
@@ -2049,10 +2063,16 @@ void PlayerWindow::ShowPlaylistProperties(
     auto context = std::make_shared<FileInfoContext>();
     context->owner = owner;
     context->resources = ResourceModule();
-    context->playlist_index = playlists_.ActiveIndex();
-    context->library_mode = !explicit_track && settings_.playlist.library_mode;
     context->explicit_playback_track = explicit_track;
-    if (explicit_track) context->explicit_source = *explicit_playback_track;
+    context->publish_tracks = [this](const auto& tracks, const auto& rows) {
+        bool changed{};
+        for (const size_t row : rows)
+            if (row < tracks.size()) changed |= PublishTrackMetadata(tracks[row]);
+        if (changed) {
+            RefreshPlaylist();
+            RefreshPlaybackUi();
+        }
+    };
     context->general_settings = &settings_.general;
     context->history_settings = &settings_.history;
     context->advanced_mode = settings_.history.advance_file_info;
@@ -2259,67 +2279,7 @@ void PlayerWindow::ShowPlaylistProperties(
         SetActiveWindow(owner);
     }
 
-    bool changed{};
-    if (context->explicit_playback_track && context->explicit_source &&
-        !context->tracks.empty() && context->touched_rows.contains(0)) {
-        const auto& source = *context->explicit_source;
-        const auto& updated = context->tracks.front();
-        const auto same_item = [](const playlist::Track& left,
-                                  const playlist::Track& right) {
-            return left.subtrack == right.subtrack &&
-                _wcsicmp(left.path.c_str(), right.path.c_str()) == 0;
-        };
-        const auto apply = [&updated, &same_item](
-            playlist::Playlist& list, size_t row) {
-            if (row >= list.Tracks().size() ||
-                !same_item(list.Tracks()[row], updated)) return false;
-            bool result = list.SetDuration(row, updated.duration_ms);
-            result |= list.SetMetadata(row, updated.title, updated.artist,
-                                       updated.album);
-            result |= list.SetExtendedMetadata(
-                row, updated.metadata, updated.media_type,
-                updated.bitrate_bps, updated.sample_rate_hz);
-            return result;
-        };
-
-        if (media_library_playback_active_ && current_)
-            changed |= apply(media_library_playback_, *current_);
-        else if (playing_playlist_index_ && current_ &&
-                 *playing_playlist_index_ < playlists_.Size()) {
-            changed |= apply(playlists_.At(*playing_playlist_index_), *current_);
-            if (changed) playlists_.MarkDirty(*playing_playlist_index_);
-        }
-        changed |= UpdateMediaLibraryTrackByIdentity(source, updated);
-        if (opened_track_ && same_item(*opened_track_, source)) {
-            *opened_track_ = updated;
-            changed = true;
-        }
-        if (changed) RefreshPlaybackUi();
-    } else if (context->library_mode) {
-        for (const size_t row : context->touched_rows) {
-            if (row < context->tracks.size())
-                changed |= UpdateMediaLibraryTrackFromProperties(
-                    row, context->tracks[row]);
-        }
-    } else if (context->playlist_index < playlists_.Size()) {
-        auto& list = playlists_.At(context->playlist_index);
-        for (const size_t row : context->touched_rows) {
-            if (row >= list.Tracks().size() || row >= context->tracks.size())
-                continue;
-            const auto& before = list.Tracks()[row];
-            const auto& updated = context->tracks[row];
-            if (before.path != updated.path || before.subtrack != updated.subtrack)
-                continue;
-            changed |= list.SetDuration(row, updated.duration_ms);
-            changed |= list.SetMetadata(row, updated.title, updated.artist,
-                                        updated.album);
-            changed |= list.SetExtendedMetadata(
-                row, updated.metadata, updated.media_type,
-                updated.bitrate_bps, updated.sample_rate_hz);
-        }
-        if (changed) playlists_.MarkDirty(context->playlist_index);
-    }
-    if (changed) RefreshPlaylist();
+    PublishUpdatedTracks(*context);
     if (repost_quit) PostQuitMessage(static_cast<int>(message.wParam));
 }
 

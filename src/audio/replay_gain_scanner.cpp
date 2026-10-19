@@ -6,6 +6,7 @@
 #include "ttplayer/plugins/plugin_manager.h"
 #include "ttplayer/audio/audio_engine.h"
 #include "ttplayer/audio/builtin_file_info.h"
+#include "ttplayer/audio/file_mutation.h"
 #include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/audio/format_probe.h"
 #include "ttplayer/platform/optional_windows_api.h"
@@ -275,6 +276,48 @@ bool LegacyReplayGainAvailable(HMODULE ttpcomm) noexcept {
         GetProcAddress(ttpcomm, MAKEINTRESOURCEA(101));
 }
 
+std::wstring CaptureReplayGainSourceVersion(
+    const std::filesystem::path& path, int subtrack) noexcept {
+    try {
+        const auto before = CaptureFileSourceVersion(path);
+        if (before.empty()) return {};
+        if (subtrack > 0 && _wcsicmp(path.extension().c_str(), L".cue") == 0) {
+            const auto sheet = CueSheet::Load(path);
+            const auto* track = sheet.FindTrack(subtrack);
+            if (!track) return {};
+            // One CUE can have many independently analysed tracks. Saving a
+            // sibling's tags/RG replaces the text file but does not change the
+            // measured audio. Compare playback structure, not that replacement's
+            // file ID. Include all boundaries so a changed following track can
+            // never silently alter this track's previously measured end.
+            std::wstring version = L"cue-source-v1:" + std::to_wstring(subtrack);
+            const auto append = [&](std::wstring_view value) {
+                version += L"|" + std::to_wstring(value.size()) + L":";
+                version.append(value);
+            };
+            for (const auto& item : sheet.Tracks()) {
+                append(item.file_reference); append(item.audio_path.native());
+                append(std::to_wstring(item.number)); append(std::to_wstring(item.source_number));
+                append(std::to_wstring(item.start_frame));
+                append(item.end_frame ? std::to_wstring(*item.end_frame) : L"end");
+                append(item.index00 ? std::to_wstring(*item.index00) : L"none");
+                append(item.has_index01 ? L"index01" : L"no-index01");
+                append(std::to_wstring(item.pregap)); append(std::to_wstring(item.postgap));
+            }
+            bool found{};
+            for (const auto& candidate : sheet.AudioCandidates(*track)) {
+                const auto source = CaptureFileSourceVersion(candidate);
+                append(candidate.native()); append(source);
+                found |= !source.empty();
+            }
+            if (!found || CaptureFileSourceVersion(path) != before)
+                return {};
+            return version;
+        }
+        return before;
+    } catch (...) { return {}; }
+}
+
 ReplayGainScanResult AnalyzeReplayGainTrack(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
@@ -309,6 +352,10 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
     std::unique_ptr<DecodedAudioSource> segment;
     std::unique_ptr<plugins::LegacyReaderSession> reader;
     const bool cda = _wcsicmp(path.extension().c_str(), L".cda") == 0;
+    const auto source_version = cda ? std::wstring{} : CaptureReplayGainSourceVersion(path, subtrack);
+    if (!cda && source_version.empty())
+        return Error(ReplayGainScanStatus::decode_error, HRESULT_FROM_WIN32(ERROR_FILE_INVALID),
+                     L"cannot identify the source file before analysis");
     if (!cue && !cda) reader = library.OpenReader(path, &opened, &diagnostic);
     if (!reader) {
         if (!cue && !cda && IsTerminalAudioOpenError(opened))
@@ -385,6 +432,10 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
     ReplayGainScanResult result;
     result.status = ReplayGainScanStatus::completed;
     if (cda && segment) result.source_identity = segment->SourceIdentity();
+    if (!cda && CaptureReplayGainSourceVersion(path, subtrack) != source_version)
+        return Error(ReplayGainScanStatus::decode_error, HRESULT_FROM_WIN32(ERROR_FILE_INVALID),
+                     L"source file changed during ReplayGain analysis");
+    result.source_version = source_version;
     result.gain_db = gain;
     result.peak = peak;
     result.decoded_frames = decoded_frames;
@@ -433,6 +484,14 @@ ReplayGainScanResult CommitReplayGainTrack(
             return Error(ReplayGainScanStatus::write_error, E_FAIL, L"writing CDDB ReplayGain");
         }
     }
+    FileMutationGuard mutation;
+    const HRESULT acquired = mutation.Acquire(path, stop);
+    if (FAILED(acquired))
+        return Error(ReplayGainScanStatus::write_error, acquired, L"acquiring metadata file transaction");
+    if (analysis.source_version.empty() ||
+        analysis.source_version != CaptureReplayGainSourceVersion(path, subtrack))
+        return Error(ReplayGainScanStatus::write_error, HRESULT_FROM_WIN32(ERROR_FILE_INVALID),
+                     L"source file changed after ReplayGain analysis; no metadata written");
     // The manual completion path 004A50B5 -> 004C80AC permanently removes
     // FILE_ATTRIBUTE_READONLY.  The live finalizer 004B1A5C does not, so it
     // must reject a read-only source rather than silently changing it.

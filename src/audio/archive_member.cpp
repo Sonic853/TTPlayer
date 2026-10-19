@@ -86,7 +86,7 @@ TtpCommArchiveStreamApi ArchiveApi(HMODULE module) {
 }
 TtpCommArchiveGroupApi GroupApi(HMODULE module){
     TtpCommArchiveGroupApi api{};
-    if(module)ttpcomm::host::QueryArchiveGroups(module,api);
+    if(module){if(!ttpcomm::host::QueryArchiveGroups(module,api))api={};}
     else if(const auto* loaded=ttpcomm::host::ArchiveGroups())api=*loaded;
     return api;
 }
@@ -151,6 +151,12 @@ IStream* OpenMember(const ArchiveMemberPath& path,HMODULE module,
         auto result=group.open_member?group.open_member(path.archive.c_str(),path.member.c_str(),&options,&volumes,&stream)
             :api.open_member(path.archive.c_str(),path.member.c_str(),&options,&stream);
         if(FAILED(result) || !stream || !password)return result;
+        // Password-capable streams already withhold encrypted plaintext until
+        // the member CRC / authentication has succeeded. Do not force an
+        // unencrypted member to EOF just because this archive has a saved
+        // password (mixed encrypted/unencrypted ZIPs are valid).
+        const auto capabilities=group.open_member?group.capabilities:api.capabilities;
+        if(capabilities&TTPCOMM_ARCHIVE_CAP_PASSWORDS)return result;
         // A password verifier alone is not proof: ZipCrypto has only 8 check
         // bits. Wait for the member CRC / AES authentication before accepting
         // a candidate or exposing plaintext to a decoder.

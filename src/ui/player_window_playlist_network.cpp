@@ -136,12 +136,7 @@ void PlayerWindow::ConfigureNetworkDownloads() {
         const auto root=settings_.source_path.empty()?PlayerRuntimeDirectory():settings_.source_path.parent_path();
         network_downloads_=std::make_unique<audio::HttpDownloadQueue>(root/L"HttpDownloads"/L"cachelist.xml");
     }
-    audio::PlaybackOptions options;
-    options.network_proxy_type=settings_.network.proxy_type;options.network_proxy_port=settings_.network.proxy_port;
-    options.network_proxy_server=settings_.network.proxy_server;options.network_proxy_username=settings_.network.proxy_username;
-    options.network_proxy_password=settings_.network.proxy_password;
-    options.network_cache_enabled=settings_.network.cache_enabled;options.network_cache_folder=settings_.network.cache_folder;
-    options.network_cache_space_mb=settings_.network.cache_space_size;
+    const auto options = PlaybackOptionsFromSettings(settings_, PlayerRuntimeDirectory());
     network_downloads_->Configure(options,settings_.network.max_download_tasks);
 }
 void PlayerWindow::QueueNetworkDownload(const playlist::Track& track) {

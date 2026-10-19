@@ -2992,7 +2992,7 @@ void PlayerWindow::DestroyLyricEditor() {
         lyric_editor_accelerators_ = nullptr;
     }
     if (lyric_find_dialog_ && IsWindow(lyric_find_dialog_))
-        SendMessageW(lyric_find_dialog_, WM_CLOSE, 0, 0);
+        DestroyWindow(lyric_find_dialog_);
     lyric_find_dialog_ = nullptr;
     if (lyric_editor_document_) {
         lyric_editor_document_->Release();
@@ -3133,7 +3133,7 @@ void PlayerWindow::LeaveLyricEditor(bool prompt_to_save) {
     const bool embedded = lyrics_embedded_;
     const std::wstring editor_text = LyricEditorText();
     if (lyric_find_dialog_ && IsWindow(lyric_find_dialog_))
-        SendMessageW(lyric_find_dialog_, WM_CLOSE, 0, 0);
+        DestroyWindow(lyric_find_dialog_);
     lyric_find_dialog_ = nullptr;
     // 0044D646 destroys +0x47C before destroying the RichEdit child.
     if (lyric_editor_accelerators_) {
@@ -3608,114 +3608,269 @@ void PlayerWindow::ConvertLyricEditorText(DWORD mapping) {
     SetFocus(lyric_editor_);
 }
 
+namespace {
+std::wstring LyricFindControlText(HWND dialog, int control) {
+    const HWND field = GetDlgItem(dialog, control);
+    std::wstring text(static_cast<size_t>(GetWindowTextLengthW(field)) + 1, L'\0');
+    text.resize(GetWindowTextW(field, text.data(), static_cast<int>(text.size())));
+    return text;
+}
+LONG LyricEditorCharacterCount(HWND editor) {
+    GETTEXTLENGTHEX length{GTL_PRECISE | GTL_NUMCHARS, 1200};
+    return static_cast<LONG>(SendMessageW(editor, EM_GETTEXTLENGTHEX,
+        reinterpret_cast<WPARAM>(&length), 0));
+}
+}
+
+void PlayerWindow::UpdateLyricFindButtons() {
+    if (!lyric_find_dialog_) return;
+    const bool have_text = GetWindowTextLengthW(GetDlgItem(lyric_find_dialog_, 1000)) != 0;
+    EnableWindow(GetDlgItem(lyric_find_dialog_, 1002), have_text);
+    EnableWindow(GetDlgItem(lyric_find_dialog_, 1019), have_text);
+    // 00446B4C/00446E3F: Find's Replace button expands the dialog; in
+    // replacement mode a selected-only operation uses Replace All.
+    EnableWindow(GetDlgItem(lyric_find_dialog_, 1004), !lyric_find_replace_ ||
+        (have_text && !lyric_find_selection_only_));
+}
+
+void PlayerWindow::CaptureLyricFindState() {
+    if (!IsWindow(lyric_find_dialog_)) return;
+    lyric_find_text_ = LyricFindControlText(lyric_find_dialog_, 1000);
+    lyric_replace_text_ = LyricFindControlText(lyric_find_dialog_, 1006);
+    lyric_find_selection_only_ = IsDlgButtonChecked(lyric_find_dialog_, 1017) != 0;
+    lyric_find_.Flags = (IsDlgButtonChecked(lyric_find_dialog_, 1014) ? 0 : FR_DOWN) |
+        (IsDlgButtonChecked(lyric_find_dialog_, 1010) ? FR_MATCHCASE : 0) |
+        (IsDlgButtonChecked(lyric_find_dialog_, 1012) ? FR_WHOLEWORD : 0);
+}
+
+void PlayerWindow::SetLyricFindMode(bool replace) {
+    const HWND dialog = lyric_find_dialog_;
+    if (!dialog) return;
+    if (lyric_find_replace_ != replace) {
+        lyric_find_replace_ = replace;
+        for (const int id : {1006, 1008, 1019})
+            ShowWindow(GetDlgItem(dialog, id), replace ? SW_SHOW : SW_HIDE);
+        EnableWindow(GetDlgItem(dialog, 1017), replace);
+        if (!replace) {
+            lyric_find_selection_only_ = false;
+            CheckRadioButton(dialog, 1016, 1017, 1016);
+        }
+        // 004467CC moves only the lower rows, retaining the Find and Replace
+        // buttons. Measure in pixels after dialog-font/DPI mapping.
+        const int delta = replace ? lyric_find_row_height_ : -lyric_find_row_height_;
+        for (HWND child = GetWindow(dialog, GW_CHILD); child;
+             child = GetWindow(child, GW_HWNDNEXT)) {
+            const int id = GetDlgCtrlID(child);
+            if (id == 1000 || id == 1002 || id == 1024 || id == 1004 ||
+                id == 1019 || id == 1006 || id == 1008) continue;
+            RECT box{}; GetWindowRect(child, &box);
+            MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&box), 2);
+            SetWindowPos(child, nullptr, box.left, box.top + delta, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        RECT box{}; GetWindowRect(dialog, &box);
+        SetWindowPos(dialog, nullptr, 0, 0, box.right - box.left,
+                     box.bottom - box.top + delta,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        InvalidateRect(dialog, nullptr, TRUE);
+    }
+    auto title = ResourceText(replace ? 0xe129 : 0xe124);
+    if (const auto newline = title.find_last_of(L'\n'); newline != title.npos)
+        title.erase(0, newline + 1);
+    if (!title.empty()) SetWindowTextW(dialog, title.c_str());
+    auto button = ResourceCommandLabel(ResourceModule(), 0xe129);
+    if (button.empty()) button = i18n::Literal(L"替换");
+    if (!replace) button += L"↓";
+    SetDlgItemTextW(dialog, 1004, button.c_str());
+    UpdateLyricFindButtons();
+}
+
+INT_PTR CALLBACK PlayerWindow::LyricFindDialogProc(
+    HWND dialog, UINT message, WPARAM wp, LPARAM lp) {
+    auto* self = reinterpret_cast<PlayerWindow*>(GetWindowLongPtrW(dialog, DWLP_USER));
+    if (message == WM_INITDIALOG) {
+        self = reinterpret_cast<PlayerWindow*>(lp);
+        if (!self) return FALSE;
+        SetWindowLongPtrW(dialog, DWLP_USER, lp);
+        self->lyric_find_dialog_ = dialog;
+        self->lyric_find_replace_ = true; // Resource 202 is the expanded layout.
+        RECT row{}; GetWindowRect(GetDlgItem(dialog, 1006), &row);
+        self->lyric_find_row_height_ = row.bottom - row.top + 4; // 00446AF6.
+        for (size_t index = 0; index < 2; ++index) {
+            const int id = index ? 1006 : 1000;
+            SendDlgItemMessageW(dialog, id, CB_LIMITTEXT, 0, 0);
+            for (const auto& text : self->lyric_find_history_[index])
+                SendDlgItemMessageW(dialog, id, CB_ADDSTRING, 0,
+                                   reinterpret_cast<LPARAM>(text.c_str()));
+        }
+        SetDlgItemTextW(dialog, 1000, self->lyric_find_text_.c_str());
+        SetDlgItemTextW(dialog, 1006, self->lyric_replace_text_.c_str());
+        CheckDlgButton(dialog, 1010, self->lyric_find_.Flags & FR_MATCHCASE ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dialog, 1012, self->lyric_find_.Flags & FR_WHOLEWORD ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dialog, 1014, self->lyric_find_.Flags & FR_DOWN ? BST_UNCHECKED : BST_CHECKED);
+        CheckRadioButton(dialog, 1016, 1017, self->lyric_find_selection_only_ ? 1017 : 1016);
+        self->UpdateLyricFindButtons();
+        return TRUE;
+    }
+    if (!self) return FALSE;
+    if (message == WM_NCDESTROY) {
+        if (self->lyric_find_dialog_ == dialog) self->lyric_find_dialog_ = nullptr;
+        SetWindowLongPtrW(dialog, DWLP_USER, 0);
+        return FALSE;
+    }
+    if (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wp) == IDCANCEL)) {
+        // 00446A45 retains the modeless dialog, its history and its flags.
+        self->CaptureLyricFindState();
+        ShowWindow(dialog, SW_HIDE);
+        if (IsWindow(self->lyric_editor_)) SetFocus(self->lyric_editor_);
+        return TRUE;
+    }
+    if (message != WM_COMMAND) return FALSE;
+    const UINT control = LOWORD(wp), notification = HIWORD(wp);
+    if (control == 1016 || control == 1017) {
+        self->lyric_find_selection_only_ = IsDlgButtonChecked(dialog, 1017) != 0;
+        self->UpdateLyricFindButtons();
+        return TRUE;
+    }
+    if ((control == 1000 || control == 1006) && notification == CBN_SELCHANGE) {
+        // A combo sends CBN_SELCHANGE before updating its edit text.
+        PostMessageW(dialog, WM_COMMAND, MAKEWPARAM(control, CBN_EDITCHANGE), 0);
+        return TRUE;
+    }
+    if ((control == 1000 || control == 1006) && notification == CBN_EDITCHANGE) {
+        self->UpdateLyricFindButtons();
+        return TRUE;
+    }
+    if (control != IDOK && control != 1002 && control != 1004 && control != 1019)
+        return FALSE;
+    if (control == 1004 && !self->lyric_find_replace_) {
+        self->SetLyricFindMode(true);
+        SetFocus(GetDlgItem(dialog, 1006));
+        return TRUE;
+    }
+    self->CaptureLyricFindState();
+    FINDREPLACEW request{};
+    request.Flags = self->lyric_find_.Flags | (control == 1019 ? FR_REPLACEALL :
+        control == 1004 ? FR_REPLACE : FR_FINDNEXT);
+    self->HandleLyricFindRequest(request);
+    return TRUE;
+}
+
 void PlayerWindow::ShowLyricFindDialog(bool replace) {
     if (!lyric_editor_ || !IsWindow(lyric_editor_)) return;
-    if (lyric_find_dialog_ && IsWindow(lyric_find_dialog_)) {
-        if (lyric_find_replace_ == replace) {
-            SetForegroundWindow(lyric_find_dialog_);
-            return;
-        }
-        SendMessageW(lyric_find_dialog_, WM_CLOSE, 0, 0);
-        lyric_find_dialog_ = nullptr;
+    if (!lyric_find_.lStructSize) {
+        lyric_find_.lStructSize = sizeof(lyric_find_);
+        lyric_find_.Flags = FR_DOWN;
     }
-
+    CaptureLyricFindState();
     CHARRANGE selection{};
-    SendMessageW(lyric_editor_, EM_EXGETSEL, 0,
-                 reinterpret_cast<LPARAM>(&selection));
+    SendMessageW(lyric_editor_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
     if (selection.cpMax > selection.cpMin) {
-        const LONG length = std::min<LONG>(
-            selection.cpMax - selection.cpMin,
-            static_cast<LONG>(std::size(lyric_find_text_) - 1));
-        TEXTRANGEW range{{selection.cpMin, selection.cpMin + length},
-                         lyric_find_text_};
-        SendMessageW(lyric_editor_, EM_GETTEXTRANGE, 0,
-                     reinterpret_cast<LPARAM>(&range));
-        lyric_find_text_[length] = L'\0';
+        std::wstring selected(static_cast<size_t>(selection.cpMax - selection.cpMin) + 1, L'\0');
+        TEXTRANGEW range{selection, selected.data()};
+        const auto length = SendMessageW(lyric_editor_, EM_GETTEXTRANGE, 0,
+                                        reinterpret_cast<LPARAM>(&range));
+        if (length > 0) {
+            selected.resize(static_cast<size_t>(length));
+            lyric_find_text_ = std::move(selected);
+        }
     }
-
-    lyric_find_ = {};
-    lyric_find_.lStructSize = sizeof(lyric_find_);
-    lyric_find_.hwndOwner = lyric_window_;
-    lyric_find_.lpstrFindWhat = lyric_find_text_;
-    lyric_find_.wFindWhatLen =
-        static_cast<WORD>(std::size(lyric_find_text_));
-    lyric_find_.Flags = FR_DOWN;
-    lyric_find_replace_ = replace;
-    if (replace) {
-        lyric_find_.lpstrReplaceWith = lyric_replace_text_;
-        lyric_find_.wReplaceWithLen =
-            static_cast<WORD>(std::size(lyric_replace_text_));
-        lyric_find_dialog_ = ReplaceTextW(&lyric_find_);
-    } else {
-        lyric_find_dialog_ = FindTextW(&lyric_find_);
+    if (!lyric_find_dialog_ || !IsWindow(lyric_find_dialog_)) {
+        if (!CreateWtlDialog(ResourceModule(), MAKEINTRESOURCEW(202), lyric_window_,
+                             LyricFindDialogProc, reinterpret_cast<LPARAM>(this))) return;
     }
+    SetDlgItemTextW(lyric_find_dialog_, 1000, lyric_find_text_.c_str());
+    SetLyricFindMode(replace);
+    SendDlgItemMessageW(lyric_find_dialog_, 1000, CB_SETEDITSEL, 0, MAKELPARAM(0, -1));
+    ShowWindow(lyric_find_dialog_, SW_SHOW);
+    SetActiveWindow(lyric_find_dialog_);
+    SetFocus(GetDlgItem(lyric_find_dialog_, 1000));
 }
 
 void PlayerWindow::HandleLyricFindRequest(const FINDREPLACEW& request) {
-    if ((request.Flags & FR_DIALOGTERM) != 0) {
-        lyric_find_dialog_ = nullptr;
-        return;
-    }
-    if (!lyric_editor_ || lyric_find_text_[0] == L'\0') return;
-
-    const auto find_next = [this, &request]() {
-        CHARRANGE selection{};
-        SendMessageW(lyric_editor_, EM_EXGETSEL, 0,
-                     reinterpret_cast<LPARAM>(&selection));
-        const LONG text_length = static_cast<LONG>(SendMessageW(
-            lyric_editor_, WM_GETTEXTLENGTH, 0, 0));
-        FINDTEXTEXW find{};
-        find.chrg.cpMin = (request.Flags & FR_DOWN) != 0
-            ? selection.cpMax : selection.cpMin;
-        find.chrg.cpMax = (request.Flags & FR_DOWN) != 0 ? -1 : 0;
-        find.lpstrText = lyric_find_text_;
-        DWORD flags = (request.Flags & FR_DOWN) != 0 ? FR_DOWN : 0;
-        if ((request.Flags & FR_MATCHCASE) != 0) flags |= FR_MATCHCASE;
-        if ((request.Flags & FR_WHOLEWORD) != 0) flags |= FR_WHOLEWORD;
-        if (text_length == 0 || SendMessageW(lyric_editor_, EM_FINDTEXTEXW,
-                flags, reinterpret_cast<LPARAM>(&find)) == -1) {
+    if (!lyric_editor_ || lyric_find_text_.empty()) return;
+    const DWORD flags = request.Flags & (FR_DOWN | FR_MATCHCASE | FR_WHOLEWORD);
+    lyric_find_.Flags = flags;
+    const auto remember = [&](size_t index, const std::wstring& text) {
+        if (text.empty()) return;
+        auto& history = lyric_find_history_[index];
+        std::erase_if(history, [&](const auto& old) { return _wcsicmp(old.c_str(), text.c_str()) == 0; });
+        history.insert(history.begin(), text);
+        if (lyric_find_dialog_) {
+            const int id = index ? 1006 : 1000;
+            const auto old = SendDlgItemMessageW(lyric_find_dialog_, id, CB_FINDSTRINGEXACT,
+                static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(text.c_str()));
+            if (old != CB_ERR) SendDlgItemMessageW(lyric_find_dialog_, id, CB_DELETESTRING, old, 0);
+            SendDlgItemMessageW(lyric_find_dialog_, id, CB_INSERTSTRING, 0,
+                               reinterpret_cast<LPARAM>(text.c_str()));
+            SetDlgItemTextW(lyric_find_dialog_, id, text.c_str());
+        }
+    };
+    remember(0, lyric_find_text_);
+    const auto find = [&](LONG start, LONG end, DWORD match_flags, CHARRANGE& result) {
+        FINDTEXTEXW query{{start, end}, lyric_find_text_.c_str(), {}};
+        if (SendMessageW(lyric_editor_, EM_FINDTEXTEXW, match_flags,
+                         reinterpret_cast<LPARAM>(&query)) == -1) return false;
+        result = query.chrgText;
+        return true;
+    };
+    const auto select = [&](CHARRANGE range) {
+        SendMessageW(lyric_editor_, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&range));
+        SendMessageW(lyric_editor_, EM_SCROLLCARET, 0, 0);
+    };
+    const auto selection = [&] {
+        CHARRANGE range{};
+        SendMessageW(lyric_editor_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&range));
+        return range;
+    };
+    const auto find_next = [&] {
+        const auto current = selection();
+        CHARRANGE match{};
+        if (!find(flags & FR_DOWN ? current.cpMax : current.cpMin,
+                  flags & FR_DOWN ? -1 : 0, flags, match)) {
             MessageBeep(MB_ICONASTERISK);
             return false;
         }
-        SendMessageW(lyric_editor_, EM_EXSETSEL, 0,
-                     reinterpret_cast<LPARAM>(&find.chrgText));
-        SendMessageW(lyric_editor_, EM_SCROLLCARET, 0, 0);
+        select(match);
         return true;
     };
-
-    const auto selection_matches = [this, &request]() {
-        CHARRANGE selection{};
-        SendMessageW(lyric_editor_, EM_EXGETSEL, 0,
-                     reinterpret_cast<LPARAM>(&selection));
-        const LONG wanted = static_cast<LONG>(wcslen(lyric_find_text_));
-        if (selection.cpMax - selection.cpMin != wanted) return false;
-        std::vector<wchar_t> selected(static_cast<size_t>(wanted) + 1);
-        TEXTRANGEW range{{selection.cpMin, selection.cpMax}, selected.data()};
-        SendMessageW(lyric_editor_, EM_GETTEXTRANGE, 0,
-                     reinterpret_cast<LPARAM>(&range));
-        return (request.Flags & FR_MATCHCASE) != 0
-            ? wcscmp(selected.data(), lyric_find_text_) == 0
-            : _wcsicmp(selected.data(), lyric_find_text_) == 0;
-    };
-
-    if ((request.Flags & FR_REPLACEALL) != 0) {
-        CHARRANGE start{0, 0};
-        SendMessageW(lyric_editor_, EM_EXSETSEL, 0,
-                     reinterpret_cast<LPARAM>(&start));
-        while (find_next()) {
+    if (request.Flags & FR_REPLACEALL) {
+        remember(1, lyric_replace_text_);
+        const auto current = selection();
+        LONG begin = lyric_find_selection_only_ ? current.cpMin : 0;
+        LONG end = lyric_find_selection_only_ ? current.cpMax : LyricEditorCharacterCount(lyric_editor_);
+        // 00446CCB always traverses forward, including when Find is upward.
+        while (begin < end) {
+            CHARRANGE match{};
+            if (!find(begin, end, flags | FR_DOWN, match) || match.cpMax > end) break;
+            select(match);
+            const LONG before = LyricEditorCharacterCount(lyric_editor_);
             SendMessageW(lyric_editor_, EM_REPLACESEL, TRUE,
-                reinterpret_cast<LPARAM>(lyric_replace_text_));
+                         reinterpret_cast<LPARAM>(lyric_replace_text_.c_str()));
+            const LONG delta = LyricEditorCharacterCount(lyric_editor_) - before;
+            end += delta;
+            begin = match.cpMax + delta; // Skip inserted text, even if it contains the query.
         }
-        return;
-    }
-    if ((request.Flags & FR_REPLACE) != 0) {
-        if (selection_matches())
+    } else if (request.Flags & FR_REPLACE) {
+        if (lyric_find_selection_only_) return;
+        const auto current = selection();
+        CHARRANGE match{};
+        // 00446BCE goes through the same EM_FINDTEXTEXW matcher as Find.
+        // Comparing selected bytes alone would replace "cat" in "catalog"
+        // despite FR_WHOLEWORD. Its one-character outward step also includes
+        // a match immediately before a downward caret (or after an upward one).
+        LONG start = current.cpMax;
+        if (flags & FR_DOWN) start = std::max<LONG>(0, current.cpMin - 1);
+        else if (start < LyricEditorCharacterCount(lyric_editor_) - 1) ++start;
+        select({start, start});
+        if (find(start, flags & FR_DOWN ? -1 : 0, flags, match)) {
+            select(match);
+            remember(1, lyric_replace_text_);
             SendMessageW(lyric_editor_, EM_REPLACESEL, TRUE,
-                reinterpret_cast<LPARAM>(lyric_replace_text_));
-        find_next();
-        return;
-    }
-    if ((request.Flags & FR_FINDNEXT) != 0) find_next();
+                         reinterpret_cast<LPARAM>(lyric_replace_text_.c_str()));
+            find_next();
+        } else MessageBeep(MB_ICONASTERISK);
+    } else if (request.Flags & FR_FINDNEXT) find_next();
 }
 
 std::optional<std::wstring> PlayerWindow::ReadEmbeddedLyrics() const {
@@ -3992,14 +4147,7 @@ void PlayerWindow::PrepareLyricMenu(HMENU menu, bool fullscreen_popup) const {
             }
         }
     }
-    const bool may_enter =
-        audio_->State() == audio::PlaybackState::playing;
-    EnableCommand(menu, kCmdFullscreenLyrics, may_enter);
-    EnableCommand(menu, kCmdFullscreenVisual, may_enter);
-    EnableCommand(menu, kCmdFullscreenAll, may_enter);
-    CheckCommand(menu, kCmdFullscreenLyrics, fullscreen_mode_ == 1);
-    CheckCommand(menu, kCmdFullscreenVisual, fullscreen_mode_ == 2);
-    CheckCommand(menu, kCmdFullscreenAll, fullscreen_mode_ == 3);
+    PrepareFullscreenMenuState(menu, fullscreen_mode_);
     // Fullscreen's legacy positional deletions must happen before insertion.
     if (!fullscreen_popup) PrepareLyricDoubleClickMenu(menu);
 }
@@ -4592,7 +4740,7 @@ void PlayerWindow::CancelLocalLyricSearch() {
 void PlayerWindow::PollLocalLyricSearch() {
     if (!local_lyric_search_ || lyric_association_open_ || lyric_save_in_progress_) return;
     const auto* track = PlaybackTrackForUi();
-    if (!track || !(local_lyric_song_ == lyrics::SongKey{track->path, track->subtrack}) || lyric_editor_) {
+    if (!track || !(local_lyric_song_ == lyrics::SongKey{track->path, track->subtrack}) || lyric_editor_ || lyric_document_modified_) {
         CancelLocalLyricSearch(); return;
     }
     std::optional<lyrics::LocalSearchResult> result;

@@ -21,6 +21,8 @@
 #include "ttplayer/audio/http_download_queue.h"
 #include "ttplayer/audio/http_mpeg_source.h"
 #include "ttplayer/audio/pcm_output_transform.h"
+#include "ttplayer/audio/pcm_effects.h"
+#include "ttplayer/plugins/legacy_host_exports.h"
 #include "ttplayer/audio/replay_gain_policy.h"
 #include "ttplayer/audio/replay_gain_scanner.h"
 #include "ttplayer/audio/winamp_dsp.h"
@@ -1385,6 +1387,37 @@ private:
     HRESULT result_{E_FAIL};
 };
 
+class NetworkProviderSource final : public DecodedAudioSource {
+public:
+    explicit NetworkProviderSource(HMODULE comm):comm_(comm){}
+    bool Open(const std::filesystem::path& path,const PlaybackOptions& options) override {
+        source_=CreateDirectShowSource();
+        if(source_->Open(path,options))return true;
+        // Keep legacy cancellation/proxy errors. MF does not inherit the
+        // NetShow settings, so it is only a modern default-profile fallback.
+        if(!platform::HasMediaFoundation() || options.network_proxy_type!=1 ||
+            (options.network_canceled && options.network_canceled()) ||
+            IsTerminalAudioOpenError(source_->ErrorResult()) || source_->ErrorResult()==HRESULT_FROM_WIN32(ERROR_TIMEOUT))return false;
+        auto modern=std::make_unique<MediaFoundationSource>(comm_);
+        if(!modern->Open(path,options))return false;
+        source_=std::move(modern);return true;
+    }
+    bool Read(size_t count,std::vector<std::byte>& out,bool& end) override{return source_->Read(count,out,end);}
+    bool Seek(std::chrono::milliseconds value) override{return source_->Seek(value);}
+    std::optional<std::chrono::milliseconds> LastSeekPosition() const override{return source_->LastSeekPosition();}
+    void SetPaused(bool value) override{source_->SetPaused(value);}
+    int DownloadedPercent() override{return source_->DownloadedPercent();}
+    const WAVEFORMATEX& OutputFormat() const override{return source_->OutputFormat();}
+    AudioFormat DisplayFormat() const override{return source_->DisplayFormat();}
+    std::chrono::milliseconds Duration() const override{return source_->Duration();}
+    std::wstring Error() const override{return source_->Error();}
+    HRESULT ErrorResult() const override{return source_->ErrorResult();}
+    AudioMetadata Metadata() const override{return source_->Metadata();}
+    bool CanOverlapPlayback() const override{return false;}
+private:
+    HMODULE comm_{};std::unique_ptr<DecodedAudioSource> source_;
+};
+
 std::unique_ptr<DecodedAudioSource> MakeBaseSource(
     const std::filesystem::path& path,
     const plugins::PluginManager* plugin_manager, HMODULE ttpcomm) {
@@ -1395,7 +1428,7 @@ std::unique_ptr<DecodedAudioSource> MakeBaseSource(
         return std::make_unique<HttpSource>(plugin_manager, ttpcomm);
     // Other network protocols keep their existing system providers.
     if (AudioEngine::IsNetworkMediaLocation(path))
-        return std::make_unique<MediaFoundationSource>(ttpcomm);
+        return std::make_unique<NetworkProviderSource>(ttpcomm);
     const auto extension = LowerExtension(path);
     if (extension == L".cda") return CreateCdaSource(plugin_manager, ttpcomm);
     return std::make_unique<RecoveredFileSource>(plugin_manager, ttpcomm);
@@ -1739,6 +1772,8 @@ public:
         }
         library_ = manager->RetainForBackground();
         if (!library_) return false;
+        source_version_ = CaptureReplayGainSourceVersion(path, subtrack);
+        if (source_version_.empty()) return false;
         path_ = path;
         subtrack_ = subtrack;
         return true;
@@ -1747,8 +1782,10 @@ public:
     void MarkPlaybackAccepted() noexcept { playback_accepted_ = true; }
 
     void Complete(std::optional<ReplayGainScanResult> analysis) noexcept {
-        if (analysis && analysis->status == ReplayGainScanStatus::completed)
-            analysis_ = std::move(*analysis);
+        if (analysis && analysis->status == ReplayGainScanStatus::completed) {
+            try { analysis->source_version=source_version_; analysis_=std::move(*analysis); }
+            catch (...) { analysis_.reset(); }
+        }
     }
 
     ~PlaybackReplayGainCommit() {
@@ -1761,6 +1798,7 @@ public:
 private:
     std::shared_ptr<plugins::PluginManager> library_;
     std::filesystem::path path_;
+    std::wstring source_version_;
     std::optional<ReplayGainScanResult> analysis_;
     bool playback_accepted_{};
     int subtrack_{};
@@ -1768,233 +1806,41 @@ private:
 
 class RecoveredProcessorChain {
 public:
-    RecoveredProcessorChain(const WAVEFORMATEX& format,
-                            const AudioMetadata& metadata,
-                            const PlaybackOptions& options,
-                            HMODULE ttpcomm_module,
-                            WinampDspChain& winamp_dsp,
-                            bool analyze_replay_gain)
-        : format_(format), replay_gain_(metadata.replay_gain_db,
-                                       metadata.replay_peak),
-          module_reference_(ttpcomm_module), ttpcomm_module_(module_reference_.get()),
-          winamp_dsp_(winamp_dsp) {
-        // The source retains the complete extensible object for format
-        // negotiation; this internal scalar copy records only the underlying
-        // sample encoding used by the recovered double-PCM processor math.
-        format_.wFormatTag = PcmProcessingTag(format);
-        if (analyze_replay_gain) {
-            replay_gain_analyzer_ = PlaybackReplayGainAnalyzer::Create(
-                ttpcomm_module_, format_.nSamplesPerSec, format_.nChannels);
-        }
+    RecoveredProcessorChain(const WAVEFORMATEX& format, const AudioMetadata& metadata,
+        const PlaybackOptions& options, HMODULE module, WinampDspChain& dsp, bool analyze)
+        : gain_(metadata.replay_gain_db), peak_(metadata.replay_peak), effects_(format,module), winamp_dsp_(dsp) {
+        std::memcpy(&format_,&format,std::min(sizeof(format_),sizeof(format)+size_t(format.cbSize)));
+        if(analyze) analyzer_=PlaybackReplayGainAnalyzer::Create(module,format.nSamplesPerSec,format.nChannels);
         Update(options);
     }
-
-    // FUN_004B182C is a distinct x86 call boundary in 5.7.9.  Preserve that
-    // boundary: VS 18 /O2 otherwise folds this setup into the constructor and
-    // the legacy ordinal-103 object subsequently reports zero output frames.
-    // Debug and /Ob0 mask the problem, which is why it only appeared in the
-    // packaged Release executable.
-    __declspec(noinline) void Update(const PlaybackOptions& options) {
-        // Playback/@AutoGain is a live processor option. The metadata belongs
-        // to this opened sound, so retain it across processor-revision updates
-        // and rebuild the multiplier when the checkbox changes. AutoScanGain
-        // is fixed when FUN_004B107E constructs this processor;
-        // SkipScanGain belongs only to CScanGainDlg::CWorkThread and is never
-        // interpreted by a live playback revision.
-        replay_gain_.Update(options.auto_gain);
-#if defined(_MSC_VER) && defined(_M_IX86)
-        if (options.equalizer_profile == -2) {
-            if (eq_) DestroyObject(eq_);
-            eq_ = nullptr;
-        } else if (ttpcomm_module_) {
-            if (!eq_) eq_ = CreateObject(ttpcomm_module_, 103);
-            // FUN_004B182C initializes the format before each update. This
-            // refreshes coefficients without discarding buffered samples;
-            // seeking clears history separately through Reset().
-            if (eq_ && (!InitializeLegacyEqualizer(
-                            eq_, format_.nSamplesPerSec, format_.nChannels) ||
-                        !SetLegacyEqualizer(eq_, options.equalizer_values))) {
-                DestroyObject(eq_);
-                eq_ = nullptr;
-            }
-        }
-        if (options.surround != surround_amount_) {
-            if (surround_) DestroyObject(surround_);
-            surround_ = nullptr;
-            surround_amount_ = options.surround;
-        }
-        if (!surround_ && ttpcomm_module_ && options.surround != 0) {
-            surround_ = CreateObject(ttpcomm_module_, 104);
-            if (surround_ && !SurroundInitialize(
-                    surround_, format_.nSamplesPerSec, format_.nChannels,
-                    options.surround)) {
-                DestroyObject(surround_);
-                surround_ = nullptr;
-            }
-        }
-#else
-        static_cast<void>(options);
-#endif
-        // The application applies DSP lifecycle changes even while stopped.
-        // A fading older sound must not restore its stale plugin snapshot.
+    void Update(const PlaybackOptions& options) {
+        PcmEffectSettings settings{PcmReplayGain(options.auto_gain,gain_,peak_),
+            options.equalizer_profile!=-2,options.equalizer_values,options.surround};
+        if(!effects_.Update(settings))diagnostics_.push_back(effects_.Error());
     }
-
-    ~RecoveredProcessorChain() {
-#if defined(_MSC_VER) && defined(_M_IX86)
-        if (surround_) DestroyObject(surround_);
-        if (eq_) DestroyObject(eq_);
-#endif
+    bool Active() const noexcept {return effects_.Active() || analyzer_;}
+    bool Process(std::vector<std::byte>& bytes, bool = true, std::vector<double>* precise=nullptr) {
+        if(!Active() || bytes.empty())return true;
+        // Analyze unprocessed source samples. Winamp runs after output SSRC.
+        if(analyzer_ && !analyzer_->AnalyzePcm(bytes,format_.Format))analyzer_.reset();
+        std::vector<double> samples;if(!effects_.Process(bytes,samples))return false;
+        if(precise){*precise=std::move(samples);return true;}
+        return effects_.Encode(samples,bytes);
     }
-
-    bool Active() const noexcept {
-        return replay_gain_.Scale() != 1.0 || eq_ || surround_ ||
-               winamp_dsp_.ActiveCount() != 0 || replay_gain_analyzer_;
-    }
-
-    bool Process(std::vector<std::byte>& bytes, bool enable_dsp = true,
-                 std::vector<double>* precise_output = nullptr) {
-        if (!Active() || bytes.empty()) return true;
-        std::vector<double> samples;
-        if (!Decode(bytes, samples)) return false;
-
-        // FUN_004B1950 invokes ordinal-101 slot 2 before applying the current
-        // ReplayGain multiplier and the remaining processor chain.  Analyzer
-        // failure disables only automatic scanning; it must never interrupt
-        // audible playback.
-        if (replay_gain_analyzer_ && !replay_gain_analyzer_->AnalyzePcm(bytes, format_)) {
-            replay_gain_analyzer_.reset();
-        }
-
-        // This processing chain uses a half-scale domain paired with Encode.
-        // Original 004B0560 and the ReplayGain analyzer use full-scale PCM
-        // (16-bit /32768). AnalyzePcm above deliberately bypasses this local
-        // scaling; 004B1950's +/-0.5 values are nonlinear branch thresholds.
-        if (replay_gain_.Scale() != 1.0) {
-            ttpcomm::host::pcm::ApplyGainHalf(samples, replay_gain_.Scale());
-        }
-#if defined(_MSC_VER) && defined(_M_IX86)
-        int count = static_cast<int>(std::min<size_t>(
-            samples.size(), static_cast<size_t>(std::numeric_limits<int>::max())));
-        if (eq_ && !EqProcess(eq_, samples.data(), &count)) return false;
-        count = std::clamp(count, 0, static_cast<int>(samples.size()));
-        if (format_.nChannels > 1)
-            count -= count % format_.nChannels;
-        samples.resize(static_cast<size_t>(count));
-        if (surround_ && !SurroundProcess(
-                surround_, samples.data(), count)) return false;
-#endif
-        if (enable_dsp && winamp_dsp_.ActiveCount() != 0) {
-            // FUN_004AC166 converts the processor stream to signed 16-bit
-            // immediately before FUN_0042898D, then converts it back when the
-            // output device uses another width. Keep ReplayGain/EQ/surround
-            // in the recovered double domain and reproduce that ABI boundary.
-            std::vector<std::int16_t> pcm16(samples.size());
-            for (size_t index = 0; index < samples.size(); ++index) {
-                const double sample = std::isfinite(samples[index])
-                    ? samples[index] : 0.0;
-                pcm16[index] = static_cast<std::int16_t>(std::llround(
-                    std::clamp(sample, -0.5, 32767.0 / 65536.0) * 65536.0));
-            }
-            winamp_dsp_.Process(pcm16, format_.nChannels,
-                                static_cast<int>(format_.nSamplesPerSec),
-                                &diagnostics_);
-            for (size_t index = 0; index < samples.size(); ++index)
-                samples[index] = pcm16[index] / 65536.0;
-        }
-        if (precise_output) {
-            // 004B1B81 -> 004B1BF4 keeps double PCM through EQ and SSRC.
-            // Quantizing back to the reader's bit depth here loses fractions
-            // before resampling/dither and clips peaks too early.
-            *precise_output = std::move(samples);
-            return true;
-        }
-        return Encode(samples, bytes);
-    }
-
-    void Reset() noexcept {
-        // FUN_004B16FE destroys +0x38 on a seek.  A partial-track histogram
-        // must not be committed as a full-track ReplayGain value.
-        if (replay_gain_analyzer_) replay_gain_analyzer_->Cancel();
-        replay_gain_analyzer_.reset();
-#if defined(_MSC_VER) && defined(_M_IX86)
-        if (eq_) EqReset(eq_);
-        if (surround_) SurroundReset(surround_);
-#endif
-    }
-
-    std::vector<std::wstring> TakeDiagnostics(bool poll_plugin = false) {
-        // The PCM callback already collected its diagnostics. A second
-        // synchronous dispatcher call here can wait behind Ozone's UI Sleep
-        // for every 1024-frame FLAC block, exhausting the output lookahead.
-        // Explicit polling is only needed at setup / configuration changes.
-        auto result = std::exchange(diagnostics_, {});
-        if (poll_plugin) {
-            auto messages = winamp_dsp_.TakeDiagnostics();
-            result.insert(result.end(),
-                std::make_move_iterator(messages.begin()),
-                std::make_move_iterator(messages.end()));
-        }
+    void Reset() noexcept {if(analyzer_)analyzer_->Cancel();analyzer_.reset();effects_.Reset();}
+    std::vector<std::wstring> TakeDiagnostics(bool poll_plugin=false) {
+        auto result=std::exchange(diagnostics_,{});
+        if(poll_plugin){auto messages=winamp_dsp_.TakeDiagnostics();result.insert(result.end(),
+            std::make_move_iterator(messages.begin()),std::make_move_iterator(messages.end()));}
         return result;
     }
-
     std::optional<ReplayGainScanResult> FinishReplayGain() noexcept {
-        if (!replay_gain_analyzer_) return std::nullopt;
-        auto result = replay_gain_analyzer_->Finish();
-        replay_gain_analyzer_.reset();
-        return result;
+        if(!analyzer_)return std::nullopt;auto result=analyzer_->Finish();analyzer_.reset();return result;
     }
-
 private:
-    bool Decode(const std::vector<std::byte>& bytes,
-                std::vector<double>& samples) const {
-        return ttpcomm::host::pcm::Decode(bytes.data(), bytes.size(), format_, samples, ttpcomm::host::pcm::Domain::half);
-    }
-
-    bool Encode(const std::vector<double>& samples,
-                std::vector<std::byte>& bytes) const {
-        return ttpcomm::host::pcm::EncodeHalf(samples, format_, bytes);
-    }
-
-#if defined(_MSC_VER) && defined(_M_IX86)
-    static void* CreateObject(HMODULE module, WORD ordinal) noexcept {
-        return ttpcomm::client::Create(module, ordinal);
-    }
-
-    static void DestroyObject(void* object) noexcept {
-        ttpcomm::client::Destroy(object);
-    }
-
-    static bool EqProcess(void* object, double* samples, int* count) noexcept {
-        return ttpcomm::client::Equalize(object, samples, count);
-    }
-
-    static void EqReset(void* object) noexcept {
-        ttpcomm::client::Reset(object, 6);
-    }
-
-    static bool SurroundInitialize(void* object, DWORD rate, DWORD channels,
-                                   int amount) noexcept {
-        return ttpcomm::client::InitializeSurround(object, rate, channels, amount);
-    }
-
-    static bool SurroundProcess(void* object, double* samples, int count) noexcept {
-        return ttpcomm::client::Surround(object, samples, count);
-    }
-
-    static void SurroundReset(void* object) noexcept {
-        ttpcomm::client::Reset(object, 3);
-    }
-#endif
-
-    WAVEFORMATEX format_{};
-    ReplayGainRuntime replay_gain_;
-    std::unique_ptr<PlaybackReplayGainAnalyzer> replay_gain_analyzer_;
-    void* eq_{};
-    void* surround_{};
-    ttpcomm::client::ModuleReference module_reference_;
-    HMODULE ttpcomm_module_{};
-    int surround_amount_{};
-    WinampDspChain& winamp_dsp_;
+    WAVEFORMATEXTENSIBLE format_{}; std::optional<double> gain_,peak_;
+    PcmSourceEffects effects_; WinampDspChain& winamp_dsp_;
+    std::unique_ptr<PlaybackReplayGainAnalyzer> analyzer_;
     std::vector<std::wstring> diagnostics_;
 };
 
@@ -2270,6 +2116,7 @@ bool AudioEngine::IsNetworkMediaLocation(
 }
 
 void AudioEngine::Configure(const PlaybackOptions& options) {
+    plugins::ConfigureLegacyHostNetwork(options);
     std::unique_lock lock(mutex_);
     const HWND existing_dsp_parent = options_.dsp_parent_window;
     options_ = options;
@@ -2596,7 +2443,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     PcmOutputTransform output_transform;
     if (!output_transform.Open(
             source_format,
-            {options.output_bits, options.resample_rate,
+            {ResolveOutputBits(options.output_bits, source->DisplayFormat().bits_per_sample), options.resample_rate,
              options.ssrc_mode, options.dither},
             ttpcomm_module_)) {
         if (!stop_requested_) SetError(output_transform.Error());
@@ -2791,12 +2638,14 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             }
             for (auto& diagnostic : processors.TakeDiagnostics())
                 RecordDiagnostic(std::move(diagnostic));
+            output_transform.SetWinampDsp(dsp_chain_.get(), dsp_enabled_.load());
             if (!(processing ? output_transform.ProcessSamples(
                       std::move(processed), decoded, decoder_eof)
                   : output_transform.Process(native, decoded, decoder_eof))) {
                 if (!stop_requested_) SetError(output_transform.Error());
                 return false;
             }
+            for(auto& message:output_transform.TakeDiagnostics()) RecordDiagnostic(std::move(message));
             stream_eof = decoder_eof;
             return true;
         };
@@ -3220,6 +3069,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 }
                 if (!decoded.empty() || decoder_eof) {
                     std::vector<std::byte> converted;
+                    output_transform.SetWinampDsp(dsp_chain_.get(), dsp_enabled_.load());
                     if (!(processing ? output_transform.ProcessSamples(
                               std::move(processed), converted, decoder_eof)
                           : output_transform.Process(decoded, converted, decoder_eof))) {
@@ -3227,6 +3077,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                             SetError(output_transform.Error());
                         return false;
                     }
+                    for(auto& message:output_transform.TakeDiagnostics()) RecordDiagnostic(std::move(message));
                     decoded = std::move(converted);
                 }
                 for (auto& diagnostic : processors.TakeDiagnostics())

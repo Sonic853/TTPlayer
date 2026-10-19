@@ -126,9 +126,24 @@ inline void ApplyGainHalfTo(double* samples, size_t count, double gain) noexcept
     if (gain == 1.0) return;
     for (size_t i = 0; i < count; ++i) {
         auto& sample = samples[i];
-        double value = sample * gain;
-        if (value > 0.5) value = (std::tan((value - 0.5) * 2.0) + 1.0) * 0.5;
-        else if (value < -0.5) value = std::tan((value + 0.5) * 2.0) * 0.5 - 0.5;
+        // IA32 can retain x87 extended intermediates, including _CItan's
+        // return value. Round each operation to binary64 without requiring
+        // SSE2. Scalar tan and subnormal products can still differ from SSE2;
+        // the runtime service separately dispatches to its original SSE2 path.
+        volatile double value = sample * gain;
+        if (value > 0.5) {
+            volatile double shifted = value - 0.5;
+            volatile double angle = shifted * 2.0;
+            volatile double tangent = std::tan(angle);
+            volatile double offset = tangent + 1.0;
+            value = offset * 0.5;
+        } else if (value < -0.5) {
+            volatile double shifted = value + 0.5;
+            volatile double angle = shifted * 2.0;
+            volatile double tangent = std::tan(angle);
+            volatile double scaled = tangent * 0.5;
+            value = scaled - 0.5;
+        }
         sample = value;
     }
 }

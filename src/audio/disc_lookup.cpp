@@ -3,7 +3,7 @@
 #include "ttplayer/net/http.h"
 #include "ttplayer/core/build_version.h"
 #include "ttplayer/platform/optional_windows_api.h"
-#include "../update/json.h"
+#include "ttplayer/core/json.h"
 #include <algorithm>
 #include <mutex>
 #include <thread>
@@ -12,7 +12,7 @@
 
 namespace ttplayer::audio {
 namespace {
-using update::detail::Json;
+using core::Json;
 using Clock=std::chrono::steady_clock;
 void Guard(const DiscCancel& canceled){if(canceled&&canceled())throw std::runtime_error("Canceled");}
 bool Mbid(std::string_view id) {
@@ -125,7 +125,7 @@ DiscQuerySource PrepareDiscQuery(const std::filesystem::path& path,const plugins
     return source;
 }
 std::vector<DiscCandidate> ParseDiscCandidates(std::string_view json,const DiscLayout& disc) {
-    const auto root=update::detail::JsonReader(json).Read();
+    const auto root=core::JsonReader(json).Read();
     if(root["releases"].kind!=Json::array)throw std::runtime_error("MusicBrainz did not return a release list");
     std::vector<DiscCandidate> result;const auto id=disc.MusicBrainzId();
     for(const auto& release:root["releases"].items) {
@@ -149,7 +149,7 @@ std::vector<DiscCandidate> ParseDiscCandidates(std::string_view json,const DiscL
     return result;
 }
 DiscRelease ParseDiscRelease(std::string_view json,const DiscCandidate& candidate,const DiscLayout& disc) {
-    const auto release=update::detail::JsonReader(json).Read();
+    const auto release=core::JsonReader(json).Read();
     if(release["id"].String()!=candidate.release_id)throw std::runtime_error("MusicBrainz release identity changed");
     DiscRelease result;result.candidate=candidate;
     for(const auto& medium:release["media"].items)if(medium["position"].Integer()==candidate.medium) {

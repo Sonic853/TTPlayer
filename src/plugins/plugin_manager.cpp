@@ -1,6 +1,7 @@
 #include "ttplayer/plugins/plugin_manager.h"
 #include "nero_config_layout.h"
 #include "ttplayer/audio/format_probe.h"
+#include "ttplayer/audio/file_mutation.h"
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/skin/skin_plugin_api.h"
@@ -1173,6 +1174,29 @@ struct LegacyReaderSession::Impl {
     std::vector<unsigned char> thumbnail;
     bool metadata_committed{};
     HRESULT metadata_commit_result{S_OK};
+    std::filesystem::path source_path;
+    audio::FileSourceVersion source_version;
+    std::unique_ptr<audio::FileMutationGuard> mutation;
+    bool mutation_started{};
+
+    HRESULT BeginMutation() noexcept {
+        if (mutation_started) return S_OK;
+        try {
+            if (!source_version.valid) return E_ACCESSDENIED;
+            if (!mutation) {
+                auto acquired = std::make_unique<audio::FileMutationGuard>();
+                const HRESULT status = acquired->Acquire(source_path, {}, 2000);
+                if (FAILED(status)) return status;
+                if (!audio::SameFileSourceVersion(source_version, acquired->Version()))
+                    return HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
+                mutation = std::move(acquired);
+            }
+            const HRESULT current = mutation->Validate();
+            if (FAILED(current)) return current;
+            mutation_started = true;
+            return S_OK;
+        } catch (...) { return E_OUTOFMEMORY; }
+    }
 
     ~Impl() {
         // The decoder can still hold a temporary reference to the staging
@@ -1385,6 +1409,8 @@ HRESULT LegacyReaderSession::ReplaceThumbnails(
         impl_->thumbnail_object, 3, &current_count);
     if (FAILED(result)) return result;
     // 004AD6E4 removes from count-1 down to zero so every index stays valid.
+    result = impl_->BeginMutation();
+    if (FAILED(result)) return result;
     while (current_count != 0) {
         result = InvokeThumbnailRemove(
             impl_->thumbnail_object, --current_count);
@@ -1447,6 +1473,8 @@ HRESULT LegacyReaderSession::SetMetadataValue(
     // Reader slot 4 capability bit 2 is the exact write guard used by
     // FUN_004ADD9C before metadata slot 6.
     if ((impl_->capabilities & 4U) == 0) return E_ACCESSDENIED;
+    const HRESULT current = impl_->BeginMutation();
+    if (FAILED(current)) return current;
     try {
         const std::string terminated_name(name);
         const std::wstring terminated_value(value);
@@ -1461,6 +1489,8 @@ HRESULT LegacyReaderSession::SetMetadataValueDirect(
     std::string_view name, std::wstring_view value) noexcept {
     if (!impl_ || !impl_->metadata) return E_NOINTERFACE;
     if (impl_->metadata_committed) return E_UNEXPECTED;
+    const HRESULT current = impl_->BeginMutation();
+    if (FAILED(current)) return current;
     try {
         const std::string terminated_name(name);
         const std::wstring terminated_value(value);
@@ -2184,6 +2214,13 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderForMetadata(
     const std::filesystem::path& path, HRESULT* result,
     std::wstring* diagnostic) const {
     if (diagnostic) diagnostic->clear();
+    auto mutation = std::make_unique<audio::FileMutationGuard>();
+    const HRESULT acquired = mutation->Acquire(path);
+    if (FAILED(acquired)) {
+        if (result) *result = acquired;
+        if (diagnostic) *diagnostic = L"acquiring metadata file transaction";
+        return {};
+    }
     IStream* stream{};
     const HRESULT opened = CreateNamedFileStream(
         path, STGM_READWRITE | STGM_SHARE_DENY_WRITE, &stream);
@@ -2195,6 +2232,7 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderForMetadata(
     }
     auto session = OpenReaderWithFlags(path, stream, 0, result, diagnostic);
     stream->Release();
+    if (session) session->impl_->mutation = std::move(mutation);
     return session;
 }
 
@@ -2241,6 +2279,8 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderWithFlags(
         if (diagnostic) *diagnostic = L"reader input IStream is null";
         return {};
     }
+    audio::FileSourceVersion source_version;
+    static_cast<void>(audio::ReadFileSourceVersion(logical_path, source_version));
     // 004CBC1F uses 004CBA11's corrected hint to select creators, while the
     // IStream/Stat filename remains the real file (also for archive members).
     auto extension = audio::AudioExtensionHint(logical_path);
@@ -2451,6 +2491,8 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderWithFlags(
             // failure now releases the private reader through Impl::~Impl.
             implementation->reader = reader;
             reader = nullptr;
+            implementation->source_path = logical_path;
+            implementation->source_version = source_version;
             implementation->metadata = metadata_owner.release();
             implementation->thumbnail_object = thumbnail_owner.release();
             implementation->decoder = std::move(decoder);

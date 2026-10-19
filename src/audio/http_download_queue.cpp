@@ -66,11 +66,7 @@ bool Under(const std::filesystem::path& file,const std::filesystem::path& root) 
         if(a==f.end() || _wcsicmp(a->c_str(),b->c_str())) return false;
     return a!=f.end();
 }
-bool AudioExtension(std::wstring ext) {
-    std::transform(ext.begin(),ext.end(),ext.begin(),towlower);
-    static constexpr const wchar_t* names[]={L".mp3",L".mp2",L".wma",L".ogg",L".opus",L".flac",L".aac",L".m4a",L".mp4",L".wav",L".ape",L".tta",L".webm",L".weba",L".rm"};
-    for(auto name:names) if(ext==name) return true;return false;
-}
+
 std::wstring SafeName(std::wstring s) {
     for(auto& c:s) if(c<32 || wcschr(L"<>:\"/\\|?*",c)) c=L'_';
     while(!s.empty() && (s.back()==L'.' || s.back()==L' ')) s.pop_back();
@@ -126,7 +122,10 @@ std::filesystem::path ResolveLegacySavedFile(const std::vector<LegacyCacheEntry>
         if(HttpDownloadKey(entry.sourceurl)!=key || entry.save.empty() ||
             (!entry.excludeurl.empty() && entry.excludeurl.find(key)!=std::wstring::npos)) continue;
         const std::filesystem::path path(entry.save);
-        if(!path.is_absolute() || !AudioExtension(path.extension().wstring())) continue;
+        // A successful save is a location, not a format assertion. The caller
+        // still opens it through the real reader; suffixless/.bin downloads
+        // must not be rejected before content probing. Never use entry.temp.
+        if(!path.is_absolute()) continue;
         if(std::none_of(roots.begin(),roots.end(),[&](const auto& root){return !root.empty() && Under(path,root);})) continue;
         std::error_code ec;const auto bytes=std::filesystem::file_size(path,ec);
         if(!ec && bytes && bytes<=0x80000000ULL && std::filesystem::is_regular_file(path,ec)) return path;
@@ -136,7 +135,7 @@ std::filesystem::path HttpDownloadDestination(const std::filesystem::path& folde
     std::wstring_view url,std::wstring title,std::wstring artist,bool artist_folder) {
     auto name=std::wstring(url);name.resize(name.find_first_of(L"?#")==std::wstring::npos?name.size():name.find_first_of(L"?#"));
     name=name.substr(name.find_last_of(L'/')+1);std::filesystem::path leaf(name);
-    auto ext=leaf.extension().wstring();if(!AudioExtension(ext)) ext=L".bin";
+    auto ext=leaf.extension().wstring();if(!AudioEngine::IsRecoveredFormatPath(leaf)) ext=L".bin";
     if(title.empty()) title=leaf.stem().wstring();
     auto root=folder;if(artist_folder && !artist.empty()) root/=SafeName(artist);
     return root/(SafeName(title)+ext);
@@ -360,7 +359,7 @@ size_t HttpDownloadQueue::ImportLegacyList(const std::filesystem::path& file,
         d.entry.title=LegacyCacheTitle(d.entry.sourceurl,title,artist);d.display_title=title;d.replace=replace;
         d.destination=HttpDownloadDestination(folder,d.entry.sourceurl,title,artist,artist_folder);
         auto format=Attribute(node.Get(),L"format");if(!format.empty() && format.front()!=L'.') format=L"."+format;
-        if(AudioExtension(format)) d.destination.replace_extension(format);
+        if(AudioEngine::IsRecoveredFormatPath(std::filesystem::path(L"track"+format))) d.destination.replace_extension(format);
         if(complete) {
             d.entry.save=Attribute(node.Get(),L"path");
             const auto saved=ResolveLegacySavedFile({d.entry},d.entry.sourceurl,{folder});

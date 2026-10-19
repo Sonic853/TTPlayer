@@ -11,6 +11,7 @@
 #include "ttplayer/audio/archive_member.h"
 #include "ttplayer/audio/audio_engine.h"
 #include "ttplayer/audio/builtin_file_info.h"
+#include "ttplayer/audio/file_mutation.h"
 #include "ttplayer/audio/format_probe.h"
 #include "ttplayer/audio/midi_player.h"
 #include "ttplayer/audio/cue_sheet.h"
@@ -329,7 +330,10 @@ int ReadFileInfo(const std::filesystem::path& addin_directory,
         return ttplayer::ui::detail::WriteFileInfoProbeReadResult(output, ReadCdaMetadata(logical_path)) ? 0 : 4;
     HMODULE ttpcomm{};
     ttplayer::audio::ArchiveMemberPath archive;
-    if (ttplayer::audio::ParseArchiveMemberPath(logical_path.native(), archive))
+    const bool archive_member = ttplayer::audio::ParseArchiveMemberPath(logical_path.native(), archive);
+    const auto source_version = archive_member ? std::wstring{} :
+        ttplayer::audio::CaptureFileSourceVersion(logical_path);
+    if (archive_member)
         ttpcomm = LoadLibraryExW(ttpcomm_path.c_str(), nullptr,
                                 LOAD_WITH_ALTERED_SEARCH_PATH);
 
@@ -364,6 +368,11 @@ int ReadFileInfo(const std::filesystem::path& addin_directory,
     }
     manager.Shutdown();
     CloseArchiveLibrary(ttpcomm);
+    if (SUCCEEDED(result.status) && !source_version.empty()) {
+        if (ttplayer::audio::CaptureFileSourceVersion(logical_path) != source_version)
+            result.status = HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
+        else result.source_identity = source_version;
+    }
     return ttplayer::ui::detail::WriteFileInfoProbeReadResult(output, result)
         ? 0 : 4;
 }
@@ -634,6 +643,19 @@ int WriteFileInfo(const std::filesystem::path& addin_directory,
         if (FAILED(result.status)) result.fields.assign(request.fields.size(), result.status);
         if (request.cover_action != ui::detail::FileInfoProbeCoverAction::unchanged) result.cover_status = E_NOTIMPL;
         return ui::detail::WriteFileInfoProbeWriteResult(output, result) ? 0 : 4;
+    }
+    // Hold this through fresh-reader verification, including legacy plug-ins
+    // which only write when their last reference is released.
+    ttplayer::audio::FileMutationGuard mutation;
+    result.status = mutation.Acquire(logical_path);
+    if (SUCCEEDED(result.status) && !request.source_identity.empty() &&
+        request.source_identity != ttplayer::audio::FileSourceVersionToken(mutation.Version()))
+        result.status = HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
+    if (FAILED(result.status)) {
+        result.fields.assign(request.fields.size(), result.status);
+        if (request.cover_action != ttplayer::ui::detail::FileInfoProbeCoverAction::unchanged)
+            result.cover_status = result.status;
+        return ttplayer::ui::detail::WriteFileInfoProbeWriteResult(output, result) ? 0 : 4;
     }
     if (_wcsicmp(logical_path.extension().c_str(), L".cue") == 0) {
         using namespace ttplayer;

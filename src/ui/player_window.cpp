@@ -1491,35 +1491,7 @@ PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(se
     if (settings_.equalizer.profile_last < -1 ||
         settings_.equalizer.profile_last >= static_cast<int>(std::size(kEqualizerPresets)))
         settings_.equalizer.profile_last = -1;
-    audio_->Configure({settings_.playback.file_buffer,
-                      settings_.device.buffer_duration,
-                      settings_.device.output_bits,
-                      settings_.device.resample_rate,
-                      settings_.playback.thread_priority,
-                      settings_.player.balance,
-                      settings_.playback.auto_gain,
-                      settings_.playback.auto_scan_gain,
-                      settings_.playback.skip_scan_gain,
-                      settings_.equalizer.profile,
-                      settings_.equalizer.surround,
-                      settings_.equalizer.current,
-                      settings_.device.device_type,
-                      settings_.device.hardware_buffer,
-                      settings_.device.create_primary,
-                      settings_.device.ssrc_mode,
-                      settings_.device.dither,
-                      settings_.plugin.folder,
-                      settings_.plugin.modules,
-                      nullptr,
-                      settings_.playback.sound_fade_mode,
-                      settings_.playback.fade_duration,
-                      settings_.playback.track_fade_duration,
-                      {}, 15000, settings_.network.proxy_type, settings_.network.proxy_port,
-                      settings_.network.proxy_server, settings_.network.proxy_username,
-                      settings_.network.proxy_password,
-                      settings_.network.cache_enabled, settings_.network.cache_folder,
-                      settings_.network.cache_space_size, settings_.network.download_folder,
-                      (settings_.source_path.empty() ? PlayerRuntimeDirectory() : settings_.source_path.parent_path()) / L"HttpDownloads" / L"cachelist.xml"});
+    audio_->Configure(PlaybackOptionsFromSettings(settings_, PlayerRuntimeDirectory()));
     audio_->SetVolume(settings_.player.mute ? 0.0F : static_cast<float>(settings_.player.volume) / 100.0F);
     discord_presence_.Configure(settings_.general.send_title_to_msn,
                                 settings_.general.discord_application_id);
@@ -5962,14 +5934,7 @@ void PlayerWindow::PrepareContextMenu(HMENU menu) {
     EnableCommand(menu, kCmdPlayUrl, true);
     // The shared menu updater enables 0x7DE8..0x7DEA only for engine state 2
     // (actively playing), even when one of those modes is already selected.
-    const bool may_enter_fullscreen =
-        state == audio::PlaybackState::playing;
-    EnableCommand(menu, kCmdFullscreenLyrics, may_enter_fullscreen);
-    EnableCommand(menu, kCmdFullscreenVisual, may_enter_fullscreen);
-    EnableCommand(menu, kCmdFullscreenAll, may_enter_fullscreen);
-    CheckCommand(menu, kCmdFullscreenLyrics, fullscreen_mode_ == 1);
-    CheckCommand(menu, kCmdFullscreenVisual, fullscreen_mode_ == 2);
-    CheckCommand(menu, kCmdFullscreenAll, fullscreen_mode_ == 3);
+    PrepareFullscreenMenuState(menu, fullscreen_mode_);
     if (const HMENU volume = FindCommandMenu(menu, kCmdMute);
         volume && !FindCommandMenu(volume, kCmdVolumeInput)) {
         const auto label = i18n::ResourceText(GetModuleHandleW(nullptr), IDS_VOLUME_MANUAL);

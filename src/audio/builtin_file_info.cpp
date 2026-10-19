@@ -1,6 +1,7 @@
 #include <ttpcomm/runtime_tags.h>
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/builtin_file_info.h"
+#include "ttplayer/audio/file_mutation.h"
 #include "ttplayer/audio/format_probe.h"
 #include "ttplayer/audio/directshow_source.h"
 #include <mfapi.h>
@@ -469,8 +470,15 @@ struct Id3Frame {
     std::string identifier;
     std::string semantic;
     std::wstring metadata_name;
+    unsigned char status_flags{};
     Bytes raw;
 };
+
+bool DiscardId3FrameOnTagAlter(const Id3Frame& frame, unsigned major) noexcept {
+    // 6002221B discards tag-alter frames while rendering. These operations
+    // leave the audio intact, so file-alter-only frames must be retained.
+    return (frame.status_flags & (major == 3 ? 0x80U : 0x40U)) != 0;
+}
 
 struct Id3Tag {
     bool present{};
@@ -587,9 +595,10 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
     tag.present = true;
     tag.major = major;
     tag.total_size = total;
+    const bool tag_unsynchronized = major < 4 && (header[5] & 0x80U) != 0;
     if (header[5] & 0x80U) {
         tag.rewrite_safe = false;
-        payload = RemoveUnsynchronization(payload);
+        if (tag_unsynchronized) payload = RemoveUnsynchronization(payload);
     }
     const auto start = ttpcomm::host::tags::FrameStart({payload.data(), payload.size()}, major, header[5]);
     if (!start) { tag.rewrite_safe = false; return tag; }
@@ -609,6 +618,9 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
         Id3Frame frame;
         frame.identifier = identifier;
         frame.semantic = FrameSemantic(identifier);
+        // ABI 1 parsed.flags is the format byte only. Preserve the separate
+        // status byte without changing that public ABI or the raw frame.
+        if (major != 2) frame.status_flags = parsed.raw[8];
         frame.raw.assign(payload.begin() + static_cast<ptrdiff_t>(begin),
                          payload.begin() + static_cast<ptrdiff_t>(end));
         // Keep the existing conservative write policy for encoded frames.
@@ -623,7 +635,7 @@ Id3Tag ReadId3v2(File file, std::uint64_t file_size) {
             std::span<const unsigned char>(parsed.payload.data(), parsed.payload.size());
         Bytes decoded_storage;
         const auto decoded = Id3DecodedPayload(frame_payload, major,
-            static_cast<unsigned char>(parsed.flags), (header[5] & 0x80U) != 0,
+            static_cast<unsigned char>(parsed.flags), tag_unsynchronized,
             decoded_storage, inflate_budget);
         if (decoded) {
             // Native frames take precedence over old TXXX aliases, regardless
@@ -1332,6 +1344,7 @@ Bytes BuildId3v2(const Id3Tag& previous, const TagData& fields,
     std::vector<std::wstring> retained_names;
     bool retained_picture{};
     for (const auto& frame : previous.frames) {
+        if (DiscardId3FrameOnTagAlter(frame, previous.major)) continue;
         if (!frame.semantic.empty()) continue;
         if (IsNativeId3Field(frame.metadata_name)) continue;
         if (!frame.metadata_name.empty() && std::any_of(modified.begin(), modified.end(),
@@ -1639,7 +1652,8 @@ std::filesystem::path CreateSiblingTemporary(
 
 HRESULT ReplaceWithTags(const std::filesystem::path& path, HANDLE source,
                         const FileLayout& layout, const Bytes& id3v2,
-                        const Bytes& ape, const Bytes& lyrics3, const Bytes& id3v1) {
+                        const Bytes& ape, const Bytes& lyrics3, const Bytes& id3v1,
+                        const FileMutationGuard& mutation) {
     UniqueHandle output;
     const auto temporary = CreateSiblingTemporary(path, output);
     if (temporary.empty()) return HRESULT_FROM_WIN32(GetLastError());
@@ -1661,9 +1675,22 @@ HRESULT ReplaceWithTags(const std::filesystem::path& path, HANDLE source,
             attributes & ~FILE_ATTRIBUTE_READONLY);
     DWORD replace_error{};
     for (unsigned attempt = 0; ; ++attempt) {
+        // Cooperating writers hold the same cross-process mutex. A foreign
+        // rename/replacement must not be overwritten by this completed but
+        // stale snapshot, including during the sharing-error retry window.
+        const HRESULT current = mutation.Validate(source);
+        if (FAILED(current)) {
+            DeleteFileW(temporary.c_str());
+            return current;
+        }
         if (ReplaceFileW(path.c_str(), temporary.c_str(), nullptr,
-                REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr) ||
-            MoveFileExW(temporary.c_str(), path.c_str(),
+                REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr)) break;
+        const HRESULT after_replace_failure = mutation.Validate(source);
+        if (FAILED(after_replace_failure)) {
+            DeleteFileW(temporary.c_str());
+            return after_replace_failure;
+        }
+        if (MoveFileExW(temporary.c_str(), path.c_str(),
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) break;
         replace_error = GetLastError();
         // A recently created/replaced file can be held briefly by another
@@ -1686,11 +1713,14 @@ HRESULT WriteMp3(const std::filesystem::path& path,
                  std::span<const BuiltinTagWriteField> requested,
                  std::vector<HRESULT>& field_results,
                  BuiltinCoverAction cover_action,
-                 std::span<const unsigned char> cover) {
+                  std::span<const unsigned char> cover,
+                  const FileMutationGuard& mutation) {
     UniqueHandle source(CreateFileW(path.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!source) return HRESULT_FROM_WIN32(GetLastError());
+    const HRESULT current = mutation.Validate(source.Get());
+    if (FAILED(current)) return current;
     FileLayout layout;
     if (!ReadMp3Layout(source.Get(), layout) || !FindMpegHeader(source.Get(), layout))
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
@@ -1755,15 +1785,18 @@ HRESULT WriteMp3(const std::filesystem::path& path,
     }
     if ((write_type & 8U) && id3v2.empty()) return E_OUTOFMEMORY;
     if ((write_type & 4U) && ape.empty()) return E_OUTOFMEMORY;
-    return ReplaceWithTags(path, source.Get(), layout, id3v2, ape, lyrics3, id3v1);
+    return ReplaceWithTags(path, source.Get(), layout, id3v2, ape, lyrics3, id3v1, mutation);
 }
 
 HRESULT WriteMpegReplayGain(const std::filesystem::path& path,
-                            std::wstring_view gain, std::wstring_view peak) {
+                            std::wstring_view gain, std::wstring_view peak,
+                            const FileMutationGuard& mutation) {
     UniqueHandle source(CreateFileW(path.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!source) return HRESULT_FROM_WIN32(GetLastError());
+    const HRESULT current = mutation.Validate(source.Get());
+    if (FAILED(current)) return current;
     FileLayout layout;
     if (!ReadMp3Layout(source.Get(), layout) || !FindMpegHeader(source.Get(), layout))
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
@@ -1778,10 +1811,13 @@ HRESULT WriteMpegReplayGain(const std::filesystem::path& path,
     Bytes id3;
     if (layout.id3v2.present) {
         // A scan must not apply the property dialog's tag conversion policy.
-        // Keep every unrelated frame, including private data, lyrics and APIC.
+        // Keep unrelated frames except those marked invalid after tag edits.
+        // Changed fields are regenerated with read-only/unknown status bits
+        // cleared; untouched frames keep their exact flags and payload.
         Bytes frames;
         for (const auto& frame : layout.id3v2.frames) {
-            if (!is_gain(frame.metadata_name))
+            if (!DiscardId3FrameOnTagAlter(frame, layout.id3v2.major) &&
+                !is_gain(frame.metadata_name))
                 frames.insert(frames.end(), frame.raw.begin(), frame.raw.end());
         }
         AppendUserTextFrame(frames, layout.id3v2.major, L"replaygain_track_gain", gain, 0);
@@ -1817,7 +1853,7 @@ HRESULT WriteMpegReplayGain(const std::filesystem::path& path,
     // The untouched tail includes ID3v1 and Lyrics3, in their original order.
     before.insert(before.end(), ape.begin(), ape.end());
     before.insert(before.end(), after.begin(), after.end());
-    return ReplaceWithTags(path, source.Get(), layout, id3, before, {}, {});
+    return ReplaceWithTags(path, source.Get(), layout, id3, before, {}, {}, mutation);
 }
 
 bool ExtensionIs(const std::filesystem::path& path,
@@ -2237,7 +2273,12 @@ HRESULT ReadBuiltinFileInfo(const std::filesystem::path& path,
 HRESULT WriteBuiltinMpegReplayGain(const std::filesystem::path& path,
                                   std::wstring_view gain,
                                   std::wstring_view peak) noexcept {
-    try { return WriteMpegReplayGain(path, gain, peak); }
+    try {
+        FileMutationGuard mutation;
+        const HRESULT acquired = mutation.Acquire(path);
+        if (FAILED(acquired)) return acquired;
+        return WriteMpegReplayGain(path, gain, peak, mutation);
+    }
     catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
     catch (...) { return HRESULT_FROM_WIN32(ERROR_INVALID_DATA); }
 }
@@ -2249,8 +2290,11 @@ BuiltinTagWriteResult WriteBuiltinFileInfo(
     std::span<const unsigned char> cover) noexcept {
     BuiltinTagWriteResult result;
     try {
-        result.status = WriteMp3(path, policy, fields, result.fields,
-                                 cover_action, cover);
+        FileMutationGuard mutation;
+        result.status = mutation.Acquire(path);
+        if (SUCCEEDED(result.status))
+            result.status = WriteMp3(path, policy, fields, result.fields,
+                                     cover_action, cover, mutation);
         if (cover_action != BuiltinCoverAction::unchanged)
             result.cover_status = result.status;
         if (FAILED(result.status)) {

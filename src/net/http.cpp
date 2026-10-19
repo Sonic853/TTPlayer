@@ -1,5 +1,5 @@
 #include "ttplayer/net/http.h"
-#include "ttplayer/net/ttp_https.h"
+#include "ttplayer/net/https_provider.h"
 #include "ttplayer/core/text.h"
 #include <windows.h>
 #include <winhttp.h>
@@ -9,7 +9,6 @@
 
 namespace ttplayer::net {
 namespace {
-struct Module { HMODULE handle{}; ~Module(){if(handle)FreeLibrary(handle);} };
 struct Internet { HINTERNET handle{}; ~Internet(){if(handle)WinHttpCloseHandle(handle);} operator HINTERNET() const{return handle;} };
 void Check(BOOL ok) {if(!ok)throw std::runtime_error("HTTPS error "+std::to_string(GetLastError()));}
 int __cdecl Canceled(void* context) noexcept {
@@ -23,10 +22,9 @@ HttpResponse GetHttps(const std::wstring& url,const std::string& agent,
     guard();
     if(!url.starts_with(L"https://") || url.size()>8192 || url.find_first_of(L"\r\n\\")!=url.npos)
         throw std::runtime_error("Invalid HTTPS URL");
-    wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);
-    Module module{LoadLibraryExW((std::filesystem::path(executable).parent_path()/L"AddIn"/L"ttp_https.dll").c_str(),nullptr,LOAD_WITH_ALTERED_SEARCH_PATH)};
-    const auto get=module.handle?reinterpret_cast<ttp_https_get_api_fn>(GetProcAddress(module.handle,"ttp_https_get_api")):nullptr;
-    const auto* base=get?get(TTP_HTTPS_HTTP_ABI_VERSION):nullptr;
+    HttpsProvider module;
+    module.Load();
+    const auto* base=module.Api(TTP_HTTPS_HTTP_ABI_VERSION);
     if(base && base->size==sizeof(ttp_https_api_v4) && base->abi_version==TTP_HTTPS_HTTP_ABI_VERSION) {
         const auto* api=reinterpret_cast<const ttp_https_api_v4*>(base);
         if(!api->get_http || !api->release_http)throw std::runtime_error("Invalid HTTPS ABI 4");

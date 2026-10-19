@@ -9,13 +9,18 @@
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
 #include "file_info_probe_client.h"
+#include "track_metadata.h"
+#include "file_intake.h"
 
 #include "ttplayer/core/text.h"
 #include "ttplayer/audio/archive_member.h"
+#include "ttplayer/audio/archive_password.h"
+#include <ttpcomm/archive_format.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <condition_variable>
 #include <cwctype>
 #include <list>
 #include <limits>
@@ -298,7 +303,12 @@ bool IsSameOrBelowPath(const std::filesystem::path& path,
     if (candidate == prefix) return true;
     return candidate.size() > prefix.size() &&
         candidate.compare(0, prefix.size(), prefix) == 0 &&
-        (prefix.back() == L'\\' || candidate[prefix.size()] == L'\\');
+        (prefix.back() == L'\\' || candidate[prefix.size()] == L'\\' ||
+         candidate[prefix.size()] == L'|');
+}
+
+std::filesystem::path LibraryPhysicalSource(const std::filesystem::path& path) {
+    return std::filesystem::path(path.native().substr(0, path.native().find(L'|')));
 }
 
 std::vector<std::wstring> Split(std::wstring_view text, wchar_t delimiter);
@@ -697,8 +707,10 @@ struct PlayerWindow::MediaLibraryState {
         unsigned long long generation{};
         std::vector<Seed> seeds;
         std::vector<Seed> priority_seeds;
+        std::vector<std::filesystem::path> changed_sources;
         std::vector<DirectoryWatchPath> directories;
         std::set<std::wstring> extensions;
+        std::vector<std::wstring> reader_patterns;
         // 004C03FD passes Library/MaxItemCount to 004AF271, whose only
         // consumer chooses the initial CPlayItem hash-table bucket count.
         // It is a capacity hint, never an admission/result limit.
@@ -781,38 +793,27 @@ struct PlayerWindow::MediaLibraryState {
 
     static void ReadTrackMetadata(playlist::Track& track, const BuildRequest& request,
                                   PlaylistInfoProbeSession& session) {
-        const auto source = track.path.wstring();
-        if (source.find(L"://") != std::wstring::npos ||
-            source.find(L'|') != std::wstring::npos || track.subtrack != 0) return;
-        // Built-in decoders and AddIns use the same bounded child process.
-        // A stalled/crashing reader cannot hold the catalogue scanner forever.
-        FileInfoProbeProcessState process{};
-        const auto probe = session.Read(request.control->stop.get_token(),
-            request.helper, request.runtime / L"AddIn", track.path,
-            request.runtime / L"ttpcomm.dll", track.subtrack, 15000, &process, request.mp3);
-        if (!probe || FAILED(probe->status)) {
-            if (process != FileInfoProbeProcessState::launch_failed &&
-                process != FileInfoProbeProcessState::cancelled) {
-                MediaLibraryReaderInfo failed; failed.duration_ms = -1;
-                ApplyMediaLibraryReaderInfo(track, std::move(failed));
-            }
-            return;
+        if (track.path.wstring().find(L"://") != std::wstring::npos) return;
+        const auto stop = request.control->stop.get_token();
+        const auto deadline = GetTickCount64() + 15000;
+        std::mutex mutex;
+        std::condition_variable_any wake;
+        while (!stop.stop_requested()) {
+            const auto now = GetTickCount64();
+            if (now >= deadline) return;
+            FileInfoProbeProcessState process{};
+            const auto probe = session.Read(stop, request.helper, request.runtime / L"AddIn",
+                track.path, request.runtime / L"ttpcomm.dll", track.subtrack,
+                static_cast<DWORD>(deadline - now), &process, request.mp3);
+            const auto state = ApplyFileInfoProbeToTrack(track, probe, process);
+            if (state == TrackInfoState::failed) track.duration_ms = -1;
+            if (state != TrackInfoState::provisional) return;
+            // Keep the same helper/member alive until its final CRC is known.
+            // Prefix metadata is useful, but must not become a verified library
+            // entry merely because the background decompressor was still busy.
+            std::unique_lock lock(mutex);
+            wake.wait_for(lock, stop, std::chrono::milliseconds(250), [] { return false; });
         }
-        MediaLibraryReaderInfo info;
-        info.duration_ms = static_cast<int>(std::min<DWORD>(probe->duration_ms, INT_MAX));
-        info.media_type = core::WideToUtf8(probe->codec);
-        const auto bitrate = probe->encoded_bits_per_second ? probe->encoded_bits_per_second :
-            static_cast<std::uint64_t>(probe->format.nAvgBytesPerSec) * 8;
-        info.bitrate_bps = static_cast<std::uint32_t>(std::min<std::uint64_t>(bitrate, 0x7fffffffU));
-        info.sample_rate_hz = probe->format.nSamplesPerSec;
-        info.channels = probe->format.nChannels;
-        info.bits_per_sample = probe->format.wBitsPerSample;
-        for (const auto& entry : probe->metadata) {
-            if (!entry.name.empty()) info.metadata.emplace_back(
-                core::WideToUtf8(entry.name), core::WideToUtf8(entry.value));
-        }
-        // The library rating belongs to CPlayItem, never to Shell PKEY_Rating.
-        ApplyMediaLibraryReaderInfo(track, std::move(info));
     }
 
     static void DeliverBuildResult(
@@ -869,6 +870,44 @@ struct PlayerWindow::MediaLibraryState {
             identities.emplace(item.identity, result->items.size());
             result->items.push_back(std::move(item));
         };
+        // A worker owns a module reference and uses saved archive credentials
+        // without opening a password/volume dialog during background watching.
+        const audio::ScopedArchiveBackgroundRead background_archive_read;
+        struct ArchiveModule {
+            HMODULE value{};
+            ~ArchiveModule() { if (value) FreeLibrary(value); }
+        } archive_module{LoadLibraryW((request.runtime / L"ttpcomm.dll").c_str())};
+        TrackSourceOptions intake;
+        intake.module = archive_module.value;
+        intake.stop = stop;
+        intake.ignore_bad = true;
+        intake.reader_patterns = request.reader_patterns;
+        if (intake.reader_patterns.empty())
+            for (const auto& extension : request.extensions)
+                intake.reader_patterns.push_back(L"*" + extension);
+        std::map<std::wstring, std::set<std::wstring>> enumerated_containers;
+        const auto record_collection = [&](const TrackSourceCollection& collection) {
+            if (collection.canceled || collection.failed) return;
+            std::map<std::wstring, std::set<std::wstring>> completed;
+            for (const auto& source : collection.completed_containers)
+                completed.try_emplace(NormalizedLocalPath(source));
+            for (const auto& track : collection.tracks) {
+                const auto found = completed.find(NormalizedLocalPath(LibraryPhysicalSource(track.path)));
+                if (found != completed.end()) found->second.insert(Identity(track));
+            }
+            for (auto& [source, members] : completed)
+                enumerated_containers[source] = std::move(members);
+        };
+        for (const auto& path : request.changed_sources) {
+            if (stop.stop_requested()) return;
+            auto collection = CollectTrackSources({path}, intake);
+            record_collection(collection);
+            for (auto& track : collection.tracks) {
+                result->observed.insert(NormalizedLocalPath(track.path));
+                read_track(track);
+                add(std::move(track), {});
+            }
+        }
         // FILE_ACTION_ADDED/MODIFIED is processed before the persisted
         // catalogue, so the changed file replaces stale cached metadata with
         // the same path+subtrack identity rather than being discarded by the
@@ -921,42 +960,34 @@ struct PlayerWindow::MediaLibraryState {
                 read_track(item.track);
         }
         for (const auto& directory : request.directories) {
-            if (stop.stop_requested()) break;
-            std::error_code error;
-            std::filesystem::recursive_directory_iterator iterator(
-                directory.path, std::filesystem::directory_options::skip_permission_denied,
-                error);
-            const std::filesystem::recursive_directory_iterator end;
-            while (!error && iterator != end && !stop.stop_requested()) {
-                std::error_code status_error;
-                if (!directory.recursive) iterator.disable_recursion_pending();
-                if (iterator->is_regular_file(status_error)) {
-                    auto extension = Fold(iterator->path().extension().wstring());
-                    if (!extension.empty() && request.extensions.contains(extension)) {
-                        playlist::Track track;
-                        track.path = iterator->path();
-                        result->observed.insert(NormalizedLocalPath(track.path));
-                        const auto existing = identities.find(Identity(track));
-                        if (existing != identities.end()) {
-                            read_track(result->items[existing->second].track);
-                        } else {
-                            read_track(track);
-                            add(std::move(track), {});
-                        }
-                    }
-                }
-                iterator.increment(error);
-                // An inaccessible subtree is not evidence that its songs were deleted.
+            if (stop.stop_requested()) return;
+            intake.recursive = directory.recursive;
+            auto collection = CollectTrackSources({directory.path}, intake);
+            if (collection.canceled) return;
+            record_collection(collection);
+            for (auto& track : collection.tracks) {
+                if (stop.stop_requested()) return;
+                result->observed.insert(NormalizedLocalPath(track.path));
+                const auto existing = identities.find(Identity(track));
+                if (existing != identities.end()) read_track(result->items[existing->second].track);
+                else { read_track(track); add(std::move(track), {}); }
             }
         }
         for (const auto& item : result->items) {
+            const auto source = LibraryPhysicalSource(item.track.path);
+            const auto complete = enumerated_containers.find(NormalizedLocalPath(source));
+            if (complete != enumerated_containers.end() &&
+                !complete->second.contains(item.identity)) {
+                result->missing.push_back(item.identity);
+                continue;
+            }
             for (const auto& directory : request.directories) {
-                if (!IsSameOrBelowPath(item.track.path, directory.path) ||
-                    (!directory.recursive && NormalizedLocalPath(item.track.path.parent_path()) !=
+                if (!IsSameOrBelowPath(source, directory.path) ||
+                    (!directory.recursive && NormalizedLocalPath(source.parent_path()) !=
                         NormalizedLocalPath(directory.path))) continue;
                 const DWORD root_attributes = GetFileAttributesW(directory.path.c_str());
                 if (root_attributes == INVALID_FILE_ATTRIBUTES) continue;
-                if (GetFileAttributesW(item.track.path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                if (GetFileAttributesW(source.c_str()) == INVALID_FILE_ATTRIBUTES) {
                     const auto error = GetLastError();
                     if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
                         result->missing.push_back(item.identity);
@@ -1005,30 +1036,26 @@ const playlist::Track* PlayerWindow::VisiblePlaylistTrack(
 
 bool PlayerWindow::SetVisiblePlaylistRating(size_t index, int rating) {
     if (rating < 0 || rating > 5) return false;
+    const auto* visible = VisiblePlaylistTrack(index);
+    if (!visible) return false;
+    auto edited = *visible;
+    edited.rating = rating;
+    const auto id = MediaLibraryTrackIdentity(edited);
     bool changed{};
-    std::wstring id;
-    if (!settings_.playlist.library_mode || !media_library_) {
-        if (!ActivePlaylist().SetRating(index, rating)) return false;
-        playlists_.MarkDirty(); changed = true;
-        id = MediaLibraryTrackIdentity(ActivePlaylist().Tracks()[index]);
-    } else {
-        const auto& state = *media_library_;
-        if (index >= state.result_tracks.size() || index >= state.result_items.size() ||
-            state.result_items[index] >= state.items.size()) return false;
-        id = state.items[state.result_items[index]].identity;
+    const auto apply = [&](playlist::Track& track) {
+        if (MediaLibraryTrackIdentity(track) != id) return;
+        changed |= track.rating != rating;
+        track.rating = rating;
+    };
+    if (media_library_) {
+        auto& state = *media_library_;
+        for (auto& item : state.items) apply(item.track);
+        for (auto* tracks : {&state.result_tracks, &state.persisted_tracks,
+                              &state.pending_tracks})
+            for (auto& track : *tracks) apply(track);
+        state.RecordEdit(edited, true);
+        state.tree_dirty = true;
     }
-    if (!media_library_) return changed;
-    auto& state = *media_library_;
-    auto found = std::find_if(state.items.begin(),state.items.end(),
-        [&](const auto& item) { return item.identity == id; });
-    if (found == state.items.end()) return changed;
-    changed |= found->track.rating != rating;
-    found->track.rating = rating;
-    state.RecordEdit(found->track,true);
-    state.tree_dirty = true;
-    for (auto* tracks : {&state.result_tracks, &state.persisted_tracks})
-        for (auto& track : *tracks)
-            if (MediaLibraryTrackIdentity(track) == id) track.rating = rating;
     // Source row hints can become stale after sorting/reordering a numbered list.
     for (size_t list=0; list<playlists_.Size(); ++list) {
         auto& playlist = playlists_.At(list);
@@ -1038,6 +1065,7 @@ bool PlayerWindow::SetVisiblePlaylistRating(size_t index, int rating) {
             }
     }
     changed |= SetMediaLibraryPlaybackRating(media_library_playback_, id, rating) != 0;
+    if (opened_track_) apply(*opened_track_);
     return changed;
 }
 
@@ -1310,65 +1338,63 @@ bool PlayerWindow::UpdateMediaLibraryTrackPath(
     return true;
 }
 
-bool PlayerWindow::UpdateMediaLibraryTrackFromProperties(
-    size_t index, const playlist::Track& updated) {
-    if (!settings_.playlist.library_mode || !media_library_ ||
-        index >= media_library_->result_items.size() ||
-        index >= media_library_->result_tracks.size())
-        return false;
-    auto& state = *media_library_;
-    const size_t item_index = state.result_items[index];
-    if (item_index >= state.items.size()) return false;
-    return UpdateMediaLibraryTrackByIdentity(
-        state.items[item_index].track, updated);
-}
-
-bool PlayerWindow::UpdateMediaLibraryTrackByIdentity(
-    const playlist::Track& source, const playlist::Track& updated) {
-    // The main-window 00464A94 route can edit a playback item after the user
-    // has selected another Tree query, so this update cannot depend on a
-    // currently visible result ordinal.
-    if (!media_library_) return false;
-    auto& state = *media_library_;
-    const auto identity = MediaLibraryState::Identity(source);
-    if (MediaLibraryState::Identity(updated) != identity) return false;
-    auto found = std::find_if(state.items.begin(), state.items.end(),
-        [&identity](const auto& item) { return item.identity == identity; });
-    if (found == state.items.end()) return false;
-    auto& item = *found;
-
-    // A library row is an index result, not an ActivePlaylist row.  Update
-    // every materialized copy first and then each validated source identity;
-    // this is the observable 00483C59 library branch without aliasing the
-    // result ordinal onto an unrelated active-list item.
-    item.track = updated;
-    state.RecordEdit(updated);
-    state.tree_dirty = true;
-    bool changed = true;
-    for (auto& result : state.result_tracks) {
-        if (MediaLibraryState::Identity(result) == identity) result = updated;
-    }
-    for (auto& persisted : state.persisted_tracks) {
-        if (MediaLibraryState::Identity(persisted) == identity)
-            persisted = updated;
+bool PlayerWindow::PublishTrackMetadata(const playlist::Track& updated) {
+    if (updated.path.empty()) return false;
+    const auto identity = MediaLibraryTrackIdentity(updated);
+    bool changed{};
+    const auto apply = [&](playlist::Track& target) {
+        if (MediaLibraryTrackIdentity(target) != identity) return false;
+        auto replacement = updated;
+        replacement.path = target.path;
+        replacement.subtrack = target.subtrack;
+        replacement.rating = target.rating;
+        if (target == replacement) return false;
+        target = std::move(replacement);
+        changed = true;
+        return true;
+    };
+    if (media_library_) {
+        auto& state = *media_library_;
+        auto edited = updated;
+        // The first catalogue scan may still be running. Its overlay must use
+        // the live row rating even when no indexed Item exists yet.
+        for (size_t list=0; list<playlists_.Size(); ++list) {
+            const auto& rows = playlists_.At(list).Tracks();
+            const auto found = std::find_if(rows.begin(), rows.end(), [&](const auto& track) {
+                return MediaLibraryTrackIdentity(track) == identity;
+            });
+            if (found != rows.end()) { edited.rating = found->rating; break; }
+        }
+        if (const auto previous = state.edits.find(identity); previous != state.edits.end())
+            edited.rating = previous->second.track.rating;
+        for (auto& item : state.items) {
+            if (item.identity != identity) continue;
+            apply(item.track);
+            edited.rating = item.track.rating;
+        }
+        for (auto* tracks : {&state.result_tracks, &state.persisted_tracks,
+                              &state.pending_tracks})
+            for (auto& track : *tracks) apply(track);
+        // Results from a scan started before this edit must not replace it.
+        state.RecordEdit(edited);
+        state.tree_dirty = true;
     }
     for (size_t list_index=0; list_index<playlists_.Size(); ++list_index) {
         auto& list = playlists_.At(list_index);
         for (size_t row=0; row<list.Tracks().size(); ++row) {
-            if (MediaLibraryState::Identity(list.Tracks()[row]) == identity && list.SetTrack(row,updated)) {
-                playlists_.MarkDirty(list_index); changed = true;
+            if (MediaLibraryTrackIdentity(list.Tracks()[row]) != identity) continue;
+            auto track = list.Tracks()[row];
+            if (apply(track) && list.SetTrack(row, std::move(track))) {
+                playlists_.MarkDirty(list_index);
             }
         }
     }
-    if (media_library_playback_active_) {
-        for (size_t row = 0;
-             row < media_library_playback_.Tracks().size(); ++row) {
-            if (MediaLibraryState::Identity(
-                    media_library_playback_.Tracks()[row]) != identity)
-                continue;
-            changed |= media_library_playback_.SetTrack(row, updated);
-        }
+    for (size_t row=0; row<media_library_playback_.Tracks().size(); ++row) {
+        if (MediaLibraryTrackIdentity(media_library_playback_.Tracks()[row]) != identity) continue;
+        auto track = media_library_playback_.Tracks()[row];
+        if (apply(track)) media_library_playback_.SetTrack(row, std::move(track));
     }
+    if (opened_track_) apply(*opened_track_);
     return changed;
 }
 
@@ -1636,23 +1662,12 @@ void PlayerWindow::StartMediaLibraryRefresh() {
     for (auto& track : state.pending_tracks)
         request.priority_seeds.push_back({std::move(track), {}});
     state.pending_tracks.clear();
-    for (const auto& path : state.pending_files) {
-        bool copied_known{};
-        for (const auto& item : state.items) {
-            if (!IsSameOrBelowPath(item.track.path, path) ||
-                !IsSameOrBelowPath(path, item.track.path)) continue;
-            auto refreshed = item.track;
-            request.priority_seeds.push_back(
-                {std::move(refreshed), {}, true});
-            copied_known = true;
-        }
-        if (!copied_known)
-            request.priority_seeds.push_back({playlist::Track{path}, {}, true});
-    }
+    request.changed_sources = std::move(state.pending_files);
     request.directories = std::move(state.pending_directories);
     state.pending_files.clear();
     state.pending_directories.clear();
     request.extensions = LibraryReaderExtensions(reader_formats_);
+    for (const auto& format : reader_formats_) request.reader_patterns.push_back(format.pattern);
     state.indexing = true;
     auto control = request.control;
     const auto request_instance = request.instance;
@@ -1835,11 +1850,16 @@ LRESULT PlayerWindow::HandleMediaLibraryDirectoryChange(
             QueueMediaLibraryDirectory(path, true);
     } else {
         const auto extensions = LibraryReaderExtensions(reader_formats_);
-        if (!extensions.contains(Fold(path.extension().wstring()))) return 0;
+        // Signature probing and CUE/archive expansion run in the worker. Do
+        // not open a large archive (or a slow share) on the window thread.
+        const auto extension = Fold(path.extension().wstring());
+        if (extension != L".cue" && !extensions.contains(extension) &&
+            extension != L".osz" && ttpcomm::archive_format::Suffix(path.c_str()) ==
+                ttpcomm::archive_format::Kind::unknown) return 0;
         const bool known = std::any_of(
             state.items.begin(), state.items.end(), [&path](const auto& item) {
-                return IsSameOrBelowPath(item.track.path, path) &&
-                       IsSameOrBelowPath(path, item.track.path);
+                return NormalizedLocalPath(LibraryPhysicalSource(item.track.path)) ==
+                       NormalizedLocalPath(path);
             });
         // 004833B6 updates an existing item in place for action 3.  A modify
         // notification must therefore outrank the persisted/numbered seeds
@@ -2534,7 +2554,7 @@ bool PlayerWindow::HandleMediaLibraryCommand(UINT command) {
         // The recovered file-info sheet consumes VisiblePlaylistTrack(), so
         // its navigation, multi-item merge, reader metadata and tag writes
         // remain in library-result coordinates.  On close it calls
-        // UpdateMediaLibraryTrackFromProperties rather than touching the
+        // PublishTrackMetadata rather than touching the
         // ActivePlaylist row with the same ordinal.
         if (GetFocus() == playlist_tree_control_) {
             // FUN_00483C59 distinguishes the focused control: LibraryTree

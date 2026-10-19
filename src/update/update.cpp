@@ -1,7 +1,7 @@
 #include "ttplayer/update/update.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/platform/windows_features.h"
-#include "json.h"
+#include "ttplayer/core/json.h"
 #include <windows.h>
 #include <algorithm>
 #include <charconv>
@@ -57,8 +57,8 @@ bool AssetUrl(std::string_view url,Source source) {
 }
 }
 std::vector<Release> ParseReleases(std::string_view json,Source source) {
-    const auto root=detail::JsonReader(json).Read();
-    if(root.kind!=detail::Json::array) throw std::runtime_error("Release API did not return a list");
+    const auto root=core::JsonReader(json).Read();
+    if(root.kind!=core::Json::array) throw std::runtime_error("Release API did not return a list");
     std::vector<Release> result;
     for(const auto& row:root.items) {
         const auto tag=row["tag_name"].String();const auto version=ParseVersion(tag);
@@ -68,7 +68,7 @@ std::vector<Release> ParseReleases(std::string_view json,Source source) {
         unsigned zip_count=0,sums_count=0;
         for(const auto& asset:row["assets"].items) {
             const auto name=asset["name"].String(),url=asset["browser_download_url"].String();
-            if(!AssetUrl(url,source) || (asset["state"].kind!=detail::Json::null && asset["state"].String()!="uploaded")) continue;
+            if(!AssetUrl(url,source) || (asset["state"].kind!=core::Json::null && asset["state"].String()!="uploaded")) continue;
             if(name==r.asset_name) {++zip_count;r.zip_url=core::Utf8ToWide(url);r.size=asset["size"].Integer();}
             if(name=="SHA256SUMS.txt") {++sums_count;r.sums_url=core::Utf8ToWide(url);}
         }
@@ -84,8 +84,8 @@ std::optional<Release> Check(Http& http,Source source,const Cancel& cancel) {
             L"https://api.github.com/repos/Sonic853/TTPlayer/releases?";
         url+=L"per_page=20&page="+std::to_wstring(page);
         const auto text=http.Get(url,cancel);
-        const auto root=detail::JsonReader(text).Read();
-        if(root.kind!=detail::Json::array) throw std::runtime_error("Invalid release list");
+        const auto root=core::JsonReader(text).Read();
+        if(root.kind!=core::Json::array) throw std::runtime_error("Invalid release list");
         if(!seen.insert(text).second && !root.items.empty()) throw std::runtime_error("Release pagination repeated a page");
         for(auto& release:ParseReleases(text,source)) if(!best || release.version>best->version) best=std::move(release);
         if(root.items.size()<20) return best;

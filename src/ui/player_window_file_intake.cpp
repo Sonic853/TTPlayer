@@ -5,6 +5,7 @@
 #include "player_window_internal.h"
 #include "modern_file_dialog.h"
 #include "archive_password_dialog.h"
+#include "file_intake.h"
 #include "../app/resource_ids.h"
 #include <mutex>
 #include <thread>
@@ -909,12 +910,15 @@ struct ImportScan {
     ImportedTrackIdentities identities;
     const size_t initial;
     std::atomic_bool canceled{}, done{};
+    std::stop_token external_stop;
+    bool IsCanceled() const noexcept { return canceled.load() || external_stop.stop_requested(); }
     std::mutex mutex;
     std::wstring current, phase;
     size_t found{};
     uint64_t completed{}, total{};
     DWORD published{};
     std::vector<std::wstring> errors;
+    std::vector<std::filesystem::path> completed_containers;
     size_t suppressed_errors{};
     bool failed{};
     std::jthread worker;
@@ -944,7 +948,7 @@ struct ImportScan {
                  std::vector<std::wstring> ancestry) noexcept {
         const auto com=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
         try {
-            for(const auto& path:paths){if(canceled.load())break;Collect(path,directory_member,&ancestry);}
+            for(const auto& path:paths){if(IsCanceled())break;Collect(path,directory_member,&ancestry);}
         }catch(...){canceled=true;failed=true;}
         if(SUCCEEDED(com))CoUninitialize();
         done.store(true,std::memory_order_release);
@@ -991,7 +995,7 @@ struct ImportScan {
 
 bool ImportScan::Collect(const std::filesystem::path& input, bool directory_member,
                          std::vector<std::wstring>* directory_ancestry) {
-    if (input.empty() || canceled.load()) return false;
+    if (input.empty() || IsCanceled()) return false;
     Report(input, L"正在检查文件…");
     auto path = input;
     if (IsUrl(path.native())) {
@@ -1034,7 +1038,7 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
         const ScopedFindHandle close_search(search);
         bool added{};
         do {
-            if (canceled.load()) return false;
+            if (IsCanceled()) return false;
             if (std::wcscmp(data.cFileName, L".") == 0 ||
                 std::wcscmp(data.cFileName, L"..") == 0) continue;
             if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
@@ -1060,6 +1064,7 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
             const auto sheet = audio::CueSheet::Load(path);
             const size_t before = tracks.size();
             AppendCueTracks(sheet, path, tracks, identities);
+            completed_containers.push_back(path);
             return tracks.size() != before;
         } catch (const std::exception&) {
             return false;
@@ -1085,8 +1090,9 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
         try {
             const size_t before = tracks.size();
             std::wstring cue_read_error;
+            bool complete = true;
             Report(path, L"正在读取压缩包目录并校验…", true);
-            const auto stop = [&] { return canceled.load(); };
+            const auto stop = [&] { return IsCanceled(); };
             const auto names = audio::ListArchiveMembers(path, module, stop,
                 [&](uint64_t n, uint64_t total) { Progress(n, total); }, &path);
             if (audio::IsOszArchive(path)) {
@@ -1104,6 +1110,7 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
                     const auto logical = audio::MakeZipMemberPath(path,item.audio);
                     if (identities.Insert(logical)) tracks.push_back({logical,{},{},-2});
                 }
+                completed_containers.push_back(path);
                 return tracks.size() != before;
             }
             size_t index = 0;
@@ -1124,12 +1131,14 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
                             logical);
                         AppendCueTracks(sheet, logical, tracks, identities);
                     } catch (const audio::ArchiveError& error) {
+                        complete = false;
                         if(error.Result()==HRESULT_FROM_WIN32(ERROR_CANCELLED)){canceled=true;return false;}
                         // Keep successfully imported members, but do not silently
                         // hide a password/CRC/read failure in the CUE itself.
                         if (cue_read_error.empty())
                             cue_read_error = member + L"\n\n" + error.Message();
                     } catch (const std::exception&) {
+                        complete = false;
                     }
                     continue;
                 }
@@ -1155,6 +1164,7 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
                 const auto message = path.filename().wstring() + L"\n" + cue_read_error;
                 Error(message);
             }
+            if (complete) completed_containers.push_back(path);
             return tracks.size() != before;
         } catch (const audio::ArchiveError& error) {
             if(error.Result()==HRESULT_FROM_WIN32(ERROR_CANCELLED)){canceled=true;return false;}
@@ -1181,6 +1191,20 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
 }
 
 } // namespace
+
+detail::TrackSourceCollection detail::CollectTrackSources(
+    const std::vector<std::filesystem::path>& paths,
+    const TrackSourceOptions& options, bool directory_member) {
+    ImportScan scan({});
+    scan.module = options.module;
+    scan.recursive = options.recursive;
+    scan.ignore_bad = options.ignore_bad;
+    scan.patterns = options.reader_patterns;
+    scan.external_stop = options.stop;
+    scan.Execute(paths, directory_member, {});
+    return {std::move(scan.tracks), std::move(scan.errors),
+            scan.IsCanceled(), scan.failed, std::move(scan.completed_containers)};
+}
 
 bool PlayerWindow::CollectImportedTracks(const std::filesystem::path& input,
     std::vector<playlist::Track>& tracks, bool directory_member,

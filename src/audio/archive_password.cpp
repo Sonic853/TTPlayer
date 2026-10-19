@@ -22,6 +22,7 @@ std::vector<Record> remembered,session;
 struct VolumeMapping {std::wstring archive,expected,actual;};
 std::vector<VolumeMapping> volume_mappings;
 ArchiveVolumePrompt volume_prompt;
+thread_local unsigned background_reads{};
 struct CachedIdentity {Record record;std::wstring stamp;};
 std::vector<CachedIdentity> fingerprints;
 HRESULT storage_result=S_OK;
@@ -149,6 +150,8 @@ void Accept(Record identity,const std::wstring& password,bool remember){
     if(report)report(result);
 }
 }
+ScopedArchiveBackgroundRead::ScopedArchiveBackgroundRead() noexcept { ++background_reads; }
+ScopedArchiveBackgroundRead::~ScopedArchiveBackgroundRead() { --background_reads; }
 void ConfigureArchivePasswords(const std::filesystem::path& path,ArchivePasswordPrompt callback,std::function<void(HRESULT)> error){
     std::lock_guard lock(mutex);storage=path;prompt=std::move(callback);storage_error=std::move(error);
     session.clear();fingerprints.clear();storage_result=S_OK;Load();
@@ -183,7 +186,7 @@ TtpCommArchiveVolumeOptions ArchiveVolumeOptions(const std::function<bool()>* ca
                 }
             }
             if(actual.empty()){
-                if(!ask)return S_FALSE;
+                if(!ask || background_reads)return S_FALSE;
                 const auto selected=ask(archive,expected,stop);if(!selected)return HRESULT_FROM_WIN32(ERROR_CANCELLED);actual=*selected;
             }
             if(stop && stop())return HRESULT_FROM_WIN32(ERROR_CANCELLED);
@@ -239,7 +242,7 @@ HRESULT WithArchivePassword(const std::filesystem::path& path,const std::functio
             if(!PasswordFailure(hr))return hr;tried.push_back(pw);}
     }
     ArchivePasswordPrompt ask;{std::lock_guard lock(mutex);ask=prompt;}
-    if(!ask)return hr;
+    if(!ask || background_reads)return hr;
     for(;;){if(stop())return HRESULT_FROM_WIN32(ERROR_CANCELLED);
         // A simultaneous importer/decoder may already have verified a password
         // while this request was reading headers or trying saved candidates.

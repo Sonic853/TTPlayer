@@ -15,6 +15,7 @@
 #include "ttplayer/audio/file_encoder.h"
 #include "ttplayer/audio/cue_sheet.h"
 #include "ttplayer/audio/pcm_output_transform.h"
+#include "ttplayer/audio/pcm_effects.h"
 #include "ttplayer/audio/replay_gain_scanner.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/plugins/plugin_manager.h"
@@ -77,24 +78,7 @@ constexpr int kConvertSaveMode = 0x411;
 constexpr int kConvertAddToPlaylist = 0x7e1;
 constexpr int kConvertAddNumber = 0x89f;
 
-WORD OfflinePcmTag(const WAVEFORMATEX& format) noexcept {
-    if (format.wFormatTag != WAVE_FORMAT_EXTENSIBLE ||
-        format.cbSize < sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX))
-        return format.wFormatTag;
-    const auto& extended =
-        reinterpret_cast<const WAVEFORMATEXTENSIBLE&>(format);
-    static constexpr std::array<BYTE, 8> wave_tail{
-        0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
-    if (extended.SubFormat.Data2 != 0 ||
-        extended.SubFormat.Data3 != 0x0010 ||
-        !std::equal(wave_tail.begin(), wave_tail.end(),
-                    extended.SubFormat.Data4))
-        return format.wFormatTag;
-    if (extended.SubFormat.Data1 == WAVE_FORMAT_PCM ||
-        extended.SubFormat.Data1 == WAVE_FORMAT_IEEE_FLOAT)
-        return static_cast<WORD>(extended.SubFormat.Data1);
-    return format.wFormatTag;
-}
+
 
 enum class RowState { waiting, scanning, writing, completed, skipped, cancelled, error };
 
@@ -628,6 +612,7 @@ struct ConvertProgressState {
     std::vector<std::filesystem::path> destinations;
     settings::ConvertSettings settings;
     settings::EqualizerSettings equalizer;
+    audio::PlaybackOptions source_options;
     std::mutex mutex;
     std::vector<PlaylistConversionResult> results;
     std::stop_source cancellation;
@@ -781,145 +766,24 @@ private:
 
 class OfflinePcmProcessor {
 public:
-    OfflinePcmProcessor(const WAVEFORMATEX& format, HMODULE ttpcomm) noexcept
-        : format_(format), module_reference_(ttpcomm), ttpcomm_(module_reference_.get()) {
-        // Preserve the session's complete extensible format for the shared
-        // output transform, while this recovered double-PCM stage works on
-        // its explicitly identified PCM/IEEE-float sample representation.
-        format_.wFormatTag = OfflinePcmTag(format);
-    }
-
-    OfflinePcmProcessor(const OfflinePcmProcessor&) = delete;
-    OfflinePcmProcessor& operator=(const OfflinePcmProcessor&) = delete;
-
-    ~OfflinePcmProcessor() {
-#if defined(_MSC_VER) && defined(_M_IX86)
-        if (surround_) Destroy(surround_);
-        if (equalizer_) Destroy(equalizer_);
-#endif
-    }
-
-    __declspec(noinline) bool Open(
-        const settings::ConvertSettings& convert,
-        const settings::EqualizerSettings* equalizer,
+    OfflinePcmProcessor(const WAVEFORMATEX& format, HMODULE module) : effects_(format,module) {}
+    bool Open(const settings::ConvertSettings& convert, const settings::EqualizerSettings* equalizer,
         const audio::AudioMetadata& metadata) {
-        if (convert.replay_gain) {
-            // FUN_004B107E/FUN_004B180A activate per-track ReplayGain only
-            // when both values form a complete tag pair.
-            if (metadata.replay_gain_db && metadata.replay_peak &&
-                std::isfinite(*metadata.replay_gain_db) &&
-                std::isfinite(*metadata.replay_peak) &&
-                *metadata.replay_peak > 0.0)
-                replay_gain_ = std::pow(
-                    10.0, *metadata.replay_gain_db * 0.05);
-        }
-
-#if defined(_MSC_VER) && defined(_M_IX86)
-        if (convert.equalizer && equalizer && equalizer->profile != -2) {
-            if (!ttpcomm_) return Fail(i18n::Literal(L"ttpcomm equalizer is unavailable"));
-            equalizer_ = Create(ttpcomm_, 103);
-            if (!equalizer_ || !audio::InitializeLegacyEqualizer(
-                    equalizer_, format_.nSamplesPerSec, format_.nChannels) ||
-                !audio::SetLegacyEqualizer(equalizer_, equalizer->current))
-                return Fail(i18n::Literal(L"ttpcomm equalizer initialization failed"));
-        }
-        if (convert.surround && equalizer && equalizer->surround != 0) {
-            if (!ttpcomm_) return Fail(i18n::Literal(L"ttpcomm surround is unavailable"));
-            surround_ = Create(ttpcomm_, 104);
-            if (!surround_ || !SurroundInitialize(
-                    surround_, format_.nSamplesPerSec, format_.nChannels,
-                    std::clamp(equalizer->surround, 0, 16)))
-                return Fail(i18n::Literal(L"ttpcomm surround initialization failed"));
-        }
-#else
-        if ((convert.equalizer && equalizer && equalizer->profile != -2) ||
-            (convert.surround && equalizer && equalizer->surround != 0))
-            return Fail(i18n::Literal(L"legacy PCM processors require the x86 host"));
-#endif
-        return true;
+        audio::PcmEffectSettings settings;
+        settings.gain=audio::PcmReplayGain(convert.replay_gain!=0,metadata.replay_gain_db,metadata.replay_peak);
+        settings.equalizer=convert.equalizer && equalizer && equalizer->profile!=-2;
+        if(equalizer){settings.bands=equalizer->current;settings.surround=convert.surround ? std::clamp(equalizer->surround,0,16) : 0;}
+        return effects_.Update(settings);
     }
-
-    bool Process(std::vector<std::byte>& bytes) {
-        if (!Active() || bytes.empty()) return true;
-        std::vector<double> samples;
-        if (!Decode(bytes, samples))
-            return Fail(i18n::Literal(L"offline processor does not support the PCM format"));
-
-        if (replay_gain_ != 1.0) {
-            ttpcomm::host::pcm::ApplyGainHalf(samples, replay_gain_);
+    bool Process(std::vector<std::byte>& bytes, std::vector<double>* precise=nullptr) {
+        if(!precise && !effects_.Active())return true;
+        std::vector<double> samples;if(!effects_.Process(bytes,samples))return false;
+        if(precise){*precise=std::move(samples);return true;}
+        return effects_.Encode(samples,bytes);
     }
-#if defined(_MSC_VER) && defined(_M_IX86)
-        int count = static_cast<int>(std::min<size_t>(
-            samples.size(), static_cast<size_t>(
-                std::numeric_limits<int>::max())));
-        if (equalizer_ && !EqProcess(equalizer_, samples.data(), &count))
-            return Fail(i18n::Literal(L"ttpcomm equalizer processing failed"));
-        count = std::clamp(count, 0, static_cast<int>(samples.size()));
-        if (format_.nChannels > 1)
-            count -= count % format_.nChannels;
-        samples.resize(static_cast<size_t>(count));
-        if (surround_ && !SurroundProcess(
-                surround_, samples.data(), count))
-            return Fail(i18n::Literal(L"ttpcomm surround processing failed"));
-#endif
-        if (!Encode(samples, bytes))
-            return Fail(i18n::Literal(L"offline processor could not encode PCM"));
-        return true;
-    }
-
-    [[nodiscard]] const std::wstring& Error() const noexcept { return error_; }
-
+    const std::wstring& Error() const noexcept{return effects_.Error();}
 private:
-    [[nodiscard]] bool Active() const noexcept {
-        return replay_gain_ != 1.0 || equalizer_ || surround_;
-    }
-
-    bool Fail(std::wstring message) {
-        error_ = std::move(message);
-        return false;
-    }
-
-    bool Decode(const std::vector<std::byte>& bytes,
-                std::vector<double>& samples) const {
-        return ttpcomm::host::pcm::Decode(bytes.data(), bytes.size(), format_, samples, ttpcomm::host::pcm::Domain::half);
-    }
-
-    bool Encode(const std::vector<double>& samples,
-                std::vector<std::byte>& bytes) const {
-        return ttpcomm::host::pcm::EncodeHalf(samples, format_, bytes);
-    }
-
-#if defined(_MSC_VER) && defined(_M_IX86)
-    static void* Create(HMODULE module, WORD ordinal) noexcept {
-        return ttpcomm::client::Create(module, ordinal);
-    }
-
-    static void Destroy(void* object) noexcept {
-        ttpcomm::client::Destroy(object);
-    }
-
-    static bool EqProcess(void* object, double* samples, int* count) noexcept {
-        return ttpcomm::client::Equalize(object, samples, count);
-    }
-
-    static bool SurroundInitialize(void* object, DWORD rate, DWORD channels,
-                                   int amount) noexcept {
-        return ttpcomm::client::InitializeSurround(object, rate, channels, amount);
-    }
-
-    static bool SurroundProcess(void* object, double* samples,
-                                int count) noexcept {
-        return ttpcomm::client::Surround(object, samples, count);
-    }
-#endif
-
-    WAVEFORMATEX format_{};
-    ttpcomm::client::ModuleReference module_reference_;
-    HMODULE ttpcomm_{};
-    double replay_gain_{1.0};
-    void* equalizer_{};
-    void* surround_{};
-    std::wstring error_;
+    audio::PcmSourceEffects effects_;
 };
 
 std::wstring SafeOutputStem(const playlist::Track& track) {
@@ -1289,7 +1153,7 @@ void RunConversion(ConvertLifetime lifetime) {
         try {
             converted = ConvertPlaylistTrack(*state.library,state.tracks[index],
                 state.encoder_index,state.destinations[index],state.settings,state.ttpcomm,
-                &state.equalizer,state.cancellation.get_token(),callbacks);
+                &state.equalizer,state.cancellation.get_token(),callbacks,state.source_options);
         } catch (...) {
             converted.result = E_FAIL;
             converted.diagnostic = i18n::Literal(L"conversion worker exception");
@@ -1642,7 +1506,7 @@ PlaylistConversionResult ConvertPlaylistTrack(
     size_t encoder_index, const std::filesystem::path& destination,
     const settings::ConvertSettings& settings, HMODULE ttpcomm,
     const settings::EqualizerSettings* equalizer, std::stop_token stop,
-    const ConversionCallbacks& callbacks) {
+    const ConversionCallbacks& callbacks, const audio::PlaybackOptions& network_options) {
     PlaylistConversionResult converted;
     converted.destination = destination;
     auto fail = [&](HRESULT error, std::wstring text) {
@@ -1708,11 +1572,14 @@ PlaylistConversionResult ConvertPlaylistTrack(
     if (!checkpoint()) return fail(HRESULT_FROM_WIN32(ERROR_CANCELLED), i18n::Literal(L"conversion cancelled"));
     auto source = audio::CreateDecodedAudioSource(track.path, track.subtrack, &library, ttpcomm);
     if (!source) return fail(E_OUTOFMEMORY, i18n::Literal(L"unable to create decoded audio source"));
-    audio::PlaybackOptions source_options;
+    audio::PlaybackOptions source_options=network_options;
     source_options.file_buffer_bytes = 64 * 1024;
+    source_options.network_canceled=[stop, previous=source_options.network_canceled] {
+        return stop.stop_requested() || (previous && previous());
+    };
     if (!source->Open(track.path, source_options))
-        return fail(!runtime.Available() ? runtime.Result() :
-                    HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED), source->Error());
+        return fail(stop.stop_requested() ? HRESULT_FROM_WIN32(ERROR_CANCELLED) :
+                    (!runtime.Available() ? runtime.Result() : source->ErrorResult()), source->Error());
     const WAVEFORMATEX& source_format = source->OutputFormat();
     if (!source_format.nChannels || !source_format.nSamplesPerSec ||
         !source_format.nAvgBytesPerSec || !source_format.nBlockAlign)
@@ -1729,7 +1596,7 @@ PlaylistConversionResult ConvertPlaylistTrack(
         return fail(HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED), decoded_transform.Error());
     const auto intermediate = decoded_transform.OutputFormat();
     const auto metadata = source->Metadata();
-    OfflinePcmProcessor processors(intermediate, ttpcomm);
+    OfflinePcmProcessor processors(source_format, ttpcomm);
     if (!processors.Open(settings, equalizer, metadata))
         return fail(HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED), processors.Error());
 
@@ -1737,11 +1604,7 @@ PlaylistConversionResult ConvertPlaylistTrack(
     WAVEFORMATEX output_format = intermediate;
     if (wave || lame) {
         audio::PcmOutputTransformOptions output_options;
-        int bits=settings.output_bits ? settings.output_bits
-                                     : source->DisplayFormat().bits_per_sample;
-        // 004122CD asks the reader (slot 10), not the double-PCM decoder;
-        // unreported/unsupported source depths fall back to 16 bits.
-        if (bits!=8 && bits!=16 && bits!=24 && bits!=32) bits=16;
+        const int bits=audio::ResolveOutputBits(settings.output_bits,source->DisplayFormat().bits_per_sample);
         output_options.output_bits = lame ? 16 : bits;
         if (!quantizer.Open(intermediate, output_options, ttpcomm))
             return fail(HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED), quantizer.Error());
@@ -1776,13 +1639,16 @@ PlaylistConversionResult ConvertPlaylistTrack(
         }
         bool end{};
         if (!source->Read(64 * 1024, pcm, end)) {
-            result = E_FAIL; converted.diagnostic = source->Error(); break;
+            result = stop.stop_requested() ? HRESULT_FROM_WIN32(ERROR_CANCELLED) : source->ErrorResult();
+            converted.diagnostic = source->Error(); break;
         }
         if (pcm.size() % source_format.nBlockAlign) {
             result = E_UNEXPECTED; converted.diagnostic = i18n::Literal(L"partial decoded PCM frame"); break;
         }
         converted.pcm_bytes += pcm.size();
-        if (!decoded_transform.Process(pcm, transformed, end) || !processors.Process(transformed)) {
+        std::vector<double> processed;
+        if (!processors.Process(pcm, &processed) ||
+            !decoded_transform.ProcessSamples(std::move(processed), transformed, end)) {
             result = E_FAIL;
             converted.diagnostic = processors.Error().empty()
                 ? decoded_transform.Error() : processors.Error();
@@ -1842,7 +1708,7 @@ bool ShowPlaylistConverter(
     const plugins::PluginManager* library, std::vector<playlist::Track> tracks,
     settings::ConvertSettings& settings, const settings::EqualizerSettings& equalizer,
     std::function<void(const std::filesystem::path&)> completed,
-    std::vector<std::wstring> display_titles) {
+    std::vector<std::wstring> display_titles, const audio::PlaybackOptions& source_options) {
     // 00412A8D/00412AB8: one modeless conversion task; reopening raises it.
     if (g_convert_dialog && IsWindow(g_convert_dialog)) {
         ShowWindow(g_convert_dialog,SW_RESTORE);
@@ -1874,6 +1740,7 @@ bool ShowPlaylistConverter(
     state->encoder_index=encoder;
     state->settings=settings;
     state->equalizer=equalizer;
+    state->source_options=source_options;
     state->completed=std::move(completed);
     state->tracks=std::move(tracks);
     state->display_titles=std::move(display_titles);

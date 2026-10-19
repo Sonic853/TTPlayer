@@ -23,16 +23,72 @@ inline std::vector<unsigned char> RemoveUnsynchronization(View value) {
     }
     return output;
 }
-// Input has already had tag-level unsynchronization removed. v2.2 tag
-// compression has no supported framing and must not be read as an extension.
+namespace detail {
+// Keep this header usable without a zlib link dependency. This is the IEEE
+// CRC-32 used by ID3 extended headers; the small table avoids per-bit work.
+inline uint32_t TagCrc32(View data) noexcept {
+    static constexpr uint32_t table[]{
+        0x00000000,0x1db71064,0x3b6e20c8,0x26d930ac,
+        0x76dc4190,0x6b6b51f4,0x4db26158,0x5005713c,
+        0xedb88320,0xf00f9344,0xd6d6a3e8,0xcb61b38c,
+        0x9b64c2b0,0x86d3d2d4,0xa00ae278,0xbdbdf21c};
+    uint32_t crc = UINT32_MAX;
+    for (const auto byte : data) {
+        crc ^= byte;
+        crc = (crc >> 4) ^ table[crc & 15];
+        crc = (crc >> 4) ^ table[crc & 15];
+    }
+    return ~crc;
+}
+}
+// v2.2/v2.3 input has already had tag-level unsynchronization removed.
+// v2.4 input must keep its stored frame lengths and bytes; unsynchronization
+// belongs to each frame. The supplied view excludes the tag header/footer.
+// v2.2 tag compression has no supported framing.
 inline std::optional<size_t> FrameStart(View tag, unsigned major, unsigned flags) noexcept {
-    if (major < 2 || major > 4) return {};
+    if (major < 2 || major > 4 || (flags & ~(major == 2 ? 0xc0u : major == 3 ? 0xe0u : 0xf0u))) return {};
     if (!(flags & 0x40)) return 0;
     if (major == 2 || tag.size() < 4) return {};
     const uint32_t size = major == 4 ? bytes::Synchsafe32(tag.data()) : bytes::Be32(tag.data());
     const uint64_t skip = uint64_t(size) + (major == 3 ? 4 : 0);
-    if (size == UINT32_MAX || skip > tag.size() || (major == 4 && size < 4)) return {};
-    return size_t(skip);
+    if (size == UINT32_MAX || size < 6 || skip > tag.size()) return {};
+    const auto start = static_cast<size_t>(skip);
+    if (major == 3) {
+        const unsigned extended_flags = unsigned(tag[4]) << 8 | tag[5];
+        const bool crc_present = (extended_flags & 0x8000u) != 0;
+        if ((extended_flags & ~0x8000u) || size != (crc_present ? 10u : 6u)) return {};
+        const uint32_t padding = bytes::Be32(tag.data() + 6);
+        if (padding > tag.size() - start) return {};
+        const size_t end = tag.size() - padding;
+        if (!std::all_of(tag.data() + end, tag.end(), [](unsigned char byte){ return byte == 0; })) return {};
+        // v2.3: CRC precedes unsynchronization and excludes padding.
+        if (crc_present && bytes::Be32(tag.data() + 10) !=
+                detail::TagCrc32({tag.data() + start, end - start})) return {};
+    } else {
+        // v2.4 has one flag byte. Every set flag owns a length byte;
+        // unknown/reserved flags cannot be safely treated as this version.
+        if (tag[4] != 1 || (tag[5] & ~0x70u)) return {};
+        size_t cursor = 6;
+        for (unsigned flag = 0x40; flag; flag >>= 1) {
+            if (!(tag[5] & flag)) continue;
+            const size_t length = flag == 0x40 ? 0 : flag == 0x20 ? 5 : 1;
+            if (cursor >= start || tag[cursor++] != length || length > start - cursor) return {};
+            if (flag == 0x20) {
+                // The 35-bit synchsafe encoding carries only 32 CRC bits.
+                if (tag[cursor] > 0x0f) return {};
+                uint32_t expected{};
+                for (size_t i = 0; i < 5; ++i) {
+                    if (tag[cursor + i] & 0x80) return {};
+                    expected = (expected << 7) | tag[cursor + i];
+                }
+                // v2.4: CRC covers stored frames and padding, not footer.
+                if (expected != detail::TagCrc32(tag.subspan(start))) return {};
+            }
+            cursor += length;
+        }
+        if (cursor != start) return {};
+    }
+    return start;
 }
 struct Frame {
     std::string_view identifier;

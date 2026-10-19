@@ -117,7 +117,7 @@ bool PinIdentifier(HANDLE filter, ULONG pin, ULONG id, const GUID& set,
 
 bool ValidPcm(const WAVEFORMATEX& format) {
     if (format.wFormatTag != WAVE_FORMAT_PCM || !format.nChannels ||
-        !format.nSamplesPerSec || (format.wBitsPerSample != 16 &&
+        !format.nSamplesPerSec || (format.wBitsPerSample != 8 && format.wBitsPerSample != 16 &&
         format.wBitsPerSample != 24 && format.wBitsPerSample != 32)) return false;
     const std::uint64_t align = std::uint64_t{format.nChannels} * format.wBitsPerSample / 8;
     return align == format.nBlockAlign &&
@@ -172,7 +172,7 @@ private:
 
 std::unique_ptr<KsStreamTransport> CreateNativeTransport(const std::wstring& path,
     const WAVEFORMATEX& source, WAVEFORMATEX& selected, std::wstring& error) {
-    if (!ValidPcm(source)) { error = L"KS requires valid 16/24/32-bit integer PCM"; return {}; }
+    if (!ValidPcm(source)) { error = L"KS requires valid 8/16/24/32-bit integer PCM"; return {}; }
     const HANDLE filter = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
         0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
     if (filter == INVALID_HANDLE_VALUE) { error = KsError(L"KS filter open", GetLastError()); return {}; }
@@ -258,27 +258,32 @@ std::unique_ptr<KsStreamTransport> CreateNativeTransport(const std::wstring& pat
 } // namespace
 
 bool ConvertKsPcm(std::span<const std::byte> source, const WAVEFORMATEX& format,
-    unsigned output_bits, float left_gain, float right_gain, std::vector<std::byte>& output) {
+    unsigned output_bits, float left_gain, float right_gain, std::vector<std::byte>& output,
+    unsigned output_channels) {
+    if(!output_channels)output_channels=format.nChannels;
     if (!ValidPcm(format) || source.size() % format.nBlockAlign ||
         (output_bits != format.wBitsPerSample && output_bits != 16) ||
+        (output_channels!=format.nChannels && !(format.nChannels==1 && output_channels==2)) ||
         !std::isfinite(left_gain) || !std::isfinite(right_gain)) return false;
-    const size_t input_bytes = format.wBitsPerSample / 8;
-    const size_t output_bytes = output_bits / 8;
-    const size_t samples = source.size() / input_bytes;
-    output.resize(samples * output_bytes);
-    for (size_t sample = 0; sample < samples; ++sample) {
-        std::uint32_t raw{};
-        for (size_t byte = 0; byte < input_bytes; ++byte)
-            raw |= std::uint32_t{std::to_integer<unsigned char>(source[sample * input_bytes + byte])} << (byte * 8);
-        if (input_bytes < 4 && (raw & (1u << (format.wBitsPerSample - 1))))
-            raw |= ~((1u << format.wBitsPerSample) - 1);
-        std::int64_t value = std::bit_cast<std::int32_t>(raw);
-        const float gain = std::clamp(sample % format.nChannels == 1 ? right_gain : left_gain, 0.0F, 1.0F);
-        if (gain != 1.0F) value = static_cast<std::int64_t>(std::llround(value * static_cast<double>(gain)));
-        value >>= (format.wBitsPerSample - output_bits);
-        const auto bits = static_cast<std::uint32_t>(value);
-        for (size_t byte = 0; byte < output_bytes; ++byte)
-            output[sample * output_bytes + byte] = static_cast<std::byte>((bits >> (byte * 8)) & 255);
+    const size_t input_bytes=format.wBitsPerSample/8, output_bytes=output_bits/8;
+    const size_t frames=source.size()/format.nBlockAlign;
+    if(frames>output.max_size()/output_channels/output_bytes)return false;
+    output.resize(frames*output_channels*output_bytes);
+    for(size_t frame=0;frame<frames;++frame)for(unsigned channel=0;channel<output_channels;++channel) {
+        const size_t input=(frame*format.nChannels+(format.nChannels==1?0:channel))*input_bytes;
+        uint32_t raw{};for(size_t byte=0;byte<input_bytes;++byte)
+            raw|=uint32_t(std::to_integer<unsigned char>(source[input+byte]))<<(byte*8);
+        int64_t value{};
+        if(input_bytes==1)value=static_cast<int>(raw)-128; // WAVE PCM8 is unsigned.
+        else {if(input_bytes<4 && (raw&(1u<<(format.wBitsPerSample-1))))raw|=~((1u<<format.wBitsPerSample)-1);
+            value=std::bit_cast<int32_t>(raw);}
+        const float gain=std::clamp(channel==1?right_gain:left_gain,0.0F,1.0F);
+        if(gain!=1)value=static_cast<int64_t>(std::llround(value*static_cast<double>(gain)));
+        if(output_bits<format.wBitsPerSample)value>>=format.wBitsPerSample-output_bits;
+        else if(output_bits>format.wBitsPerSample)value*=int64_t{1}<<(output_bits-format.wBitsPerSample);
+        const auto bits=static_cast<uint32_t>(output_bits==8 ? value+128 : value);
+        const size_t target=(frame*output_channels+channel)*output_bytes;
+        for(size_t byte=0;byte<output_bytes;++byte)output[target+byte]=std::byte((bits>>(8*byte))&255);
     }
     return true;
 }
@@ -327,7 +332,10 @@ bool KernelStreamingSink::OpenDevice(const std::wstring& path, const WAVEFORMATE
     Close();
     error_.clear();
     WAVEFORMATEX actual{};
-    auto transport = CreateNativeTransport(path, source, actual, error_);
+    WAVEFORMATEX requested=source;
+    // 004AB1C4/004AC2B1 expands mono to the native stereo output pair.
+    if(requested.nChannels==1){requested.nChannels=2;requested.nBlockAlign*=2;requested.nAvgBytesPerSec*=2;}
+    auto transport = CreateNativeTransport(path, requested, actual, error_);
     return transport && OpenTransport(std::move(transport), source, actual, count, bytes);
 }
 
@@ -336,7 +344,8 @@ bool KernelStreamingSink::OpenTransport(std::unique_ptr<KsStreamTransport> trans
     Close();
     error_.clear();
     if (!transport || !ValidPcm(source) || !ValidPcm(device) ||
-        source.nChannels != device.nChannels || source.nSamplesPerSec != device.nSamplesPerSec ||
+        (source.nChannels != device.nChannels && !(source.nChannels==1 && device.nChannels==2)) ||
+        source.nSamplesPerSec != device.nSamplesPerSec ||
         (device.wBitsPerSample != source.wBitsPerSample && device.wBitsPerSample != 16) ||
         count == 0 || count > 64 || bytes == 0 || bytes > 4 * 1024 * 1024 ||
         bytes % source.nBlockAlign) {
@@ -379,7 +388,7 @@ bool KernelStreamingSink::Submit(size_t index, std::span<const std::byte> source
         error_ = KsError(L"KS packet is not writable", error ? error : ERROR_IO_PENDING); return false;
     }
     if (!ConvertKsPcm(source, state_->source, state_->device.wBitsPerSample,
-                       left_gain, right_gain, packet.data)) {
+                       left_gain, right_gain, packet.data, state_->device.nChannels)) {
         error_ = L"KS PCM packet conversion failed"; return false;
     }
     packet.source_bytes = source.size();

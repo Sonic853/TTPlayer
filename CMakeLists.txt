@@ -84,6 +84,7 @@ add_library(ttplayer_core
   src/audio/http_download_queue.cpp
   src/audio/http_mpeg_source.cpp
   src/audio/builtin_file_info.cpp
+  src/audio/file_mutation.cpp
   src/audio/disc_lookup.cpp
   src/net/http.cpp
   src/ui/disc_lookup_dialog.cpp
@@ -101,6 +102,7 @@ add_library(ttplayer_core
   src/audio/native_output_contract.cpp
   src/audio/wasapi_sink.cpp
   src/audio/pcm_output_transform.cpp
+  src/audio/pcm_effects.cpp
   src/audio/replay_gain_scanner.cpp
   src/audio/winamp_dsp.cpp
   src/audio/plugin_registry.cpp
@@ -120,6 +122,7 @@ add_library(ttplayer_core
   src/platform/optional_windows_api.cpp
   src/platform/windows_features.cpp
   src/plugins/plugin_manager.cpp
+  src/plugins/legacy_host_exports.cpp
   src/plugins/nero_config_layout.cpp
   src/settings/file_association.cpp
   src/settings/settings.cpp
@@ -134,6 +137,7 @@ add_library(ttplayer_core
   src/ui/desktop_lyrics.cpp
   src/ui/directory_change_monitor.cpp
   src/ui/file_info_probe_client.cpp
+  src/ui/track_metadata.cpp
   src/ui/player_window.cpp
   src/ui/player_window_layout.cpp
   src/ui/player_window_skin_plugin.cpp

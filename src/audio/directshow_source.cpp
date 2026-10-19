@@ -2,6 +2,9 @@
 #include "ttplayer/audio/archive_member.h"
 
 #include <dshow.h>
+#include <qnetwork.h>
+#include <atomic>
+#include <thread>
 #include <mmreg.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -13,6 +16,88 @@
 #include <new>
 
 namespace ttplayer::audio {
+
+namespace detail {
+HRESULT ConfigureLegacyNetworkSource(IUnknown* source, const PlaybackOptions& options) {
+    if(!source)return E_POINTER;
+    static const IID config_id{0xfa2aa8f1,0x8b62,0x11d0,{0xa5,0x20,0,0,0,0,0,0}};
+    Microsoft::WRL::ComPtr<IAMNetShowConfig> config;
+    const HRESULT query=source->QueryInterface(config_id,reinterpret_cast<void**>(config.GetAddressOf()));
+    // Default/system networking may use a filter with no NetShow settings.
+    if(FAILED(query))return options.network_proxy_type==1 ? S_OK : query;
+    HRESULT hr=config->put_EnableAutoProxy(options.network_proxy_type==1 ? VARIANT_TRUE : VARIANT_FALSE);
+    if(FAILED(hr))return hr;
+    hr=config->put_UseHTTPProxy(options.network_proxy_type==0 ? VARIANT_FALSE : VARIANT_TRUE);
+    if(FAILED(hr) || options.network_proxy_type!=2)return hr;
+    // This legacy interface has no proxy-credential setter. Report unsupported
+    // authentication instead of silently dropping the caller's credentials.
+    if(!options.network_proxy_username.empty() || !options.network_proxy_password.empty())return E_NOTIMPL;
+    if(options.network_proxy_server.empty() || options.network_proxy_port<=0 || options.network_proxy_port>65535)return E_INVALIDARG;
+    BSTR server=SysAllocString(options.network_proxy_server.c_str());if(!server)return E_OUTOFMEMORY;
+    hr=config->put_HTTPProxyHost(server);SysFreeString(server);
+    if(SUCCEEDED(hr))hr=config->put_HTTPProxyPort(options.network_proxy_port);
+    if(SUCCEEDED(hr))hr=config->put_EnableHTTP(VARIANT_TRUE);
+    return hr;
+}
+HRESULT RunLegacyNetworkOperation(IGraphBuilder* graph,IUnknown* source,
+    const PlaybackOptions& options,const std::function<HRESULT()>& operation) {
+    if(!operation)return E_INVALIDARG;
+    const auto canceled=[&]() noexcept {
+        try { return options.network_canceled && options.network_canceled(); }
+        catch(...) { return true; }
+    };
+    if(canceled())return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    // Marshal interfaces; never call apartment-bound provider pointers from
+    // the watcher directly. Broken third-party filters may ignore Abort; their
+    // owner still joins/releases them normally, never TerminateThread.
+    Microsoft::WRL::ComPtr<IStream> graph_stream,progress_stream;
+    if(graph)CoMarshalInterThreadInterfaceInStream(IID_IGraphBuilder,graph,&graph_stream);
+    Microsoft::WRL::ComPtr<IAMOpenProgress> progress;
+    if(source && SUCCEEDED(source->QueryInterface(IID_PPV_ARGS(&progress))))
+        CoMarshalInterThreadInterfaceInStream(IID_IAMOpenProgress,progress.Get(),&progress_stream);
+    const auto release_packet=[](Microsoft::WRL::ComPtr<IStream>& stream) {
+        if(stream) { LARGE_INTEGER zero{}; stream->Seek(zero,STREAM_SEEK_SET,nullptr);
+            CoReleaseMarshalData(stream.Get()); stream.Reset(); }
+    };
+    std::atomic<HRESULT> interrupted{S_OK};
+    const auto started=std::chrono::steady_clock::now();
+    const auto timeout=std::chrono::milliseconds(std::clamp(options.network_timeout_ms,100,60000));
+    std::jthread watcher;
+    try {
+        watcher=std::jthread([&](std::stop_token stop) {
+            const HRESULT com=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+            if(FAILED(com)) { interrupted=com; return; }
+            Microsoft::WRL::ComPtr<IGraphBuilder> proxy_graph;
+            Microsoft::WRL::ComPtr<IAMOpenProgress> proxy_progress;
+            if(graph_stream)CoGetInterfaceAndReleaseStream(graph_stream.Detach(),IID_PPV_ARGS(&proxy_graph));
+            if(progress_stream)CoGetInterfaceAndReleaseStream(progress_stream.Detach(),IID_PPV_ARGS(&proxy_progress));
+            while(!stop.stop_requested()) {
+                const bool cancel=canceled();
+                if(cancel || std::chrono::steady_clock::now()-started>=timeout) {
+                    interrupted=HRESULT_FROM_WIN32(cancel?ERROR_CANCELLED:ERROR_TIMEOUT);
+                    if(proxy_progress)proxy_progress->AbortOperation();
+                    if(proxy_graph)proxy_graph->Abort();
+                    break;
+                }
+                Sleep(10);
+            }
+            proxy_progress.Reset();proxy_graph.Reset();CoUninitialize();
+        });
+    } catch(...) {
+        // A marshal packet owns a reference until unmarshaled or explicitly
+        // released; merely destroying its IStream leaks it on thread failure.
+        release_packet(progress_stream);release_packet(graph_stream);
+        return E_OUTOFMEMORY;
+    }
+    HRESULT result{};
+    try { result=operation(); } catch(...) { result=E_UNEXPECTED; }
+    watcher.request_stop();watcher.join();
+    release_packet(progress_stream);release_packet(graph_stream);
+    if(canceled())return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    return FAILED(interrupted.load()) ? interrupted.load() : result;
+}
+} // namespace detail
+
 namespace {
 using Microsoft::WRL::ComPtr;
 
@@ -352,11 +437,17 @@ public:
 
     void Close() { std::scoped_lock lock(mutex_); closing_ = true; changed_.notify_all(); }
     const WAVEFORMATEXTENSIBLE& Format() const { return wave_; }
-    HRESULT Pull(size_t requested, std::vector<std::byte>& output, bool& end) {
+    HRESULT Pull(size_t requested, std::vector<std::byte>& output, bool& end,
+        const std::function<bool()>& canceled = {}) {
         output.clear(); end = false;
         std::unique_lock lock(mutex_);
-        if (!changed_.wait_for(lock, std::chrono::milliseconds(500), [&] {
-                return !queue_.empty() || ended_ || closing_ || FAILED(failure_); })) return S_FALSE;
+        const auto until=std::chrono::steady_clock::now()+std::chrono::milliseconds(500);
+        while(queue_.empty() && !ended_ && !closing_ && SUCCEEDED(failure_)) {
+            if(canceled && canceled())return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+            if(std::chrono::steady_clock::now()>=until)return S_FALSE;
+            changed_.wait_for(lock,std::chrono::milliseconds(20));
+        }
+        if(canceled && canceled())return HRESULT_FROM_WIN32(ERROR_CANCELLED);
         if (FAILED(failure_)) return failure_;
         if (closing_) return E_ABORT;
         while (!queue_.empty() && output.size() < requested) {
@@ -429,14 +520,34 @@ std::wstring Codec(WORD tag) {
 class DirectShowSource final : public DecodedAudioSource {
 public:
     ~DirectShowSource() override { Close(); }
-    bool Open(const std::filesystem::path& path, const PlaybackOptions&) override {
-        Close(); error_.clear(); error_result_ = S_OK; duration_ = {}; empty_reads_ = 0;
+    bool Open(const std::filesystem::path& path, const PlaybackOptions& options) override {
+        Close(); options_=options; network_=AudioEngine::IsNetworkMediaLocation(path); error_.clear(); error_result_ = S_OK; duration_ = {}; empty_reads_ = 0;
         ArchiveMemberPath member;
         if (ParseArchiveMemberPath(path.native(), member)) return Fail(L"DirectShow archive stream", E_NOTIMPL);
         HRESULT result = CoCreateInstance(CLSID_FilterGraph, nullptr,
             CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&graph_));
         if (FAILED(result)) return Fail(L"DirectShow graph", result);
-        result = graph_->AddSourceFilter(path.c_str(), L"Source Filter", &source_);
+        if(Canceled())return Fail(L"DirectShow source",HRESULT_FROM_WIN32(ERROR_CANCELLED));
+        if(network_) {
+            // 004E8AC3: mms/ASF use the installed Windows Media source,
+            // all other protocols use URLReader, then graph discovery.
+            static const CLSID media{0x6b6d0800,0x9ada,0x11d0,{0xa5,0x20,0,0xa0,0xd1,1,0x29,0xc0}};
+            auto ext=path.extension().wstring();for(auto& ch:ext)ch=towlower(ch);
+            const bool windows_media=_wcsnicmp(path.c_str(),L"mms://",6)==0 || ext==L".wma" || ext==L".wmv" || ext==L".asf" || ext==L".asx";
+            ComPtr<IFileSourceFilter> file;
+            result=CoCreateInstance(windows_media?media:CLSID_URLReader,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&file));
+            if(SUCCEEDED(result)) {
+                result=detail::ConfigureLegacyNetworkSource(file.Get(),options_);
+                if(FAILED(result))return Fail(L"DirectShow network proxy (legacy authentication may be unsupported)",result);
+                result=detail::RunLegacyNetworkOperation(graph_.Get(),file.Get(),options_,[&]{return file->Load(path.c_str(),nullptr);});
+                if(SUCCEEDED(result))result=file.As(&source_);
+                if(SUCCEEDED(result))result=graph_->AddFilter(source_.Get(),L"Source Filter");
+            }
+            if(FAILED(result) && !Canceled() && result!=HRESULT_FROM_WIN32(ERROR_TIMEOUT) && options_.network_proxy_type==1) {
+                source_.Reset();
+                result=detail::RunLegacyNetworkOperation(graph_.Get(),nullptr,options_,[&]{return graph_->AddSourceFilter(path.c_str(),L"Source Filter",&source_);});
+            }
+        } else result=graph_->AddSourceFilter(path.c_str(),L"Source Filter",&source_);
         if (FAILED(result)) return Fail(L"DirectShow source", result);
         sink_ = new(std::nothrow) PcmSink;
         if (!sink_) return Fail(L"DirectShow PCM sink", E_OUTOFMEMORY);
@@ -450,7 +561,9 @@ public:
         while (pins->Next(1, &pin, nullptr) == S_OK) {
             PIN_DIRECTION direction{};
             if (SUCCEEDED(pin->QueryDirection(&direction)) && direction == PINDIR_OUTPUT) {
-                connected = graph_->Connect(pin.Get(), sink_);
+                connected = network_ ? detail::RunLegacyNetworkOperation(graph_.Get(),source_.Get(),options_,
+                    [&]{return graph_->Connect(pin.Get(),sink_);}) : graph_->Connect(pin.Get(),sink_);
+                if(Canceled())return Fail(L"DirectShow connect",HRESULT_FROM_WIN32(ERROR_CANCELLED));
                 if (SUCCEEDED(connected)) break;
             }
             pin.Reset();
@@ -476,6 +589,7 @@ public:
     }
     bool Read(size_t requested, std::vector<std::byte>& output, bool& end) override {
         output.clear(); end = false;
+        if(Canceled())return Fail(L"DirectShow read",HRESULT_FROM_WIN32(ERROR_CANCELLED));
         if (!sink_ || !wave_.Format.nBlockAlign) return Fail(L"DirectShow reader", E_UNEXPECTED);
         if (!running_) {
             const HRESULT result = control_->Run();
@@ -484,7 +598,7 @@ public:
         }
         if (!CheckEvents()) return false;
         requested = std::max<size_t>(requested - requested % wave_.Format.nBlockAlign, wave_.Format.nBlockAlign);
-        const HRESULT result = sink_->Pull(requested, output, end);
+        const HRESULT result = sink_->Pull(requested, output, end, options_.network_canceled);
         if (FAILED(result)) return Fail(L"DirectShow PCM read", result);
         if (!CheckEvents()) return false;
         if (result == S_FALSE && ++empty_reads_ >= 20) return Fail(L"DirectShow decoder timeout", HRESULT_FROM_WIN32(ERROR_TIMEOUT));
@@ -492,6 +606,7 @@ public:
         return true;
     }
     bool Seek(std::chrono::milliseconds position) override {
+        if(Canceled())return Fail(L"DirectShow seek",HRESULT_FROM_WIN32(ERROR_CANCELLED));
         if (!seeking_) return Fail(L"DirectShow seek", E_NOINTERFACE);
         if (position.count() < 0 || position.count() > std::numeric_limits<LONGLONG>::max() / 10000)
             return Fail(L"DirectShow seek", E_INVALIDARG);
@@ -512,6 +627,7 @@ public:
     std::wstring Error() const override { return error_; }
     HRESULT ErrorResult() const override { return error_result_; }
 private:
+    bool Canceled() const {return options_.network_canceled && options_.network_canceled();}
     bool CheckEvents() {
         if (!events_) return true;
         long code{}; LONG_PTR first{}, second{};
@@ -523,6 +639,7 @@ private:
         return true;
     }
     bool Fail(const wchar_t* operation, HRESULT result) {
+        if(result==HRESULT_FROM_WIN32(ERROR_CANCELLED) && sink_)sink_->Close();
         error_result_ = result;
         wchar_t hex[16]{}; swprintf_s(hex, L"%08X", static_cast<unsigned>(result));
         error_ = std::wstring(operation) + L" failed (0x" + hex + L")";
@@ -544,7 +661,8 @@ private:
     ComPtr<IMediaControl> control_; ComPtr<IMediaSeeking> seeking_; ComPtr<IMediaEvent> events_;
     WAVEFORMATEXTENSIBLE wave_{}; AudioFormat display_{};
     std::chrono::milliseconds duration_{};
-    bool running_{}; unsigned empty_reads_{};
+    bool running_{}, network_{}; unsigned empty_reads_{};
+    PlaybackOptions options_;
     HRESULT error_result_{E_FAIL}; std::wstring error_;
 };
 } // namespace

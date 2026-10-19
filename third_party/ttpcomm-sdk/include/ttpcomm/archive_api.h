@@ -70,6 +70,9 @@ typedef BOOL (__cdecl *TtpCommQueryArchiveFn)(uint32_t abi, TtpCommArchiveApi*);
 #define TTPCOMM_ARCHIVE_ZIP_UTF8 128u
 #define TTPCOMM_ARCHIVE_ZIP64 256u
 #define TTPCOMM_ARCHIVE_EXTENDED_REQUIRED 511u
+/* For stream open_member, encrypted members are exposed only after complete
+   CRC/authentication verification. A supplied password does not force an
+   unencrypted member to finish decoding before its stream can be returned. */
 #define TTPCOMM_ARCHIVE_CAP_PASSWORDS 512u
 #define TTPCOMM_ARCHIVE_CAP_SIGNATURE 1024u
 #define TTPCOMM_ARCHIVE_PASSWORD_REQUIRED 2047u

@@ -36,12 +36,13 @@ public:
     virtual std::optional<std::uint64_t> PositionBytes() = 0;
 };
 
-// Signed, interleaved 16/24/32-bit PCM. The 16-bit fallback discards the
+// Unsigned 8-bit or signed interleaved 16/24/32-bit PCM. The 16-bit fallback discards the
 // least-significant bytes exactly as FUN_004E088A. Gain is applied to the
 // owned packet copy because KS pins need not expose a hardware volume node.
 [[nodiscard]] bool ConvertKsPcm(std::span<const std::byte> source,
     const WAVEFORMATEX& source_format, unsigned output_bits,
-    float left_gain, float right_gain, std::vector<std::byte>& output);
+    float left_gain, float right_gain, std::vector<std::byte>& output,
+    unsigned output_channels = 0);
 
 class KernelStreamingSink {
 public:

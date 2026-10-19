@@ -33,7 +33,9 @@ int ttplayer::app::RunOutputDeviceWorker(int argc, wchar_t** argv) {
                          std::wcscmp(argv[1], L"--details") == 0 &&
                          argv[2] && argv[2][0] != L'\0' &&
                          argv[3] && argv[3][0] != L'\0';
-    if (!enumerate && !details) return 2;
+    const bool names = argc == 3 && argv[1] &&
+        std::wcscmp(argv[1], L"--names") == 0 && argv[2] && argv[2][0] != L'\0';
+    if (!enumerate && !details && !names) return 2;
 
     // FUN_004E207B creates ASIO's in-proc COM object.  The original player has
     // already initialized COM by the time the Options page reaches it; this
@@ -53,9 +55,10 @@ int ttplayer::app::RunOutputDeviceWorker(int argc, wchar_t** argv) {
         // KS is the exception: original FUN_004F0CB0 validates its pins before
         // publishing the descriptor.
         const auto devices =
-            ttplayer::ui::detail::EnumerateLegacyOutputDevices();
+            names ? ttplayer::ui::detail::EnumerateWaveAndDirectSoundOutputDevices()
+                  : ttplayer::ui::detail::EnumerateLegacyOutputDevices();
         exit_code = ttplayer::ui::detail::WriteLegacyOutputDeviceProbe(
-                        argv[1], devices)
+                        names ? argv[2] : argv[1], devices)
             ? 0 : 3;
     }
     CoUninitialize();

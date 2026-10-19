@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ttplayer/playlist/playlist.h"
+#include "ttplayer/audio/audio_engine.h"
 #include "ttplayer/settings/settings.h"
 
 #include <cstdint>
@@ -52,7 +53,8 @@ struct ConversionCallbacks {
     size_t encoder_index, const std::filesystem::path& destination,
     const settings::ConvertSettings& settings, HMODULE ttpcomm,
     const settings::EqualizerSettings* equalizer = nullptr,
-    std::stop_token stop = {}, const ConversionCallbacks& callbacks = {});
+    std::stop_token stop = {}, const ConversionCallbacks& callbacks = {},
+    const audio::PlaybackOptions& source_options = {});
 
 // Resource-220 configuration followed by the executable resource-221 batch
 // transaction used by command 0x7EF7. Targets use the selected folder (or
@@ -65,7 +67,8 @@ bool ShowPlaylistConverter(
     settings::ConvertSettings& settings,
     const settings::EqualizerSettings& equalizer,
     std::function<void(const std::filesystem::path&)> completed = {},
-    std::vector<std::wstring> display_titles = {});
+    std::vector<std::wstring> display_titles = {},
+    const audio::PlaybackOptions& source_options = {});
 
 bool TranslatePlaylistConverterMessage(MSG& message);
 void ClosePlaylistConverter(HWND owner);

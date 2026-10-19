@@ -8,6 +8,15 @@
 #include <ttpcomm/archive_api.h>
 
 namespace ttplayer::audio {
+// Background catalogue scans may use verified/saved passwords and volume
+// mappings, but must not open modal dialogs on behalf of a directory watcher.
+class ScopedArchiveBackgroundRead {
+public:
+    ScopedArchiveBackgroundRead() noexcept;
+    ~ScopedArchiveBackgroundRead();
+    ScopedArchiveBackgroundRead(const ScopedArchiveBackgroundRead&) = delete;
+    ScopedArchiveBackgroundRead& operator=(const ScopedArchiveBackgroundRead&) = delete;
+};
 struct ArchivePasswordAnswer {std::wstring password;bool remember{};};
 using ArchivePasswordPrompt=std::function<std::optional<ArchivePasswordAnswer>(
     const std::filesystem::path&,bool,const std::function<bool()>&)>;

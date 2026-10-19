@@ -10,6 +10,7 @@
 #include <mmreg.h>
 
 namespace ttplayer::audio {
+class WinampDspChain;
 
 // Output-side PCM contract recovered from FUN_004B0D1A.  Readers keep their
 // native PCM format; this stage is shared by every output backend and applies
@@ -23,6 +24,7 @@ struct PcmOutputTransformOptions {
     // CConvertDlg sends normalized IEEE float64 to AddIn encoders; only its
     // built-in Wave writer quantizes to the selected integer bit depth.
     bool floating_point{};
+    int source_bits{}; // Reader display depth; zero falls back to input PCM.
 };
 
 class PcmOutputTransform {
@@ -43,6 +45,9 @@ public:
     bool ProcessSamples(std::vector<double> samples,
                         std::vector<std::byte>& output,
                         bool end_of_stream = false);
+    // Applied after SSRC (including drained output), before device encoding.
+    void SetWinampDsp(WinampDspChain* chain, bool enabled = true) noexcept;
+    std::vector<std::wstring> TakeDiagnostics();
     void Reset() noexcept;
 
     [[nodiscard]] WAVEFORMATEX OutputFormat() const noexcept;
