@@ -1564,6 +1564,11 @@ Bytes BuildId3v1(const TagData& fields) {
             break;
         }
     }
+    // Selecting ID3v1 does not create an empty TAG block. Lyrics3 carries
+    // lyrics independently; an untagged song with only lyrics stays free of
+    // a synthetic all-zero ID3v1 footer, as in the original tag writer.
+    if (output.back() == 0xffU && std::all_of(output.begin() + 3, output.end() - 1,
+            [](unsigned char value) { return value == 0; })) return {};
     return output;
 }
 
@@ -1785,6 +1790,9 @@ HRESULT WriteMp3(const std::filesystem::path& path,
     }
     if ((write_type & 8U) && id3v2.empty()) return E_OUTOFMEMORY;
     if ((write_type & 4U) && ape.empty()) return E_OUTOFMEMORY;
+    // BuildApe retains unknown/binary entries and pictures. Only omit its
+    // truly empty header/footer pair; Lyrics may have moved into Lyrics3.
+    if (ape.size() == 64U && ReadLe32(ape.data() + 16) == 0) ape.clear();
     return ReplaceWithTags(path, source.Get(), layout, id3v2, ape, lyrics3, id3v1, mutation);
 }
 

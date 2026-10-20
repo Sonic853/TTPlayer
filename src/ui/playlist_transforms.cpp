@@ -1685,7 +1685,7 @@ PlaylistConversionResult ConvertPlaylistTrack(
             if (!entry.name.empty() && !entry.value.empty() &&
                 _wcsnicmp(entry.name.c_str(), L"replaygain_", 11) != 0)
                 tags.push_back({core::WideToUtf8(entry.name), entry.value});
-        const auto written = audio::WriteBuiltinFileInfo(transaction.temporary, {}, tags);
+        const auto written = audio::WriteBuiltinFileInfo(transaction.temporary, source_options.mp3_tags, tags);
         if (FAILED(written.status)) {
             result = written.status; converted.diagnostic = i18n::Literal(L"MP3 metadata write failed");
         }

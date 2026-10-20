@@ -120,6 +120,10 @@ public:
     HRESULT ClearThumbnails() noexcept;
     [[nodiscard]] std::optional<std::wstring> MetadataValue(
         std::string_view name) const;
+    // Verification callers must distinguish an absent field (S_FALSE) from
+    // an I/O or malformed-metadata failure. MetadataValue is display-only.
+    [[nodiscard]] HRESULT ReadMetadataValue(std::string_view name,
+                                            std::wstring& value) const noexcept;
     HRESULT SetMetadataValue(std::string_view name,
                              std::wstring_view value) noexcept;
     // CScanGainDlg/FUN_004A50B5 and FUN_00484009 call metadata slot 6
@@ -129,6 +133,10 @@ public:
     // ReplayGain comment updates through this slot.
     HRESULT SetMetadataValueDirect(std::string_view name,
                                    std::wstring_view value) noexcept;
+    // Some host-provided tag writers alias Lyric to Lyrics. Clear an existing
+    // singular field before setting Lyrics, then verify the reader's result.
+    // This edits the live reader only; its caller owns commit/release timing.
+    HRESULT SetLyrics(std::wstring_view text) noexcept;
     // S_FALSE: old plugin, release the session then verify by reopening.
     // Otherwise returns the explicit save result. A supporting session is
     // terminal afterwards, including on failure; retry with a fresh reader.

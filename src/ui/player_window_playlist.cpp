@@ -9,6 +9,7 @@
 #include "modern_file_dialog.h"
 #include "file_info_probe_client.h"
 #include "track_metadata.h"
+#include "replay_gain_remove.h"
 
 #include "ttplayer/core/text.h"
 #include "ttplayer/audio/builtin_file_info.h"
@@ -1435,35 +1436,69 @@ std::vector<wchar_t> ShellPathList(
     return list;
 }
 
-bool RemoveReplayGainTags(const plugins::PluginManager* library,
-                          const std::filesystem::path& path) {
-    if (path.empty() || LooksLikeUrl(path.wstring())) return false;
-    if (_wcsicmp(path.extension().c_str(), L".cda") == 0) {
-        try {
-            audio::WriteDiscMetadata(audio::ReadDiscLayout(path), {{audio::CdaTrackNumber(path),
-                {{L"replaygain_track_gain", L""}, {L"replaygain_track_peak", L""}}}});
-            return true;
-        } catch (...) { return false; }
-    }
-    if (!library) return false;
-    HRESULT result{};
-    // FUN_00484009 obtains the metadata interface from a writable file
-    // stream.  A playback-only reader makes the shipped FLAC add-in return
-    // STG_E_ACCESSDENIED from metadata slot 6 and leaves both tags intact.
-    const auto reader = library->OpenReaderForMetadata(path, &result);
-    if (!reader) {
-        audio::BuiltinFileInfo info;
-        return SUCCEEDED(audio::ReadBuiltinMpegFileInfo(path, {}, info)) &&
-            SUCCEEDED(audio::WriteBuiltinMpegReplayGain(path, {}, {}));
-    }
-    const HRESULT gain = reader->SetMetadataValueDirect(
-        "replaygain_track_gain", std::wstring_view{});
-    const HRESULT peak = reader->SetMetadataValueDirect(
-        "replaygain_track_peak", std::wstring_view{});
-    const HRESULT committed = reader->CommitMetadata();
-    return SUCCEEDED(gain) && SUCCEEDED(peak) && SUCCEEDED(committed);
-}
 } // namespace
+
+void PlayerWindow::PollPlaylistMetadataRemoval() {
+    if (!playlist_metadata_result_ || !playlist_metadata_working_ ||
+        playlist_metadata_working_->load(std::memory_order_acquire)) return;
+    auto result = std::exchange(playlist_metadata_result_, {});
+    playlist_metadata_working_.reset();
+    playlist_metadata_cancel_.reset();
+    bool changed{};
+    for (const auto& completed : result->succeeded) {
+        const auto same = [&](const playlist::Track& track) {
+            return track.subtrack == completed.subtrack &&
+                !_wcsicmp(track.path.c_str(), completed.path.c_str());
+        };
+        // Merge into the newest UI snapshot, rather than restoring other tags
+        // captured before a concurrent property edit or metadata read.
+        auto updated = completed;
+        bool found{};
+        for (size_t row = 0; row < VisiblePlaylistTrackCount(); ++row)
+            if (const auto* track = VisiblePlaylistTrack(row); track && same(*track)) {
+                updated = *track; found = true; break;
+            }
+        if (!found && opened_track_ && same(*opened_track_)) {
+            updated = *opened_track_; found = true;
+        }
+        for (size_t list = 0; list < playlists_.Size() && !found; ++list)
+            for (const auto& track : playlists_.At(list).Tracks())
+                if (same(track)) { updated = track; found = true; break; }
+        std::erase_if(updated.metadata, [](const auto& field) {
+            return !_stricmp(field.first.c_str(), "replaygain_track_gain") ||
+                   !_stricmp(field.first.c_str(), "replaygain_track_peak");
+        });
+        changed |= PublishTrackMetadata(updated);
+    }
+    if (changed) {
+        RefreshPlaylist();
+        RefreshPlaybackUi();
+    }
+    if ((result->failed.empty() && SUCCEEDED(result->worker_result)) ||
+        !IsWindow(window_)) return;
+    std::wstring message = L"删除增益信息已完成。成功 " +
+        std::to_wstring(result->succeeded.size()) + L" 首，失败 " +
+        std::to_wstring(result->failed.size()) + L" 首。\r\n";
+    if (FAILED(result->worker_result)) {
+        wchar_t code[24]{};
+        swprintf_s(code, L"0x%08lX", static_cast<unsigned long>(result->worker_result));
+        message += L"后台任务未能完成（" + std::wstring(code) + L"）。\r\n";
+    }
+    message += L"以下项目未确认删除成功，原有列表信息已保留：\r\n";
+    const size_t count = std::min<size_t>(result->failed.size(), 8);
+    for (size_t index = 0; index < count; ++index) {
+        const auto& failure = result->failed[index];
+        message += L"\r\n" + failure.track.path.native();
+        if (failure.track.subtrack > 0)
+            message += L"（子轨 " + std::to_wstring(failure.track.subtrack) + L"）";
+        wchar_t code[24]{};
+        swprintf_s(code, L"0x%08lX", static_cast<unsigned long>(failure.result));
+        message += L"\r\n" + std::wstring(code) + L"\r\n";
+    }
+    if (count < result->failed.size())
+        message += L"\r\n另有 " + std::to_wstring(result->failed.size() - count) + L" 项失败。";
+    MessageBoxW(window_, message.c_str(), L"删除增益信息", MB_OK | MB_ICONWARNING);
+}
 
 std::wstring PlayerWindow::PlaylistDisplayText(
     const playlist::Track& track) const {
@@ -5954,43 +5989,63 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
         return true;
     }
     if (command == kPlaylistReplayGainRemove) {
+        PollPlaylistMetadataRemoval();
         if (playlist_selected_rows_.empty() || !sound_library_ ||
             (playlist_metadata_working_ && playlist_metadata_working_->load(
                 std::memory_order_acquire))) return true;
-        std::vector<std::filesystem::path> paths;
-        paths.reserve(playlist_selected_rows_.size());
+        std::vector<playlist::Track> tracks;
+        tracks.reserve(playlist_selected_rows_.size());
+        std::set<std::wstring> identities;
         for (const size_t row : playlist_selected_rows_) {
-            if (const auto* track = VisiblePlaylistTrack(row))
-                paths.push_back(track->path);
+            if (const auto* track = VisiblePlaylistTrack(row);
+                track && identities.insert(PlaylistTrackIdentity(*track)).second)
+                tracks.push_back(*track);
         }
-        if (paths.empty()) return true;
+        if (tracks.empty()) return true;
 
         auto library = sound_library_->RetainForBackground();
         if (!library) return true;
         std::shared_ptr<std::atomic_bool> working;
         std::shared_ptr<std::atomic_bool> cancel;
+        std::shared_ptr<ReplayGainRemovalResult> result;
         try {
             working = std::make_shared<std::atomic_bool>(true);
             cancel = std::make_shared<std::atomic_bool>(false);
+            result = std::make_shared<ReplayGainRemovalResult>();
+            result->succeeded.reserve(tracks.size());
+            result->failed.reserve(tracks.size());
         } catch (const std::exception&) {
             return true;
         }
         playlist_metadata_working_ = working;
         playlist_metadata_cancel_ = cancel;
+        playlist_metadata_result_ = result;
         try {
             std::thread(
-                [library = std::move(library), working, cancel,
-                 paths = std::move(paths)] {
+                [library = std::move(library), working, cancel, result,
+                 tracks = std::move(tracks)] {
                 const HRESULT initialized = CoInitializeEx(
                     nullptr, COINIT_MULTITHREADED);
-                for (const auto& path : paths) {
-                    if (cancel->load(std::memory_order_acquire)) break;
-                    static_cast<void>(RemoveReplayGainTags(library.get(), path));
+                if (FAILED(initialized)) result->worker_result = initialized;
+                else try {
+                    for (auto& track : tracks) {
+                        if (cancel->load(std::memory_order_acquire)) {
+                            result->canceled = true; break;
+                        }
+                        const HRESULT removed = detail::RemoveReplayGainTags(library.get(), track);
+                        if (SUCCEEDED(removed)) result->succeeded.push_back(std::move(track));
+                        else result->failed.push_back({std::move(track), removed});
+                    }
+                } catch (const std::bad_alloc&) {
+                    result->worker_result = E_OUTOFMEMORY;
+                } catch (...) {
+                    result->worker_result = E_FAIL;
                 }
                 if (SUCCEEDED(initialized)) CoUninitialize();
                 working->store(false, std::memory_order_release);
                 }).detach();
-        } catch (const std::system_error&) {
+        } catch (const std::system_error& error) {
+            result->worker_result = HRESULT_FROM_WIN32(error.code().value());
             working->store(false, std::memory_order_release);
         }
         return true;

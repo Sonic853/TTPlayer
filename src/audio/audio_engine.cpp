@@ -304,6 +304,46 @@ bool MetadataKeyEquals(std::wstring_view value, const wchar_t* expected) {
     return _wcsicmp(std::wstring(value).c_str(), expected) == 0;
 }
 
+void SetLyricMetadata(AudioMetadata& metadata, std::wstring_view text) {
+    std::erase_if(metadata.entries, [](const auto& entry) {
+        return MetadataKeyEquals(entry.first, L"Lyrics") ||
+            MetadataKeyEquals(entry.first, L"Lyric") || MetadataKeyEquals(entry.first, L"WM/Lyrics");
+    });
+    if (!text.empty()) metadata.entries.emplace_back(L"Lyrics", text);
+    metadata.tags_authoritative = true;
+}
+
+std::filesystem::path PreserveFailedLyrics(const std::filesystem::path& preferred,
+                                         std::wstring_view text) noexcept {
+    try {
+        wchar_t temporary[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, temporary);
+        for (const auto& directory : {preferred, std::filesystem::path(temporary) / L"TTPlayer-LyricRecovery"}) {
+            if (directory.empty()) continue;
+            std::error_code error;
+            std::filesystem::create_directories(directory, error);
+            if (error) continue;
+            GUID id{};
+            if (FAILED(CoCreateGuid(&id))) continue;
+            wchar_t suffix[40]{};
+            if (!StringFromGUID2(id, suffix, 40)) continue;
+            const auto path = directory / (std::wstring(suffix) + L".lrc");
+            const std::string bytes = "\xef\xbb\xbf" + core::WideToUtf8(text);
+            HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE) continue;
+            DWORD written{};
+            const bool saved = bytes.size() <= MAXDWORD &&
+                WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) &&
+                written == bytes.size() && FlushFileBuffers(file);
+            CloseHandle(file);
+            if (saved) return path;
+            DeleteFileW(path.c_str()); // Only our exclusively created recovery file.
+        }
+    } catch (...) {}
+    return {};
+}
+
 std::optional<double> MetadataNumber(std::wstring_view value) {
     const std::wstring terminated(value);
     wchar_t* end{};
@@ -626,21 +666,37 @@ public:
     }
     HRESULT WriteLyrics(std::wstring_view text) override {
         if (!reader_) return E_NOINTERFACE;
-        const HRESULT result = reader_->SetMetadataValueDirect("Lyrics", text);
+        const HRESULT result = reader_->SetLyrics(text);
         if (SUCCEEDED(result)) {
-            reader_->SetMetadataValueDirect("Lyric", {});
-            std::erase_if(metadata_.entries, [](const auto& entry) {
-                return MetadataKeyEquals(entry.first, L"Lyrics") || MetadataKeyEquals(entry.first, L"Lyric");
-            });
-            if (!text.empty()) metadata_.entries.emplace_back(L"Lyrics", text);
+            pending_lyrics_ = text;
+            SetLyricMetadata(metadata_, text);
         }
         return result;
+    }
+    HRESULT FinishLyrics() override {
+        if (!pending_lyrics_ || !reader_) return S_FALSE;
+        auto expected = std::exchange(pending_lyrics_, {});
+        const HRESULT committed = reader_->CommitMetadata();
+        reader_.reset(); // Old readers flush on final Release.
+        if (FAILED(committed)) return committed;
+        HRESULT result{};
+        auto saved = manager_.OpenReaderForInspection(path_, &result);
+        if (!saved) return FAILED(result) ? result : E_NOINTERFACE;
+        std::wstring actual;
+        result = saved->ReadMetadataValue("Lyrics", actual);
+        if (FAILED(result)) return result;
+        if (actual.empty()) {
+            result = saved->ReadMetadataValue("Lyric", actual);
+            if (FAILED(result)) return result;
+        }
+        return actual == *expected ? S_OK : STG_E_WRITEFAULT;
     }
     LegacyPluginSource(const plugins::PluginManager& manager, HMODULE ttpcomm, IStream* input = nullptr)
         : manager_(manager), ttpcomm_(ttpcomm), network_input_(input) {}
 
     bool Open(const std::filesystem::path& path,
               const PlaybackOptions&) override {
+        path_ = path;
         HRESULT result{};
         std::wstring diagnostic;
         ArchiveMemberPath member;
@@ -689,6 +745,7 @@ public:
             reader_->DurationMilliseconds());
 
         metadata_.source_format = reader_->DetectedFormat();
+        metadata_.tags_authoritative = true;
         for (const auto& entry : reader_->Metadata()) {
             metadata_.entries.emplace_back(entry.name, entry.value);
             if (MetadataKeyEquals(entry.name, L"title")) metadata_.title = entry.value;
@@ -784,6 +841,8 @@ private:
     HMODULE ttpcomm_{};
     ComPtr<IStream> network_input_;
     std::unique_ptr<plugins::LegacyReaderSession> reader_;
+    std::filesystem::path path_;
+    std::optional<std::wstring> pending_lyrics_;
     AudioFormat display_format_{};
     std::chrono::milliseconds duration_{};
     AudioMetadata metadata_;
@@ -1196,6 +1255,7 @@ public:
     RecoveredFileSource(const plugins::PluginManager* manager, HMODULE comm)
         : manager_(manager), comm_(comm) {}
     ~RecoveredFileSource() override {
+        try { static_cast<void>(FinishLyrics()); } catch (...) {}
         // The independent consumer must be released last. If nobody inherited
         // it, its explicit cancellation then reaches the final task consumer.
         source_.reset();
@@ -1203,13 +1263,21 @@ public:
         archive_session_.reset();
     }
     bool Open(const std::filesystem::path& path, const PlaybackOptions& options) override {
+        if (pending_lyrics_) {
+            const HRESULT committed = FinishLyrics();
+            if (FAILED(committed)) { result_ = committed; return false; }
+        }
         source_.reset(); archive_stream_.Reset(); archive_session_.reset();
         metadata_ = {}; error_.clear(); result_ = E_FAIL;
+        path_ = path; mp3_policy_ = options.mp3_tags;
+        builtin_mpeg_ = false; finished_ = false; metadata_revision_ = 0;
+        pending_lyrics_.reset();
         ArchiveCacheIdentity identity;
         metadata_override_ = false;
         ArchiveMemberPath member;
         const bool archive = ParseArchiveMemberPath(path.native(), member);
         const auto format_source_version = archive ? std::wstring{} : CaptureFileSourceVersion(path);
+        source_version_ = format_source_version;
         archive_stream_.Reset();
         if(archive) {
             try {
@@ -1242,12 +1310,14 @@ public:
             if (builtin_tags && !deferred_wave) {
                 BuiltinFileInfo info;
                 const auto status = archive
-                    ? ReadBuiltinStreamInfo(archive_stream_.Get(), path, {}, info)
-                    : ReadBuiltinMpegFileInfo(path, {}, info);
+                    ? ReadBuiltinStreamInfo(archive_stream_.Get(), path, mp3_policy_, info)
+                    : ReadBuiltinMpegFileInfo(path, mp3_policy_, info);
                 if (SUCCEEDED(status)) {
+                    builtin_mpeg_ = !archive;
                     metadata_override_ = true;
                     // A system decoder need not expose ID3/APEv2 or artwork.
                     metadata_ = {};
+                    metadata_.tags_authoritative = true;
                     for (auto& field : info.metadata) {
                         if (MetadataKeyEquals(field.name, L"title")) metadata_.title = field.value;
                         else if (MetadataKeyEquals(field.name, L"artist")) metadata_.artist = field.value;
@@ -1341,7 +1411,59 @@ public:
     }
     void SetPaused(bool paused) override { if (source_) source_->SetPaused(paused); }
     bool CanOverlapPlayback() const override { return source_ && source_->CanOverlapPlayback(); }
-    HRESULT WriteLyrics(std::wstring_view text) override { return source_ ? source_->WriteLyrics(text) : E_NOINTERFACE; }
+    HRESULT WriteLyrics(std::wstring_view text) override {
+        if (!source_ || finished_) return E_NOINTERFACE;
+        if (archive_stream_ || AudioEngine::IsNetworkMediaLocation(path_)) return E_ACCESSDENIED;
+        HRESULT result{};
+        if (builtin_mpeg_) {
+            // 004D9E23 accepts a memory edit. Rewriting/copying the file belongs
+            // after decoder teardown, not between real-time PCM reads.
+            if (source_version_.empty() || CaptureFileSourceVersion(path_) != source_version_)
+                return HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
+            const DWORD attributes = GetFileAttributesW(path_.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES) return HRESULT_FROM_WIN32(GetLastError());
+            if (attributes & FILE_ATTRIBUTE_READONLY) return E_ACCESSDENIED;
+            if (mp3_policy_.write_type == 0) return E_INVALIDARG;
+            pending_lyrics_ = text;
+            result = S_OK;
+        } else result = source_->WriteLyrics(text);
+        if (SUCCEEDED(result)) {
+            // source_format used to freeze the complete Open-time snapshot.
+            // Keep identification/cover while publishing changed text fields.
+            SetLyricMetadata(metadata_, text);
+            metadata_override_ = true;
+            ++metadata_revision_;
+        }
+        return result;
+    }
+    HRESULT FinishLyrics() override {
+        if (finished_) return S_FALSE;
+        finished_ = true;
+        if (!pending_lyrics_) {
+            const HRESULT result = source_ ? source_->FinishLyrics() : S_FALSE;
+            source_.reset();
+            return result;
+        }
+        const auto text = std::exchange(pending_lyrics_, {});
+        source_.reset(); // MF/DirectShow/mp3PRO can hold deny-write streams.
+        FileMutationGuard transaction;
+        HRESULT result = transaction.Acquire(path_);
+        if (FAILED(result)) return result;
+        if (FileSourceVersionToken(transaction.Version()) != source_version_)
+            return HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
+        const BuiltinTagWriteField field{"Lyrics", *text};
+        result = WriteBuiltinFileInfo(path_, mp3_policy_, std::span(&field, 1)).status;
+        if (FAILED(result)) return result;
+        BuiltinFileInfo actual;
+        result = ReadBuiltinMpegFileInfo(path_, mp3_policy_, actual);
+        if (FAILED(result)) return result;
+        std::wstring saved;
+        for (const auto& entry : actual.metadata)
+            if (MetadataKeyEquals(entry.name, L"Lyrics") || MetadataKeyEquals(entry.name, L"Lyric")) {
+                saved = entry.value; break;
+            }
+        return saved == *text ? S_OK : STG_E_WRITEFAULT;
+    }
     const WAVEFORMATEX& OutputFormat() const override {
         static const WAVEFORMATEX empty{}; return source_ ? source_->OutputFormat() : empty;
     }
@@ -1361,7 +1483,7 @@ public:
         return source_ && !metadata_override_ ? source_->Metadata() : metadata_;
     }
     uint64_t MetadataRevision() const noexcept override {
-        return archive_session_ ? archive_session_->Revision() : 0;
+        return archive_session_ ? archive_session_->Revision() : metadata_revision_;
     }
     std::shared_ptr<ArchivePlaybackSession> ArchiveSession() const override { return archive_session_; }
 private:
@@ -1375,6 +1497,12 @@ private:
     AudioMetadata metadata_;
     std::shared_ptr<ArchivePlaybackSession> archive_session_;
     bool metadata_override_{};
+    bool builtin_mpeg_{}, finished_{};
+    uint64_t metadata_revision_{};
+    std::filesystem::path path_;
+    std::wstring source_version_;
+    Mp3TagPolicy mp3_policy_;
+    std::optional<std::wstring> pending_lyrics_;
     std::wstring error_; HRESULT result_{E_FAIL};
 };
 
@@ -2104,6 +2232,25 @@ AudioEngine::AudioEngine() : dsp_chain_(std::make_shared<WinampDspChain>()) {
 }
 
 AudioEngine::LyricSourceRegistration::~LyricSourceRegistration() {
+    // All output/PCM objects declared after this registration have gone away.
+    // Complete the reader's delayed write before announcing a stopped source.
+    std::optional<std::wstring> accepted;
+    {
+        std::scoped_lock lock(owner.mutex_);
+        accepted = std::exchange(owner.accepted_lyric_text_, {});
+    }
+    HRESULT committed = E_FAIL;
+    if (accepted) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+    try { committed = source.FinishLyrics(); } catch (...) {}
+    if (accepted && FAILED(committed)) {
+        try {
+            LyricSaveFailure failure{path, subtrack, *accepted, committed,
+                PreserveFailedLyrics(recovery_folder, *accepted)};
+            std::scoped_lock lock(owner.mutex_);
+            owner.diagnostic_ = HResultMessage(L"Saving embedded lyrics", committed);
+            owner.lyric_save_failures_.push_back(std::move(failure));
+        } catch (...) {}
+    }
     std::scoped_lock lock(owner.mutex_);
     owner.lyric_source_path_.clear();
     if (auto request = std::exchange(owner.lyric_write_request_, {})) {
@@ -2113,12 +2260,27 @@ AudioEngine::LyricSourceRegistration::~LyricSourceRegistration() {
     owner.lyric_write_condition_.notify_all();
 }
 
+std::optional<AudioMetadata> AudioEngine::CurrentMetadata(
+    const std::filesystem::path& path, int subtrack) const {
+    std::scoped_lock lock(mutex_);
+    if (lyric_source_path_.empty() || _wcsicmp(lyric_source_path_.lexically_normal().c_str(),
+                                             path.lexically_normal().c_str()) != 0 ||
+        lyric_source_subtrack_ != subtrack) return std::nullopt;
+    return metadata_;
+}
+
+std::vector<LyricSaveFailure> AudioEngine::TakeLyricSaveFailures() {
+    std::scoped_lock lock(mutex_);
+    return std::exchange(lyric_save_failures_, {});
+}
+
 std::optional<HRESULT> AudioEngine::WriteCurrentLyrics(
     const std::filesystem::path& path, int subtrack, std::wstring_view text) {
     auto request = std::make_shared<LyricWriteRequest>();
     request->text = text;
     std::unique_lock lock(mutex_);
-    if (lyric_source_path_.empty() || lyric_source_path_ != path ||
+    if (lyric_source_path_.empty() || _wcsicmp(lyric_source_path_.lexically_normal().c_str(),
+                                             path.lexically_normal().c_str()) != 0 ||
         lyric_source_subtrack_ != subtrack) return std::nullopt;
     if (stop_requested_) return HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
     if (lyric_write_request_) return HRESULT_FROM_WIN32(ERROR_BUSY);
@@ -2145,7 +2307,11 @@ void AudioEngine::ProcessLyricWrite(DecodedAudioSource& source) {
     catch (...) { result = E_FAIL; }
     {
         std::scoped_lock lock(mutex_);
-        if (SUCCEEDED(result)) metadata_ = source.Metadata();
+        if (SUCCEEDED(result)) {
+            metadata_ = source.Metadata();
+            accepted_lyric_text_ = request->text;
+            ++metadata_revision_;
+        }
         request->result = result;
         request->finished = true;
     }
@@ -2509,7 +2675,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     }
     options.archive_session.reset();
     if (stop_requested_) return;
-    LyricSourceRegistration lyric_registration{*this};
+    LyricSourceRegistration lyric_registration{*this, *source, path, subtrack,
+        options.lyric_recovery_folder};
     {
         std::scoped_lock lock(mutex_);
         // Stop removes the task owner under this same lock. Do not publish a
@@ -2517,6 +2684,10 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         if (stop_requested_) return;
         lyric_source_path_ = path;
         lyric_source_subtrack_ = subtrack;
+        // Publish identity and its metadata together. A read during output
+        // initialization must never see the previous track's snapshot.
+        metadata_ = source->Metadata();
+        ++metadata_revision_;
         archive_session_ = source->ArchiveSession();
         source_can_overlap_ = source->CanOverlapPlayback() &&
                               !IsNetworkMediaLocation(path);
@@ -3945,6 +4116,11 @@ void AudioEngine::Stop() {
     downloaded_percent_ = -1;
     position_ms_ = 0;
     backend_ = Backend::none;
+}
+
+void AudioEngine::StopAndWait() {
+    Stop();
+    if (worker_.joinable()) worker_.join();
 }
 
 void AudioEngine::StopWithFade() {

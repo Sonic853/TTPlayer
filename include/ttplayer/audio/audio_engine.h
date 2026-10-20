@@ -1,5 +1,6 @@
 #pragma once
 #include <ttpcomm/audio_format_probe.h>
+#include "ttplayer/audio/builtin_file_info.h"
 
 #include <array>
 #include <atomic>
@@ -98,6 +99,16 @@ struct AudioMetadata {
     std::vector<unsigned char> thumbnail;
     std::optional<ttp::format::Result> source_format;
     std::wstring source_format_version;
+    // An empty complete snapshot means deletion, not unavailable metadata.
+    bool tags_authoritative{};
+};
+
+struct LyricSaveFailure {
+    std::filesystem::path path;
+    int subtrack{};
+    std::wstring text;
+    HRESULT result{E_FAIL};
+    std::filesystem::path recovery_path;
 };
 
 // The original visualization pipeline asks the sound player for two blocks
@@ -117,6 +128,8 @@ struct VisualizationSamples {
 // pipeline.  Keeping them at the engine boundary prevents UI code from
 // silently substituting hard-coded buffering and output-format defaults.
 struct PlaybackOptions {
+    Mp3TagPolicy mp3_tags;
+    std::filesystem::path lyric_recovery_folder;
     int file_buffer_bytes{16384};
     int output_buffer_ms{1000};
     int output_bits{16};
@@ -216,6 +229,9 @@ public:
     [[nodiscard]] virtual bool CanOverlapPlayback() const { return true; }
     // Called only by the source's owning playback thread, between reads.
     virtual HRESULT WriteLyrics(std::wstring_view) { return E_NOINTERFACE; }
+    // Called after playback has finished, on the owning thread. Close decoder
+    // handles before committing pending tags; never rewrite MP3 in Read().
+    virtual HRESULT FinishLyrics() { return S_FALSE; }
 };
 
 // Creates (but does not open) the recovered source selected for `path`.
@@ -259,6 +275,9 @@ public:
     // fade gate. Keep playback state and leave play/pause/stop fades alone.
     void SeekWithoutFade(std::chrono::milliseconds position);
     void Stop();
+    // File editors must wait until the decoder releases its file and commits
+    // pending tags; ordinary playback controls keep the bounded Stop().
+    void StopAndWait();
     // Explicit UI stop follows bit 3 of SoundFadeMode.  Stop() remains the
     // immediate lifetime/cancellation primitive used before Play and during
     // destruction.
@@ -320,6 +339,9 @@ public:
     // A live-source failure must not retry through a conflicting file handle.
     std::optional<HRESULT> WriteCurrentLyrics(const std::filesystem::path& path,
                                             int subtrack, std::wstring_view text);
+    [[nodiscard]] std::optional<AudioMetadata> CurrentMetadata(
+        const std::filesystem::path& path, int subtrack) const;
+    [[nodiscard]] std::vector<LyricSaveFailure> TakeLyricSaveFailures();
     [[nodiscard]] VisualizationSamples Visualization() const;
 
 private:
@@ -343,6 +365,10 @@ private:
     };
     struct LyricSourceRegistration {
         AudioEngine& owner;
+        DecodedAudioSource& source;
+        std::filesystem::path path;
+        int subtrack{};
+        std::filesystem::path recovery_folder;
         ~LyricSourceRegistration();
     };
     void ProcessLyricWrite(DecodedAudioSource& source);
@@ -385,6 +411,8 @@ private:
     std::shared_ptr<LyricWriteRequest> lyric_write_request_;
     std::filesystem::path lyric_source_path_;
     int lyric_source_subtrack_{};
+    std::optional<std::wstring> accepted_lyric_text_;
+    std::vector<LyricSaveFailure> lyric_save_failures_;
     std::condition_variable open_condition_;
     std::condition_variable fade_condition_;
     bool open_complete_{};

@@ -1513,6 +1513,7 @@ PlayerWindow::~PlayerWindow() {
         playlist_metadata_cancel_->store(true, std::memory_order_release);
     playlist_metadata_working_.reset();
     playlist_metadata_cancel_.reset();
+    playlist_metadata_result_.reset();
     desktop_lyrics_.Destroy();
     CloseOptions();
     UnregisterConfiguredHotKeys();
@@ -2919,6 +2920,13 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
          message == WM_COPYDATA || message == WM_DROPFILES)) {
         return 0;
     }
+    if (file_info_write_in_progress_ &&
+        (message == WM_COMMAND || message == WM_SYSCOMMAND ||
+         message == WM_CONTEXTMENU || message == WM_HOTKEY || message == WM_COPYDATA)) return 0;
+    if (file_info_write_in_progress_ && message == WM_DROPFILES) {
+        DragFinish(reinterpret_cast<HDROP>(wparam));
+        return 0;
+    }
     if (file_import_active_ && (message==WM_COMMAND || message==WM_SYSCOMMAND ||
         message==WM_CONTEXTMENU || message==WM_HOTKEY)) return 0;
     if (message == taskbar_created) {
@@ -3693,6 +3701,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             PollMediaLibraryWorkers();
             PollUpdateCheck();
             PollPlaylistInfo();
+            PollPlaylistMetadataRemoval();
+            PollLyricSaveFailures();
             if (!extension_corrections_.empty() && !extension_correction_open_ &&
                 IsWindowEnabled(window_))
                 PostMessageW(window_, kMsgExtensionCorrection, 0, 0);
@@ -7396,7 +7406,11 @@ void PlayerWindow::PaintSkinInfoTick() {
 void PlayerWindow::PollFadingAudio(bool cancel) {
     for (auto it = fading_audio_.begin(); it != fading_audio_.end();) {
         if (cancel) (*it)->StopAsync();
-        if ((*it)->TryReapStopped()) it = fading_audio_.erase(it);
+        if ((*it)->TryReapStopped()) {
+            auto failures = (*it)->TakeLyricSaveFailures();
+            for (auto& failure : failures) pending_lyric_save_failures_.push_back(std::move(failure));
+            it = fading_audio_.erase(it);
+        }
         else ++it;
     }
 }
@@ -7592,6 +7606,11 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
         const auto format = audio_->Format();
         const std::uint64_t bitrate =
             static_cast<std::uint64_t>(format.bytes_per_second) * 8U;
+        if (metadata.tags_authoritative) {
+            auto refreshed = PlaybackPlaylist().Tracks()[*current_];
+            refreshed.metadata = entries;
+            metadata_changed |= PlaybackPlaylist().SetTrack(*current_, std::move(refreshed));
+        }
         metadata_changed |= PlaybackPlaylist().SetExtendedMetadata(
             *current_, std::move(entries),
             format.codec_name.empty() ? std::string{} :
@@ -7621,6 +7640,11 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
         if (playback_playlist_index)
             playlists_.MarkDirty(*playback_playlist_index);
         if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
+    }
+    if (!indexed_playback && metadata.tags_authoritative && opened_track_) {
+        opened_track_->metadata.clear();
+        for (const auto& [name, value] : metadata.entries)
+            opened_track_->metadata.emplace_back(core::WideToUtf8(name), core::WideToUtf8(value));
     }
     // Store the post-reader metadata as well as path/subtrack.  This copy is
     // the UI's CPlayItem once a later Clear/Remove invalidates current_.
@@ -7653,9 +7677,7 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
 
 void PlayerWindow::PollNetworkPlayback() {
     if (!opened_track_) return;
-    audio::ArchiveMemberPath member;
     const bool network = audio::AudioEngine::IsNetworkMediaLocation(opened_track_->path);
-    if (!network && !audio::ParseArchiveMemberPath(opened_track_->path.native(), member)) return;
     const auto state = audio_->State();
     if (network_open_pending_) {
         if (state == audio::PlaybackState::opening) return;
@@ -7672,7 +7694,9 @@ void PlayerWindow::PollNetworkPlayback() {
     const auto revision = audio_->MetadataRevision();
     if (revision == playback_metadata_revision_) return;
     playback_metadata_revision_ = revision;
-    const auto metadata = audio_->Metadata();
+    const auto active_metadata = audio_->CurrentMetadata(opened_track_->path, opened_track_->subtrack);
+    if (!active_metadata) return;
+    const auto& metadata = *active_metadata;
     const auto title = core::WideToUtf8(metadata.title);
     const auto artist = core::WideToUtf8(metadata.artist);
     const auto album = core::WideToUtf8(metadata.album);
@@ -7683,7 +7707,8 @@ void PlayerWindow::PollNetworkPlayback() {
     if (!artist.empty()) opened_track_->artist = artist;
     if (!album.empty()) opened_track_->album = album;
     bool metadata_changed = text_changed;
-    if (!network && !metadata.entries.empty()) {
+    const bool have_snapshot = !network && (metadata.tags_authoritative || !metadata.entries.empty());
+    if (have_snapshot) {
         std::vector<std::pair<std::string, std::string>> entries;
         entries.reserve(metadata.entries.size());
         for (const auto& [name, value] : metadata.entries)
@@ -7693,18 +7718,34 @@ void PlayerWindow::PollNetworkPlayback() {
             metadata_changed = true;
         }
     }
-    if (metadata_changed && HasPlaybackTrack() &&
-        PlaybackPlaylist().Tracks()[*current_].path == opened_track_->path &&
-        PlaybackPlaylist().Tracks()[*current_].subtrack == opened_track_->subtrack) {
-        PlaybackPlaylist().SetMetadata(*current_, title, artist, album);
-        if (!network && !metadata.entries.empty()) {
-            const auto& track = PlaybackPlaylist().Tracks()[*current_];
-            PlaybackPlaylist().SetExtendedMetadata(*current_, opened_track_->metadata,
-                track.media_type, track.bitrate_bps, track.sample_rate_hz);
+    // Local tag edits publish revisions as network metadata does. Replace
+    // authoritative bags, including empty ones; SetExtendedMetadata merges
+    // fields and would preserve a deleted final Lyrics entry forever.
+    bool rows_changed{};
+    for (size_t index = 0; index < playlists_.Size(); ++index) {
+        auto& list = playlists_.At(index);
+        bool changed{};
+        for (size_t row = 0; row < list.Tracks().size(); ++row) {
+            const auto& item = list.Tracks()[row];
+            if (item.subtrack != opened_track_->subtrack ||
+                _wcsicmp(item.path.lexically_normal().c_str(),
+                         opened_track_->path.lexically_normal().c_str()) != 0) continue;
+            auto updated = item;
+            if (!title.empty()) updated.title = title;
+            if (!artist.empty()) updated.artist = artist;
+            if (!album.empty()) updated.album = album;
+            if (have_snapshot) updated.metadata = opened_track_->metadata;
+            changed |= list.SetTrack(row, std::move(updated));
         }
-        if (playing_playlist_index_) playlists_.MarkDirty(*playing_playlist_index_);
-        RefreshPlaylist();
+        if (changed) playlists_.MarkDirty(index);
+        rows_changed |= changed;
     }
+    if (have_snapshot && lyric_document_track_ &&
+        lyric_document_track_->subtrack == opened_track_->subtrack &&
+        _wcsicmp(lyric_document_track_->path.lexically_normal().c_str(),
+                 opened_track_->path.lexically_normal().c_str()) == 0)
+        lyric_document_track_->metadata = opened_track_->metadata;
+    if (rows_changed) { playlist_info_checked_.clear(); RefreshPlaylist(); }
     if (metadata_changed) {
         display_title_ = DisplayName(*opened_track_);
         display_artist_ = core::Utf8ToWide(opened_track_->artist);

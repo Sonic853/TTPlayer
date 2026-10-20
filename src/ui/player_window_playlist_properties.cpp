@@ -2099,7 +2099,12 @@ void PlayerWindow::ShowPlaylistProperties(
         if (writing) {
             file_info_write_in_progress_ = true;
             // An outgoing crossfade may still hold a file selected for editing.
-            for (const auto& engine : fading_audio_) engine->Stop();
+            for (const auto& engine : fading_audio_) {
+                engine->StopAndWait();
+                auto failures = engine->TakeLyricSaveFailures();
+                for (auto& failure : failures)
+                    pending_lyric_save_failures_.push_back(std::move(failure));
+            }
             fading_audio_.clear();
         }
         const auto* opened = OpenedTrack();
@@ -2136,8 +2141,13 @@ void PlayerWindow::ShowPlaylistProperties(
         CancelWaveTrackChange();
         pending_natural_play_ = pending_failed_advance_ = false;
         playback_was_active_ = playback_source_open_ = false;
-        audio_->Stop();
-        for (const auto& engine : fading_audio_) engine->Stop();
+        audio_->StopAndWait();
+        for (const auto& engine : fading_audio_) {
+            engine->StopAndWait();
+            auto failures = engine->TakeLyricSaveFailures();
+            for (auto& failure : failures)
+                pending_lyric_save_failures_.push_back(std::move(failure));
+        }
         fading_audio_.clear();
         RefreshPlaybackUi();
     };

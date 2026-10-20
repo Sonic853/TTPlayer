@@ -9,6 +9,12 @@ namespace ttplayer::ui::detail {
 inline audio::PlaybackOptions PlaybackOptionsFromSettings(
     const settings::Settings& settings, const std::filesystem::path& runtime) {
     audio::PlaybackOptions options;
+    options.mp3_tags = {static_cast<std::uint32_t>(settings.general.mp3_read_tag_priority),
+        static_cast<std::uint32_t>(settings.general.mp3_write_tag_type),
+        static_cast<std::uint32_t>(settings.general.mp3_id3v2_encoding),
+        settings.general.mp3_id3v2_padding};
+    options.lyric_recovery_folder = (settings.source_path.empty() ? runtime :
+        settings.source_path.parent_path()) / L"LyricRecovery";
     options.file_buffer_bytes = settings.playback.file_buffer;
     options.output_buffer_ms = settings.device.buffer_duration;
     options.output_bits = settings.device.output_bits;

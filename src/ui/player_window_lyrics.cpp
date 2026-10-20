@@ -5,6 +5,8 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "ttplayer/audio/archive_member.h"
+#include "ttplayer/audio/builtin_file_info.h"
+#include <wrl/client.h>
 #include "modern_file_dialog.h"
 #include "lyric_association_dialog.h"
 #include "lyric_alpha_mask.h"
@@ -43,6 +45,114 @@ namespace ttplayer::ui {
 using namespace detail;
 
 namespace {
+bool SameLyricSource(const playlist::Track& track,
+                     const std::filesystem::path& path, int subtrack) {
+    return track.subtrack == subtrack &&
+        _wcsicmp(track.path.lexically_normal().c_str(), path.lexically_normal().c_str()) == 0;
+}
+
+bool CanWriteEmbeddedLyrics(const playlist::Track* track) {
+    if (!track || track->path.empty() || track->subtrack != 0 ||
+        audio::AudioEngine::IsNetworkMediaLocation(track->path) ||
+        _wcsicmp(track->path.extension().c_str(), L".cue") == 0) return false;
+    audio::ArchiveMemberPath member;
+    return !audio::ParseArchiveMemberPath(track->path.native(), member);
+}
+
+audio::Mp3TagPolicy LyricMp3Policy(const settings::Settings& settings) {
+    audio::Mp3TagPolicy policy;
+    policy.read_priority = static_cast<std::uint32_t>(settings.general.mp3_read_tag_priority);
+    policy.write_type = static_cast<std::uint32_t>(settings.general.mp3_write_tag_type);
+    policy.id3v2_encoding = static_cast<std::uint32_t>(settings.general.mp3_id3v2_encoding);
+    policy.id3v2_padding = settings.general.mp3_id3v2_padding;
+    return policy;
+}
+
+template<class Entries, class Name, class Value>
+std::optional<std::wstring> EmbeddedLyricText(
+    const Entries& entries, Name name, Value value) {
+    for (const auto* key : {L"Lyrics", L"Lyric", L"WM/Lyrics"})
+        for (const auto& entry : entries)
+            if (_wcsicmp(name(entry).c_str(), key) == 0 && !value(entry).empty())
+                return value(entry);
+    return std::nullopt;
+}
+
+std::optional<std::wstring> EmbeddedLyricText(const audio::AudioMetadata& metadata) {
+    return EmbeddedLyricText(metadata.entries,
+        [](const auto& e) -> const auto& { return e.first; },
+        [](const auto& e) -> const auto& { return e.second; });
+}
+
+std::optional<std::wstring> EmbeddedLyricText(const audio::BuiltinFileInfo& info) {
+    return EmbeddedLyricText(info.metadata,
+        [](const auto& e) -> const auto& { return e.name; },
+        [](const auto& e) -> const auto& { return e.value; });
+}
+
+std::optional<std::wstring> EmbeddedLyricText(const plugins::LegacyReaderSession& reader) {
+    for (const auto* name : {"Lyrics", "Lyric", "WM/Lyrics"})
+        if (const auto value = reader.MetadataValue(name); value && !value->empty()) return value;
+    return EmbeddedLyricText(reader.Metadata(),
+        [](const auto& e) -> const auto& { return e.name; },
+        [](const auto& e) -> const auto& { return e.value; });
+}
+
+// Large file replacement and archive decompression never run in the UI or
+// decoder loop. The caller's file_info_write_in_progress_ guard keeps track
+// changes/close from reentering while painting and worker replies are pumped.
+template<class Work> auto RunLyricFileOperation(Work work) {
+    auto future = std::async(std::launch::async, [work = std::move(work)]() mutable {
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        struct ComScope { HRESULT result; ~ComScope() { if (SUCCEEDED(result)) CoUninitialize(); } } scope{com};
+        return work();
+    });
+    std::optional<int> quit;
+    while (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT) { quit = static_cast<int>(message.wParam); continue; }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    if (quit) PostQuitMessage(*quit);
+    return future.get();
+}
+
+struct LyricFileAccessScope {
+    bool& busy;
+    std::array<HWND, 5> disabled{};
+    size_t count{};
+    explicit LyricFileAccessScope(bool& flag, std::initializer_list<HWND> windows) : busy(flag) {
+        busy = true;
+        for (const HWND window : windows)
+            if (window && IsWindow(window) && IsWindowEnabled(window)) {
+                disabled[count++] = window;
+                EnableWindow(window, FALSE);
+            }
+    }
+    ~LyricFileAccessScope() {
+        for (size_t index = 0; index < count; ++index)
+            if (IsWindow(disabled[index])) EnableWindow(disabled[index], TRUE);
+        busy = false;
+    }
+};
+
+bool VerifyEmbeddedArchiveStream(IStream* stream, HMODULE comm) {
+    Microsoft::WRL::ComPtr<IStream> cursor;
+    HRESULT result = stream ? stream->Clone(&cursor) : E_POINTER;
+    LARGE_INTEGER zero{};
+    if (SUCCEEDED(result)) result = cursor->Seek(zero, STREAM_SEEK_END, nullptr);
+    unsigned char byte{};
+    ULONG count{};
+    if (SUCCEEDED(result)) result = cursor->Read(&byte, 1, &count);
+    if (FAILED(result) || count) return false;
+    static_cast<void>(audio::ArchiveMemberProgress(stream, comm, &result));
+    return SUCCEEDED(result);
+}
+
 HCURSOR LyricContentCursor(HMODULE resources, bool have_lines, bool dragging) {
     // CLyricCtrl's constructor (0043EB87) loads the two resource cursors:
     // +0xD0 = 0x455 (hover), +0xD4 = 0x454 (captured drag). Neither
@@ -3873,85 +3983,188 @@ void PlayerWindow::HandleLyricFindRequest(const FINDREPLACEW& request) {
     } else if (request.Flags & FR_FINDNEXT) find_next();
 }
 
-std::optional<std::wstring> PlayerWindow::ReadEmbeddedLyrics() const {
-    const auto* track = PlaybackTrackForUi();
-    if (!sound_library_ || !track)
-        return std::nullopt;
-    HRESULT result{};
-    const auto reader = sound_library_->OpenReader(track->path, &result);
-    if (!reader) return std::nullopt;
-    for (const auto* name : {"Lyrics", "Lyric"})
-        if (const auto value = reader->MetadataValue(name); value && !value->empty()) return value;
-    for (const auto& entry : reader->Metadata()) {
-        if ((_wcsicmp(entry.name.c_str(), L"Lyrics") == 0 ||
-             _wcsicmp(entry.name.c_str(), L"WM/Lyrics") == 0) &&
-            !entry.value.empty())
-            return entry.value;
+std::optional<std::wstring> PlayerWindow::ReadEmbeddedLyrics() {
+    const auto* selected = lyric_document_track_ ? &*lyric_document_track_ : PlaybackTrackForUi();
+    if (!selected || file_info_write_in_progress_) return std::nullopt;
+    const auto track = *selected;
+    // 004AD25D / 004AD30E reuse the active Reader, including its pending
+    // deletion. An authoritative empty snapshot must not revive disk lyrics.
+    if (const auto current = audio_->CurrentMetadata(track.path, track.subtrack)) {
+        const auto text = EmbeddedLyricText(*current);
+        if (current->tags_authoritative || text) return text;
     }
-    return std::nullopt;
+    if (track.subtrack != 0 || audio::AudioEngine::IsNetworkMediaLocation(track.path))
+        return std::nullopt;
+    const auto policy = LyricMp3Policy(settings_);
+    const auto manager = sound_library_ ? sound_library_->RetainForBackground() : nullptr;
+    const auto comm = ttpcomm_module_;
+    LyricFileAccessScope access(file_info_write_in_progress_,
+        {window_, lyric_window_, playlist_window_, equalizer_window_, options_window_});
+    try {
+        return RunLyricFileOperation([track, policy, manager, comm]() -> std::optional<std::wstring> {
+            audio::BuiltinFileInfo builtin;
+            audio::ArchiveMemberPath member;
+            Microsoft::WRL::ComPtr<IStream> stream;
+            if (audio::ParseArchiveMemberPath(track.path.native(), member)) {
+                stream.Attach(audio::OpenArchiveMemberStream(member, comm));
+                if (SUCCEEDED(audio::ReadBuiltinStreamInfo(stream.Get(), track.path, policy, builtin)))
+                    return VerifyEmbeddedArchiveStream(stream.Get(), comm)
+                        ? EmbeddedLyricText(builtin) : std::nullopt;
+            } else if (SUCCEEDED(audio::ReadBuiltinMpegFileInfo(track.path, policy, builtin))) {
+                return EmbeddedLyricText(builtin);
+            }
+            if (!manager) return std::nullopt;
+            const auto reader = stream
+                ? manager->OpenReaderForInspection(track.path, stream.Get())
+                : manager->OpenReaderForInspection(track.path);
+            if (!reader || (stream && !VerifyEmbeddedArchiveStream(stream.Get(), comm)))
+                return std::nullopt;
+            return EmbeddedLyricText(*reader);
+        });
+    } catch (...) { return std::nullopt; }
+}
+
+void PlayerWindow::SynchronizeEmbeddedLyricCache(const std::filesystem::path& path,
+                                                int subtrack, std::wstring_view text) {
+    const auto encoded = core::WideToUtf8(text);
+    const auto update = [&](playlist::Track& item) {
+        std::erase_if(item.metadata, [](const auto& pair) {
+            return !_stricmp(pair.first.c_str(), "Lyrics") ||
+                !_stricmp(pair.first.c_str(), "Lyric") || !_stricmp(pair.first.c_str(), "WM/Lyrics");
+        });
+        if (!encoded.empty()) item.metadata.emplace_back("Lyrics", encoded);
+    };
+    for (size_t index = 0; index < playlists_.Size(); ++index) {
+        auto& list = playlists_.At(index);
+        bool changed{};
+        for (size_t row = 0; row < list.Tracks().size(); ++row) {
+            if (!SameLyricSource(list.Tracks()[row], path, subtrack)) continue;
+            auto item = list.Tracks()[row];
+            update(item);
+            changed |= list.SetTrack(row, std::move(item)); // bumps InfoRevision; stale worker replies lose
+        }
+        if (changed) playlists_.MarkDirty(index);
+    }
+    if (opened_track_ && SameLyricSource(*opened_track_, path, subtrack)) update(*opened_track_);
+    if (lyric_document_track_ && SameLyricSource(*lyric_document_track_, path, subtrack))
+        update(*lyric_document_track_);
+    playlist_info_checked_.clear();
+    if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
 }
 
 bool PlayerWindow::WriteEmbeddedLyrics(std::wstring_view text,
                                        bool deleting, bool silent) {
-    const auto* track = lyric_document_track_ ? &*lyric_document_track_ : PlaybackTrackForUi();
-    if (!sound_library_ || !track)
-        return false;
-    if (!deleting && text.empty()) return false;
-    const auto path = track->path;
-    // 0044C708 -> 004C80AC clears read-only before writing; deletion does
-    // not. Neither original command issues Stop/Pause/Seek. A busy file
-    // must fail without interrupting the current playback session.
-    HRESULT result = S_OK;
-    if (!deleting) {
-        const DWORD attributes = GetFileAttributesW(path.c_str());
+    const auto* selected = lyric_document_track_ ? &*lyric_document_track_ : PlaybackTrackForUi();
+    if (!selected || file_info_write_in_progress_ || (!deleting && text.empty())) return false;
+    const auto track = *selected;
+    const std::wstring value(deleting ? std::wstring_view{} : text);
+    HRESULT result = CanWriteEmbeddedLyrics(&track) ? S_OK : STG_E_ACCESSDENIED;
+    // 0044C708 -> 004C80AC clears read-only before embedding, not deletion.
+    if (SUCCEEDED(result) && !deleting) {
+        const DWORD attributes = GetFileAttributesW(track.path.c_str());
         if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) &&
-            !SetFileAttributesW(path.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY))
+            !SetFileAttributesW(track.path.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY))
             result = HRESULT_FROM_WIN32(GetLastError());
     }
-    std::unique_ptr<plugins::LegacyReaderSession> reader;
     const auto shared = SUCCEEDED(result)
-        ? audio_->WriteCurrentLyrics(path, track->subtrack, deleting ? std::wstring_view{} : text)
+        ? audio_->WriteCurrentLyrics(track.path, track.subtrack, value)
         : std::optional<HRESULT>{result};
     if (shared) result = *shared;
     if (!shared && SUCCEEDED(result)) {
-        reader = sound_library_->OpenReaderForMetadata(path, &result);
-        if (!reader && SUCCEEDED(result)) result = E_NOINTERFACE;
-    }
-    if (reader) {
-        // 004AD3E9 calls metadata slot 6 directly, without the file-info
-        // capability-bit guard (FLAC can report bit 4 clear yet write tags).
-        result = reader->SetMetadataValueDirect("Lyrics", deleting ? std::wstring_view{} : text);
-        if (SUCCEEDED(result)) reader->SetMetadataValueDirect("Lyric", {});
-        const HRESULT committed = reader->CommitMetadata();
-        if (SUCCEEDED(result) && FAILED(committed)) result = committed;
-        reader.reset(); // Some AddIns flush tags on final reader Release.
+        const auto policy = LyricMp3Policy(settings_);
+        const auto manager = sound_library_ ? sound_library_->RetainForBackground() : nullptr;
+        LyricFileAccessScope access(file_info_write_in_progress_,
+            {window_, lyric_window_, playlist_window_, equalizer_window_, options_window_});
+        try {
+            result = RunLyricFileOperation([path = track.path, value, policy, manager]() -> HRESULT {
+                audio::BuiltinFileInfo builtin;
+                if (SUCCEEDED(audio::ReadBuiltinMpegFileInfo(path, policy, builtin))) {
+                    // Lyric is an alias of Lyrics in the host's standard tags.
+                    // Passing both fields would erase the freshly written value.
+                    const std::array<audio::BuiltinTagWriteField, 1> fields{{{"Lyrics", value}}};
+                    const auto written = audio::WriteBuiltinFileInfo(path, policy, fields);
+                    if (FAILED(written.status)) return written.status;
+                    const HRESULT read = audio::ReadBuiltinMpegFileInfo(path, policy, builtin);
+                    if (FAILED(read)) return read;
+                    return EmbeddedLyricText(builtin).value_or(L"") == value
+                        ? S_OK : HRESULT_FROM_WIN32(ERROR_WRITE_FAULT);
+                }
+                if (!manager) return E_NOINTERFACE;
+                HRESULT status{};
+                auto reader = manager->OpenReaderForMetadata(path, &status);
+                if (!reader) return FAILED(status) ? status : E_NOINTERFACE;
+                status = reader->SetLyrics(value);
+                if (SUCCEEDED(status)) {
+                    const HRESULT committed = reader->CommitMetadata();
+                    if (FAILED(committed)) status = committed;
+                }
+                reader.reset(); // old plugins persist on final Release
+                if (FAILED(status)) return status;
+                reader = manager->OpenReaderForInspection(path, &status);
+                if (!reader) return FAILED(status) ? status : E_FAIL;
+                // An unavailable/broken GetValue is not proof that deletion
+                // succeeded. Preserve the HRESULT for both original spellings;
+                // canonicalizing readers may return the same value for Lyric.
+                std::wstring canonical;
+                status = reader->ReadMetadataValue("Lyrics", canonical);
+                if (FAILED(status)) return status;
+                if (canonical != value) return HRESULT_FROM_WIN32(ERROR_WRITE_FAULT);
+                std::wstring alias;
+                status = reader->ReadMetadataValue("Lyric", alias);
+                if (FAILED(status)) return status;
+                if (!alias.empty() && alias != value)
+                    return HRESULT_FROM_WIN32(ERROR_WRITE_FAULT);
+                return S_OK;
+            });
+        } catch (const std::bad_alloc&) { result = E_OUTOFMEMORY; }
+        catch (...) { result = E_FAIL; }
     }
     if (FAILED(result)) {
-        if (!deleting && !silent) {
-            const UINT resource = result == E_NOINTERFACE ? 0x817f : 0x8180;
-            const auto message = ResourceText(resource);
+        if (!silent) {
+            const auto message = ResourceText(result == E_NOINTERFACE ? 0x817f : 0x8180);
             wchar_t caption[128]{};
-            GetWindowTextW(window_, caption,
-                           static_cast<int>(std::size(caption)));
-            MessageBoxW(lyric_window_, message.c_str(), caption,
-                        MB_ICONERROR);
+            GetWindowTextW(window_, caption, static_cast<int>(std::size(caption)));
+            MessageBoxW(lyric_window_ ? lyric_window_ : window_, message.c_str(), caption, MB_ICONERROR);
         }
         RefreshPlaybackUi();
         return false;
     }
+    CancelLocalLyricSearch();
+    SynchronizeEmbeddedLyricCache(track.path, track.subtrack, value);
     lyrics_embedded_ = !deleting;
-    // Update the playback-item cache: LoadCurrentLyrics checks it before disk.
-    if (opened_track_ && opened_track_->path == path) {
-        std::erase_if(opened_track_->metadata, [](const auto& pair) {
-            return !_stricmp(pair.first.c_str(), "Lyrics") || !_stricmp(pair.first.c_str(), "Lyric");
-        });
-        if (!deleting) opened_track_->metadata.emplace_back("Lyrics", core::WideToUtf8(text));
-    }
-    if (lyric_editor_ && !deleting)
-        SendMessageW(lyric_editor_, EM_SETMODIFY, FALSE, 0);
+    if (lyric_editor_ && !deleting) SendMessageW(lyric_editor_, EM_SETMODIFY, FALSE, 0);
     if (!deleting) lyric_document_modified_ = false;
     RefreshPlaybackUi();
     return true;
+}
+
+void PlayerWindow::PollLyricSaveFailures() {
+    if (audio_) {
+        auto failures = audio_->TakeLyricSaveFailures();
+        for (auto& failure : failures) pending_lyric_save_failures_.push_back(std::move(failure));
+    }
+    if (pending_lyric_save_failures_.empty() || lyric_save_in_progress_ ||
+        file_info_write_in_progress_ || close_after_skin_window_fade_ || !IsWindow(window_)) return;
+    auto failures = std::move(pending_lyric_save_failures_);
+    pending_lyric_save_failures_.clear();
+    LyricFileAccessScope access(file_info_write_in_progress_,
+        {lyric_window_, playlist_window_, equalizer_window_, options_window_});
+    for (const auto& failure : failures) {
+        if (lyric_document_track_ &&
+            SameLyricSource(*lyric_document_track_, failure.path, failure.subtrack)) {
+            lyric_document_modified_ = true;
+            if (lyric_editor_) SendMessageW(lyric_editor_, EM_SETMODIFY, TRUE, 0);
+        }
+        wchar_t code[32]{};
+        swprintf_s(code, L"0x%08lX", static_cast<unsigned long>(failure.result));
+        auto message = ResourceText(0x8180) + L"\r\n\r\n" + failure.path.native() +
+            L"\r\n" + code;
+        if (!failure.recovery_path.empty())
+            message += L"\r\n\r\n歌词恢复文件：\r\n" + failure.recovery_path.native();
+        wchar_t caption[128]{};
+        GetWindowTextW(window_, caption, static_cast<int>(std::size(caption)));
+        MessageBoxW(window_, message.c_str(), caption, MB_OK | MB_ICONERROR);
+    }
 }
 
 void PlayerWindow::LyricDocumentChanged() {
@@ -4107,8 +4320,10 @@ void PlayerWindow::PrepareLyricMenu(HMENU menu, bool fullscreen_popup) const {
     EnableCommand(menu, kCmdLyricAssociate, have_track);
     EnableCommand(menu, kCmdLyricDownload, have_track);
     EnableCommand(menu, kCmdLyricEmbeddedRead, have_track);
-    EnableCommand(menu, kCmdLyricEmbeddedDelete, have_track);
-    EnableCommand(menu, kCmdLyricEmbeddedWrite, have_track && have_lyrics);
+    const auto* embedded_track = lyric_document_track_ ? &*lyric_document_track_ : PlaybackTrackForUi();
+    const bool can_write_embedded = CanWriteEmbeddedLyrics(embedded_track) && !file_info_write_in_progress_;
+    EnableCommand(menu, kCmdLyricEmbeddedDelete, can_write_embedded);
+    EnableCommand(menu, kCmdLyricEmbeddedWrite, can_write_embedded && have_lyrics);
     EnableCommand(menu, kCmdChineseTraditional, have_lyrics);
     EnableCommand(menu, kCmdChineseSimplified, have_lyrics);
     // 0044AAB2: resource 143 has only "system default" and a separator.
@@ -4260,6 +4475,7 @@ void PlayerWindow::PrepareLyricEditorMenu(HMENU menu) const {
 }
 
 bool PlayerWindow::HandleLyricCommand(UINT command) {
+    if (file_info_write_in_progress_) return true;
     if(HandleNativeLyricContentCommand(command))return true;
     if (command == kCmdLyricDoubleClickFullscreen) {
         settings_.lyric.double_click_fullscreen = !settings_.lyric.double_click_fullscreen;

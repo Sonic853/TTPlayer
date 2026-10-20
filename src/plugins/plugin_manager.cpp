@@ -976,6 +976,55 @@ bool SafeWideLength(const wchar_t* value, size_t maximum, size_t* length) noexce
 #endif
 }
 
+HRESULT ReadOptionalMetadataValue(void* metadata, const char* name,
+                                  const wchar_t* wide_name, std::wstring& value) {
+    value.clear();
+    wchar_t* allocated{};
+    const HRESULT result = InvokeMetadataValue(metadata, name, &allocated);
+    const std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> owner(allocated, CoTaskMemFree);
+    if (SUCCEEDED(result)) {
+        if (!allocated) return S_FALSE;
+        size_t length{};
+        if (!SafeWideLength(allocated, 1024U * 1024U, &length))
+            return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        value.assign(allocated, length);
+        return S_OK;
+    }
+    // The private GetValue contract uses E_INVALIDARG for an absent field.
+    // Keep actual I/O/access failures; MetadataValue() intentionally hides
+    // those for display callers and is unsuitable for write verification.
+    if (result == E_INVALIDARG || result == HRESULT_FROM_WIN32(ERROR_NOT_FOUND))
+        return S_FALSE;
+    if (result != E_FAIL) return result;
+
+    // Some shipped writers return E_FAIL for missing keys. Accept that only
+    // when a complete, current enumeration confirms the key is absent. A Get
+    // implementation can expose additional keys, so successful Get wins above.
+    DWORD count{};
+    const HRESULT counted = InvokeMetadataCount(metadata, &count);
+    if (FAILED(counted)) return counted;
+    if (count > 65536U) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    for (DWORD index = 0; index < count; ++index) {
+        wchar_t* entry_name{};
+        wchar_t* entry_value{};
+        const HRESULT enumerated = InvokeMetadataAt(metadata, index, &entry_name, &entry_value);
+        const std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> name_owner(entry_name, CoTaskMemFree);
+        const std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> value_owner(entry_value, CoTaskMemFree);
+        if (FAILED(enumerated)) return enumerated;
+        size_t length{};
+        if (!SafeWideLength(entry_name, 32768U, &length))
+            return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        if (_wcsicmp(entry_name, wide_name) == 0) {
+            size_t value_length{};
+            if (!SafeWideLength(entry_value, 1024U * 1024U, &value_length))
+                return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+            // An explicitly empty enumerated field is equivalent to absent.
+            return value_length == 0 ? S_FALSE : result;
+        }
+    }
+    return S_FALSE;
+}
+
 std::wstring ReadInterfaceString(void* object, size_t slot) {
     wchar_t* allocated{};
     std::wstring value;
@@ -1508,6 +1557,24 @@ std::optional<std::wstring> LegacyReaderSession::MetadataValue(
     return value;
 }
 
+HRESULT LegacyReaderSession::ReadMetadataValue(
+    std::string_view name, std::wstring& value) const noexcept {
+    value.clear();
+    if (!impl_ || !impl_->metadata) return E_NOINTERFACE;
+    if (name.empty() || name.find('\0') != std::string_view::npos)
+        return E_INVALIDARG;
+    try {
+        const std::string terminated_name(name);
+        const std::wstring wide_name = core::Utf8ToWide(name);
+        return ReadOptionalMetadataValue(impl_->metadata,
+            terminated_name.c_str(), wide_name.c_str(), value);
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    } catch (...) {
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    }
+}
+
 HRESULT LegacyReaderSession::SetMetadataValue(
     std::string_view name, std::wstring_view value) noexcept {
     if (!impl_ || !impl_->metadata) return E_NOINTERFACE;
@@ -1538,6 +1605,65 @@ HRESULT LegacyReaderSession::SetMetadataValueDirect(
         const std::wstring terminated_value(value);
         return InvokeMetadataSet(impl_->metadata, terminated_name.c_str(),
                                  terminated_value.c_str());
+    } catch (...) {
+        return E_OUTOFMEMORY;
+    }
+}
+
+HRESULT LegacyReaderSession::SetLyrics(std::wstring_view text) noexcept {
+    if (!impl_ || !impl_->metadata) return E_NOINTERFACE;
+    if (impl_->metadata_committed) return E_UNEXPECTED;
+    if (text.find(L'\0') != std::wstring_view::npos) return E_INVALIDARG;
+    try {
+        std::wstring original_canonical, original_singular;
+        HRESULT result = ReadOptionalMetadataValue(impl_->metadata, "Lyrics", L"Lyrics", original_canonical);
+        if (FAILED(result)) return result;
+        result = ReadOptionalMetadataValue(impl_->metadata, "Lyric", L"Lyric", original_singular);
+        if (FAILED(result)) return result;
+        // Old readers persist dirty metadata at final Release, even when a
+        // later setter failed. Keep both views before touching either key.
+        // Empty fields must be restored first: the two setters may address
+        // one canonical value, so clearing an absent alias last would erase
+        // the original lyrics again. Rollback is best-effort; a third-party
+        // writer can reject restoration too. Never mask the original error.
+        struct RestoreLyrics {
+            void* metadata;
+            const std::wstring& canonical;
+            const std::wstring& singular;
+            bool pending{};
+            ~RestoreLyrics() noexcept {
+                if (!pending) return;
+                if (singular.empty()) InvokeMetadataSet(metadata, "Lyric", L"");
+                if (canonical.empty()) InvokeMetadataSet(metadata, "Lyrics", L"");
+                if (!singular.empty()) InvokeMetadataSet(metadata, "Lyric", singular.c_str());
+                if (!canonical.empty()) InvokeMetadataSet(metadata, "Lyrics", canonical.c_str());
+            }
+        } restore{impl_->metadata, original_canonical, original_singular};
+        result = impl_->BeginMutation();
+        if (FAILED(result)) return result;
+        restore.pending = true; // A failed setter may still have changed data.
+        if (!original_singular.empty()) {
+            result = SetMetadataValueDirect("Lyric", {});
+            if (FAILED(result)) return result;
+            std::wstring previous;
+            result = ReadOptionalMetadataValue(impl_->metadata, "Lyric", L"Lyric", previous);
+            if (FAILED(result)) return result;
+            if (!previous.empty()) return STG_E_WRITEFAULT;
+        }
+        // Do this last: standard host tags canonicalize both names to Lyrics.
+        result = SetMetadataValueDirect("Lyrics", text);
+        if (FAILED(result)) return result;
+        std::wstring actual;
+        result = ReadOptionalMetadataValue(impl_->metadata, "Lyrics", L"Lyrics", actual);
+        if (FAILED(result)) return result;
+        if (actual != text) return STG_E_WRITEFAULT;
+        if (text.empty()) {
+            result = ReadOptionalMetadataValue(impl_->metadata, "Lyric", L"Lyric", actual);
+            if (FAILED(result)) return result;
+            if (!actual.empty()) return STG_E_WRITEFAULT;
+        }
+        restore.pending = false;
+        return S_OK;
     } catch (...) {
         return E_OUTOFMEMORY;
     }

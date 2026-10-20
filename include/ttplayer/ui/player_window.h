@@ -54,6 +54,7 @@ struct IDataObject;
 namespace ttplayer::testing { struct SkinRebindAccess; }
 
 namespace ttplayer::ui {
+namespace detail { struct ReplayGainRemovalResult; }
 class VisualRuntime;
 struct LyricUploadData;
 class PlayerWindow {
@@ -596,6 +597,7 @@ private:
     std::vector<std::pair<size_t, size_t>> VisiblePlaylistInfoRanges() const;
     void InvalidatePlaylistInfoRows(const std::vector<size_t>& rows);
     void PollPlaylistInfo();
+    void PollPlaylistMetadataRemoval();
     const std::vector<size_t>& PlaylistInfoSourceRows(size_t index, const std::wstring& source);
     void StartNextPlaylistInfoRead();
     LRESULT ApplyPlaylistInfoResult(LPARAM result);
@@ -714,7 +716,9 @@ private:
     void CaptureLyricFindState();
     void UpdateLyricFindButtons();
     static INT_PTR CALLBACK LyricFindDialogProc(HWND, UINT, WPARAM, LPARAM);
-    [[nodiscard]] std::optional<std::wstring> ReadEmbeddedLyrics() const;
+    [[nodiscard]] std::optional<std::wstring> ReadEmbeddedLyrics();
+    void SynchronizeEmbeddedLyricCache(const std::filesystem::path& path, int subtrack, std::wstring_view text);
+    void PollLyricSaveFailures();
     bool WriteEmbeddedLyrics(std::wstring_view text, bool deleting, bool silent = false);
     void LoadCurrentLyrics(bool force = false);
     void LoadLyricsFrom(const std::filesystem::path& path, bool associated);
@@ -1214,6 +1218,7 @@ private:
     bool lyric_document_modified_{};
     bool lyric_save_in_progress_{};
     bool file_info_write_in_progress_{};
+    std::vector<audio::LyricSaveFailure> pending_lyric_save_failures_;
     std::optional<playlist::Track> lyric_document_track_;
     std::unique_ptr<LyricUploadData> lyric_upload_pending_;
     std::filesystem::path lyric_path_;
@@ -1324,6 +1329,7 @@ private:
     std::deque<audio::ExtensionCorrection> extension_corrections_;
     std::set<std::wstring> extension_corrections_seen_;
     bool extension_correction_open_{};
+    std::shared_ptr<detail::ReplayGainRemovalResult> playlist_metadata_result_;
     std::shared_ptr<std::atomic_bool> playlist_metadata_working_;
     std::shared_ptr<std::atomic_bool> playlist_metadata_cancel_;
     int playlist_scrollbar_drag_anchor_y_{};
