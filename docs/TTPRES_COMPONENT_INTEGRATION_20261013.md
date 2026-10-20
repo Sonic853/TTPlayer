@@ -33,3 +33,42 @@ Windows 11、XP、Win7 均通过：原版 192 项逐字节对照，25 个菜单�
 - DLL SHA-256：`f4db74b1f4095fa1d25146ec33265ec4b3ade12dff9c5e75680c44a3e9138df6`。
 
 原版资源 `VERSION/1` 保留 5.7.9.0；资源组件的日期版本保存于 `TTPLAYER_RES_BUILD` 和发行包名中。原版启动读取的产品名、显示版本、菜单占位编号、皮肤内容及字体均保留。
+
+## 2026-10-21：Action 缺少资源审计模块
+
+### 原因与修复
+
+`download_ttpres_component.py` 从 `third_party/ttpres-sdk/tools` 导入
+`audit.py`，后者还依赖同目录的 `resource_model.py`。根 `.gitignore` 中不带
+路径限定的 `tools` 规则忽略了所有同名目录，这两个文件虽然存在于本机，却未进入
+Git 源码。Action 只检出仓库文件，因此在开始下载前便抛出
+`ModuleNotFoundError: No module named 'audit'`。它不是需要通过 pip 安装的包，
+也不是 Python、VC 运行库或下载凭据的问题。
+
+现已为 SDK 目录下这两个文件增加精确的忽略例外，使它们可以随播放器源码提交；
+其它本地工具和 `__pycache__` 仍保持忽略。两个文件分别与 `sdk.json` 中记录的
+SHA-256、相邻 TTPlayerRes 源码完全一致，无需更改资源基准或下载脚本的导入路径。
+提交本次修复时必须同时包含两个新增 Python 文件，仅提交 `.gitignore` 不足以修复 CI。
+
+另外，资源 Release 返回 404 时，按用户要求仅显示
+`TTPlayerRes: no releases found.` 并以失败状态退出，不显示异常堆栈或发布说明。
+下载、哈希、192 项原版资源、扩展 ABI 和版本检查全部保留，不使用备用 DLL，
+不跳过审计。
+
+### 验证与待完成的远程条件
+
+- 在只含 Git 已跟踪构建文件的临时目录中复现了同一个 `audit` 导入异常。
+- 将可提交的新模块加入独立临时目录后，资源、TTPCOMM、HTTPS、歌词搜索四个下载脚本均可导入。
+- SDK 全部文件通过既有哈希清单校验；仅包含两个应提交的工具模块。
+- 本地资源 DLL 通过原版 192 项资源和扩展校验；破坏旧校验字段的 DLL 被拒绝。
+- 使用现有 `ttpres-2026.10.13.zip` 与离线 Release 元数据，完整执行下载器入口、
+  ZIP/DLL 哈希校验、资源审计、版本匹配和暂存，生成 DLL 与组件报告。
+- 缺失 Release 的回归检查通过：仅显示简短提示，不生成输出或使用回退。
+- 本地测试位于 `tests/ttpres_action_20261021/verify.py`，不上传测试代码，
+  不添加 Action 测试步骤；本次未重编译播放器或重复虚拟机运行测试。
+
+2026-10-21 的实际联网检查中，匿名 GitHub API 已达速率限额；使用已有登录凭据后，
+确认 `TTPlayerRebuild/TTPlayerRes` 仓库可访问，但 Release 列表为空，
+`releases/latest` 返回 404。因此本次未完成实际远程资源下载，也未运行托管 Action。
+用户正在补上资源 DLL 发行包；本次仅保留缺少 Release 的简短提示，未发布或推送
+任何仓库。

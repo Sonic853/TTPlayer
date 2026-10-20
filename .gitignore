@@ -1,4 +1,11 @@
 tools
+# These SDK modules are build dependencies used by the resource downloader.
+# Keep other local tools and generated files excluded.
+!/third_party/ttpres-sdk/tools/
+/third_party/ttpres-sdk/tools/*
+!/third_party/ttpres-sdk/tools/audit.py
+!/third_party/ttpres-sdk/tools/resource_model.py
+
 # CMake build trees and generated project files
 /rebuild/build/
 /build/

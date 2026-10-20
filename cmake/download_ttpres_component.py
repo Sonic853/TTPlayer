@@ -90,7 +90,12 @@ def main():
     if args.version != 'latest' and not re.fullmatch(r'\d{4}\.\d{2}\.\d{2}(?:p[1-9]\d*)?', args.version):
         raise ValueError('Invalid resource version')
     api = API_BASE + ('latest' if args.version == 'latest' else 'tags/' + args.version)
-    release = json.loads(download(api, 2 * 1024 * 1024, api=True))
+    try:
+        release = json.loads(download(api, 2 * 1024 * 1024, api=True))
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+        raise SystemExit('TTPlayerRes: no releases found.') from None
     dll, metadata = unpack(release)
     if args.version != 'latest' and metadata['version'] != args.version:
         raise ValueError('Resource release tag does not match requested version')
