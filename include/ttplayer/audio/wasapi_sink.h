@@ -32,8 +32,12 @@ public:
     WasapiSink(const WasapiSink&) = delete;
     WasapiSink& operator=(const WasapiSink&) = delete;
 
+    // AudioEngine retains four producer packets until fully played. Supply
+    // their actual size so recovery never waits for an unreachable watermark.
+    // Zero retains the nominal four-packet size inferred from buffer_ms.
     bool OpenDevice(const std::wstring& endpoint_id, bool exclusive,
-                    const WAVEFORMATEX& source_format, int buffer_ms);
+                    const WAVEFORMATEX& source_format, int buffer_ms,
+                    size_t queued_packet_bytes = 0);
     bool Submit(std::span<const std::byte> pcm);
     // The final submitted packet may be shorter than the buffering threshold.
     // Reset clears this marker before a seek/refill.

@@ -2,6 +2,7 @@
 #include <ttpcomm/audio_format_probe_impl.h>
 #include "nero_config_layout.h"
 #include "builtin_mpeg_decoder.h"
+#include "builtin_acm_decoder.h"
 #include "ttplayer/audio/format_probe.h"
 #include "ttplayer/audio/file_mutation.h"
 #include "ttplayer/i18n/i18n.h"
@@ -1687,6 +1688,7 @@ HRESULT LegacyReaderSession::CommitMetadata() noexcept {
 struct LegacyDecoderSession::Impl {
     void* decoder{};
     bool builtin_mpeg{};
+    bool builtin_acm{};
     alignas(WAVEFORMATEX) std::array<std::byte, 0x28> output_format{};
     DWORD input_bytes{};
     DWORD output_bytes{};
@@ -1756,7 +1758,8 @@ HRESULT LegacyDecoderSession::PushInput(
 HRESULT LegacyDecoderSession::FinishInput() noexcept {
     if (!impl_ || !impl_->decoder) return E_UNEXPECTED;
     return impl_->builtin_mpeg
-        ? detail::FinishBuiltinMpegDecoder(impl_->decoder) : S_FALSE;
+        ? detail::FinishBuiltinMpegDecoder(impl_->decoder)
+        : impl_->builtin_acm ? detail::FinishBuiltinAcmDecoder(impl_->decoder) : S_FALSE;
 }
 
 HRESULT LegacyDecoderSession::ReadOutput(
@@ -2809,7 +2812,7 @@ bool PluginManager::HasDecoderForFormat(
         // still a valid candidate.
         if (SUCCEEDED(supported)) return true;
     }
-    return false;
+    return detail::SupportsBuiltinAcmDecoder(format);
 }
 
 std::unique_ptr<LegacyDecoderSession> PluginManager::OpenDecoder(
@@ -2826,10 +2829,12 @@ std::unique_ptr<LegacyDecoderSession> PluginManager::OpenDecoder(
     const GUID subtype = WaveSubtype(encoded_format);
     HRESULT last_result = E_NOTIMPL;
     bool matched{};
-    for (size_t candidate = 0; candidate <= decoder_factories_.size(); ++candidate) {
+    for (size_t candidate = 0; candidate <= decoder_factories_.size() + 1; ++candidate) {
         const bool builtin = candidate == 0;
+        const bool acm = candidate == decoder_factories_.size() + 1;
         if (builtin && !detail::SupportsBuiltinMpegDecoder(encoded_format)) continue;
-        const auto* factory = builtin ? nullptr : &decoder_factories_[candidate - 1];
+        if (acm && !detail::SupportsBuiltinAcmDecoder(encoded_format)) continue;
+        const auto* factory = builtin || acm ? nullptr : &decoder_factories_[candidate - 1];
         std::filesystem::path decoder_module;
         HRESULT supported = S_OK;
         void* decoder{};
@@ -2840,6 +2845,11 @@ std::unique_ptr<LegacyDecoderSession> PluginManager::OpenDecoder(
             // ttpcomm ordinals 10..14, independently of ASF/DMO and ACM.
             matched = true;
             current = detail::CreateBuiltinMpegDecoder(&decoder, decoder_module);
+        } else if (acm) {
+            // 004CA0A0 / 004C9C1F is the host's final generic ACM decoder.
+            // Keep format-specific Sound AddIn decoders ahead of this fallback.
+            matched = true;
+            current = detail::CreateBuiltinAcmDecoder(&decoder, decoder_module);
         } else {
             void* creator = ResolveCategoryInterface(
                 factory->module_index, factory->enumeration_index,
@@ -2909,6 +2919,7 @@ std::unique_ptr<LegacyDecoderSession> PluginManager::OpenDecoder(
             auto implementation = std::make_unique<LegacyDecoderSession::Impl>();
             implementation->decoder = decoder;
             implementation->builtin_mpeg = builtin;
+            implementation->builtin_acm = acm;
             decoder = nullptr;
             implementation->output_format = output_format;
             implementation->input_bytes = input_bytes;

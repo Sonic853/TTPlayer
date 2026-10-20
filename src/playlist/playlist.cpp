@@ -418,12 +418,23 @@ std::string EncodeM3uField(std::wstring_view value, UINT code_page) {
     return encoded;
 }
 
+std::filesystem::path NormalizePlaylistTrackPath(const std::filesystem::path& path) {
+    const auto& value = path.native();
+    const auto member = value.find(L'|');
+    if (member == std::wstring::npos) return path.lexically_normal();
+    // The archive member is an opaque name, not a Windows filesystem path.
+    // Its literal dot components must survive playlist export/import.
+    return std::filesystem::path(
+        std::filesystem::path(value.substr(0, member)).lexically_normal().native() +
+        value.substr(member));
+}
+
 std::filesystem::path ResolveM3uTrackPath(
     const std::filesystem::path& base, std::wstring_view value) {
     if (IsUrl(value)) return std::filesystem::path(value);
     std::filesystem::path resolved(value);
     if (resolved.is_relative()) resolved = base / resolved;
-    return resolved.lexically_normal();
+    return NormalizePlaylistTrackPath(resolved);
 }
 
 // Older reconstruction builds persisted literal TRACK values. Original
@@ -484,7 +495,7 @@ std::filesystem::path ResolveXmlTrackPath(
     const auto wide = core::Utf8ToWide(encoded);
     std::filesystem::path resolved(wide);
     if (!IsUrl(wide) && resolved.is_relative()) resolved = base / resolved;
-    return IsUrl(wide) ? resolved : resolved.lexically_normal();
+    return IsUrl(wide) ? resolved : NormalizePlaylistTrackPath(resolved);
 }
 
 std::string EscapeXmlAttribute(std::string_view value) {
@@ -503,7 +514,7 @@ std::string EscapeXmlAttribute(std::string_view value) {
     return escaped;
 }
 
-std::wstring XmlStoredTrackPath(const std::filesystem::path& output_path,
+std::wstring StoredTrackPath(const std::filesystem::path& output_path,
                                 const std::filesystem::path& track_path,
                                 bool save_relative_path) {
     if (IsUrl(track_path.native())) return track_path.wstring();
@@ -511,14 +522,18 @@ std::wstring XmlStoredTrackPath(const std::filesystem::path& output_path,
     std::error_code output_error;
     std::error_code track_error;
     auto output = std::filesystem::absolute(output_path, output_error);
-    auto track = std::filesystem::absolute(track_path, track_error);
+    const auto member = track_path.native().find(L'|');
+    const std::filesystem::path physical(member == std::wstring::npos
+        ? track_path.native() : track_path.native().substr(0, member));
+    auto track = std::filesystem::absolute(physical, track_error);
     if (output_error) output = output_path;
-    if (track_error) track = track_path;
-    auto base = output.parent_path().wstring();
+    if (track_error) track = physical;
+    auto base = output.lexically_normal().parent_path().wstring();
     auto value = track.lexically_normal().wstring();
+    if (member != std::wstring::npos) value += track_path.native().substr(member);
     if (!base.empty() && base.back() != L'\\' && base.back() != L'/')
         base.push_back(L'\\');
-    // 00475486 strips only the output directory's case-insensitive prefix;
+    // 00475486 and M3U writer 00477446 strip the output directory's prefix;
     // it does not manufacture .. components for media outside that tree.
     if (save_relative_path && !base.empty() && value.size() >= base.size() &&
         _wcsnicmp(value.c_str(), base.c_str(), base.size()) == 0) {
@@ -982,7 +997,8 @@ void Playlist::LoadM3u8(const std::filesystem::path& path,
     }
 }
 
-void Playlist::SaveM3u8(const std::filesystem::path& path) const {
+void Playlist::SaveM3u8(const std::filesystem::path& path,
+                       bool save_relative_path) const {
     // FUN_00477446 receives the .m3u8 comparison from 00475486: UTF-8 is
     // used only for M3U8, while legacy .m3u is written in the process ANSI
     // code page that LoadM3u8 already selects for that suffix.
@@ -997,13 +1013,11 @@ void Playlist::SaveM3u8(const std::filesystem::path& path) const {
         output.push_back(',');
         output += EncodeM3uField(title, code_page);
         output.push_back('\n');
-        output += EncodeM3uField(track.path.wstring(), code_page);
+        output += EncodeM3uField(StoredTrackPath(path, track.path, save_relative_path),
+                                 code_page);
         output.push_back('\n');
     }
-    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
-    if (!stream) throw std::runtime_error("cannot write M3U file");
-    stream.write(output.data(), static_cast<std::streamsize>(output.size()));
-    if (!stream) throw std::runtime_error("cannot write M3U file");
+    core::WriteFileAtomically(path, output);
 }
 
 void Playlist::LoadTtbl(const std::filesystem::path& path) {
@@ -1363,7 +1377,7 @@ void Playlist::SaveXml(const std::filesystem::path& path,
     output << "\t<items count=\"" << tracks_.size() << "\">\r\n";
     for (const auto& track : tracks_) {
         const auto stored_path = core::WideToUtf8(
-            XmlStoredTrackPath(path, track.path, save_relative_path));
+            StoredTrackPath(path, track.path, save_relative_path));
         output << "\t\t<item file=\"" << EscapeXmlAttribute(stored_path) << '"';
         if (track.subtrack > 0)
             output << " subtk=\"" << track.subtrack << '"';
@@ -1439,7 +1453,8 @@ void Playlist::SaveToFile(const std::filesystem::path& path,
     if (extension.empty())
         throw std::invalid_argument("playlist output has no extension");
     if (extension == L".ttbl") SaveTtbl(path);
-    else if (extension == L".m3u" || extension == L".m3u8") SaveM3u8(path);
+    else if (extension == L".m3u" || extension == L".m3u8")
+        SaveM3u8(path, save_relative_path);
     else SaveXml(path, tag_title_format, default_title_format,
                  save_relative_path, save_tags);
 }

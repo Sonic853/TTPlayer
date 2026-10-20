@@ -35,6 +35,18 @@ struct ReplayGainScanResult {
     std::wstring diagnostic;
 };
 
+// Committed values survive decoder/modeless-dialog destruction. The UI
+// consumes them independently of the current playback state.
+struct ReplayGainMetadataUpdate {
+    std::filesystem::path path;
+    int subtrack{};
+    std::wstring gain;
+    std::wstring peak;
+    std::wstring source_identity; // CD TOC checked by the writer.
+    std::wstring file_version; // Post-commit physical identity for late-result rejection.
+};
+[[nodiscard]] std::vector<ReplayGainMetadataUpdate> TakeReplayGainMetadataUpdates();
+
 enum class ReplayGainCommitPolicy {
     // CScanGainDlg completion (004A50B5 -> 004C80AC) deliberately removes
     // FILE_ATTRIBUTE_READONLY before opening the metadata writer.

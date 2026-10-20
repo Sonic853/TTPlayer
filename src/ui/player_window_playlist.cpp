@@ -13,6 +13,7 @@
 
 #include "ttplayer/core/text.h"
 #include "ttplayer/audio/builtin_file_info.h"
+#include "ttplayer/audio/replay_gain_scanner.h"
 #include "ttplayer/audio/archive_member.h"
 #include "ttplayer/ui/dialog_history_policy.h"
 #include "ttplayer/ui/playlist_catalog_reorder.h"
@@ -20,6 +21,7 @@
 #include "ttplayer/ui/playlist_list_contract.h"
 #include "ttplayer/ui/playlist_network_commands.h"
 #include "ttplayer/ui/playlist_transforms.h"
+#include "ttplayer/ui/media_library_playback.h"
 #include "ttplayer/ui/window_drag.h"
 
 #include <algorithm>
@@ -48,6 +50,7 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 #include <windowsx.h>
 
@@ -1438,6 +1441,38 @@ std::vector<wchar_t> ShellPathList(
 
 } // namespace
 
+void PlayerWindow::PollReplayGainMetadata() {
+    // A completed writer may belong to a stopped/faded-out engine. The
+    // scanner validates committed source identities without waiting for an
+    // active writer, independently of the current playback state.
+    std::unordered_map<std::wstring, std::pair<std::string, std::string>> accepted;
+    for (const auto& completed : audio::TakeReplayGainMetadataUpdates()) {
+        playlist::Track source;
+        source.path = completed.path;
+        source.subtrack = completed.subtrack;
+        accepted.insert_or_assign(MediaLibraryTrackIdentity(source),
+            std::make_pair(core::WideToUtf8(completed.gain), core::WideToUtf8(completed.peak)));
+    }
+    if (accepted.empty()) return;
+    // A modeless scan can finish many rows between timer ticks. Merge the
+    // whole batch in one traversal instead of rescanning every container N times.
+    const bool changed = PublishTrackMetadataUpdate(
+        [&](const auto& track) { return accepted.contains(MediaLibraryTrackIdentity(track)); },
+        [&](auto& track) {
+            const auto& values = accepted.at(MediaLibraryTrackIdentity(track));
+            std::erase_if(track.metadata, [](const auto& field) {
+                return !_stricmp(field.first.c_str(), "replaygain_track_gain") ||
+                       !_stricmp(field.first.c_str(), "replaygain_track_peak");
+            });
+            track.metadata.emplace_back("replaygain_track_gain", values.first);
+            track.metadata.emplace_back("replaygain_track_peak", values.second);
+        }, true);
+    if (changed) {
+        RefreshPlaylist();
+        RefreshPlaybackUi();
+    }
+}
+
 void PlayerWindow::PollPlaylistMetadataRemoval() {
     if (!playlist_metadata_result_ || !playlist_metadata_working_ ||
         playlist_metadata_working_->load(std::memory_order_acquire)) return;
@@ -1446,29 +1481,8 @@ void PlayerWindow::PollPlaylistMetadataRemoval() {
     playlist_metadata_cancel_.reset();
     bool changed{};
     for (const auto& completed : result->succeeded) {
-        const auto same = [&](const playlist::Track& track) {
-            return track.subtrack == completed.subtrack &&
-                !_wcsicmp(track.path.c_str(), completed.path.c_str());
-        };
-        // Merge into the newest UI snapshot, rather than restoring other tags
-        // captured before a concurrent property edit or metadata read.
-        auto updated = completed;
-        bool found{};
-        for (size_t row = 0; row < VisiblePlaylistTrackCount(); ++row)
-            if (const auto* track = VisiblePlaylistTrack(row); track && same(*track)) {
-                updated = *track; found = true; break;
-            }
-        if (!found && opened_track_ && same(*opened_track_)) {
-            updated = *opened_track_; found = true;
-        }
-        for (size_t list = 0; list < playlists_.Size() && !found; ++list)
-            for (const auto& track : playlists_.At(list).Tracks())
-                if (same(track)) { updated = track; found = true; break; }
-        std::erase_if(updated.metadata, [](const auto& field) {
-            return !_stricmp(field.first.c_str(), "replaygain_track_gain") ||
-                   !_stricmp(field.first.c_str(), "replaygain_track_peak");
-        });
-        changed |= PublishTrackMetadata(updated);
+        changed |= PublishTrackMetadataFields(completed, {
+            {"replaygain_track_gain", ""}, {"replaygain_track_peak", ""}});
     }
     if (changed) {
         RefreshPlaylist();
@@ -6354,6 +6368,12 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
                     settings_.playlist.default_title_format,
                     settings_.playlist.save_relative_path,
                     settings_.playlist.save_tags);
+            } catch (const std::filesystem::filesystem_error& error) {
+                auto message = ResourceText(0x828e);
+                if (error.code().value() == ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 && !error.path2().empty())
+                    message += L"\r\n原文件的备份已保留在：\r\n" + error.path2().native();
+                MessageBoxW(playlist_window_, message.c_str(),
+                            ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
             } catch (const std::exception&) {
                 const auto message = ResourceText(0x828e);
                 MessageBoxW(playlist_window_, message.c_str(),
@@ -6379,6 +6399,7 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
             return true;
         }
         bool failed{};
+        std::wstring retained_backups;
         for (const auto& entry : playlists_.Entries()) {
             auto name = SafePlaylistFileName(entry.playlist.Title());
             if (name.empty()) name = ResourceText(0x813a);
@@ -6389,12 +6410,18 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
                     settings_.playlist.default_title_format,
                     settings_.playlist.save_relative_path,
                     settings_.playlist.save_tags);
+            } catch (const std::filesystem::filesystem_error& error) {
+                failed = true;
+                if (error.code().value() == ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 && !error.path2().empty())
+                    retained_backups += L"\r\n" + error.path2().native();
             } catch (const std::exception&) {
                 failed = true;
             }
         }
         if (failed) {
-            MessageBoxW(playlist_window_, ResourceText(0x828e).c_str(),
+            auto message = ResourceText(0x828e);
+            if (!retained_backups.empty()) message += L"\r\n原文件的备份已保留在：" + retained_backups;
+            MessageBoxW(playlist_window_, message.c_str(),
                         ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
         }
         return true;
@@ -6504,6 +6531,12 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
             pattern = std::move(state.value);
         }
 
+        EnsureLyricAssociationsLoaded();
+        if (!lyric_associations_.Loaded()) {
+            MessageBoxW(playlist_window_, ResourceText(0x8182).c_str(),
+                        ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
+            return true;
+        }
         std::vector<playlist::Track> selected_tracks;
         selected_tracks.reserve(playlist_selected_rows_.size());
         for (const size_t row : playlist_selected_rows_) {
@@ -6553,6 +6586,14 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
                 if (edits != 0) playlists_.MarkDirty(list, edits);
             }
             static_cast<void>(UpdateMediaLibraryTrackPath(snapshot, target));
+            // The library playback queue may survive a disabled/destroyed
+            // library view; its identities still have to follow the file.
+            for (size_t row = 0; row < media_library_playback_.Tracks().size(); ++row)
+                if (!_wcsicmp(media_library_playback_.Tracks()[row].path.c_str(), snapshot.path.c_str()))
+                    media_library_playback_.SetPath(row, target);
+            RetargetLyricSource(snapshot.path, target);
+            if (!_wcsicmp(settings_.player.playing_file_name.c_str(), snapshot.path.c_str()))
+                settings_.player.playing_file_name = target.native();
             if (opened_track_ &&
                 _wcsicmp(opened_track_->path.c_str(),
                          snapshot.path.c_str()) == 0) {

@@ -5138,7 +5138,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         const HWND tab = GetDlgItem(dialog, 1181);
         if (tab) {
             for (int index = 0; index < 2; ++index) {
-                auto title = index == 1 ? std::wstring(L"MusicBrainz") : ResourceText(33262 + index);
+                auto title = ResourceText(33262 + index);
                 TCITEMW item{};
                 item.mask = TCIF_TEXT;
                 item.pszText = title.data();

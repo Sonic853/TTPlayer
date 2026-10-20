@@ -1,5 +1,6 @@
 #include "ttplayer/app/single_instance.h"
 
+#include <limits>
 #include <string>
 
 namespace ttplayer::app {
@@ -38,15 +39,25 @@ bool SingleInstanceIpc::ForwardCommandLine(std::wstring_view path, ULONG_PTR mod
         !shared_ || !IsWindow(shared_->window)) return false;
     const HWND target = shared_->window;
     if (!path.empty()) {
+        if (path.size() >= (std::numeric_limits<DWORD>::max)() / sizeof(wchar_t))
+            return false;
+        // string_view need not end at a NUL. WM_COPYDATA copies cbData bytes,
+        // so own the terminator as well as the payload until the send returns.
+        const std::wstring command(path);
         COPYDATASTRUCT data{};
         data.dwData = mode;
-        data.cbData = static_cast<DWORD>((path.size() + 1) * sizeof(wchar_t));
-        data.lpData = const_cast<wchar_t*>(path.data());
-        SendMessageW(target, WM_COPYDATA, reinterpret_cast<WPARAM>(target),
-                     reinterpret_cast<LPARAM>(&data));
+        data.cbData = static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t));
+        data.lpData = const_cast<wchar_t*>(command.c_str());
+        DWORD_PTR result{};
+        if (!SendMessageTimeoutW(target, WM_COPYDATA, reinterpret_cast<WPARAM>(target),
+                reinterpret_cast<LPARAM>(&data), SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                5000, &result))
+            return false;
     }
-    ShowWindow(target, SW_SHOW);
-    SendMessageW(target, WM_SYSCOMMAND, SC_RESTORE, 0);
+    // A stalled first instance must not keep a second launch blocked inside
+    // either ShowWindow or a synchronous restore message.
+    ShowWindowAsync(target, SW_SHOW);
+    if (!PostMessageW(target, WM_SYSCOMMAND, SC_RESTORE, 0)) return false;
     SetForegroundWindow(target);
     return true;
 }

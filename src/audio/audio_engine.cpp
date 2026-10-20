@@ -2,6 +2,8 @@
 #include <ttpcomm/runtime_pcm.h>
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/audio_engine.h"
+#include "ttplayer/audio/buffering_contract.h"
+#include "ttplayer/audio/precise_seek_source.h"
 #include "ttplayer/audio/file_mutation.h"
 #include "ttplayer/audio/legacy_equalizer.h"
 #include "ttplayer/audio/builtin_file_info.h"
@@ -2220,7 +2222,7 @@ std::unique_ptr<DecodedAudioSource> CreateDecodedAudioSource(
         return std::make_unique<CueSegmentSource>(
             plugin_manager, ttpcomm_module, subtrack);
     }
-    return MakeBaseSource(path, plugin_manager, ttpcomm_module);
+    return MakePreciseSeekSource(MakeBaseSource(path, plugin_manager, ttpcomm_module));
 }
 
 AudioEngine::AudioEngine() : dsp_chain_(std::make_shared<WinampDspChain>()) {
@@ -3012,7 +3014,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         const uint64_t low_water = std::min<uint64_t>(
             segment_bytes, std::max<uint64_t>(wave_format.nBlockAlign,
                                              wave_format.nAvgBytesPerSec / 10));
-        const uint64_t resume_water = ring_bytes * 8 / 10;
+        const uint64_t resume_water = ReachableRefillWatermark(
+            ring_bytes, segment_bytes, ring_bytes * 8 / 10);
         std::jthread ring_monitor([&](std::stop_token stop) {
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
             while (!stop.stop_requested()) {
@@ -3200,7 +3203,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         wasapi_sink = std::make_unique<WasapiSink>();
         if (!wasapi_sink->OpenDevice(key->endpoint_id,
                 output.requested_backend == LegacyOutputBackend::wasapi_exclusive,
-                wave_format, options.output_buffer_ms)) {
+                wave_format, options.output_buffer_ms, buffer_bytes)) {
             if (!stop_requested_) SetError(wasapi_sink->Error(), wasapi_sink->ErrorResult());
             return;
         }

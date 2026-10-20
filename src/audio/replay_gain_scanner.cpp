@@ -188,6 +188,42 @@ std::wstring CommitKey(const std::filesystem::path& path) {
     return key;
 }
 
+struct CommittedMetadataRegistry {
+    std::mutex mutex;
+    std::map<std::pair<std::wstring, int>, ReplayGainMetadataUpdate> updates;
+};
+CommittedMetadataRegistry& CommittedMetadata() {
+    // Detached finalizers may finish after the window/engine is destroyed.
+    static auto* registry = new CommittedMetadataRegistry;
+    return *registry;
+}
+
+void PublishCommittedMetadata(const std::filesystem::path& path, int subtrack,
+    const ReplayGainScanResult& analysis, const std::wstring& before) noexcept {
+    try {
+        const auto key = CommitKey(path);
+        ReplayGainMetadataUpdate update{path, subtrack,
+            FormatGain(analysis.gain_db), FormatPeak(analysis.peak),
+            analysis.source_identity, CaptureFileSourceVersion(path)};
+        auto& registry = CommittedMetadata();
+        const std::scoped_lock lock(registry.mutex);
+        // Successive CUE subtrack commits replace the same physical text
+        // file. Advance only results belonging to the immediately preceding
+        // revision; an intervening external edit must not bless stale data.
+        if (subtrack > 0 && !_wcsicmp(path.extension().c_str(), L".cue") &&
+            !before.empty() && !update.file_version.empty()) {
+            for (auto& [identity, pending] : registry.updates)
+                if (identity.first == key && pending.file_version == before)
+                    pending.file_version = update.file_version;
+        }
+        registry.updates.insert_or_assign(std::make_pair(key, subtrack), std::move(update));
+    } catch (...) {
+        // The tag transaction is already durable; a UI allocation failure
+        // cannot turn it into a false disk-write failure/retry.
+        OutputDebugStringW(L"ReplayGain metadata publication failed\n");
+    }
+}
+
 void ReleaseCommitKey(const std::wstring& key) noexcept {
     auto& registry = CommitRegistry();
     const std::scoped_lock lock(registry.mutex);
@@ -195,6 +231,42 @@ void ReleaseCommitKey(const std::wstring& key) noexcept {
 }
 
 } // namespace
+
+std::vector<ReplayGainMetadataUpdate> TakeReplayGainMetadataUpdates() {
+    // Never wait on a decoder/writer from the UI. Validate and drain between
+    // our transactions so a succeeding CUE subtrack cannot change the file
+    // after its predecessor was drained but before that predecessor is checked.
+    std::unique_lock<std::timed_mutex> writer(ReplayGainLegacyGate(), std::try_to_lock);
+    if (!writer.owns_lock()) return {};
+    auto& registry = CommittedMetadata();
+    std::map<std::pair<std::wstring, int>, ReplayGainMetadataUpdate> pending;
+    {
+        const std::scoped_lock lock(registry.mutex);
+        pending.swap(registry.updates);
+    }
+    std::vector<ReplayGainMetadataUpdate> result;
+    result.reserve(pending.size());
+    std::map<std::wstring, std::wstring> files, discs;
+    for (auto& [identity, update] : pending) {
+        try {
+            if (!_wcsicmp(update.path.extension().c_str(), L".cda")) {
+                const auto drive = CommitKey(update.path.root_name());
+                auto [entry, inserted] = discs.try_emplace(drive);
+                if (inserted) entry->second = ReadDiscLayout(update.path).Fingerprint();
+                if (update.source_identity.empty() || entry->second != update.source_identity) continue;
+            } else {
+                auto [entry, inserted] = files.try_emplace(identity.first);
+                if (inserted) entry->second = CaptureFileSourceVersion(update.path);
+                if (update.file_version.empty() || entry->second != update.file_version) continue;
+            }
+            result.push_back(std::move(update));
+        } catch (...) {
+            // Ejection, removal, or replacement invalidates this observation;
+            // it does not turn a completed transaction into a write failure.
+        }
+    }
+    return result;
+}
 
 ReplayGainScanConcurrency::ReplayGainScanConcurrency(
     const plugins::PluginManager& library, HMODULE ttpcomm) {
@@ -372,7 +444,10 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
         return result;
     }
 
-    const WAVEFORMATEX format = segment ? segment->OutputFormat() : reader->Format();
+    // The source owns cbSize's trailing fields (for example the extensible
+    // valid-bit count and subtype GUID). Slicing this to WAVEFORMATEX leaves
+    // Decode inspecting an extension which no longer belongs to the object.
+    const WAVEFORMATEX& format = segment ? segment->OutputFormat() : reader->Format();
     Analyzer analyzer(ttpcomm, format.nSamplesPerSec);
     if (!analyzer)
         return Error(ReplayGainScanStatus::unsupported,
@@ -477,6 +552,7 @@ ReplayGainScanResult CommitReplayGainTrack(
             WriteDiscMetadata(disc, {{CdaTrackNumber(path), {
                 {L"replaygain_track_gain", FormatGain(analysis.gain_db)},
                 {L"replaygain_track_peak", FormatPeak(analysis.peak)}}}});
+            PublishCommittedMetadata(path, subtrack, analysis, {});
             return analysis;
         } catch (const std::system_error& e) {
             return Error(ReplayGainScanStatus::write_error, HRESULT_FROM_WIN32(e.code().value()), L"writing CDDB ReplayGain");
@@ -492,6 +568,7 @@ ReplayGainScanResult CommitReplayGainTrack(
         analysis.source_version != CaptureReplayGainSourceVersion(path, subtrack))
         return Error(ReplayGainScanStatus::write_error, HRESULT_FROM_WIN32(ERROR_FILE_INVALID),
                      L"source file changed after ReplayGain analysis; no metadata written");
+    const auto before_commit = FileSourceVersionToken(mutation.Version());
     // The manual completion path 004A50B5 -> 004C80AC permanently removes
     // FILE_ATTRIBUTE_READONLY.  The live finalizer 004B1A5C does not, so it
     // must reject a read-only source rather than silently changing it.
@@ -531,6 +608,7 @@ ReplayGainScanResult CommitReplayGainTrack(
             CueSheet::Load(path).WriteTrackMetadata(subtrack, {
                 {L"replaygain_track_gain", FormatGain(analysis.gain_db)},
                 {L"replaygain_track_peak", FormatPeak(analysis.peak)}});
+            PublishCommittedMetadata(path, subtrack, analysis, before_commit);
             return analysis;
         } catch (const std::system_error& error) {
             return Error(ReplayGainScanStatus::write_error,
@@ -549,7 +627,10 @@ ReplayGainScanResult CommitReplayGainTrack(
             SUCCEEDED(ReadBuiltinMpegFileInfo(path, {}, info))) {
             const HRESULT written = WriteBuiltinMpegReplayGain(
                 path, FormatGain(analysis.gain_db), FormatPeak(analysis.peak));
-            if (SUCCEEDED(written)) return analysis;
+            if (SUCCEEDED(written)) {
+                PublishCommittedMetadata(path, subtrack, analysis, before_commit);
+                return analysis;
+            }
             opened = written;
             diagnostic = L"writing built-in MPEG ReplayGain tags";
         }
@@ -602,6 +683,7 @@ ReplayGainScanResult CommitReplayGainTrack(
 
     auto result = analysis;
     result.diagnostic.clear();
+    PublishCommittedMetadata(path, subtrack, result, before_commit);
     return result;
 }
 

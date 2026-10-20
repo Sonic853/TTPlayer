@@ -1,4 +1,5 @@
 #include "ttplayer/audio/wasapi_sink.h"
+#include "ttplayer/audio/buffering_contract.h"
 
 #include <audioclient.h>
 #include <mmdeviceapi.h>
@@ -126,7 +127,8 @@ struct WasapiStream {
     HRESULT error_result{S_OK};
 
     bool OpenDevice(const std::wstring& endpoint_id, bool exclusive,
-                    const WAVEFORMATEX& source_format, int buffer_ms);
+                    const WAVEFORMATEX& source_format, int buffer_ms,
+                    size_t queued_packet_bytes);
     bool Submit(std::span<const std::byte> pcm);
     bool Pump(float left_gain, float right_gain);
     bool SetPaused(bool value);
@@ -165,7 +167,8 @@ struct WasapiStream {
 };
 
 bool WasapiStream::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
-                           const WAVEFORMATEX& source_format, int buffer_ms) {
+                           const WAVEFORMATEX& source_format, int buffer_ms,
+                           size_t queued_packet_bytes) {
     Close();
     auto& s = *this;
     if (!s.error.empty()) return false;
@@ -173,7 +176,6 @@ bool WasapiStream::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
     const auto lookahead = static_cast<std::uint64_t>(s.source.nSamplesPerSec) *
                            std::clamp(buffer_ms, 100, 10000) / 1000;
     s.low_frames = std::min<std::uint64_t>(lookahead / 4, s.source.nSamplesPerSec / 10);
-    s.resume_frames = lookahead * 8 / 10;
     if (s.source.wFormatTag != WAVE_FORMAT_PCM || s.source.nChannels == 0 ||
         s.source.nChannels > 8 || s.source.nSamplesPerSec < 1000 ||
         s.source.nSamplesPerSec > 768000 ||
@@ -181,6 +183,15 @@ bool WasapiStream::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
          s.source.wBitsPerSample != 24 && s.source.wBitsPerSample != 32) ||
         s.source.nBlockAlign != s.source.nChannels * (s.source.wBitsPerSample / 8))
         return s.Fail(E_INVALIDARG, L"PCM 格式");
+    if (queued_packet_bytes &&
+        (queued_packet_bytes % s.source.nBlockAlign ||
+         queued_packet_bytes > 4U * 1024U * 1024U))
+        return s.Fail(E_INVALIDARG, L"预读缓冲区大小");
+    const auto packet_frames = queued_packet_bytes
+        ? queued_packet_bytes / s.source.nBlockAlign
+        : std::max<std::uint64_t>(1, lookahead / 4);
+    s.resume_frames = ReachableRefillWatermark(
+        packet_frames * 4, packet_frames, lookahead * 8 / 10);
     const auto enumerator = Enumerator();
     if (!enumerator) return s.Fail(REGDB_E_CLASSNOTREG, L"初始化");
     const HRESULT found = endpoint_id.empty()
@@ -423,12 +434,14 @@ WasapiSink::WasapiSink() = default;
 WasapiSink::~WasapiSink() { Close(); }
 
 bool WasapiSink::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
-                           const WAVEFORMATEX& source_format, int buffer_ms) {
+                           const WAVEFORMATEX& source_format, int buffer_ms,
+                           size_t queued_packet_bytes) {
     Close();
     impl_ = std::make_unique<Impl>();
     bool opened{};
     impl_->Invoke([&] {
-        opened = impl_->stream.OpenDevice(endpoint_id, exclusive, source_format, buffer_ms);
+        opened = impl_->stream.OpenDevice(endpoint_id, exclusive, source_format,
+                                          buffer_ms, queued_packet_bytes);
     });
     if (!opened) impl_->Stop();
     return opened;

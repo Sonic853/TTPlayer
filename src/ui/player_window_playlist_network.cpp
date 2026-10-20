@@ -10,7 +10,9 @@
 #include "modern_file_dialog.h"
 
 #include <windows.h>
+#include <windowsx.h>
 
+#include <algorithm>
 #include <string>
 
 namespace ttplayer::ui {
@@ -31,7 +33,15 @@ struct DownloadsDialogState {
     audio::HttpDownloadQueue* queue;
     std::filesystem::path folder;
     bool artist_folder{},replace{};
+    std::filesystem::path reported_recovery;
 };
+uint64_t SelectedDownloadId(HWND list) {
+    LVITEMW item{};
+    item.mask=LVIF_PARAM;
+    item.iItem=ListView_GetNextItem(list,-1,LVNI_SELECTED);
+    return item.iItem>=0 && ListView_GetItem(list,&item)
+        ? static_cast<uint64_t>(item.lParam) : 0;
+}
 INT_PTR CALLBACK DownloadsProc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
     auto* state=reinterpret_cast<DownloadsDialogState*>(GetWindowLongPtrW(dialog,DWLP_USER));
     if(message==WM_INITDIALOG) {
@@ -65,8 +75,60 @@ INT_PTR CALLBACK DownloadsProc(HWND dialog, UINT message, WPARAM wparam, LPARAM 
         }
         SendMessageW(list,WM_SETREDRAW,TRUE,0);InvalidateRect(list,nullptr,FALSE);
         SetDlgItemTextW(dialog,IDC_HTTP_DOWNLOAD_STATUS,FAILED(queue->StorageResult())?
-            L"下载列表无法保存，或正由另一个播放器使用。":L"关闭窗口后继续下载。取消后的任务可重新下载并续传缓存。");
+            L"下载列表无法保存，或正由另一个播放器使用。":L"关闭窗口后继续下载。右键可移除记录，保留已下载文件。");
+        const auto backup=queue->RecoveryBackupPath();
+        if(!backup.empty() && backup!=state->reported_recovery) {
+            state->reported_recovery=backup;
+            const auto notice=L"下载列表替换失败，原文件备份保留于：\n"+backup.wstring();
+            MessageBoxW(dialog,notice.c_str(),L"下载列表保存失败",MB_OK|MB_ICONERROR);
+        }
         return TRUE;
+    }
+    if(message==WM_CONTEXTMENU &&
+        reinterpret_cast<HWND>(wparam)==GetDlgItem(dialog,IDC_HTTP_DOWNLOAD_LIST)) {
+        const auto list=GetDlgItem(dialog,IDC_HTTP_DOWNLOAD_LIST);
+        POINT point{GET_X_LPARAM(lparam),GET_Y_LPARAM(lparam)};
+        if(point.x==-1 && point.y==-1) {
+            RECT rect{};
+            const auto selected=ListView_GetNextItem(list,-1,LVNI_SELECTED);
+            if(selected<0 || !ListView_GetItemRect(list,selected,&rect,LVIR_BOUNDS))
+                GetClientRect(list,&rect);
+            point={rect.left+8,rect.top+8};ClientToScreen(list,&point);
+        } else {
+            LVHITTESTINFO hit{};hit.pt=point;ScreenToClient(list,&hit.pt);
+            const auto row=ListView_HitTest(list,&hit);
+            ListView_SetItemState(list,-1,0,LVIS_SELECTED|LVIS_FOCUSED);
+            if(row>=0) ListView_SetItemState(list,row,LVIS_SELECTED|LVIS_FOCUSED,
+                                            LVIS_SELECTED|LVIS_FOCUSED);
+        }
+        const auto id=SelectedDownloadId(list);
+        const auto jobs=queue->Snapshot();
+        const bool history=std::any_of(jobs.begin(),jobs.end(),[](const auto& job) {
+            return !job.prefetch && (job.state==audio::DownloadState::complete ||
+                job.state==audio::DownloadState::canceled || job.state==audio::DownloadState::failed);
+        });
+        const auto menu=CreatePopupMenu();
+        if(!menu) return TRUE;
+        AppendMenuW(menu,MF_STRING|(id?MF_ENABLED:MF_GRAYED),1,L"移除记录（保留文件）");
+        AppendMenuW(menu,MF_STRING|(history?MF_ENABLED:MF_GRAYED),2,L"清理已结束记录（保留文件）");
+        const auto command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,
+                                         point.x,point.y,0,dialog,nullptr);
+        DestroyMenu(menu);
+        if(command==1) queue->Remove(id);
+        else if(command==2) queue->ClearHistory();
+        SendMessageW(dialog,WM_TIMER,1,0);
+        return TRUE;
+    }
+    if(message==WM_NOTIFY) {
+        const auto* header=reinterpret_cast<const NMHDR*>(lparam);
+        if(header && header->idFrom==IDC_HTTP_DOWNLOAD_LIST && header->code==LVN_KEYDOWN) {
+            const auto* key=reinterpret_cast<const NMLVKEYDOWN*>(lparam);
+            if(key->wVKey==VK_DELETE) {
+                queue->Remove(SelectedDownloadId(header->hwndFrom));
+                SendMessageW(dialog,WM_TIMER,1,0);
+                return TRUE;
+            }
+        }
     }
     if(message==WM_COMMAND) {
         if(LOWORD(wparam)==IDCANCEL){EndDialog(dialog,IDCANCEL);return TRUE;}

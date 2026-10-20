@@ -39,6 +39,11 @@ public:
                      std::wstring artist = {});
     void Cancel(uint64_t id);
     void Retry(uint64_t id);
+    // Remove queue records only. Running work is canceled before its private
+    // temporary file can be published; completed destination files are kept.
+    bool Remove(uint64_t id);
+    // Complete, canceled and failed records; waiting/running/paused work stays.
+    size_t ClearHistory();
     // Explicit import of cachelist v2 or tasklist v1; never modifies the input.
     size_t ImportLegacyList(const std::filesystem::path& file,
         const std::filesystem::path& folder, bool artist_folder, bool replace);
@@ -47,6 +52,8 @@ public:
     void Prefetch(std::wstring url);
     std::vector<HttpDownload> Snapshot() const;
     HRESULT StorageResult() const noexcept;
+    // Nonempty when replacement recovery had to retain the old file separately.
+    std::filesystem::path RecoveryBackupPath() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -99,19 +99,38 @@ bool AssociationStore::Erase(const SongKey& song) {
     if (!entries_.erase(song)) return false;
     dirty_ = true; return true;
 }
+bool AssociationStore::RetargetSource(const std::filesystem::path& before,
+                                      const std::filesystem::path& after) {
+    if (!Field(before) || !Field(after) || !_wcsicmp(before.c_str(), after.c_str())) return false;
+    Entries moved = entries_;
+    bool changed{};
+    for (const auto& [song, lyric] : entries_) {
+        if (_wcsicmp(song.path.c_str(), before.c_str())) continue;
+        moved.erase(song);
+        moved.insert_or_assign(SongKey{after, song.subtrack}, lyric);
+        changed = true;
+    }
+    if (changed) { entries_.swap(moved); dirty_ = true; }
+    return changed;
+}
 bool AssociationStore::Save() {
-    if (!dirty_) return true;
-    if (file_.empty()) return false;
+    return static_cast<bool>(SaveChecked());
+}
+SaveResult AssociationStore::SaveChecked() {
+    if (!dirty_) return {};
+    if (file_.empty()) return SaveResult::Win32Failure(file_, ERROR_INVALID_NAME);
     if (entries_.empty()) {
         std::error_code error;
         std::filesystem::remove(file_, error);
-        if (error) return false;
-        dirty_ = false; return true;
+        if (error) return SaveResult::Win32Failure(file_, static_cast<DWORD>(error.value()));
+        dirty_ = false; return {};
     }
     // Same-directory temporary file preserves the old table on a failed write.
     wchar_t temporary[MAX_PATH]{};
-    if (!GetTempFileNameW(file_.parent_path().c_str(), L"rll", 0, temporary)) return false;
+    if (!GetTempFileNameW(file_.parent_path().c_str(), L"rll", 0, temporary))
+        return SaveResult::Win32Failure(file_);
     bool okay = false;
+    DWORD failure = ERROR_WRITE_FAULT;
     try {
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         output << "\xef\xbb\xbf";
@@ -123,10 +142,13 @@ bool AssociationStore::Save() {
                    << core::WideToUtf8(escaped ? Escape(value.native()) : value.native()) << "\r\n";
         }
         output.flush(); okay = output.good(); output.close(); okay &= !output.fail();
-        if (okay) okay = MoveFileExW(temporary, file_.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+        if (okay) {
+            okay = MoveFileExW(temporary, file_.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+            if (!okay) failure = GetLastError();
+        }
     } catch (...) { okay = false; }
     if (!okay) DeleteFileW(temporary);
     else dirty_ = false;
-    return okay;
+    return okay ? SaveResult{} : SaveResult::Win32Failure(file_, failure);
 }
 } // namespace ttplayer::lyrics

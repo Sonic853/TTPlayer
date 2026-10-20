@@ -3702,6 +3702,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             PollUpdateCheck();
             PollPlaylistInfo();
             PollPlaylistMetadataRemoval();
+            PollReplayGainMetadata();
             PollLyricSaveFailures();
             if (!extension_corrections_.empty() && !extension_correction_open_ &&
                 IsWindowEnabled(window_))
@@ -4093,7 +4094,7 @@ SaveResult PlayerWindow::SaveCurrentSkinProfile() {
 }
 
 SaveResult PlayerWindow::PersistWindowState() {
-    if (window_state_saved_) return {};
+    if (window_state_saved_ && !lyric_associations_.Dirty()) return {};
     CaptureWindowState();
     settings_.player.mini_mode = mini_mode_;
     settings_.player.playlist_scan_count = static_cast<int>(playlists_.Size());
@@ -4118,10 +4119,9 @@ SaveResult PlayerWindow::PersistWindowState() {
     // as well, before the root state that owns mini visibility/top-most data.
     const auto profile = SaveCurrentSkinProfile();
     const auto root = settings::SaveWindowState(settings_.source_path, settings_);
-    if (!lyric_associations_.Save())
-        OutputDebugStringW(L"TTPlayerRebuild: cannot save lyric associations; previous .rll retained.\n");
-    window_state_saved_ = profile && root;
-    return !root ? root : profile;
+    const auto associations = lyric_associations_.SaveChecked();
+    window_state_saved_ = profile && root && associations;
+    return !root ? root : !profile ? profile : associations;
 }
 
 SaveResult PlayerWindow::SavePersistentState() {
@@ -4151,7 +4151,7 @@ void PlayerWindow::ReportPersistenceFailure(const SaveResult& failure) {
     wchar_t code[24]{};
     swprintf_s(code, L"0x%08lX", static_cast<unsigned long>(failure.error));
     const auto message = std::wstring(i18n::Literal(
-        L"无法保存播放列表或设置：\n\n")) + failure.path.wstring() + L"\n" + code +
+        L"无法保存播放列表、歌词关联或设置：\n\n")) + failure.path.wstring() + L"\n" + code +
         i18n::Literal(L"\n\n请检查文件是否只读、被占用，或所在目录是否可写。\n播放器已保留当前内容，请修复后再次保存或退出。");
     OutputDebugStringW((message + L"\n").c_str());
     if (session_end_pending_ || persistence_error_open_) return;
@@ -7718,34 +7718,19 @@ void PlayerWindow::PollNetworkPlayback() {
             metadata_changed = true;
         }
     }
-    // Local tag edits publish revisions as network metadata does. Replace
-    // authoritative bags, including empty ones; SetExtendedMetadata merges
-    // fields and would preserve a deleted final Lyrics entry forever.
+    // Share the publication boundary with property writes, embedded lyrics,
+    // scans, and library refreshes, including the independent library queue.
     bool rows_changed{};
-    for (size_t index = 0; index < playlists_.Size(); ++index) {
-        auto& list = playlists_.At(index);
-        bool changed{};
-        for (size_t row = 0; row < list.Tracks().size(); ++row) {
-            const auto& item = list.Tracks()[row];
-            if (item.subtrack != opened_track_->subtrack ||
-                _wcsicmp(item.path.lexically_normal().c_str(),
-                         opened_track_->path.lexically_normal().c_str()) != 0) continue;
-            auto updated = item;
-            if (!title.empty()) updated.title = title;
-            if (!artist.empty()) updated.artist = artist;
-            if (!album.empty()) updated.album = album;
-            if (have_snapshot) updated.metadata = opened_track_->metadata;
-            changed |= list.SetTrack(row, std::move(updated));
-        }
-        if (changed) playlists_.MarkDirty(index);
-        rows_changed |= changed;
+    if (have_snapshot) {
+        rows_changed = PublishTrackMetadata(*opened_track_);
+    } else {
+        std::vector<std::pair<std::string, std::string>> fields;
+        if (!title.empty()) fields.emplace_back("Title", title);
+        if (!artist.empty()) fields.emplace_back("Artist", artist);
+        if (!album.empty()) fields.emplace_back("Album", album);
+        rows_changed = PublishTrackMetadataFields(*opened_track_, fields);
     }
-    if (have_snapshot && lyric_document_track_ &&
-        lyric_document_track_->subtrack == opened_track_->subtrack &&
-        _wcsicmp(lyric_document_track_->path.lexically_normal().c_str(),
-                 opened_track_->path.lexically_normal().c_str()) == 0)
-        lyric_document_track_->metadata = opened_track_->metadata;
-    if (rows_changed) { playlist_info_checked_.clear(); RefreshPlaylist(); }
+    if (rows_changed) RefreshPlaylist();
     if (metadata_changed) {
         display_title_ = DisplayName(*opened_track_);
         display_artist_ = core::Utf8ToWide(opened_track_->artist);

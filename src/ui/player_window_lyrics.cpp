@@ -4026,29 +4026,13 @@ std::optional<std::wstring> PlayerWindow::ReadEmbeddedLyrics() {
 
 void PlayerWindow::SynchronizeEmbeddedLyricCache(const std::filesystem::path& path,
                                                 int subtrack, std::wstring_view text) {
-    const auto encoded = core::WideToUtf8(text);
-    const auto update = [&](playlist::Track& item) {
-        std::erase_if(item.metadata, [](const auto& pair) {
-            return !_stricmp(pair.first.c_str(), "Lyrics") ||
-                !_stricmp(pair.first.c_str(), "Lyric") || !_stricmp(pair.first.c_str(), "WM/Lyrics");
-        });
-        if (!encoded.empty()) item.metadata.emplace_back("Lyrics", encoded);
-    };
-    for (size_t index = 0; index < playlists_.Size(); ++index) {
-        auto& list = playlists_.At(index);
-        bool changed{};
-        for (size_t row = 0; row < list.Tracks().size(); ++row) {
-            if (!SameLyricSource(list.Tracks()[row], path, subtrack)) continue;
-            auto item = list.Tracks()[row];
-            update(item);
-            changed |= list.SetTrack(row, std::move(item)); // bumps InfoRevision; stale worker replies lose
-        }
-        if (changed) playlists_.MarkDirty(index);
-    }
-    if (opened_track_ && SameLyricSource(*opened_track_, path, subtrack)) update(*opened_track_);
-    if (lyric_document_track_ && SameLyricSource(*lyric_document_track_, path, subtrack))
-        update(*lyric_document_track_);
-    playlist_info_checked_.clear();
+    playlist::Track source;
+    source.path = path;
+    source.subtrack = subtrack;
+    // The legacy CPlayItem is shared by its lists. Publish the tag patch to
+    // every value copy, including a detached library queue and scan overlays.
+    PublishTrackMetadataFields(source, {{"Lyrics", core::WideToUtf8(text)},
+        {"Lyric", ""}, {"WM/Lyrics", ""}});
     if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
 }
 
@@ -4599,6 +4583,9 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
             if (lyric_control_) {
                 InvalidateRect(lyric_control_, nullptr, FALSE);
             }
+            // 0044C648 -> 0044A370 -> 0044A692: a manual embedded load
+            // finishes through the same visibility policy as a local load.
+            ApplyAutoLyricVisibility();
         } catch (const std::exception&) {
         }
         return true;
@@ -4946,6 +4933,22 @@ void PlayerWindow::EnsureLyricAssociationsLoaded() {
     auto path = std::filesystem::path(executable);
     path.replace_extension(L".rll"); // 00401829: EXE basename, not TTPlayer.xml.
     static_cast<void>(lyric_associations_.Load(path));
+}
+
+void PlayerWindow::RetargetLyricSource(const std::filesystem::path& before,
+                                      const std::filesystem::path& after) {
+    static_cast<void>(lyric_associations_.RetargetSource(before, after));
+    const auto retarget = [&](std::filesystem::path& path) {
+        if (_wcsicmp(path.c_str(), before.c_str())) return false;
+        path = after;
+        return true;
+    };
+    if (lyric_document_track_) retarget(lyric_document_track_->path);
+    if (retarget(local_lyric_song_.path)) CancelLocalLyricSearch();
+    retarget(lyric_search_track_.path);
+    for (auto& failure : pending_lyric_save_failures_) retarget(failure.path);
+    // Associated/downloaded LRC paths belong to their own files; renaming
+    // the song only changes the media identity, never those lyric files.
 }
 
 void PlayerWindow::CancelLocalLyricSearch() {

@@ -77,7 +77,10 @@ discid 查询不接受先前分析草案中的 `media+discids` 包含参数组�
 ## 网络、界面与配置
 
 - 播放列表原 FreeDB 命令改为 MusicBrainz，范围仍为 CDA/CUE。
-- 网络连接页的对应标签、说明及服务器名称已更新；旧 `FreedbAutoQuery`、`FreedbServer` 配置键保留以迁移设置，退役 freedb 地址转换为默认 HTTPS API 根地址。
+- 网络连接页的 CD 查询分组说明及服务器名称已更新；旧 `FreedbAutoQuery`、`FreedbServer` 配置键保留以迁移设置，退役 freedb 地址转换为默认 HTTPS API 根地址。
+- 2026-10-20 修正：下载子页曾被错误改名为 MusicBrainz，现恢复原资源 `0x81EF` 的“歌曲下载”。原 `0049885A` 的两个子页为“在线试听”（381）和“歌曲下载”（382）；下载路径、任务数、按歌手建目录等仍绑定下载设置，CD 查询是另外的设置分组。
+  - 本次 Release 构建及 XP／Win7 静态导入检查通过。Win11 独立配置目录中的实际窗口验证通过：两页标题、来回切换、下载目录和任务数保存、CD 查询设置独立及正常退出。证据：私有 `tests/full_feature_fixes_20261020/data/network-download-tab-result.json`；本次 EXE SHA-256：`234eea971602f0b3c3474f58a019b239ccb92681ea7776ec30eb85e13f0dddde`。
+  - 同日再次按用户要求还原“下载歌曲时同步下载歌词”的原始文案、可选状态及 `DownloadLrc` 保存，删除“服务尚未接入”说明。Release 重新构建、XP／Win7 静态导入检查和 Win11 实际窗口的勾选／取消、保存／重开、退出检查均通过。证据：私有 `tests/full_feature_fixes_20261020/data/download-lyrics-restored-result.json`；还原后 EXE SHA-256：`8e723a2892ec44b1aee4ca02c3a0fb1793935b40a703c17b48d43e79810ced2e`。本次还原未修改下载后台。
 - 手动查询始终显示错误；自动查询遵循“自动查询失败时显示错误信息”。本次错误展示使用查询窗口，没有恢复原版右下角通知窗。
 - 导入歌曲或复制 CDA 描述不会触发自动查询。查询结果只在点击保存后应用，确认保存前取消不会改标签。
 - 请求和详情读取在工作线程执行；关闭会发取消请求，并等工作线程退出后销毁状态。

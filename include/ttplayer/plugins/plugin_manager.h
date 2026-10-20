@@ -165,7 +165,7 @@ public:
     HRESULT NeedsInput() const noexcept;
     HRESULT OutputAvailable() const noexcept;
     HRESULT PushInput(std::span<const std::byte> encoded) noexcept;
-    // Only the host's MPEG decoder opts into final look-ahead padding.
+    // Only the host's MPEG and ACM decoders opt into explicit EOF draining.
     // S_FALSE leaves all foreign decoder EOF contracts unchanged.
     HRESULT FinishInput() noexcept;
     HRESULT ReadOutput(size_t requested_bytes, std::vector<std::byte>& pcm,

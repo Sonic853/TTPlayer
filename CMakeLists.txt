@@ -104,6 +104,7 @@ add_library(ttplayer_core
   src/audio/wasapi_sink.cpp
   src/audio/pcm_output_transform.cpp
   src/audio/pcm_effects.cpp
+  src/audio/precise_seek_source.cpp
   src/audio/replay_gain_scanner.cpp
   src/audio/winamp_dsp.cpp
   src/audio/plugin_registry.cpp
@@ -124,6 +125,7 @@ add_library(ttplayer_core
   src/platform/windows_features.cpp
   src/plugins/plugin_manager.cpp
   src/plugins/builtin_mpeg_decoder.cpp
+  src/plugins/builtin_acm_decoder.cpp
   src/plugins/legacy_host_exports.cpp
   src/plugins/nero_config_layout.cpp
   src/settings/file_association.cpp
@@ -188,7 +190,7 @@ target_compile_definitions(ttplayer_core PRIVATE UNICODE _UNICODE NOMINMAX WIN32
 target_compile_options(ttplayer_core PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_core PUBLIC
   ttplayer_wtl_headers
-  advapi32 crypt32 winmm ole32 oleaut32 comsuppw uuid strmiids msimg32 shell32 shlwapi comctl32 comdlg32
+  advapi32 crypt32 winmm msacm32 ole32 oleaut32 comsuppw uuid strmiids msimg32 shell32 shlwapi comctl32 comdlg32
   windowscodecs gdiplus dsound setupapi dwmapi uxtheme
   mfplat mfreadwrite mfuuid propsys winhttp wininet
 )

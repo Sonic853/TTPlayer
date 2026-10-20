@@ -33,6 +33,7 @@
 #include <deque>
 #include <filesystem>
 #include <future>
+#include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -307,6 +308,8 @@ private:
     void ContinueLyricUpload();
     void LyricDocumentChanged();
     void EnsureLyricAssociationsLoaded();
+    void RetargetLyricSource(const std::filesystem::path& before,
+                             const std::filesystem::path& after);
     void ShowLyricAssociation();
     void CancelLocalLyricSearch();
     void PollLocalLyricSearch();
@@ -572,6 +575,13 @@ private:
     // Publish file metadata to all copies of this logical song. Rating belongs
     // to the playlist/library and must survive a stale property-sheet snapshot.
     bool PublishTrackMetadata(const playlist::Track& updated);
+    bool PublishTrackMetadataSnapshot(const playlist::Track& updated, bool record_edit);
+    bool PublishTrackMetadataFields(const playlist::Track& source,
+        const std::vector<std::pair<std::string, std::string>>& fields,
+        bool disc_fields = false);
+    bool PublishTrackMetadataUpdate(
+        const std::function<bool(const playlist::Track&)>& matches,
+        const std::function<void(playlist::Track&)>& update, bool record_edit);
     [[nodiscard]] std::wstring PlaylistDisplayText(
         const playlist::Track& track) const;
     void ActivateMediaLibraryResult(size_t index, bool start_playback);
@@ -598,6 +608,7 @@ private:
     void InvalidatePlaylistInfoRows(const std::vector<size_t>& rows);
     void PollPlaylistInfo();
     void PollPlaylistMetadataRemoval();
+    void PollReplayGainMetadata();
     const std::vector<size_t>& PlaylistInfoSourceRows(size_t index, const std::wstring& source);
     void StartNextPlaylistInfoRead();
     LRESULT ApplyPlaylistInfoResult(LPARAM result);

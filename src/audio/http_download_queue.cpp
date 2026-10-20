@@ -3,8 +3,10 @@
 #include "ttplayer/core/text.h"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cwchar>
 #include <fstream>
+#include <system_error>
 #include <msxml6.h>
 #include <comdef.h>
 #include <wrl/client.h>
@@ -145,13 +147,16 @@ struct HttpDownloadQueue::Impl {
     struct Job {
         HttpDownload info;
         std::shared_ptr<std::atomic_bool> canceled{std::make_shared<std::atomic_bool>(false)};
-        bool requeue{},user_canceled{};
+        bool requeue{},user_canceled{},removed{};
         ComPtr<HttpAudioStream> prefetched;
     };
     std::filesystem::path file;Handle lease;
-    mutable std::mutex mutex;std::condition_variable changed;
+    mutable std::mutex mutex;std::condition_variable changed,save_changed;
     std::vector<std::shared_ptr<Job>> jobs;std::vector<std::thread> workers;
-    PlaybackOptions options;int maximum{3};bool stop{},dirty{},writable{};
+    std::thread saver;
+    std::filesystem::path recovery_backup;
+    PlaybackOptions options;int maximum{3};bool stop{},writable{},save_stop{};
+    uint64_t revision{},saved_revision{};
     std::wstring prediction;uint64_t serial{};std::atomic<HRESULT> storage{S_OK};
     explicit Impl(std::filesystem::path path):file(std::move(path)) {
         try {
@@ -192,23 +197,39 @@ struct HttpDownloadQueue::Impl {
                 jobs.push_back(j);
             }
             writable=true; // Workers wait for Configure; credentials are never serialized.
-        }catch(const Error& e){storage=e.hr;}catch(...){storage=E_FAIL;}
+            saver=std::thread([this]{Saver();});
+        }catch(const Error& e){writable=false;storage=e.hr;}catch(...){writable=false;storage=E_FAIL;}
     }
     ~Impl(){
         {std::lock_guard lock(mutex);stop=true;for(auto& j:jobs) j->canceled->store(true);changed.notify_all();}
-        for(auto& worker:workers) worker.join();Save();
+        for(auto& worker:workers) worker.join();
+        {std::lock_guard lock(mutex);save_stop=true;save_changed.notify_all();}
+        if(saver.joinable()) saver.join();
+        Save();
     }
     void StartWorkers() {
         if(!workers.empty() || jobs.empty() || !writable) return;
-        for(size_t i=0;i<5;++i) workers.emplace_back([this,i]{Worker(i);});
+        for(size_t i=0;i<5;++i) workers.emplace_back([this]{Worker();});
     }
-    void Save() noexcept {
-        if(!writable) return;
-        std::filesystem::path temp;
+    // Caller holds mutex. Only acknowledged revisions are considered saved.
+    void Changed() noexcept {
+        ++revision;
+        changed.notify_all();
+        save_changed.notify_one();
+    }
+    bool Save() noexcept {
+        if(!writable) return false;
         try {
-            std::wstring xml=L"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<cachelist version=\"2\"><items>\n";
+            std::vector<HttpDownload> snapshot;
+            uint64_t snapshot_revision{};
             {std::lock_guard lock(mutex);
-                for(const auto& j:jobs) {const auto& d=j->info;if(d.prefetch) continue;
+                snapshot_revision=revision;
+                snapshot.reserve(jobs.size());
+                for(const auto& job:jobs)
+                    if(!job->info.prefetch && !job->removed) snapshot.push_back(job->info);
+            }
+            std::wstring xml=L"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<cachelist version=\"2\"><items>\n";
+            for(const auto& d:snapshot) {
                     xml+=L"<item";
                     auto attr=[&](const wchar_t* name,std::wstring_view value){xml+=L" ";xml+=name;xml+=L"=\"";xml+=Escape(value);xml+=L"\"";};
                     attr(L"title",d.entry.title);attr(L"temp",d.entry.temp);attr(L"save",d.entry.save);
@@ -218,37 +239,61 @@ struct HttpDownloadQueue::Impl {
                     attr(L"state",d.state==DownloadState::complete?L"complete":d.state==DownloadState::failed?L"failed":d.state==DownloadState::canceled?L"canceled":d.state==DownloadState::paused?L"paused":L"waiting");
                     attr(L"result",std::to_wstring(static_cast<uint32_t>(d.result)));
                     xml+=L"/>\n";
-                }dirty=false;
             }
             xml+=L"</items></cachelist>\n";const auto bytes=core::WideToUtf8(xml);
             if(bytes.size()>4*1024*1024) throw Error{HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE)};
-            temp=file.wstring()+L"."+std::to_wstring(GetCurrentProcessId())+L".new";
-            {Handle out{CreateFileW(temp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,0,nullptr)};Check(out.h!=INVALID_HANDLE_VALUE);
-                DWORD done{};Check(WriteFile(out.h,bytes.data(),static_cast<DWORD>(bytes.size()),&done,nullptr));
-                if(done!=bytes.size()) throw Error{STG_E_WRITEFAULT};Check(FlushFileBuffers(out.h));}
-            Check(MoveFileExW(temp.c_str(),file.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH));storage=S_OK;
-        }catch(const Error& e){storage=e.hr;}catch(...){storage=E_FAIL;}
-        if(!temp.empty()) DeleteFileW(temp.c_str());
+            core::WriteFileAtomically(file,bytes);
+            {std::lock_guard lock(mutex);saved_revision=snapshot_revision;}
+            storage=S_OK;
+            return true;
+        }catch(const Error& e){storage=e.hr;}
+        catch(const std::filesystem::filesystem_error& e){
+            if(e.code().value()==ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 && !e.path2().empty()) {
+                try {std::lock_guard lock(mutex);recovery_backup=e.path2();} catch(...) {}
+            }
+            storage=e.code().value()?HRESULT_FROM_WIN32(e.code().value()):E_FAIL;
+        }
+        catch(const std::system_error& e){storage=e.code().value()?HRESULT_FROM_WIN32(e.code().value()):E_FAIL;}
+        catch(const std::bad_alloc&){storage=E_OUTOFMEMORY;}
+        catch(...){storage=E_FAIL;}
+        return false;
     }
-    // Only worker zero writes XML; no save races, no I/O under the queue mutex.
-    void Worker(size_t index) noexcept {
+    // 004D10EC has separate cache maintenance. Do not let a long HTTP Run
+    // occupy the only writer; acknowledge a snapshot only after commit.
+    void Saver() noexcept {
+        std::unique_lock lock(mutex);
+        for(;;) {
+            save_changed.wait(lock,[this]{return save_stop || revision!=saved_revision;});
+            if(save_stop) return;
+            // Coalesce short bursts without extending the deadline on each edit.
+            save_changed.wait_for(lock,std::chrono::milliseconds(50),[this]{return save_stop;});
+            if(save_stop) return;
+            lock.unlock();
+            const bool saved=Save();
+            lock.lock();
+            // Failed snapshots stay dirty. Retry even without another edit,
+            // but do not busy-loop while storage is unavailable.
+            if(!saved) save_changed.wait_for(lock,std::chrono::seconds(1),
+                                             [this]{return save_stop;});
+        }
+    }
+    void Worker() noexcept {
         ComInit com;
         for(;;) {
-            std::shared_ptr<Job> job;PlaybackOptions profile;bool save{};
+            std::shared_ptr<Job> job;PlaybackOptions profile;
             {std::unique_lock lock(mutex);
                 changed.wait_for(lock,std::chrono::milliseconds(50));if(stop) break;
-                save=index==0 && dirty;
                 const auto active=std::count_if(jobs.begin(),jobs.end(),[](auto& j){return j->info.state==DownloadState::running;});
                 if(active<maximum) {
                     // Explicit jobs first, stable FIFO within each class.
                     for(bool speculative:{false,true}) {
-                        for(auto& j:jobs) if(j->info.prefetch==speculative && j->info.state==DownloadState::waiting) {job=j;break;}
+                        for(auto& j:jobs) if(!j->removed && j->info.prefetch==speculative && j->info.state==DownloadState::waiting) {job=j;break;}
                         if(job) break;
                     }
-                    if(job){job->info.state=DownloadState::running;job->canceled->store(false);job->requeue=false;profile=options;dirty=true;}
+                    if(job){job->info.state=DownloadState::running;job->canceled->store(false);job->requeue=false;profile=options;Changed();}
                 }
             }
-            if(save) Save();if(!job) continue;
+            if(!job) continue;
             Run(job,profile);
         }
     }
@@ -308,7 +353,9 @@ struct HttpDownloadQueue::Impl {
             else if(FAILED(result)) job->info.state=DownloadState::failed;
             else {job->info.state=DownloadState::complete;job->info.entry.save=job->info.destination.wstring();}
             if(job->info.prefetch && job->info.state==DownloadState::complete) job->prefetched=std::move(prefetched);
-            job->info.result=result;dirty=true;changed.notify_all();
+            job->info.result=result;
+            if(job->removed) jobs.erase(std::remove(jobs.begin(),jobs.end(),job),jobs.end());
+            Changed();
         }
     }
 };
@@ -324,22 +371,61 @@ void HttpDownloadQueue::Configure(const PlaybackOptions& options,int maximum) {
 uint64_t HttpDownloadQueue::Enqueue(std::wstring url,std::wstring title,std::filesystem::path destination,bool replace,std::wstring artist) {
     url=HttpDownloadKey(std::move(url));if(url.empty() || destination.empty() || !destination.is_absolute()) return 0;
     std::lock_guard lock(impl_->mutex);if(!impl_->writable) return 0;
-    for(auto& j:impl_->jobs) if(!j->info.prefetch && j->info.entry.sourceurl==url && j->info.destination==destination) return j->info.id;
+    for(auto& j:impl_->jobs) if(!j->removed && !j->info.prefetch && j->info.entry.sourceurl==url && j->info.destination==destination) return j->info.id;
     if(impl_->jobs.size()>=10000) return 0;
     auto job=std::make_shared<Impl::Job>();job->info.id=++impl_->serial;job->info.entry.sourceurl=std::move(url);
     job->info.entry.title=LegacyCacheTitle(job->info.entry.sourceurl,title,artist);
     job->info.display_title=std::move(title);job->info.destination=std::move(destination);job->info.replace=replace;
     if(std::count_if(impl_->jobs.begin(),impl_->jobs.end(),[](const auto& j){return j->info.state==DownloadState::running;})>=impl_->maximum)
         for(auto& j:impl_->jobs) if(j->info.prefetch && j->info.state==DownloadState::running && !j->canceled->load()) {j->requeue=true;j->canceled->store(true);break;}
-    impl_->jobs.push_back(job);impl_->dirty=true;impl_->StartWorkers();impl_->changed.notify_all();return job->info.id;
+    impl_->jobs.push_back(job);impl_->Changed();impl_->StartWorkers();return job->info.id;
 }
 void HttpDownloadQueue::Cancel(uint64_t id){std::lock_guard lock(impl_->mutex);
-    for(auto& j:impl_->jobs) if(j->info.id==id){j->canceled->store(true);j->user_canceled=true;j->requeue=false;if(j->info.state==DownloadState::waiting || j->info.state==DownloadState::paused) j->info.state=DownloadState::canceled;}
-    impl_->dirty=true;impl_->changed.notify_all();}
+    if(!impl_->writable) return;
+    for(auto& j:impl_->jobs) if(!j->removed && j->info.id==id &&
+        (j->info.state==DownloadState::running || j->info.state==DownloadState::waiting || j->info.state==DownloadState::paused)) {
+        j->canceled->store(true);j->user_canceled=true;j->requeue=false;
+        if(j->info.state!=DownloadState::running) j->info.state=DownloadState::canceled;
+        impl_->Changed();break;
+    }}
 void HttpDownloadQueue::Retry(uint64_t id){std::lock_guard lock(impl_->mutex);
-    for(auto& j:impl_->jobs) if(j->info.id==id && j->info.state!=DownloadState::running && j->info.state!=DownloadState::waiting) {
-        j->info.state=DownloadState::waiting;j->info.entry.save.clear();j->info.result=S_OK;j->canceled->store(false);j->user_canceled=false;}
-    impl_->dirty=true;impl_->changed.notify_all();}
+    if(!impl_->writable) return;
+    for(auto& j:impl_->jobs) if(!j->removed && j->info.id==id && j->info.state!=DownloadState::running && j->info.state!=DownloadState::waiting) {
+        j->info.state=DownloadState::waiting;j->info.entry.save.clear();j->info.result=S_OK;
+        j->canceled->store(false);j->user_canceled=false;j->requeue=false;
+        impl_->Changed();impl_->StartWorkers();break;
+    }}
+bool HttpDownloadQueue::Remove(uint64_t id) {
+    // Release a retained prefetch/stream after dropping the queue mutex.
+    std::shared_ptr<Impl::Job> removed;
+    {std::lock_guard lock(impl_->mutex);
+        const auto found=std::find_if(impl_->jobs.begin(),impl_->jobs.end(),
+            [id](const auto& job){return job->info.id==id && !job->removed && !job->info.prefetch;});
+        if(found==impl_->jobs.end() || !impl_->writable) return false;
+        removed=*found;removed->removed=true;removed->user_canceled=true;
+        removed->requeue=false;removed->canceled->store(true);
+        // A running tombstone still occupies its worker/concurrency slot.
+        // Run erases it after its stream and temporary file have been released.
+        if(removed->info.state!=DownloadState::running) impl_->jobs.erase(found);
+        impl_->Changed();
+    }
+    return true;
+}
+size_t HttpDownloadQueue::ClearHistory() {
+    std::vector<std::shared_ptr<Impl::Job>> removed;
+    {std::lock_guard lock(impl_->mutex);
+        if(!impl_->writable) return 0;
+        for(const auto& job:impl_->jobs) if(!job->removed && !job->info.prefetch &&
+            (job->info.state==DownloadState::complete || job->info.state==DownloadState::canceled ||
+             job->info.state==DownloadState::failed)) removed.push_back(job);
+        if(removed.empty()) return 0;
+        for(const auto& job:removed) job->removed=true;
+        impl_->jobs.erase(std::remove_if(impl_->jobs.begin(),impl_->jobs.end(),
+            [](const auto& job){return job->removed && job->info.state!=DownloadState::running;}),impl_->jobs.end());
+        impl_->Changed();
+    }
+    return removed.size();
+}
 size_t HttpDownloadQueue::ImportLegacyList(const std::filesystem::path& file,
     const std::filesystem::path& folder,bool artist_folder,bool replace) {
     if(folder.empty() || !folder.is_absolute()) return 0;
@@ -383,7 +469,7 @@ size_t HttpDownloadQueue::ImportLegacyList(const std::filesystem::path& file,
     size_t added{};std::lock_guard lock(impl_->mutex);if(!impl_->writable) return 0;
     for(auto& d:imported) {
         if(impl_->jobs.size()>=10000) break;
-        if(std::any_of(impl_->jobs.begin(),impl_->jobs.end(),[&](const auto& j){return j->info.entry.sourceurl==d.entry.sourceurl && j->info.destination==d.destination;})) continue;
+        if(std::any_of(impl_->jobs.begin(),impl_->jobs.end(),[&](const auto& j){return !j->removed && j->info.entry.sourceurl==d.entry.sourceurl && j->info.destination==d.destination;})) continue;
         auto j=std::make_shared<Impl::Job>();d.id=++impl_->serial;j->info=std::move(d);
         if(j->info.state==DownloadState::complete) {
             std::error_code ec;const auto bytes=std::filesystem::file_size(j->info.destination,ec);
@@ -391,14 +477,14 @@ size_t HttpDownloadQueue::ImportLegacyList(const std::filesystem::path& file,
         }
         impl_->jobs.push_back(j);++added;
     }
-    impl_->dirty|=added!=0;impl_->StartWorkers();impl_->changed.notify_all();return added;
+    if(added) impl_->Changed();impl_->StartWorkers();return added;
 }
 void HttpDownloadQueue::Prefetch(std::wstring url){url=HttpDownloadKey(std::move(url));std::lock_guard lock(impl_->mutex);
     if(impl_->prediction==url) return;impl_->prediction=url;
     for(auto& j:impl_->jobs) if(j->info.prefetch){j->canceled->store(true);j->requeue=false;if(j->info.state==DownloadState::waiting) j->info.state=DownloadState::canceled;}
     impl_->jobs.erase(std::remove_if(impl_->jobs.begin(),impl_->jobs.end(),[](auto& j){return j->info.prefetch && j->info.state!=DownloadState::running;}),impl_->jobs.end());
     if(url.empty() || impl_->jobs.size()>=10000 || !impl_->options.network_cache_enabled) return;
-    for(const auto& j:impl_->jobs) if(j->info.entry.sourceurl==url) {
+    for(const auto& j:impl_->jobs) if(!j->removed && j->info.entry.sourceurl==url) {
         if(j->info.state==DownloadState::waiting || j->info.state==DownloadState::running) return;
         // Playback already resolves a verified completed download as a local
         // file. Predicting that same song must not reopen its HTTP resource.
@@ -408,6 +494,9 @@ void HttpDownloadQueue::Prefetch(std::wstring url){url=HttpDownloadKey(std::move
     auto j=std::make_shared<Impl::Job>();j->info.id=++impl_->serial;j->info.entry.sourceurl=std::move(url);j->info.prefetch=true;
     impl_->jobs.push_back(j);impl_->StartWorkers();impl_->changed.notify_all();}
 std::vector<HttpDownload> HttpDownloadQueue::Snapshot() const {std::lock_guard lock(impl_->mutex);std::vector<HttpDownload> out;
-    for(const auto& j:impl_->jobs) out.push_back(j->info);return out;}
+    for(const auto& j:impl_->jobs) if(!j->removed) out.push_back(j->info);return out;}
 HRESULT HttpDownloadQueue::StorageResult() const noexcept {return impl_->storage;}
+std::filesystem::path HttpDownloadQueue::RecoveryBackupPath() const {
+    std::lock_guard lock(impl_->mutex);return impl_->recovery_backup;
+}
 } // namespace ttplayer::audio

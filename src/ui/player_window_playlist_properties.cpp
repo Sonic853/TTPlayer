@@ -188,6 +188,8 @@ struct FileInfoContext : std::enable_shared_from_this<FileInfoContext> {
     std::function<void()> end_file_access;
     std::function<void(const std::vector<playlist::Track>&,
                        const std::set<size_t>&)> publish_tracks;
+    std::function<void(const std::vector<playlist::Track>&,
+                       const std::vector<FileInfoWriteResult::Item>&)> publish_fields;
 
     ~FileInfoContext() {
         if (cover_bitmap) DeleteObject(cover_bitmap);
@@ -1253,9 +1255,15 @@ void ApplyWriteResult(FileInfoContext& context,
         context.touched_rows.insert(item.row);
     }
     const int navigation = std::exchange(context.navigation_after_save, 0);
-    // Only successfully saved fields are in result.items. Publish before
-    // reopening playback, including partial success from a batch save.
-    PublishUpdatedTracks(context);
+    // A CUE/CD album header affects tracks outside this dialog snapshot.
+    // Publish only committed fields into every live identity; a full stale
+    // snapshot would overwrite unrelated edits made while the worker ran.
+    if (context.publish_fields) {
+        context.publish_fields(context.tracks, result.items);
+        context.touched_rows.clear();
+    } else {
+        PublishUpdatedTracks(context);
+    }
     if (context.end_file_access) context.end_file_access();
     if (FAILED(result.error)) {
         const auto message = detail::FileInfoSaveErrorText(context.strings.save_failure, result.error);
@@ -2068,6 +2076,21 @@ void PlayerWindow::ShowPlaylistProperties(
         bool changed{};
         for (const size_t row : rows)
             if (row < tracks.size()) changed |= PublishTrackMetadata(tracks[row]);
+        if (changed) {
+            RefreshPlaylist();
+            RefreshPlaybackUi();
+        }
+    };
+    context->publish_fields = [this](const auto& tracks, const auto& items) {
+        bool changed{};
+        for (const auto& item : items) {
+            if (item.row >= tracks.size()) continue;
+            std::vector<std::pair<std::string, std::string>> fields;
+            fields.reserve(item.values.size());
+            for (const auto& [name, value] : item.values)
+                fields.emplace_back(name, core::WideToUtf8(value));
+            changed |= PublishTrackMetadataFields(tracks[item.row], fields, true);
+        }
         if (changed) {
             RefreshPlaylist();
             RefreshPlaybackUi();

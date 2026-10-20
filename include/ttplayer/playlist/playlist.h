@@ -115,7 +115,8 @@ public:
     [[nodiscard]] std::optional<size_t> Previous(size_t current, PlayMode mode);
     void LoadM3u8(const std::filesystem::path& path,
                   const LoadOptions& options = {});
-    void SaveM3u8(const std::filesystem::path& path) const;
+    void SaveM3u8(const std::filesystem::path& path,
+                 bool save_relative_path = true) const;
     void LoadTtbl(const std::filesystem::path& path);
     void SaveTtbl(const std::filesystem::path& path) const;
     void LoadXml(const std::filesystem::path& path,
