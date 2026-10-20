@@ -9,6 +9,8 @@ namespace ttplayer::ui::detail {
 inline audio::PlaybackOptions PlaybackOptionsFromSettings(
     const settings::Settings& settings, const std::filesystem::path& runtime) {
     audio::PlaybackOptions options;
+    options.pcm_mode = settings.device.pcm_mode == 1 ? audio::PcmPlaybackMode::high_precision :
+        settings.device.pcm_mode == 2 ? audio::PcmPlaybackMode::bit_exact : audio::PcmPlaybackMode::compatible;
     options.mp3_tags = {static_cast<std::uint32_t>(settings.general.mp3_read_tag_priority),
         static_cast<std::uint32_t>(settings.general.mp3_write_tag_type),
         static_cast<std::uint32_t>(settings.general.mp3_id3v2_encoding),

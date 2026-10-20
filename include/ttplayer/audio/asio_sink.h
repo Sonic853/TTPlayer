@@ -1,4 +1,5 @@
 #pragma once
+#include "ttplayer/audio/hires_output.h"
 
 #include "ttplayer/audio/native_output_contract.h"
 
@@ -117,10 +118,14 @@ public:
     // ASIO Kernel-Streaming driver uses its DllGetClassObject exception.
     bool OpenDevice(const std::wstring& name, const std::wstring& module,
                     const GUID& class_id, const WAVEFORMATEX& source_format,
-                    std::uint32_t requested_source_bytes, HWND window = nullptr);
+                    std::uint32_t requested_source_bytes, HWND window = nullptr,
+                    PcmPlaybackMode mode = PcmPlaybackMode::compatible,
+                    HMODULE audio_module = nullptr, int dither = 0);
     bool OpenDriver(std::unique_ptr<AsioDriver> driver,
                     const WAVEFORMATEX& source_format,
-                    std::uint32_t requested_source_bytes, HWND window = nullptr);
+                    std::uint32_t requested_source_bytes, HWND window = nullptr,
+                    PcmPlaybackMode mode = PcmPlaybackMode::compatible,
+                    HMODULE audio_module = nullptr, int dither = 0);
     // Queue signed interleaved PCM. A callback consumes whole source frames,
     // converts each output channel, and zero-fills an underrun period.
     bool Submit(std::span<const std::byte> source, float left_gain = 1.0F,
@@ -139,6 +144,10 @@ public:
     // decoder worker can refill promptly without polling at device-period
     // granularity.
     [[nodiscard]] HANDLE ActivityEvent() const noexcept;
+    // ASIO channels may use different native encodings. Keep each one visible
+    // rather than reporting a fictitious single interleaved WAVE format.
+    [[nodiscard]] const std::vector<AsioChannelLayout>& ChannelLayouts() const noexcept;
+    [[nodiscard]] std::uint32_t SampleRate() const noexcept;
     [[nodiscard]] const std::wstring& Error() const noexcept { return error_; }
     [[nodiscard]] const std::wstring& Diagnostic() const noexcept { return diagnostic_; }
 

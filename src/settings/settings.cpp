@@ -1057,6 +1057,7 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         const auto device_type=StringAttr(n,L"DeviceType");
         if(!device_type.empty()) s.device.device_type=device_type;
         s.device.output_bits=IntAttr(n,L"OutputBits",s.device.output_bits);
+        s.device.pcm_mode=std::clamp(IntAttr(n,L"PcmMode",s.device.pcm_mode),0,2);
         s.device.buffer_duration=IntAttr(
             n,L"BufferDuration",s.device.buffer_duration);
         s.device.hardware_buffer=IntAttr(
@@ -1853,6 +1854,7 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
     if(auto* element=EnsureElement(document,L"Device")) {
         auto element_owner=AdoptCom(element);
         SetAttribute(element,L"DeviceType",settings.device.device_type);
+        SetAttribute(element,L"PcmMode",std::clamp(settings.device.pcm_mode,0,2));
         SetAttribute(element,L"OutputBits",settings.device.output_bits);
         SetAttribute(element,L"BufferDuration",settings.device.buffer_duration);
         SetAttribute(element,L"HardwareBuffer",

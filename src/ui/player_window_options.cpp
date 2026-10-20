@@ -92,6 +92,11 @@ constexpr int kOptionsLanguage = 0xe914;
 constexpr int kOptionsLanguageLabel = 0xe916;
 constexpr int kOptionsLanguageNotice = 0xe917;
 constexpr int kOptionsSkinKindTab = 0xe918;
+constexpr int kOptionsPcmModeLabel = 0xe931;
+constexpr int kOptionsPcmMode = 0xe932;
+constexpr std::array<int, 17> kOptionsResampleRates{
+    8000,11025,16000,22050,24000,32000,44100,48000,64000,
+    88200,96000,176400,192000,352800,384000,705600,768000};
 
 std::wstring AlbumOptionText(UINT id) {
     return i18n::ResourceText(GetModuleHandleW(nullptr), id);
@@ -326,6 +331,24 @@ void SetChecked(HWND dialog, int control, bool checked) {
 
 bool IsChecked(HWND dialog, int control) {
     return IsDlgButtonChecked(dialog, control) == BST_CHECKED;
+}
+
+void UpdatePcmModeControls(HWND dialog, int mode) {
+    // Disabled controls retain their selection/check state: changing modes
+    // must not discard the user's compatible-mode output preferences.
+    const bool compatible = mode == 0;
+    const bool processing = mode != 2;
+    EnableWindow(GetDlgItem(dialog, 2041), compatible);
+    EnableWindow(GetDlgItem(dialog, 2037), processing);
+    EnableWindow(GetDlgItem(dialog, 2043),
+                 compatible && IsChecked(dialog, 2037));
+    EnableWindow(GetDlgItem(dialog, 2036), processing);
+    EnableWindow(GetDlgItem(dialog, 2042),
+                 processing && IsChecked(dialog, 2036));
+    EnableWindow(GetDlgItem(dialog, 2186),
+                 processing && IsChecked(dialog, 2036));
+    EnableWindow(GetDlgItem(dialog, 2033), compatible);
+    EnableWindow(GetDlgItem(dialog, 2034), compatible);
 }
 
 int TreeCheckState(HWND tree, HTREEITEM item) {
@@ -5239,6 +5262,35 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         break;
     }
     case 260: {
+        if (!GetDlgItem(dialog, kOptionsPcmMode)) {
+            // Template 260 leaves this part of the buffer row unused.
+            // Use the resource font/DLUs, including on XP and high-DPI hosts.
+            const auto add = [&](LPCWSTR klass, LPCWSTR text, int id,
+                                 DWORD style, RECT rect, HWND after) {
+                MapDialogRect(dialog, &rect);
+                const HWND control = CreateWindowExW(0, klass, text,
+                    WS_CHILD | WS_VISIBLE | style,
+                    rect.left, rect.top, rect.right - rect.left,
+                    rect.bottom - rect.top, dialog,
+                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                    instance_, nullptr);
+                SendMessageW(control, WM_SETFONT,
+                    SendMessageW(dialog, WM_GETFONT, 0, 0), FALSE);
+                SetWindowPos(control, after, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                return control;
+            };
+            const HWND label = add(WC_STATICW, i18n::Literal(L"处理模式:"),
+                kOptionsPcmModeLabel, 0, {134,28,170,40},
+                GetDlgItem(dialog, 1072));
+            add(WC_COMBOBOXW, L"", kOptionsPcmMode,
+                WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+                {170,26,273,90}, label);
+        }
+        PopulateTextCombo(dialog, kOptionsPcmMode,
+            {i18n::Text(L"原版兼容"), i18n::Text(L"高精度处理"),
+             i18n::Text(L"原样输出")},
+            std::clamp(settings_.device.pcm_mode, 0, 2));
         options_device_entries_.clear();
         PopulateOptionsDeviceCatalog(dialog, false);
         StartOptionsDeviceProbe(dialog, false);
@@ -5252,23 +5304,19 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         PopulateResourceCombo(dialog, 2043, resources, 4,
             std::clamp(settings_.device.dither - 1, 0, 3));
         SetChecked(dialog, 2036, settings_.device.resample_rate != 0);
-        const std::array<int, 13> rates{8000,11025,16000,22050,24000,32000,
-            44100,48000,64000,88200,96000,176400,192000};
-        PopulateTextCombo(dialog, 2042,
-            IntegerLabels({8000,11025,16000,22050,24000,32000,44100,48000,
-                           64000,88200,96000,176400,192000}, L" Hz"),
-            settings_.device.resample_rate == 0 ? 7 : static_cast<int>(
-                std::find(rates.begin(), rates.end(),
-                          settings_.device.resample_rate) - rates.begin()));
+        std::vector<std::wstring> rate_labels;
+        for (const int rate : kOptionsResampleRates)
+            rate_labels.push_back(std::to_wstring(rate) + L" Hz");
+        const auto rate = std::find(kOptionsResampleRates.begin(),
+            kOptionsResampleRates.end(), settings_.device.resample_rate);
+        PopulateTextCombo(dialog, 2042, rate_labels,
+            rate == kOptionsResampleRates.end() ? 7 :
+            static_cast<int>(rate - kOptionsResampleRates.begin()));
         PopulateResourceCombo(dialog, 2186, resources, 3,
                               std::clamp(settings_.device.ssrc_mode, 0, 2));
         SetChecked(dialog, 2033, settings_.device.hardware_buffer);
         SetChecked(dialog, 2034, settings_.device.create_primary);
-        EnableWindow(GetDlgItem(dialog, 2043), settings_.device.dither != 0);
-        EnableWindow(GetDlgItem(dialog, 2042),
-                     settings_.device.resample_rate != 0);
-        EnableWindow(GetDlgItem(dialog, 2186),
-                     settings_.device.resample_rate != 0);
+        UpdatePcmModeControls(dialog, settings_.device.pcm_mode);
         UpdateOptionsDeviceDetails(dialog);
         break;
     }
@@ -5816,19 +5864,29 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         }
         settings_.device.buffer_duration = GetInteger(dialog, 1071,
             settings_.device.buffer_duration, 100, 10000);
-        settings_.device.output_bits =
-            std::clamp(ComboSelection(dialog, 2041), 0, 4) * 8;
-        settings_.device.dither = IsChecked(dialog, 2037)
-            ? std::clamp(ComboSelection(dialog, 2043), 0, 3) + 1 : 0;
-        constexpr std::array<int, 13> rates{8000,11025,16000,22050,24000,32000,
-            44100,48000,64000,88200,96000,176400,192000};
-        settings_.device.resample_rate = IsChecked(dialog, 2036)
-            ? rates[static_cast<size_t>(std::clamp(
-                  ComboSelection(dialog, 2042), 0, 12))] : 0;
-        settings_.device.ssrc_mode = ComboSelection(dialog, 2186,
-                                                     settings_.device.ssrc_mode);
-        settings_.device.hardware_buffer = IsChecked(dialog, 2033);
-        settings_.device.create_primary = IsChecked(dialog, 2034);
+        settings_.device.pcm_mode = std::clamp(ComboSelection(dialog,
+            kOptionsPcmMode, settings_.device.pcm_mode), 0, 2);
+        if (settings_.device.pcm_mode == 0) {
+            settings_.device.output_bits =
+                std::clamp(ComboSelection(dialog, 2041), 0, 4) * 8;
+            settings_.device.dither = IsChecked(dialog, 2037)
+                ? std::clamp(ComboSelection(dialog, 2043), 0, 3) + 1 : 0;
+            settings_.device.hardware_buffer = IsChecked(dialog, 2033);
+            settings_.device.create_primary = IsChecked(dialog, 2034);
+        } else if (settings_.device.pcm_mode == 1) {
+            // Any enabled dither uses TPDF in the high-precision path.
+            // Keep the saved legacy type for switching back to mode 0.
+            settings_.device.dither = IsChecked(dialog, 2037)
+                ? std::max(settings_.device.dither, 1) : 0;
+        }
+        if (settings_.device.pcm_mode != 2) {
+            settings_.device.resample_rate = IsChecked(dialog, 2036)
+                ? kOptionsResampleRates[static_cast<size_t>(std::clamp(
+                      ComboSelection(dialog, 2042), 0,
+                      static_cast<int>(kOptionsResampleRates.size()) - 1))] : 0;
+            settings_.device.ssrc_mode = ComboSelection(dialog, 2186,
+                                                       settings_.device.ssrc_mode);
+        }
         break;
     }
     case 263:
@@ -6149,6 +6207,10 @@ bool PlayerWindow::CommitOptionsControl(
         return true;
     case 260: {
         switch (control) {
+        case kOptionsPcmMode:
+            settings_.device.pcm_mode = std::clamp(ComboSelection(dialog,
+                kOptionsPcmMode, settings_.device.pcm_mode), 0, 2);
+            break;
         case 1059: {
             if (const auto selected = SelectedOutputDeviceEntry(
                     dialog, options_device_entries_.size())) {
@@ -6162,6 +6224,7 @@ bool PlayerWindow::CommitOptionsControl(
                 dialog, 1071, settings_.device.buffer_duration, 100, 10000);
             break;
         case 2041: {
+            if (settings_.device.pcm_mode != 0) break;
             const LRESULT selected = SendDlgItemMessageW(
                 dialog, 2041, CB_GETCURSEL, 0, 0);
             if (selected >= 0 && selected <= 4)
@@ -6169,6 +6232,7 @@ bool PlayerWindow::CommitOptionsControl(
             break;
         }
         case 2037: {
+            if (settings_.device.pcm_mode == 2) break;
             if (!IsChecked(dialog, 2037)) {
                 settings_.device.dither = 0;
             } else {
@@ -6180,6 +6244,7 @@ bool PlayerWindow::CommitOptionsControl(
             break;
         }
         case 2043: {
+            if (settings_.device.pcm_mode != 0) break;
             const LRESULT selected = SendDlgItemMessageW(
                 dialog, 2043, CB_GETCURSEL, 0, 0);
             if (selected >= 0 && selected <= 3)
@@ -6187,36 +6252,33 @@ bool PlayerWindow::CommitOptionsControl(
             break;
         }
         case 2036: {
+            if (settings_.device.pcm_mode == 2) break;
             if (!IsChecked(dialog, 2036)) {
                 settings_.device.resample_rate = 0;
             } else {
-                constexpr std::array<int, 13> rates{
-                    8000,11025,16000,22050,24000,32000,44100,
-                    48000,64000,88200,96000,176400,192000};
                 const LRESULT selected = SendDlgItemMessageW(
                     dialog, 2042, CB_GETCURSEL, 0, 0);
                 if (selected >= 0 &&
-                    selected < static_cast<LRESULT>(rates.size())) {
+                    selected < static_cast<LRESULT>(kOptionsResampleRates.size())) {
                     settings_.device.resample_rate =
-                        rates[static_cast<size_t>(selected)];
+                        kOptionsResampleRates[static_cast<size_t>(selected)];
                 }
             }
             break;
         }
         case 2042: {
-            constexpr std::array<int, 13> rates{
-                8000,11025,16000,22050,24000,32000,44100,
-                48000,64000,88200,96000,176400,192000};
+            if (settings_.device.pcm_mode == 2) break;
             const LRESULT selected = SendDlgItemMessageW(
                 dialog, 2042, CB_GETCURSEL, 0, 0);
             if (selected >= 0 &&
-                selected < static_cast<LRESULT>(rates.size())) {
+                selected < static_cast<LRESULT>(kOptionsResampleRates.size())) {
                 settings_.device.resample_rate =
-                    rates[static_cast<size_t>(selected)];
+                    kOptionsResampleRates[static_cast<size_t>(selected)];
             }
             break;
         }
         case 2186: {
+            if (settings_.device.pcm_mode == 2) break;
             const LRESULT selected = SendDlgItemMessageW(
                 dialog, 2186, CB_GETCURSEL, 0, 0);
             if (selected != CB_ERR)
@@ -6224,10 +6286,12 @@ bool PlayerWindow::CommitOptionsControl(
             break;
         }
         case 2033:
-            settings_.device.hardware_buffer = IsChecked(dialog, 2033);
+            if (settings_.device.pcm_mode == 0)
+                settings_.device.hardware_buffer = IsChecked(dialog, 2033);
             break;
         case 2034:
-            settings_.device.create_primary = IsChecked(dialog, 2034);
+            if (settings_.device.pcm_mode == 0)
+                settings_.device.create_primary = IsChecked(dialog, 2034);
             break;
         default: return false;
         }
@@ -6582,11 +6646,13 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
 }
 
 void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
+    const int pcm_mode = std::clamp(settings_.device.pcm_mode, 0, 2);
+    UpdatePcmModeControls(dialog, pcm_mode);
     const HWND devices = GetDlgItem(dialog, 1059);
     const HWND details = GetDlgItem(dialog, 1064);
     if (!devices || !details) return;
     ListView_SetExtendedListViewStyle(details,
-        LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
     const HWND header = ListView_GetHeader(details);
     if (!header || Header_GetItemCount(header) == 0) {
         for (int column_index = 0; column_index < 2; ++column_index) {
@@ -6618,7 +6684,8 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
     const UINT detail_resource = entry.backend == 0 ? 0x812a
         : entry.backend == 1 ? 0x812b
         : entry.backend == 2 ? 0x812c : 0x812d;
-    std::array<std::wstring, 5> labels{ResourceText(0x813c)};
+    std::vector<std::wstring> labels(5);
+    labels[0] = ResourceText(0x813c);
     for (size_t index = 0; index < 4; ++index)
         labels[index + 1] = ResourceListItem(
             ResourceModule(), detail_resource, index);
@@ -6628,7 +6695,7 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
         labels[3] = L"设备选择";
         labels[4] = L"系统要求";
     }
-    std::array<std::wstring, 5> values;
+    std::vector<std::wstring> values(5);
     values[0] = entry.backend == 0 ? L"WaveOut"
         : entry.backend == 1 ? L"DirectSound"
         : entry.backend == 2 ? L"Kernel Streaming"
@@ -6661,6 +6728,42 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
     const int show_direct_sound = entry.backend == 1 ? SW_SHOW : SW_HIDE;
     ShowWindow(GetDlgItem(dialog, 2033), show_direct_sound);
     ShowWindow(GetDlgItem(dialog, 2034), show_direct_sound);
+    const auto add = [&](std::wstring label, std::wstring value) {
+        labels.push_back(std::move(label));
+        values.push_back(std::move(value));
+    };
+    add(i18n::Text(L"处理模式"), pcm_mode == 0 ? i18n::Text(L"原版兼容") :
+        pcm_mode == 1 ? i18n::Text(L"高精度处理") : i18n::Text(L"原样输出"));
+    const bool supported = pcm_mode == 0 || entry.backend == 2 ||
+        entry.backend == 3 || entry.backend == 5 ||
+        (pcm_mode == 1 && entry.backend == 4);
+    add(i18n::Text(L"设备兼容"), supported
+        ? i18n::Text(L"支持此模式；实际格式需设备接受")
+        : i18n::Text(L"不支持此模式，播放时将报告错误"));
+    if (!supported) {
+        add(i18n::Text(L"可用输出"), pcm_mode == 1
+            ? L"WASAPI / ASIO / Kernel Streaming"
+            : i18n::Text(L"WASAPI 独占 / ASIO / Kernel Streaming"));
+    }
+    add(i18n::Text(L"音频处理"), pcm_mode == 0
+        ? i18n::Text(L"原版兼容 DSP 链")
+        : pcm_mode == 1 ? i18n::Text(L"64 位浮点 / EQ / SSRC")
+        : i18n::Text(L"全部 DSP、增益及音量处理旁路"));
+    if (pcm_mode != 0) {
+        add(i18n::Text(L"输出精度"), pcm_mode == 1
+            ? i18n::Text(L"设备自动协商，至少 24 位")
+            : i18n::Text(L"保持源 PCM 的有效位深"));
+        if (pcm_mode == 2)
+            add(i18n::Text(L"采样频率"), i18n::Text(L"保持源采样率，禁止重采样"));
+    }
+    add(i18n::Text(L"Winamp 音效"), pcm_mode == 0
+        ? i18n::Text(L"使用配置的插件链") : i18n::Text(L"旁路（保留插件设置）"));
+    add(i18n::Text(L"抖动"), pcm_mode == 2 ? i18n::Text(L"旁路")
+        : !settings_.device.dither ? i18n::Text(L"关闭")
+        : pcm_mode == 1 ? L"TPDF" : GetText(dialog, 2043));
+    auto signal_path = audio_ ? audio_->SignalPathDescription() : std::wstring{};
+    add(i18n::Text(L"最近实际路径"), signal_path.empty()
+        ? i18n::Text(L"尚未打开音频输出") : std::move(signal_path));
     for (int row = 0; row < static_cast<int>(labels.size()); ++row) {
         AddListText(details, row, labels[static_cast<size_t>(row)]);
         ListView_SetItemText(details, row, 1,
@@ -6675,6 +6778,8 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
         image_item.iImage = -1;
         ListView_SetItem(details, &image_item);
     }
+    // Keep the original 100/200-pixel columns. LVS_EX_LABELTIP exposes a
+    // clipped negotiated-path value on hover without changing this layout.
     if (options_device_images_) {
         LVITEMW item{};
         item.mask = LVIF_IMAGE;
@@ -7481,17 +7586,6 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
             }
             return TRUE;
         }
-        if (template_id == 260) {
-            if (control == 1059 && notification == CBN_SELCHANGE)
-                UpdateOptionsDeviceDetails(dialog);
-            else if (control == 2036) {
-                const bool enabled = IsChecked(dialog, 2036);
-                EnableWindow(GetDlgItem(dialog, 2042), enabled);
-                EnableWindow(GetDlgItem(dialog, 2186), enabled);
-            }
-            else if (control == 2037)
-                EnableWindow(GetDlgItem(dialog, 2043), IsChecked(dialog, 2037));
-        }
         if (template_id == 262) {
             if (control == IDC_ASSOCIATION_SUPPRESS && notification == BN_CLICKED) {
                 settings_.player.suppress_association_reminder = IsChecked(dialog, IDC_ASSOCIATION_SUPPRESS);
@@ -7924,6 +8018,8 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 else
                     ApplyOptionsPageRuntime(template_id);
             }
+            if (template_id == 260 && !edit_change)
+                UpdateOptionsDeviceDetails(dialog);
             return TRUE;
         }
         break;
@@ -8057,6 +8153,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
             // shortcut editor owns the two HOTKEY controls.  They are rebuilt
             // only when this page loses activation.
             if (template_id == 252) UnregisterConfiguredHotKeys();
+            if (template_id == 260) UpdateOptionsDeviceDetails(dialog);
             const int index = TemplateIndex(template_id);
             if (index >= 0) {
                 options_page_index_ = index;

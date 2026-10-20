@@ -5,8 +5,8 @@ import json
 import struct
 from pathlib import Path
 
-def archive_capabilities(data):
-    """Read the versioned archive capability resource; never execute the DLL."""
+def _resource_capabilities(data, identifier, expected_magic, required_abi, required_features, label):
+    """Read a versioned capability resource; never execute the DLL."""
     def read(fmt, at):
         n=struct.calcsize('<'+fmt)
         if at<0 or at+n>len(data):raise ValueError('Truncated archive capability PE')
@@ -32,14 +32,22 @@ def archive_capabilities(data):
             if name==identifier:
                 if bool(target&0x80000000)!=directory:raise ValueError('Invalid resource tree')
                 return target&0x7fffffff
-        raise ValueError('TTPCOMM release lacks extended archive capability metadata; publish the updated DLL first')
-    at=child(child(child(0,10,True),503,True),0,False)
+        raise ValueError(f'TTPCOMM release lacks {label} capability metadata; publish the updated DLL first')
+    at=child(child(child(0,10,True),identifier,True),0,False)
     payload,n=read('II',relative(at,16))
     if n!=16:raise ValueError('Invalid archive capability size')
     magic,version,abi,features=read('IIII',mapped(payload,n))
-    if magic!=0x41435054 or version!=1 or abi<3 or features&16383!=16383:
-        raise ValueError('TTPCOMM lacks required archive/password/signature/7z BZip2/Zstandard capabilities; publish the updated DLL first')
+    if magic!=expected_magic or version!=1 or abi<required_abi or features&required_features!=required_features:
+        raise ValueError(f'TTPCOMM lacks required {label} capabilities; publish the updated DLL first')
     return {'abi':abi,'features':features}
+
+def archive_capabilities(data):
+    return _resource_capabilities(data,503,0x41435054,3,16383,
+        'archive/password/signature/7z BZip2/Zstandard')
+
+def audio_capabilities(data):
+    return _resource_capabilities(data,504,0x41415054,2,3,
+        'audio ABI 2 encoder/effects')
 
 def inspect_exports(path):
     data=path.read_bytes()

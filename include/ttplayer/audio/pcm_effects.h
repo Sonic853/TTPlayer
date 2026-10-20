@@ -21,13 +21,18 @@ double PcmReplayGain(bool enabled, std::optional<double> gain, std::optional<dou
 // this state; SSRC and the Winamp bridge are deliberately output stages.
 class PcmSourceEffects {
 public:
-    PcmSourceEffects(const WAVEFORMATEX& input, HMODULE ttpcomm);
+    PcmSourceEffects(const WAVEFORMATEX& input, HMODULE ttpcomm, bool high_precision = false);
     ~PcmSourceEffects();
     PcmSourceEffects(const PcmSourceEffects&) = delete;
     PcmSourceEffects& operator=(const PcmSourceEffects&) = delete;
     bool Update(const PcmEffectSettings& settings);
     bool Active() const noexcept;
-    bool Process(const std::vector<std::byte>& input, std::vector<double>& half_samples);
+    // Modern mode drains every ready output block and may buffer a partial
+    // FIR block. Call Process({}, output, true) at EOF to return the remaining
+    // accepted frames; total output equals total input. Reset before a seek
+    // or another track. Legacy mode retains its historical queue behavior.
+    bool Process(const std::vector<std::byte>& input, std::vector<double>& half_samples,
+                 bool end_of_stream = false);
     bool Encode(const std::vector<double>& half_samples, std::vector<std::byte>& output);
     void Reset() noexcept;
     const std::wstring& Error() const noexcept;

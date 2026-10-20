@@ -1,6 +1,7 @@
 #pragma once
 #include <ttpcomm/audio_format_probe.h>
 #include "ttplayer/audio/builtin_file_info.h"
+#include "ttplayer/audio/hires_output.h"
 
 #include <array>
 #include <atomic>
@@ -128,6 +129,7 @@ struct VisualizationSamples {
 // pipeline.  Keeping them at the engine boundary prevents UI code from
 // silently substituting hard-coded buffering and output-format defaults.
 struct PlaybackOptions {
+    PcmPlaybackMode pcm_mode{PcmPlaybackMode::compatible};
     Mp3TagPolicy mp3_tags;
     std::filesystem::path lyric_recovery_folder;
     int file_buffer_bytes{16384};
@@ -332,6 +334,7 @@ public:
     // an unavailable/unsupported legacy backend must not make playback look
     // failed, but callers and diagnostic probes still need an audit trail.
     [[nodiscard]] std::wstring LastDiagnostic() const;
+    [[nodiscard]] std::wstring SignalPathDescription() const;
     [[nodiscard]] AudioFormat Format() const;
     [[nodiscard]] AudioMetadata Metadata() const;
     [[nodiscard]] uint64_t MetadataRevision() const noexcept { return metadata_revision_.load(); }
@@ -419,6 +422,8 @@ private:
     std::wstring error_;
     HRESULT error_result_{S_OK};
     std::wstring diagnostic_;
+    std::wstring signal_path_;
+    std::atomic<PcmPlaybackMode> active_pcm_mode_{PcmPlaybackMode::compatible};
     AudioFormat format_{};
     AudioMetadata metadata_{};
     std::shared_ptr<ArchivePlaybackSession> archive_session_, archive_handoff_;

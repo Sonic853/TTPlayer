@@ -115,6 +115,7 @@ struct PlaybackSettings {
     unsigned scan_gain_threads{2};
 };
 struct DeviceSettings {
+    int pcm_mode{}; // 0=original, 1=high precision processing, 2=unaltered PCM
     std::wstring device_type{L"{DEF00000-9C6D-47ED-AAF1-4DDA8F2B5C03}"};
     int output_bits{16};
     int buffer_duration{1000};

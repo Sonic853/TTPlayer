@@ -113,6 +113,9 @@ struct WasapiStream {
     ComPtr<IAudioClient> client;
     ComPtr<IAudioRenderClient> render;
     WAVEFORMATEX source{};
+    TtpCommPcmFormat source_pcm{};
+    PcmPlaybackMode active_mode{PcmPlaybackMode::compatible};
+    HiresPcmEncoder encoder;
     WAVEFORMATEXTENSIBLE format{};
     UINT32 capacity{};
     bool paused{true};
@@ -128,7 +131,8 @@ struct WasapiStream {
 
     bool OpenDevice(const std::wstring& endpoint_id, bool exclusive,
                     const WAVEFORMATEX& source_format, int buffer_ms,
-                    size_t queued_packet_bytes);
+                    size_t queued_packet_bytes, PcmPlaybackMode mode,
+                    HMODULE module, int dither);
     bool Submit(std::span<const std::byte> pcm);
     bool Pump(float left_gain, float right_gain);
     bool SetPaused(bool value);
@@ -144,9 +148,13 @@ struct WasapiStream {
         error = std::wstring(L"WASAPI ") + operation + L"失败 (" + hex + L")";
         if (hr == AUDCLNT_E_DEVICE_IN_USE) error += L"：设备已被其它程序占用。";
         else if (hr == AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED)
-            error += L"：请在系统声音设置中允许独占模式，或选择 WASAPI 共享模式。";
+            error += active_mode==PcmPlaybackMode::bit_exact
+                ? L"：请在系统声音设置中允许独占模式，或选择支持原样输出的设备。"
+                : L"：请在系统声音设置中允许独占模式，或选择 WASAPI 共享模式。";
         else if (hr == AUDCLNT_E_UNSUPPORTED_FORMAT)
-            error += L"：设备不支持该采样率、位深或声道数，请调整音频设备选项或使用共享模式。";
+            error += active_mode==PcmPlaybackMode::bit_exact
+                ? L"：设备不支持源采样率、位深或声道数。请选择支持该格式的设备，或改用高精度处理／原版兼容模式。"
+                : L"：设备不支持该采样率、位深或声道数，请调整音频设备选项或使用共享模式。";
         else if (hr == AUDCLNT_E_DEVICE_INVALIDATED)
             error += L"：音频设备已断开或配置已更改，请重新选择设备。";
         else if (hr == REGDB_E_CLASSNOTREG)
@@ -168,20 +176,28 @@ struct WasapiStream {
 
 bool WasapiStream::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
                            const WAVEFORMATEX& source_format, int buffer_ms,
-                           size_t queued_packet_bytes) {
+                           size_t queued_packet_bytes, PcmPlaybackMode playback_mode,
+                           HMODULE module, int dither) {
     Close();
     auto& s = *this;
     if (!s.error.empty()) return false;
     s.source = source_format;
+    s.active_mode = playback_mode;
+    if (playback_mode != PcmPlaybackMode::compatible &&
+        !DescribeHiresPcm(source_format,s.source_pcm))
+        return s.Fail(E_INVALIDARG,L"高精度源格式");
+    if (playback_mode == PcmPlaybackMode::bit_exact && !exclusive)
+        return s.Fail(E_INVALIDARG,L"原样输出需要独占模式");
     const auto lookahead = static_cast<std::uint64_t>(s.source.nSamplesPerSec) *
                            std::clamp(buffer_ms, 100, 10000) / 1000;
     s.low_frames = std::min<std::uint64_t>(lookahead / 4, s.source.nSamplesPerSec / 10);
-    if (s.source.wFormatTag != WAVE_FORMAT_PCM || s.source.nChannels == 0 ||
+    if (playback_mode == PcmPlaybackMode::compatible &&
+       (s.source.wFormatTag != WAVE_FORMAT_PCM || s.source.nChannels == 0 ||
         s.source.nChannels > 8 || s.source.nSamplesPerSec < 1000 ||
         s.source.nSamplesPerSec > 768000 ||
         (s.source.wBitsPerSample != 8 && s.source.wBitsPerSample != 16 &&
          s.source.wBitsPerSample != 24 && s.source.wBitsPerSample != 32) ||
-        s.source.nBlockAlign != s.source.nChannels * (s.source.wBitsPerSample / 8))
+        s.source.nBlockAlign != s.source.nChannels * (s.source.wBitsPerSample / 8)))
         return s.Fail(E_INVALIDARG, L"PCM 格式");
     if (queued_packet_bytes &&
         (queued_packet_bytes % s.source.nBlockAlign ||
@@ -206,7 +222,23 @@ bool WasapiStream::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
     if (!s.Fail(activate(), L"创建音频流")) return false;
     s.format = PcmFormat(s.source, s.source.wBitsPerSample,
                         s.source.nChannels > 2 || s.source.wBitsPerSample > 16);
-    if (exclusive) {
+    if (playback_mode != PcmPlaybackMode::compatible) {
+        if (exclusive) {
+            bool supported{};
+            for (const auto& candidate : HiresOutputCandidates(source_format,playback_mode)) {
+                if (s.client->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE,
+                    &candidate.Format,nullptr) == S_OK) {
+                    s.format=candidate;supported=true;break;
+                }
+            }
+            if (!supported) return s.Fail(AUDCLNT_E_UNSUPPORTED_FORMAT,
+                playback_mode==PcmPlaybackMode::bit_exact ? L"原样独占格式协商" : L"高精度独占格式协商");
+        } else {
+            auto pcm=s.source_pcm;
+            pcm.floating_point=1;pcm.bits=pcm.valid_bits=32;pcm.block_align=4*pcm.channels;
+            s.format=MakeHiresWave(pcm);
+        }
+    } else if (exclusive) {
         bool supported{};
         // Keep rate/channels explicit; try container widths at that rate only.
         for (const WORD bits : {s.source.wBitsPerSample, WORD{32}, WORD{24}, WORD{16}}) {
@@ -246,6 +278,15 @@ bool WasapiStream::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
         !s.Fail(s.client->GetBufferSize(&s.capacity), L"查询缓冲区大小") ||
         !s.Fail(s.client->GetService(IID_PPV_ARGS(&s.render)), L"创建渲染接口")) return false;
     if (s.capacity == 0) return s.Fail(E_UNEXPECTED, L"空音频缓冲区");
+    if (playback_mode != PcmPlaybackMode::compatible) {
+        TtpCommPcmFormat target{};
+        if (!DescribeHiresPcm(s.format.Format,target) ||
+            !s.encoder.Open(module,s.source_pcm,target,playback_mode,s.capacity,s.error,dither)) {
+            s.error_result=E_FAIL;
+            if (s.error.empty()) s.error=L"Invalid negotiated high precision PCM format";
+            return false;
+        }
+    }
     return true;
 }
 
@@ -254,6 +295,9 @@ bool WasapiStream::Submit(std::span<const std::byte> pcm) {
     if (!s.render || pcm.empty() || pcm.size() % s.source.nBlockAlign != 0 ||
         pcm.size() > 4 * 1024 * 1024 || s.queue.size() >= 4)
         return s.Fail(E_INVALIDARG, L"提交音频数据");
+    if (s.active_mode==PcmPlaybackMode::bit_exact &&
+        !FiniteHiresPacket(pcm,s.source_pcm))
+        return s.Fail(E_INVALIDARG,L"原样输出拒绝非有限浮点样本");
     s.queue.emplace_back(pcm.begin(), pcm.end());
     return true;
 }
@@ -261,6 +305,9 @@ bool WasapiStream::Submit(std::span<const std::byte> pcm) {
 bool WasapiStream::Pump(float left_gain, float right_gain) {
     auto& s = *this;
     if (!s.error.empty()) return false;
+    if (!std::isfinite(left_gain) || !std::isfinite(right_gain) ||
+        (s.active_mode==PcmPlaybackMode::bit_exact && (left_gain!=1 || right_gain!=1)))
+        return s.Fail(E_INVALIDARG,L"原样输出要求音量增益为一");
     if (s.paused) return true;
     UINT32 padding{};
     if (!s.Padding(padding)) return false;
@@ -283,6 +330,15 @@ bool WasapiStream::Pump(float left_gain, float right_gain) {
             (packet.size() - s.offset) / s.source.nBlockAlign));
         BYTE* destination{};
         if (!s.Fail(s.render->GetBuffer(frames, &destination), L"取得音频缓冲区")) return false;
+        if (s.active_mode != PcmPlaybackMode::compatible) {
+            const auto input=std::span<const std::byte>(packet).subspan(s.offset,
+                size_t(frames)*s.source.nBlockAlign);
+            if (!s.encoder.Convert(input,left_gain,right_gain,
+                {reinterpret_cast<std::byte*>(destination),size_t(frames)*s.format.Format.nBlockAlign})) {
+                s.render->ReleaseBuffer(frames,AUDCLNT_BUFFERFLAGS_SILENT);
+                return s.Fail(E_INVALIDARG,L"最终高精度编码");
+            }
+        } else {
         const size_t input_bytes = s.source.wBitsPerSample / 8;
         const size_t output_bytes = s.format.Format.wBitsPerSample / 8;
         const auto* input = reinterpret_cast<const BYTE*>(packet.data()) + s.offset;
@@ -309,6 +365,7 @@ bool WasapiStream::Pump(float left_gain, float right_gain) {
                 destination[byte] = static_cast<BYTE>(static_cast<std::uint64_t>(value) >> (byte * 8));
             input += input_bytes;
             destination += output_bytes;
+        }
         }
         if (!s.Fail(s.render->ReleaseBuffer(frames, 0), L"提交音频缓冲区")) return false;
         s.written_frames += frames;
@@ -342,6 +399,7 @@ bool WasapiStream::Reset() {
     s.offset = 0;
     s.written_frames = s.played_frames = 0;
     s.input_finished = s.buffering = false;
+    s.encoder.Reset();
     return true;
 }
 
@@ -435,13 +493,16 @@ WasapiSink::~WasapiSink() { Close(); }
 
 bool WasapiSink::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
                            const WAVEFORMATEX& source_format, int buffer_ms,
-                           size_t queued_packet_bytes) {
+                           size_t queued_packet_bytes, PcmPlaybackMode mode,
+                           HMODULE module, int dither) {
     Close();
     impl_ = std::make_unique<Impl>();
     bool opened{};
     impl_->Invoke([&] {
         opened = impl_->stream.OpenDevice(endpoint_id, exclusive, source_format,
-                                          buffer_ms, queued_packet_bytes);
+                                          buffer_ms, queued_packet_bytes,mode,module,dither);
+        if (opened && mode==PcmPlaybackMode::bit_exact)
+            impl_->left_gain=impl_->right_gain=1.0F;
     });
     if (!opened) impl_->Stop();
     return opened;

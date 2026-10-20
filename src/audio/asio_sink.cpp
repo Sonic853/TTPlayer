@@ -328,6 +328,13 @@ struct AsioSink::State {
     std::mutex mutex;
     std::unique_ptr<AsioDriver> driver;
     WAVEFORMATEX source{};
+    TtpCommPcmFormat source_pcm{};
+    PcmPlaybackMode mode{PcmPlaybackMode::compatible};
+    std::vector<std::unique_ptr<HiresPcmEncoder>> encoders;
+    std::vector<double> samples;
+    std::vector<std::byte> encoded;
+    float left_gain{1},right_gain{1};
+    std::atomic<bool> conversion_failed{};
     std::vector<AsioBufferInfo> buffers;
     std::vector<AsioChannelLayout> layouts;
     std::vector<std::byte> queue;
@@ -375,6 +382,46 @@ struct AsioSink::State {
             auto* out = static_cast<std::byte*>(buffers[channel].buffers[index]);
             const auto& layout = layouts[channel];
             const size_t output_bytes = layout.container_bits / 8;
+            if (mode!=PcmPlaybackMode::compatible) {
+                // Source stays unquantized in the lookahead queue. Encode at
+                // the driver boundary, once, using its real sample type.
+                const double gain=channel==0?left_gain:channel==1?right_gain:
+                    std::max(left_gain,right_gain);
+                const bool direct_float=mode==PcmPlaybackMode::bit_exact &&
+                    source_pcm.floating_point && layout.floating_point &&
+                    source_pcm.bits==unsigned(layout.container_bits);
+                if (direct_float) {
+                    for (size_t frame=0;frame<count;++frame) {
+                        const auto* p=period_source[index].data()+frame*frame_bytes+channel*input_bytes;
+                        std::memcpy(out+frame*output_bytes,p,output_bytes);
+                    }
+                } else {
+                    for (size_t frame=0;frame<count;++frame) {
+                        const auto* p=period_source[index].data()+frame*frame_bytes+channel*input_bytes;
+                        samples[frame]=ReadHiresSample(p,source_pcm)*0.5*gain;
+                    }
+                    if (!encoders[channel]->EncodeHalf({samples.data(),count},
+                        {encoded.data(),count*output_bytes})) {
+                        conversion_failed.store(true,std::memory_order_release);
+                        std::memset(out,0,count*output_bytes);
+                    } else {
+                        std::memcpy(out,encoded.data(),count*output_bytes);
+                        // WAVE valid bits are left aligned; ASIO's Int32LSBxx
+                        // and Int32MSBxx are signed, right-aligned containers.
+                        if (!layout.floating_point && layout.valid_bits<layout.container_bits) {
+                            for (size_t frame=0;frame<count;++frame) {
+                                int32_t value{};std::memcpy(&value,out+frame*output_bytes,4);
+                                value >>= layout.container_bits-layout.valid_bits;
+                                std::memcpy(out+frame*output_bytes,&value,4);
+                            }
+                        }
+                    }
+                }
+                if (layout.big_endian) for (size_t frame=0;frame<count;++frame)
+                    std::reverse(out+frame*output_bytes,out+(frame+1)*output_bytes);
+                if (count<frames) std::memset(out+count*output_bytes,0,(frames-count)*output_bytes);
+                continue;
+            }
             for (size_t frame = 0; frame < count; ++frame) {
                 double sample{};
                 if (channel < source.nChannels || source.nChannels == 1) {
@@ -436,22 +483,26 @@ AsioSink::AsioSink() = default;
 AsioSink::~AsioSink() { Close(); }
 
 bool AsioSink::OpenDevice(const std::wstring& name, const std::wstring& module,
-    const GUID& class_id, const WAVEFORMATEX& source, std::uint32_t requested, HWND window) {
+    const GUID& class_id, const WAVEFORMATEX& source, std::uint32_t requested, HWND window,
+    PcmPlaybackMode mode, HMODULE audio_module, int dither) {
     Close(); error_.clear(); diagnostic_.clear();
     auto driver = ActivateAsio(name, module, class_id, error_);
-    return driver && OpenDriver(std::move(driver), source, requested, window);
+    return driver && OpenDriver(std::move(driver), source, requested, window,mode,audio_module,dither);
 }
 
 bool AsioSink::OpenDriver(std::unique_ptr<AsioDriver> driver, const WAVEFORMATEX& source,
-    std::uint32_t requested, HWND window) {
+    std::uint32_t requested, HWND window, PcmPlaybackMode mode, HMODULE audio_module,int dither) {
     Close(); error_.clear(); diagnostic_.clear();
-    if (!driver || !ValidSource(source)) { error_ = L"ASIO requires 16/24/32-bit integer PCM"; return false; }
+    TtpCommPcmFormat source_pcm{};
+    if (!driver || (mode==PcmPlaybackMode::compatible ? !ValidSource(source) :
+        !DescribeHiresPcm(source,source_pcm))) { error_ = L"ASIO requires a valid PCM source"; return false; }
     {
         std::scoped_lock lock(g_callback_mutex);
         if (g_active_sink) { error_ = L"Only one active ASIO callback owner is supported"; return false; }
     }
     auto state = std::make_unique<State>();
     state->driver = std::move(driver); state->source = source;
+    state->mode=mode;state->source_pcm=source_pcm;
     state->activity_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!state->activity_event) { error_ = L"Unable to create ASIO callback event"; return false; }
     if (!state->driver->Init(window)) { error_ = DriverError(*state->driver, L"IASIO::init failed"); return false; }
@@ -459,7 +510,7 @@ bool AsioSink::OpenDriver(std::unique_ptr<AsioDriver> driver, const WAVEFORMATEX
     if (!state->driver->GetChannels(inputs, outputs)) {
         error_ = DriverError(*state->driver, L"IASIO::getChannels failed"); return false;
     }
-    if (outputs < 2 || outputs > 4096) {
+    if (outputs < (mode==PcmPlaybackMode::compatible ? 2 : source.nChannels) || outputs > 4096) {
         error_ = L"IASIO::getChannels returned unusable output count " + std::to_wstring(outputs); return false;
     }
     if (!state->driver->GetBufferSize(minimum, maximum, preferred, granularity)) {
@@ -483,7 +534,10 @@ bool AsioSink::OpenDriver(std::unique_ptr<AsioDriver> driver, const WAVEFORMATEX
     // not every physical output offered by the driver.  A mono source is
     // deliberately duplicated to the first stereo pair; excess source
     // channels are truncated only when the selected driver exposes fewer.
-    const long stream_channels = std::clamp<long>(source.nChannels, 2, outputs);
+    const long stream_channels = mode==PcmPlaybackMode::compatible ?
+        std::clamp<long>(source.nChannels, 2, outputs) : source.nChannels;
+    if (mode!=PcmPlaybackMode::compatible && source.nChannels>2)
+        diagnostic_ += L"; channel order maps explicitly to ASIO output indices 0..N-1; verify driver routing";
     state->frames = plan->frames_per_buffer; state->capacity = plan->queued_source_bytes;
     state->buffers.resize(static_cast<size_t>(stream_channels));
     state->layouts.resize(static_cast<size_t>(stream_channels));
@@ -495,14 +549,31 @@ bool AsioSink::OpenDriver(std::unique_ptr<AsioDriver> driver, const WAVEFORMATEX
             error_ = DriverError(*state->driver, L"IASIO::getChannelInfo failed") +
                 L"; output=" + std::to_wstring(channel); return false;
         }
-        const auto layout = ResolveAsioChannelLayout(source.wBitsPerSample, channel_info.type);
+        auto layout = ResolveAsioChannelLayout(mode==PcmPlaybackMode::compatible ? source.wBitsPerSample : 32,
+            channel_info.type);
+        if (mode!=PcmPlaybackMode::compatible && channel_info.type>=8 && channel_info.type<=11) {
+            constexpr int valid[]{16,18,20,24};
+            layout=AsioChannelLayout{32,valid[channel_info.type-8],false,true};
+        }
         if (!layout) {
             error_ = L"IASIO output sample type " + std::to_wstring(channel_info.type) +
                 L" is unsupported; output=" + std::to_wstring(channel); return false;
         }
         state->layouts[static_cast<size_t>(channel)] = *layout;
+        if (mode!=PcmPlaybackMode::compatible) {
+            auto input=source_pcm;input.channels=1;input.block_align=input.bits/8;input.channel_mask=0;
+            auto target=input;target.bits=layout->container_bits;target.valid_bits=layout->valid_bits;
+            target.block_align=target.bits/8;target.floating_point=layout->floating_point ? 1:0;
+            auto encoder=std::make_unique<HiresPcmEncoder>();
+            if (!encoder->Open(audio_module,input,target,mode,state->frames,error_,dither,
+                0x6d2b79f5u+uint32_t(channel)*0x9e3779b9u)) return false;
+            state->encoders.push_back(std::move(encoder));
+        }
     }
     const size_t period_bytes = size_t{state->frames} * source.nBlockAlign;
+    if (mode!=PcmPlaybackMode::compatible) {
+        state->samples.resize(state->frames);state->encoded.resize(size_t(state->frames)*8);
+    }
     for (auto& pcm : state->period_source) pcm.resize(period_bytes);
     state->callback_table = {&BufferSwitch, &SampleRateDidChange, &AsioMessage,
                              &BufferSwitchTimeInfo};
@@ -547,6 +618,14 @@ bool AsioSink::Submit(std::span<const std::byte> source, float left_gain, float 
     if (!state_ || source.empty() || source.size() % state_->source.nBlockAlign ||
         !std::isfinite(left_gain) || !std::isfinite(right_gain)) { error_ = L"Invalid ASIO source packet"; return false; }
     std::scoped_lock lock(state_->mutex);
+    if (state_->mode==PcmPlaybackMode::bit_exact &&
+        (left_gain!=1 || right_gain!=1 || !FiniteHiresPacket(source,state_->source_pcm))) {
+        error_=L"Bit-exact ASIO rejects gain changes and nonfinite floating samples";return false;
+    }
+    if (state_->mode!=PcmPlaybackMode::compatible) {
+        state_->left_gain=std::clamp(left_gain,0.0F,1.0F);
+        state_->right_gain=std::clamp(right_gain,0.0F,1.0F);
+    }
     const size_t pending = state_->queue.size() - state_->read_offset +
         state_->period_bytes[0] + state_->period_bytes[1];
     if (pending > state_->capacity || source.size() > state_->capacity - pending) { error_ = L"ASIO source queue is full"; return false; }
@@ -554,6 +633,7 @@ bool AsioSink::Submit(std::span<const std::byte> source, float left_gain, float 
     // sees stable frame data.  The callback remains bounded and allocation-free.
     std::vector<std::byte> copy(source.begin(), source.end());
     const unsigned bytes = state_->source.wBitsPerSample / 8;
+    if (state_->mode==PcmPlaybackMode::compatible)
     for (size_t frame = 0; frame < copy.size() / state_->source.nBlockAlign; ++frame) {
         for (unsigned channel = 0; channel < state_->source.nChannels; ++channel) {
             const float gain = std::clamp(channel == 0 ? left_gain : channel == 1 ? right_gain : 1.0F, 0.0F, 1.0F);
@@ -619,12 +699,17 @@ bool AsioSink::Reset() {
     state_->period_bytes = {};
     state_->primed = false;
     state_->consumed.store(0, std::memory_order_relaxed);
+    state_->conversion_failed.store(false);
+    for (auto& encoder:state_->encoders) encoder->Reset();
     state_->ClearDriverBuffers();
     return true;
 }
 
 bool AsioSink::CheckStatus() {
     if (!state_) { error_ = L"ASIO stream is not open"; return false; }
+    if (state_->conversion_failed.load(std::memory_order_acquire)) {
+        error_=L"ASIO final high precision encoding failed";return false;
+    }
     const unsigned notifications = state_->notifications.load(std::memory_order_acquire);
     if (!notifications) return true;
     if (notifications & 1u)
@@ -665,6 +750,13 @@ std::uint64_t AsioSink::ConsumedSourceBytes() const noexcept {
     return state_ ? state_->consumed.load(std::memory_order_relaxed) : 0;
 }
 HANDLE AsioSink::ActivityEvent() const noexcept { return state_ ? state_->activity_event : nullptr; }
+const std::vector<AsioChannelLayout>& AsioSink::ChannelLayouts() const noexcept {
+    static const std::vector<AsioChannelLayout> empty;
+    return state_ ? state_->layouts : empty;
+}
+std::uint32_t AsioSink::SampleRate() const noexcept {
+    return state_ ? state_->source.nSamplesPerSec : 0;
+}
 
 void AsioSink::BufferSwitch(long index, AsioBool) noexcept {
     State* state{};

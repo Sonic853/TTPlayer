@@ -2021,22 +2021,27 @@ class RecoveredProcessorChain {
 public:
     RecoveredProcessorChain(const WAVEFORMATEX& format, const AudioMetadata& metadata,
         const PlaybackOptions& options, HMODULE module, WinampDspChain& dsp, bool analyze)
-        : gain_(metadata.replay_gain_db), peak_(metadata.replay_peak), effects_(format,module), winamp_dsp_(dsp) {
+        : gain_(metadata.replay_gain_db), peak_(metadata.replay_peak),
+          mode_(options.pcm_mode),
+          effects_(format,module,options.pcm_mode==PcmPlaybackMode::high_precision), winamp_dsp_(dsp) {
         std::memcpy(&format_,&format,std::min(sizeof(format_),sizeof(format)+size_t(format.cbSize)));
-        if(analyze) analyzer_=PlaybackReplayGainAnalyzer::Create(module,format.nSamplesPerSec,format.nChannels);
+        if(analyze && mode_!=PcmPlaybackMode::bit_exact)
+            analyzer_=PlaybackReplayGainAnalyzer::Create(module,format.nSamplesPerSec,format.nChannels);
         Update(options);
     }
     void Update(const PlaybackOptions& options) {
+        if(mode_==PcmPlaybackMode::bit_exact)return;
         PcmEffectSettings settings{PcmReplayGain(options.auto_gain,gain_,peak_),
             options.equalizer_profile!=-2,options.equalizer_values,options.surround};
         if(!effects_.Update(settings))diagnostics_.push_back(effects_.Error());
     }
-    bool Active() const noexcept {return effects_.Active() || analyzer_;}
-    bool Process(std::vector<std::byte>& bytes, bool = true, std::vector<double>* precise=nullptr) {
-        if(!Active() || bytes.empty())return true;
+    bool Good() const noexcept {return mode_!=PcmPlaybackMode::high_precision || effects_.Error().empty();}
+    bool Active() const noexcept {return mode_!=PcmPlaybackMode::bit_exact && (effects_.Active() || analyzer_);}
+    bool Process(std::vector<std::byte>& bytes, bool = true, std::vector<double>* precise=nullptr, bool end=false) {
+        if(!Active() || (bytes.empty() && !end))return true;
         // Analyze unprocessed source samples. Winamp runs after output SSRC.
-        if(analyzer_ && !analyzer_->AnalyzePcm(bytes,format_.Format))analyzer_.reset();
-        std::vector<double> samples;if(!effects_.Process(bytes,samples))return false;
+        if(analyzer_ && !bytes.empty() && !analyzer_->AnalyzePcm(bytes,format_.Format))analyzer_.reset();
+        std::vector<double> samples;if(!effects_.Process(bytes,samples,end))return false;
         if(precise){*precise=std::move(samples);return true;}
         return effects_.Encode(samples,bytes);
     }
@@ -2052,6 +2057,7 @@ public:
     }
 private:
     WAVEFORMATEXTENSIBLE format_{}; std::optional<double> gain_,peak_;
+    PcmPlaybackMode mode_{};
     PcmSourceEffects effects_; WinampDspChain& winamp_dsp_;
     std::unique_ptr<PlaybackReplayGainAnalyzer> analyzer_;
     std::vector<std::wstring> diagnostics_;
@@ -2520,6 +2526,8 @@ bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
         error_.clear();
         error_result_ = S_OK;
         diagnostic_.clear();
+        signal_path_.clear();
+        active_pcm_mode_=options_.pcm_mode;
         format_ = {};
         metadata_ = {};
         open_complete_ = false;
@@ -2617,7 +2625,9 @@ void AudioEngine::PlaybackWorker(std::filesystem::path path, int subtrack,
         static_cast<int>(THREAD_PRIORITY_TIME_CRITICAL)));
     const HRESULT com_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (IsMidiPath(path)) {
-        if (FAILED(com_result)) SetError(L"MIDI COM initialization failed", com_result);
+        if (active_pcm_mode_.load()!=PcmPlaybackMode::compatible)
+            SetError(L"MIDI 合成播放请使用原版兼容模式；高精度／原样输出仅适用于解码后的 PCM。");
+        else if (FAILED(com_result)) SetError(L"MIDI COM initialization failed", com_result);
         else MidiWorker(path);
     } else {
         const HRESULT media_result = platform::MFStartup(MF_VERSION, MFSTARTUP_LITE);
@@ -2659,6 +2669,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     {
         std::scoped_lock lock(mutex_);
         options = options_;
+        active_pcm_mode_=options.pcm_mode;
     }
     options.network_canceled = [this] { return stop_requested_.load(); };
     options.archive_session = std::move(archive);
@@ -2669,6 +2680,22 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     WaveOutSelection output = ResolveWaveOutSelection(options);
     if (!output.error.empty()) {
         if (!stop_requested_) SetError(std::move(output.error));
+        return;
+    }
+    const auto pcm_mode=options.pcm_mode;
+    const bool precise=pcm_mode==PcmPlaybackMode::high_precision;
+    const bool unaltered=pcm_mode==PcmPlaybackMode::bit_exact;
+    if (pcm_mode!=PcmPlaybackMode::compatible &&
+        output.requested_backend!=LegacyOutputBackend::wasapi_shared &&
+        output.requested_backend!=LegacyOutputBackend::wasapi_exclusive &&
+        output.requested_backend!=LegacyOutputBackend::asio &&
+        output.requested_backend!=LegacyOutputBackend::kernel_streaming) {
+        SetError(L"高精度／原样输出需要选择 WASAPI、ASIO 或 Kernel Streaming；"
+                 L"WaveOut 和 DirectSound 请使用原版兼容模式。");
+        return;
+    }
+    if (unaltered && output.requested_backend==LegacyOutputBackend::wasapi_shared) {
+        SetError(L"原样输出需要 WASAPI 独占、ASIO 或 Kernel Streaming；共享模式经过系统混音器。");
         return;
     }
     if (!source->Open(path, options)) {
@@ -2712,12 +2739,13 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         ++metadata_revision_;
     };
     const bool analyze_replay_gain = replay_gain_commit.Prepare(
-        plugin_manager_, path, subtrack, options.auto_scan_gain);
+        plugin_manager_, path, subtrack, !unaltered && options.auto_scan_gain);
     RecoveredProcessorChain processors(
         source_format, source_metadata, options, ttpcomm_module_, *dsp_chain_,
         analyze_replay_gain);
     for (auto& diagnostic : processors.TakeDiagnostics(true))
         RecordDiagnostic(std::move(diagnostic));
+    if (!processors.Good()) {SetError(LastDiagnostic());return;}
     uint64_t processor_revision = processor_revision_.load();
 
     // FUN_004B0D1A creates the floating-point processing stream first and
@@ -2725,15 +2753,38 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     // @Dither.  Keeping this output transform outside every reader is what
     // makes APE/TAK/VQF, AIFF/AU, CDA and Media Foundation obey one contract.
     PcmOutputTransform output_transform;
-    if (!output_transform.Open(
+    if (!unaltered && !output_transform.Open(
             source_format,
             {ResolveOutputBits(options.output_bits, source->DisplayFormat().bits_per_sample), options.resample_rate,
-             options.ssrc_mode, options.dither},
+             options.ssrc_mode, precise ? 0 : options.dither, precise},
             ttpcomm_module_)) {
         if (!stop_requested_) SetError(output_transform.Error());
         return;
     }
-    WAVEFORMATEX wave_format = output_transform.OutputFormat();
+    // Keep the EXTENSIBLE tail alive through endpoint negotiation. A sliced
+    // WAVEFORMATEX loses channel masks and valid bits (e.g. 24 in 32).
+    WAVEFORMATEXTENSIBLE native_format{};
+    if (unaltered) {
+        std::memcpy(&native_format,&source_format,
+            std::min(sizeof(native_format),sizeof(source_format)+size_t(source_format.cbSize)));
+    } else if (precise) {
+        TtpCommPcmFormat original{};
+        if (!DescribeHiresPcm(source_format,original)) {
+            SetError(L"The decoder returned an unsupported high precision PCM format");return;
+        }
+        original.bits=original.valid_bits=64;
+        original.floating_point=1;
+        original.block_align=original.channels*8;
+        original.sample_rate=output_transform.OutputFormat().nSamplesPerSec;
+        native_format=MakeHiresWave(original);
+    } else native_format.Format=output_transform.OutputFormat();
+    WAVEFORMATEX wave_format=native_format.Format;
+    // Queue accounting and visualization use a self-contained canonical
+    // header; only endpoint opening receives the extended format object.
+    if (wave_format.wFormatTag==WAVE_FORMAT_EXTENSIBLE) {
+        wave_format.wFormatTag=static_cast<WORD>(native_format.SubFormat.Data1);
+        wave_format.cbSize=0;
+    }
 
     if (output.requested_backend == LegacyOutputBackend::direct_sound) {
         // FUN_004C3170 creates the DirectSound device selected by the
@@ -2922,7 +2973,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             }
             for (auto& diagnostic : processors.TakeDiagnostics())
                 RecordDiagnostic(std::move(diagnostic));
-            output_transform.SetWinampDsp(dsp_chain_.get(), dsp_enabled_.load());
+            output_transform.SetWinampDsp(dsp_chain_.get(),
+                        pcm_mode==PcmPlaybackMode::compatible && dsp_enabled_.load());
             if (!(processing ? output_transform.ProcessSamples(
                       std::move(processed), decoded, decoder_eof)
                   : output_transform.Process(native, decoded, decoder_eof))) {
@@ -2989,6 +3041,10 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             std::scoped_lock lock(mutex_);
             direct_sound_buffer_ = sound_buffer.Get();
             backend_ = Backend::direct_sound;
+            signal_path_=L"原版兼容 → DirectSound "+
+                std::to_wstring(wave_format.nSamplesPerSec)+L" Hz / "+
+                std::to_wstring(wave_format.wBitsPerSample)+L" bit / "+
+                std::to_wstring(wave_format.nChannels)+L" ch";
             ApplyVolumeLocked();
             metadata_ = source->Metadata();
             ++metadata_revision_;
@@ -3203,7 +3259,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         wasapi_sink = std::make_unique<WasapiSink>();
         if (!wasapi_sink->OpenDevice(key->endpoint_id,
                 output.requested_backend == LegacyOutputBackend::wasapi_exclusive,
-                wave_format, options.output_buffer_ms, buffer_bytes)) {
+                native_format.Format, options.output_buffer_ms, buffer_bytes,
+                pcm_mode, ttpcomm_module_, options.dither)) {
             if (!stop_requested_) SetError(wasapi_sink->Error(), wasapi_sink->ErrorResult());
             return;
         }
@@ -3220,12 +3277,14 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         }
         if (stop_requested_) return;
         ks_sink = std::make_unique<KernelStreamingSink>();
-        if (!ks_sink->OpenDevice(selected.device->module, wave_format,
-                                 kOutputBufferCount, buffer_bytes)) {
+        if (!ks_sink->OpenDevice(selected.device->module, native_format.Format,
+                                 kOutputBufferCount, buffer_bytes,
+                                 pcm_mode, ttpcomm_module_, options.dither)) {
             if (!stop_requested_) SetError(ks_sink->Error());
             return;
         }
-        if (ks_sink->DeviceFormat().wBitsPerSample != wave_format.wBitsPerSample)
+        if (pcm_mode==PcmPlaybackMode::compatible &&
+            ks_sink->DeviceFormat().wBitsPerSample != wave_format.wBitsPerSample)
             RecordDiagnostic(L"The selected KS pin uses the original 16-bit PCM fallback");
     }
     std::unique_ptr<AsioSink> asio_sink;
@@ -3240,8 +3299,9 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         if (stop_requested_) return;
         asio_sink = std::make_unique<AsioSink>();
         if (!asio_sink->OpenDevice(selected.device->name, selected.device->module,
-                                   selected.device->class_id, wave_format,
-                                   static_cast<std::uint32_t>(buffer_bytes))) {
+                                   selected.device->class_id, native_format.Format,
+                                   static_cast<std::uint32_t>(buffer_bytes), nullptr,
+                                   pcm_mode, ttpcomm_module_, options.dither)) {
             if (!stop_requested_) SetError(asio_sink->Error());
             return;
         }
@@ -3250,6 +3310,34 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         // EOF waits for the final submitted period, including a short tail.
         buffer_bytes = static_cast<size_t>(asio_sink->PeriodFrames()) *
                        wave_format.nBlockAlign;
+    }
+    {
+        const auto describe=[](const WAVEFORMATEX& f) {
+            TtpCommPcmFormat info{};
+            if (!DescribeHiresPcm(f,info)) return std::wstring(L"未知格式");
+            return std::to_wstring(info.sample_rate)+L" Hz / "+
+                std::to_wstring(info.valid_bits)+L" bit "+
+                (info.floating_point ? L"float" : L"PCM")+
+                L" / "+std::to_wstring(info.channels)+L" ch";
+        };
+        std::wstring signal=describe(source_format);
+        signal+=precise ? L" → float64 处理（Winamp 旁路） → " :
+                unaltered ? L" → 原样（处理／音量旁路） → " : L" → 原版兼容 → ";
+        signal+=BackendName(output.requested_backend)+L" ";
+        if (wasapi_sink) signal+=describe(wasapi_sink->DeviceFormat());
+        else if (ks_sink) signal+=describe(ks_sink->DeviceFormat());
+        else if (asio_sink) {
+            signal+=std::to_wstring(asio_sink->SampleRate())+L" Hz";
+            size_t channel{};
+            for (const auto& layout:asio_sink->ChannelLayouts())
+                signal+=L" / ch"+std::to_wstring(++channel)+L": "+
+                    std::to_wstring(layout.valid_bits)+L" bit "+
+                    (layout.floating_point?L"float":L"PCM");
+        } else signal+=describe(wave_format);
+        if (output.requested_backend==LegacyOutputBackend::wasapi_shared)
+            signal+=L"（系统共享混音）";
+        std::scoped_lock lock(mutex_);
+        signal_path_=std::move(signal);
     }
 
     HANDLE completion = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -3346,15 +3434,16 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                     processor_revision = latest_revision;
                 }
                 std::vector<double> processed;
-                const bool processing = !decoded.empty() && processors.Active();
-                if (processing && !processors.Process(decoded, dsp_enabled_.load(), &processed)) {
+                const bool processing = (!decoded.empty() || (precise && decoder_eof)) && processors.Active();
+                if (processing && !processors.Process(decoded, dsp_enabled_.load(), &processed, decoder_eof)) {
                     if (!stop_requested_)
                         SetError(L"The recovered audio processor chain failed");
                     return false;
                 }
-                if (!decoded.empty() || decoder_eof) {
+                if (!unaltered && (!decoded.empty() || decoder_eof)) {
                     std::vector<std::byte> converted;
-                    output_transform.SetWinampDsp(dsp_chain_.get(), dsp_enabled_.load());
+                    output_transform.SetWinampDsp(dsp_chain_.get(),
+                        pcm_mode==PcmPlaybackMode::compatible && dsp_enabled_.load());
                     if (!(processing ? output_transform.ProcessSamples(
                               std::move(processed), converted, decoder_eof)
                           : output_transform.Process(decoded, converted, decoder_eof))) {
@@ -3396,7 +3485,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             output.header.dwFlags = WHDR_PREPARED;
         } else if (ks_sink || asio_sink) {
             float left{1.0F}, right{1.0F};
-            if (ks_sink) {
+            if (!unaltered && (ks_sink || precise)) {
                 std::scoped_lock lock(mutex_);
                 // KS has no universally exposed per-pin volume node.  Unlike
                 // waveOut/DirectSound, its output gain is applied when a
@@ -3409,8 +3498,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 // recovered; user volume/balance and end-of-track gain take
                 // effect at the next real KS packet boundary.
                 left = right = std::clamp(volume_ * track_gain_, 0.0F, 1.0F);
-                if (balance_ > 0) left *= (100 - balance_) / 100.0F;
-                else if (balance_ < 0) right *= (100 + balance_) / 100.0F;
+                if (!unaltered && balance_ > 0) left *= (100 - balance_) / 100.0F;
+                else if (!unaltered && balance_ < 0) right *= (100 + balance_) / 100.0F;
             } else {
                 // The original ASIO output vtable has the generic no-op stub
                 // at both SetVolume/SetBalance slots (+0x20/+0x24).  It is a
@@ -3596,9 +3685,9 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 std::scoped_lock lock(mutex_);
                 paused = state_.load() == PlaybackState::paused &&
                     !(fade_pending_ && fade_completion_ == FadeCompletion::pause);
-                left = right = std::clamp(volume_ * transition_gain_ * track_gain_, 0.0F, 1.0F);
-                if (balance_ > 0) left *= (100 - balance_) / 100.0F;
-                else if (balance_ < 0) right *= (100 + balance_) / 100.0F;
+                left = right = unaltered ? 1.0F : std::clamp(volume_ * transition_gain_ * track_gain_, 0.0F, 1.0F);
+                if (!unaltered && balance_ > 0) left *= (100 - balance_) / 100.0F;
+                else if (!unaltered && balance_ < 0) right *= (100 + balance_) / 100.0F;
             }
             // Publish gain before resuming the independent render thread;
             // its first packet must use this play/seek/fade's current gain.
@@ -3855,7 +3944,7 @@ bool AudioEngine::PublishOpened(Backend backend, const AudioFormat& format,
             opening_seek_ms_ = -1;
             opening_paused_ = false;
             track_gain_ = 1.0F;
-            if (backend != Backend::midi &&
+            if (backend != Backend::midi && active_pcm_mode_.load()!=PcmPlaybackMode::bit_exact &&
                 (options_.sound_fade_mode & 0x01) != 0 &&
                 options_.fade_duration[
                     RecoveredFadeInDurationIndex(false)] > 0) {
@@ -3891,7 +3980,7 @@ void AudioEngine::SignalOpenComplete() {
 void AudioEngine::Pause() {
     std::scoped_lock lock(mutex_);
     if (state_.load() != PlaybackState::playing) return;
-    if ((options_.sound_fade_mode & 0x02) != 0 &&
+    if (active_pcm_mode_.load()!=PcmPlaybackMode::bit_exact && (options_.sound_fade_mode & 0x02) != 0 &&
         options_.fade_duration[1] > 0 &&
         (backend_.load() == Backend::wave_out ||
          backend_.load() == Backend::direct_sound ||
@@ -3936,7 +4025,7 @@ void AudioEngine::Resume() {
         success = true; // The owner thread applies IMediaControl::Run.
     if (success) {
         state_ = PlaybackState::playing;
-        if ((options_.sound_fade_mode & 0x01) != 0 &&
+        if (active_pcm_mode_.load()!=PcmPlaybackMode::bit_exact && (options_.sound_fade_mode & 0x01) != 0 &&
             options_.fade_duration[
                 RecoveredFadeInDurationIndex(false)] > 0 &&
             (backend_.load() == Backend::wave_out ||
@@ -4029,7 +4118,7 @@ void AudioEngine::SeekImpl(std::chrono::milliseconds position,
                                backend_.load() == Backend::direct_sound ||
                                backend_.load() == Backend::wasapi;
         if (ShouldBeginRecoveredSeekFade(
-                allow_fade, options_.sound_fade_mode,
+                allow_fade && active_pcm_mode_.load()!=PcmPlaybackMode::bit_exact, options_.sound_fade_mode,
                 options_.fade_duration[RecoveredFadeInDurationIndex(true)],
                 state, supported)) {
             // The seek-transition flag at CSound +0xB0 makes the subsequent
@@ -4143,7 +4232,7 @@ bool AudioEngine::BeginStopFade(bool detach_dsp, bool preserve_archive) {
                            backend_.load() == Backend::direct_sound ||
                            backend_.load() == Backend::wasapi;
     if (ShouldBeginRecoveredStopFade(
-            options_.sound_fade_mode, options_.fade_duration[3],
+            active_pcm_mode_.load()==PcmPlaybackMode::bit_exact ? 0 : options_.sound_fade_mode, options_.fade_duration[3],
             state_.load(), supported)) {
         // 0045BB9D calls CSound +0x60(0) before retiring the old sound.
         // 004AC166 then bypasses the global Winamp DSP chain on its tail;
@@ -4300,7 +4389,7 @@ void AudioEngine::FadeWorker(std::stop_token stop_token) {
 void AudioEngine::UpdateTrackFade(int64_t position_ms) {
     std::scoped_lock lock(mutex_);
     float gain = 1.0F;
-    if ((options_.sound_fade_mode & 0x10) != 0 &&
+    if (active_pcm_mode_.load()!=PcmPlaybackMode::bit_exact && (options_.sound_fade_mode & 0x10) != 0 &&
         options_.track_fade_duration > 0 &&
         duration_ms_.load() > 0 &&
         state_.load() == PlaybackState::playing) {
@@ -4378,6 +4467,11 @@ int AudioEngine::DownloadedPercent() const noexcept {
 std::wstring AudioEngine::LastDiagnostic() const {
     std::scoped_lock lock(mutex_);
     return diagnostic_;
+}
+
+std::wstring AudioEngine::SignalPathDescription() const {
+    std::scoped_lock lock(mutex_);
+    return signal_path_;
 }
 
 AudioFormat AudioEngine::Format() const {

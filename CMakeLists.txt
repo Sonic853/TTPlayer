@@ -104,6 +104,7 @@ add_library(ttplayer_core
   src/audio/wasapi_sink.cpp
   src/audio/pcm_output_transform.cpp
   src/audio/pcm_effects.cpp
+  src/audio/hires_output.cpp
   src/audio/precise_seek_source.cpp
   src/audio/replay_gain_scanner.cpp
   src/audio/winamp_dsp.cpp

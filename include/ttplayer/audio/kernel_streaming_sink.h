@@ -1,4 +1,5 @@
 #pragma once
+#include "ttplayer/audio/hires_output.h"
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -53,10 +54,14 @@ public:
 
     bool OpenDevice(const std::wstring& filter_path,
         const WAVEFORMATEX& source_format, size_t packet_count,
-        size_t source_packet_bytes);
+        size_t source_packet_bytes,
+        PcmPlaybackMode mode = PcmPlaybackMode::compatible,
+        HMODULE module = nullptr, int dither = 0);
     bool OpenTransport(std::unique_ptr<KsStreamTransport> transport,
         const WAVEFORMATEX& source_format, const WAVEFORMATEX& device_format,
-        size_t packet_count, size_t source_packet_bytes);
+        size_t packet_count, size_t source_packet_bytes,
+        PcmPlaybackMode mode = PcmPlaybackMode::compatible,
+        HMODULE module = nullptr, int dither = 0);
     bool Submit(size_t packet, std::span<const std::byte> source,
         float left_gain = 1.0F, float right_gain = 1.0F);
     // A completed packet becomes writable; pending packets are never reused.

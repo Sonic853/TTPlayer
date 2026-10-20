@@ -1,4 +1,5 @@
 #pragma once
+#include "ttplayer/audio/hires_output.h"
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -37,7 +38,9 @@ public:
     // Zero retains the nominal four-packet size inferred from buffer_ms.
     bool OpenDevice(const std::wstring& endpoint_id, bool exclusive,
                     const WAVEFORMATEX& source_format, int buffer_ms,
-                    size_t queued_packet_bytes = 0);
+                    size_t queued_packet_bytes = 0,
+                    PcmPlaybackMode mode = PcmPlaybackMode::compatible,
+                    HMODULE module = nullptr, int dither = 0);
     bool Submit(std::span<const std::byte> pcm);
     // The final submitted packet may be shorter than the buffering threshold.
     // Reset clears this marker before a seek/refill.
