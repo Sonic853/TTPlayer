@@ -168,11 +168,14 @@ ServiceCatalog ReadServiceCatalog(const std::vector<plugins::LyricSearchProvider
             LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
         unsigned builtins = 0;
         if (module) {
-            for (UINT j = 0; j < 2; ++j) {
-                const auto name = Resource(module, 32000 + j), url = Resource(module, 32002 + j);
+            // The rebuilt plugin extends the original two resource pairs with
+            // 32030/31 + 32032/33. Older DLLs simply lack those optional strings.
+            constexpr UINT name_ids[]{32000, 32001, 32030, 32031};
+            for (size_t j = 0; j < std::size(name_ids); ++j) {
+                const auto name = Resource(module, name_ids[j]), url = Resource(module, name_ids[j] + 2);
                 if (name.empty() || !ValidServiceUrl(url)) continue;
                 // A valid one-server XML may expose only one factory. Resource
-                // defaults use Configure, so both may use that first factory.
+                // defaults use Configure, so all may use that first factory.
                 const auto factory = i + j < providers.size() && providers[i + j].module_path == provider.module_path ? i + j : i;
                 LyricService entry{name, url, {}, provider.module_path, provider.module_path, true, factory};
                 entry.key = ServiceKey(entry); catalog.entries.push_back(std::move(entry)); ++builtins;
