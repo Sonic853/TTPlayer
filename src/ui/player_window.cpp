@@ -5830,8 +5830,11 @@ void PlayerWindow::QueueSkinMenuToolTip(UINT command, HMENU menu) {
             CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
             window_, nullptr, instance_, nullptr);
         if (!skin_menu_tooltip_) return;
+        // This tooltip is created lazily while a popup is already tracking.
+        // Raising its owner group would put a pinned player above that popup
+        // on first hover, hiding menu pixels without ending menu input.
         SetWindowPos(skin_menu_tooltip_, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
         SendMessageW(skin_menu_tooltip_, TTM_SETMAXTIPWIDTH, 0, 600);
         TOOLINFOW tool{TTTOOLINFOW_V2_SIZE};
         tool.uFlags = TTF_TRACK | TTF_ABSOLUTE;

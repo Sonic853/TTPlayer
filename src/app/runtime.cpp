@@ -27,7 +27,7 @@ void SetTooltipTopmost(HWND window, bool topmost) noexcept {
     if (current == topmost) return;
     if (topmost) {
         SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     } else {
         // FUN_004B5713 -> FUN_00405417 removes the extended-style bit
         // directly when the tooltip is hidden; it does not reorder the
