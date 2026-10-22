@@ -82,7 +82,7 @@ add_library(ttplayer_core
   src/audio/asio_sink.cpp
   src/audio/audio_engine.cpp
   src/audio/http_stream.cpp
-  src/audio/http_download_queue.cpp
+  src/audio/legacy_cache.cpp
   src/audio/http_mpeg_source.cpp
   src/audio/builtin_file_info.cpp
   src/audio/file_mutation.cpp
@@ -144,6 +144,8 @@ add_library(ttplayer_core
   src/ui/file_info_probe_client.cpp
   src/ui/track_metadata.cpp
   src/ui/player_window.cpp
+  src/ui/browser_client.cpp
+  src/ui/player_window_browser.cpp
   src/ui/player_window_layout.cpp
   src/ui/player_window_skin_plugin.cpp
   src/ui/player_window_skin_animation.cpp
@@ -183,7 +185,7 @@ add_library(ttplayer_core
   src/ui/window_drag.cpp
 )
 target_include_directories(ttplayer_core
-  PUBLIC include third_party/ttpcomm-sdk/include third_party/ttpres-sdk/include
+  PUBLIC include third_party/ttpcomm-sdk/include third_party/ttpres-sdk/include ../ttpbrowser/include
   PRIVATE "${TTPLAYER_GENERATED_INCLUDE_DIR}"
 )
 add_dependencies(ttplayer_core ttplayer_build_date ttplayer_file_version)
@@ -230,6 +232,25 @@ set_target_properties(ttplayer_rebuild PROPERTIES
 target_compile_definitions(ttplayer_rebuild PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(ttplayer_rebuild PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_rebuild PRIVATE ttplayer_core ttpcomm_api comctl32 comdlg32 shell32)
+
+# Optional runtime component: the EXE deliberately has no import-library link
+# to ttpbrowser. Removing the DLL removes music-window and download entry points.
+option(TTPLAYER_BUILD_BROWSER "Build and stage the optional music window DLL" ON)
+if(TTPLAYER_BUILD_BROWSER)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ttpbrowser" "${CMAKE_CURRENT_BINARY_DIR}/ttpbrowser")
+  add_dependencies(ttplayer_rebuild ttpbrowser)
+  if(TTPBROWSER_BUILD_TESTS)
+    add_executable(ttpbrowser_host_tests ../ttpbrowser/tests/host_tests.cpp)
+    target_sources(ttpbrowser_host_tests PRIVATE src/app/ttplayer.manifest)
+    target_include_directories(ttpbrowser_host_tests PRIVATE src/ui)
+    target_compile_definitions(ttpbrowser_host_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(ttpbrowser_host_tests PRIVATE /W4 /EHsc /utf-8)
+    target_link_libraries(ttpbrowser_host_tests PRIVATE ttplayer_core)
+  endif()
+  add_custom_command(TARGET ttplayer_rebuild POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:ttpbrowser>"
+      "$<TARGET_FILE_DIR:ttplayer_rebuild>/ttpbrowser.dll" VERBATIM)
+endif()
 
 # The TLS DLL is built independently. This option only stages a prebuilt DLL.
 set(TTPLAYER_HTTPS_DLL "" CACHE FILEPATH "Prebuilt ttp_https.dll to stage in the player's AddIn directory")

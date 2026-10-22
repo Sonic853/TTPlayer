@@ -187,6 +187,7 @@ void ApplyMediaLibraryReaderInfo(playlist::Track& track,
     track.sample_rate_hz = info.sample_rate_hz;
     track.channels = info.channels;
     track.bits_per_sample = info.bits_per_sample;
+    detail::PreserveBrowserTrackIdentity(track.metadata, info.metadata);
     track.metadata = std::move(info.metadata);
 }
 using namespace detail;

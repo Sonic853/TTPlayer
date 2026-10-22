@@ -3341,6 +3341,25 @@ bool PlayerWindow::RoutePlayerMouseWheel(const MSG& message) const {
     return true;
 }
 
+std::optional<size_t> PlayerWindow::ChooseMusicBrowserPlaylist() {
+    PlaylistTargetDialogState state{&playlists_};
+    if (ShowWtlModalDialog(ResourceModule(), MAKEINTRESOURCEW(223),
+            MusicBrowserWindow() ? MusicBrowserWindow() : window_,
+            PlaylistTargetDialogProc, reinterpret_cast<LPARAM>(&state)) != IDOK)
+        return std::nullopt;
+    const size_t original = playlists_.ActiveIndex();
+    if (state.selected == playlists_.Size()) {
+        auto format = ResourceText(0x8192);
+        wchar_t title[128]{};
+        if (!format.empty()) swprintf_s(title, format.c_str(), playlists_.Size() + 1);
+        state.selected = playlists_.NewList(title[0] ? std::wstring(title) : ResourceText(0x813a));
+        playlists_.SetActive(original);
+        settings_.player.playlist_scan_count = static_cast<int>(playlists_.Size());
+        RefreshPlaylist();
+    }
+    return state.selected < playlists_.Size() ? std::optional<size_t>(state.selected) : std::nullopt;
+}
+
 bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
     // Alt+F4 is an explicit exit, even in close-button-to-tray mode. Handle
     // the queued key before a skin provider or DefWindowProc turns it into
@@ -3351,6 +3370,7 @@ bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
         PostMessageW(window_, WM_COMMAND, kCmdExit, 0);
         return true;
     }
+    if (TranslateMusicBrowserMessage(message)) return true;
     if (external_skin_ && external_skin_->Translate(message)) return true;
     if (RoutePlayerMouseWheel(message)) return true;
     if (TranslateLyricUploadMessage(message)) return true;
@@ -3395,6 +3415,7 @@ bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
             modifiers |= HOTKEYF_CONTROL;
         if ((GetKeyState(VK_MENU) & 0x8000) != 0) modifiers |= HOTKEYF_ALT;
         for (const auto& binding : settings_.hotkey.key_map) {
+            if ((binding.command == kCmdShowBrowser || binding.command == kPlaylistDownload) && !BrowserAvailable()) continue;
             if (binding.command < 0 || binding.application.virtual_key == 0)
                 continue;
             if (binding.application.virtual_key != static_cast<int>(message.wParam) ||
@@ -3478,7 +3499,7 @@ void PlayerWindow::UpdateMainToolRects() {
 
     std::set<UINT_PTR> registered;
     for (const auto& element : ActiveSkinElements()) {
-        if (IsSuppressedSkinControl(element.name)) continue;
+        if (IsSuppressedSkinControl(element.name, BrowserAvailable())) continue;
         UINT_PTR identifier{};
         if (element.name == L"pause" && FindActiveSkinElement(L"play")) continue;
         if (element.name == L"play" || element.name == L"pause") identifier = kCmdPlay;
@@ -4746,8 +4767,12 @@ void PlayerWindow::PreparePlaylistMenu(HMENU menu) const {
     EnableCommand(menu, kPlaylistFreeDb,
         has_selection && focused_track &&
         SupportsLegacyFreeDbQuery(*focused_track));
+    if (!BrowserAvailable()) {
+        if (const HMENU owner = FindCommandMenu(menu, kPlaylistDownload))
+            DeleteMenu(owner, kPlaylistDownload, MF_BYCOMMAND);
+    }
     EnableCommand(menu, kPlaylistDownload,
-        has_selection && focused_track &&
+        BrowserAvailable() && has_selection && focused_track &&
         !audio::HttpDownloadKey(focused_track->path.wstring()).empty());
     EnableCommand(menu, kPlaylistReportOnline,
         focused_network && all_selected_network);

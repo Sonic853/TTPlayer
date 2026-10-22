@@ -516,8 +516,8 @@ void ApplyLyricSkinDefaults(const skin::LyricSkin& source,
                             settings::LyricSettings& target);
 void SetControlFont(HWND control, HFONT font);
 // Keep these nodes in the parsed skin, but hide their UI by user request.
-bool IsSuppressedSkinControl(std::wstring_view name);
-bool IsSkinButton(std::wstring_view name);
+bool IsSuppressedSkinControl(std::wstring_view name, bool browser_available = false);
+bool IsSkinButton(std::wstring_view name, bool browser_available = false);
 HFONT CreateSkinFont(const skin::SkinElement& element);
 void DrawSkinText(HDC dc, const skin::SkinElement& element,
                   const wchar_t* text);
@@ -530,7 +530,7 @@ std::wstring FormatAudioDescription(const audio::AudioFormat& format);
 std::wstring FormatLedTime(std::chrono::milliseconds position);
 std::vector<skin::SkinLayer> PlayerSkinLayers(const std::vector<skin::SkinElement>& elements,
     bool playing, int play_mode, std::wstring_view led_text, HICON icon = nullptr,
-    std::optional<RECT> play_bounds = std::nullopt);
+    std::optional<RECT> play_bounds = std::nullopt, bool browser_available = false);
 void DrawSkinIcon(HDC dc, HICON icon, const RECT& bounds);
 RECT SkinLedBounds(const skin::SkinElement& led, std::wstring_view value);
 void DrawSkinLed(HDC dc, const skin::SkinElement& led, std::wstring_view value,

@@ -142,6 +142,16 @@ struct PlaylistSkin {
 // CSkinParser_ParseEqualizerWindow (004A8B73) stores the equalizer as a
 // separate owned popup layout.  eqfactor is a template: the native parser
 // clones it ten times and advances by template width + eq_interval.
+struct BrowserSkin {
+    bool valid{};
+    RECT position{}, content{}, resize_rect{};
+    bool resize_tile{};
+    COLORREF transparent_color{CLR_INVALID};
+    SkinBitmap background;
+    SkinElement close, music, downloads, back, forward, refresh, startup, link;
+    int checkbox_interval{4};
+};
+
 struct EqualizerSkin {
     bool valid{};
     RECT position{};
@@ -270,6 +280,11 @@ public:
     [[nodiscard]] const std::vector<SkinElement>& MiniElements() const noexcept {
         return mini_.elements;
     }
+    [[nodiscard]] const SkinMetadata& Metadata() const noexcept { return metadata_; }
+    [[nodiscard]] const BrowserSkin& Browser() const noexcept { return browser_; }
+    void ApplyBrowserFallback(const LegacySkin& fallback) {
+        if (!browser_.valid) browser_ = fallback.browser_;
+    }
     [[nodiscard]] const PlaylistSkin& Playlist() const noexcept { return playlist_; }
     [[nodiscard]] const EqualizerSkin& Equalizer() const noexcept { return equalizer_; }
     [[nodiscard]] const LyricSkin& Lyric() const noexcept { return lyric_; }
@@ -305,5 +320,7 @@ private:
     PlaylistSkin playlist_;
     EqualizerSkin equalizer_;
     VisualSkin visual_;
+    BrowserSkin browser_;
+    SkinMetadata metadata_;
 };
 } // namespace ttplayer::skin

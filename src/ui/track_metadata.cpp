@@ -48,10 +48,12 @@ TrackInfoState ApplyFileInfoProbeToTrack(
     track.sample_rate_hz = probe->format.nSamplesPerSec;
     track.channels = probe->format.nChannels;
     track.bits_per_sample = probe->format.wBitsPerSample;
+    const auto previous = track.metadata;
     track.metadata.clear();
     track.metadata.reserve(probe->metadata.size());
     for (const auto& entry : probe->metadata)
         if (!entry.name.empty()) track.metadata.emplace_back(utf8(entry.name), utf8(entry.value));
+    PreserveBrowserTrackIdentity(previous, track.metadata);
     return probe->status == S_FALSE ? TrackInfoState::provisional : TrackInfoState::success;
 }
 

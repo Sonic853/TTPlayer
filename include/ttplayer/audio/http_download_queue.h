@@ -1,5 +1,13 @@
 #pragma once
-#include "ttplayer/audio/audio_engine.h"
+#include <windows.h>
+#include <objidl.h>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace ttplayer::audio {
 // 5.7.9: 004D025D / 004D05F1. These are names/locations, NOT a map of
@@ -13,31 +21,39 @@ std::filesystem::path ResolveLegacySavedFile(const std::vector<LegacyCacheEntry>
 std::wstring HttpDownloadKey(std::wstring url);
 std::wstring LegacyCacheTitle(std::wstring_view url, std::wstring_view title,
                              std::wstring_view artist);
+bool IsHttpDownloadMediaPath(const std::filesystem::path& path);
 
 enum class DownloadState { waiting, running, complete, canceled, failed, paused };
 struct HttpDownload {
     uint64_t id{};
     LegacyCacheEntry entry;
     std::wstring display_title;
+    std::wstring tid;
     std::filesystem::path destination;
     DownloadState state{DownloadState::waiting};
     uint64_t received{}, total{};
     HRESULT result{S_OK};
     bool prefetch{}, replace{};
 };
-// Owned by the player, not by an individual sound/decoder. Stopping playback
-// does not cancel user downloads. Shutdown joins every worker before unloading.
+// Implemented only in ttpbrowser.dll. Playback uses the read-only helpers above.
+// The host's existing network producer returns a consumer stream; the callback
+// duplicates the cancellation event before retaining it beyond the call.
 class HttpDownloadQueue {
 public:
-    explicit HttpDownloadQueue(std::filesystem::path state_file);
+    using StreamOpener = std::function<HRESULT(const std::wstring&, HANDLE,
+                                               IStream**, BOOL*)>;
+    HttpDownloadQueue(std::filesystem::path state_file, StreamOpener opener);
     ~HttpDownloadQueue();
     HttpDownloadQueue(const HttpDownloadQueue&) = delete;
     HttpDownloadQueue& operator=(const HttpDownloadQueue&) = delete;
-    void Configure(const PlaybackOptions& options, int maximum);
+    void Configure(int maximum, std::filesystem::path legacy_cache_folder = {});
     uint64_t Enqueue(std::wstring url, std::wstring title,
                      std::filesystem::path destination = {}, bool replace = false,
-                     std::wstring artist = {});
+                     std::wstring artist = {}, std::wstring tid = {});
     void Cancel(uint64_t id);
+    // Stop this consumer and persist a paused task. Retry starts it again;
+    // any byte reuse belongs to the host producer's verified cache journal.
+    void Pause(uint64_t id);
     void Retry(uint64_t id);
     // Remove queue records only. Running work is canceled before its private
     // temporary file can be published; completed destination files are kept.

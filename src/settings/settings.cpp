@@ -938,6 +938,13 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         s.player.playlist_visible=IntAttr(n,L"PlayListVisible",0)!=0;
         s.player.equalizer_window=RectAttr(n,L"EqualizerWnd");
         s.player.equalizer_visible=IntAttr(n,L"EqualizerVisible",0)!=0;
+        s.player.browser_window=RectAttr(n,L"BrowserWnd");
+        s.player.browser_window2=RectAttr(n,L"BrowserWnd2");
+        s.player.browser_visible=IntAttr(n,L"BrowserVisible",0)!=0;
+        s.player.browser_auto_startup=IntAttr(n,L"BrowserAutoStartup",1)!=0;
+        s.player.browser_engine=std::clamp(IntAttr(n,L"BrowserEngine",0),0,2);
+        const auto browser_home=StringAttr(n,L"BrowserHomeURL");
+        if(!browser_home.empty()) s.player.browser_home_url=browser_home;
         s.player.playlist_scan_count=IntAttr(n,L"PlayLists",100);
         s.player.active_playlist=IntAttr(n,L"ActiveList",0);
         s.player.playing_time=IntAttr(n,L"PlayingTime",0);
@@ -1590,6 +1597,9 @@ bool LoadSkinVisualProfile(const std::filesystem::path& path,
             rectangle(L"LyricWnd2",next_player.mini_lyric_window);
             rectangle(L"PlayListWnd",next_player.playlist_window);
             rectangle(L"EqualizerWnd",next_player.equalizer_window);
+            rectangle(L"BrowserWnd",next_player.browser_window);
+            rectangle(L"BrowserWnd2",next_player.browser_window2);
+            next_player.browser_visible=IntAttr(n,L"BrowserVisible",next_player.browser_visible)!=0;
             next_player.lyric_visible=IntAttr(n,L"LyricVisible",next_player.lyric_visible)!=0;
             next_player.playlist_visible=IntAttr(n,L"PlayListVisible",next_player.playlist_visible)!=0;
             next_player.equalizer_visible=IntAttr(n,L"EqualizerVisible",next_player.equalizer_visible)!=0;
@@ -1691,6 +1701,9 @@ bool SaveSkinVisualProfile(const std::filesystem::path& path,
         SetAttribute(element,L"LyricWnd",RectangleText(player.lyric_window));
         SetAttribute(element,L"LyricWnd2",RectangleText(player.mini_lyric_window));
         SetAttribute(element,L"EqualizerWnd",RectangleText(player.equalizer_window));
+        SetAttribute(element,L"BrowserWnd",RectangleText(player.browser_window));
+        SetAttribute(element,L"BrowserWnd2",RectangleText(player.browser_window2));
+        SetAttribute(element,L"BrowserVisible",player.browser_visible ? 1 : 0);
         SetAttribute(element,L"PlayListWnd",RectangleText(player.playlist_window));
         SetAttribute(element,L"LyricVisible",player.lyric_visible ? 1 : 0);
         SetAttribute(element,L"EqualizerVisible",player.equalizer_visible ? 1 : 0);
@@ -1747,6 +1760,12 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
                      RectangleText(player.desktop_lyric_window));
         SetAttribute(element,L"PlayListWnd",RectangleText(player.playlist_window));
         SetAttribute(element,L"EqualizerWnd",RectangleText(player.equalizer_window));
+        SetAttribute(element,L"BrowserWnd",RectangleText(player.browser_window));
+        SetAttribute(element,L"BrowserWnd2",RectangleText(player.browser_window2));
+        SetAttribute(element,L"BrowserVisible",player.browser_visible ? 1 : 0);
+        SetAttribute(element,L"BrowserAutoStartup",player.browser_auto_startup ? 1 : 0);
+        SetAttribute(element,L"BrowserEngine",std::clamp(player.browser_engine,0,2));
+        SetAttribute(element,L"BrowserHomeURL",player.browser_home_url);
         SetAttribute(element,L"MiniMode",player.mini_mode ? 1 : 0);
         SetAttribute(element,L"TopMost",player.top_most ? 1 : 0);
         SetAttribute(element,L"TopMost2",player.mini_top_most ? 1 : 0);

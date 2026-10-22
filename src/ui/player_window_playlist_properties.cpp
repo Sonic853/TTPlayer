@@ -1,6 +1,7 @@
 #include "ttplayer/ui/cover_image.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "player_window_internal.h"
+#include "track_metadata.h"
 #include "file_info_cover_policy.h"
 #include "file_info_probe_protocol.h"
 #include "file_info_probe_client.h"
@@ -939,7 +940,9 @@ void ApplyReadResult(FileInfoContext& context, FileInfoReadResult result) {
         const long number = std::wcstol(record.tags[3].c_str(), nullptr, 10);
         track.track_number = number > 0 && number <= INT_MAX
             ? static_cast<int>(number) : 0;
+        const auto previous_metadata = track.metadata;
         track.metadata = record.metadata;
+        detail::PreserveBrowserTrackIdentity(previous_metadata, track.metadata);
         track.media_type = record.media_type;
         track.bitrate_bps = record.bitrate_bps;
         track.sample_rate_hz = record.sample_rate_hz;

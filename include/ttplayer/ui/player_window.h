@@ -18,6 +18,7 @@
 #include "ttplayer/skin/skin_package.h"
 #include "ttplayer/skin/skin_plugin.h"
 #include "ttplayer/ui/desktop_lyrics.h"
+#include "ttplayer/ui/browser_client.h"
 #include "ttplayer/ui/playlist_rating_input.h"
 #include "ttplayer/ui/playlist_marquee.h"
 #include "ttplayer/ui/playlist_scrollbar_contract.h"
@@ -861,10 +862,29 @@ private:
     void ConfigureNetworkDownloads();
     void QueueNetworkDownload(const playlist::Track& track);
     void ShowNetworkDownloads();
-    std::unique_ptr<audio::HttpDownloadQueue> network_downloads_;
+    [[nodiscard]] bool BrowserAvailable() const noexcept;
+    [[nodiscard]] HWND MusicBrowserWindow() const noexcept;
+    bool ConfigureMusicBrowser();
+    void UpdateMusicBrowserSkin(bool restore_bounds = false);
+    void ShowMusicBrowser(uint32_t view);
+    void CaptureMusicBrowserState();
+    void ApplyMusicBrowserState();
+    bool TranslateMusicBrowserMessage(const MSG&) const;
+    HRESULT SubmitMusicBrowserTracks(const ttp_browser_track*, uint32_t, int, int, int);
+    HRESULT QueryMusicBrowserInfo(uint32_t, uint32_t, BSTR*);
+    static HRESULT WINAPI BrowserSubmitCallback(void*, const ttp_browser_track*, uint32_t, int, int, int);
+    static HRESULT WINAPI BrowserQueryCallback(void*, uint32_t, uint32_t, BSTR*);
+    static void WINAPI BrowserStateCallback(void*, const ttp_browser_state*);
+    static HRESULT WINAPI BrowserSetupCallback(void*, const wchar_t*, const wchar_t*, const wchar_t*);
+    static HRESULT WINAPI BrowserAdjustWindowRectCallback(void*, HWND, uint32_t, RECT*);
+    void MusicBrowserStateChanged(const ttp_browser_state&);
+    std::optional<size_t> ChooseMusicBrowserPlaylist();
+    std::unique_ptr<BrowserClient> browser_client_;
+    bool browser_state_applying_{};
+    bool browser_shutting_down_{};
     std::wstring network_auto_download_url_;
     ULONGLONG network_prefetch_after_{};
-    bool network_download_dialog_open_{};
+
     void ClearPersistedPlaybackIdentity() noexcept;
     void SelectTrack(size_t index, bool start_playback);
     void SelectTrackFrom(size_t playlist_index, size_t index, bool start_playback);
@@ -956,6 +976,7 @@ private:
     UINT options_focus_control_{};
     UINT options_deferred_apply_mask_{};
     int options_hotkey_selection_{-1};
+    std::vector<size_t> options_hotkey_rows_;
     bool options_resetting_{};
     std::vector<SkinMenuEntry> options_skin_entries_;
     HBITMAP options_skin_preview_{};

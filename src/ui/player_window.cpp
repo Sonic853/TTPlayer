@@ -5,6 +5,7 @@
 #include "ttplayer/ui/wtl_window.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
+#include "track_metadata.h"
 #include "ttplayer/ui/wtl_runtime.h"
 #include "project_links.h"
 #include "archive_password_dialog.h"
@@ -1054,12 +1055,12 @@ void SetControlFont(HWND control, HFONT font) {
     SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 }
 
-bool IsSuppressedSkinControl(std::wstring_view name) {
-    return name == L"login" || name == L"login_name" || name == L"browser";
+bool IsSuppressedSkinControl(std::wstring_view name, bool browser_available) {
+    return name == L"login" || name == L"login_name" || (name == L"browser" && !browser_available);
 }
 
-bool IsSkinButton(std::wstring_view name) {
-    if (IsSuppressedSkinControl(name)) return false;
+bool IsSkinButton(std::wstring_view name, bool browser_available) {
+    if (IsSuppressedSkinControl(name, browser_available)) return false;
     constexpr std::wstring_view names[] = {
         L"icon",
         L"play", L"pause", L"prev", L"next", L"mute",
@@ -1100,12 +1101,12 @@ HFONT CreateSkinFont(const skin::SkinElement& element) {
 }
 
 std::vector<skin::SkinLayer> PlayerSkinLayers(const std::vector<skin::SkinElement>& elements,
-    bool playing, int play_mode, std::wstring_view led_text, HICON icon, std::optional<RECT> play_bounds) {
+    bool playing, int play_mode, std::wstring_view led_text, HICON icon, std::optional<RECT> play_bounds, bool browser_available) {
     std::vector<skin::SkinLayer> result;
     const auto play = std::find_if(elements.begin(), elements.end(),
         [](const auto& element) { return element.name == L"play"; });
     for (const auto& element : elements) {
-        if (skin::PlayerSkinOrder(element.name) < 0 || IsSuppressedSkinControl(element.name) ||
+        if (skin::PlayerSkinOrder(element.name) < 0 || IsSuppressedSkinControl(element.name, browser_available) ||
             !IsPlayModeSkinVisible(element.name, play_mode)) continue;
         if ((element.name == L"play" && playing) || (element.name == L"pause" && !playing)) continue;
         // 0040A1DD keeps a rectangular child when image loading fails. Its
@@ -1466,6 +1467,7 @@ bool RequestSystemPowerOff() {
 using namespace detail;
 
 PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(settings)) {
+    browser_client_ = std::make_unique<BrowserClient>();
     if (FAILED(EnsureWtlRuntime())) throw std::runtime_error("WTL initialization failed");
     if (!settings_.source_path.empty())
         audio_->SetDspStorageDirectory(settings_.source_path.parent_path() / L"PluginState");
@@ -1498,7 +1500,8 @@ PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(se
 }
 
 PlayerWindow::~PlayerWindow() {
-    network_downloads_.reset();
+    browser_shutting_down_ = true;
+    browser_client_.reset();
     CancelUpdateCheck();
     external_skin_.reset();
     system_media_controls_.Reset();
@@ -1813,7 +1816,8 @@ void PlayerWindow::RegisterConfiguredHotKeys(bool report_failures) {
     std::wstring failures;
     for (size_t index = 0; index < settings_.hotkey.key_map.size(); ++index) {
         const auto& binding = settings_.hotkey.key_map[index];
-        if (binding.command < 0 || binding.global.virtual_key == 0) continue;
+        if (binding.command < 0 || binding.global.virtual_key == 0 ||
+            ((binding.command == kCmdShowBrowser || binding.command == kPlaylistDownload) && !BrowserAvailable())) continue;
         UINT modifiers{};
         if ((binding.global.modifiers & HOTKEYF_ALT) != 0) modifiers |= MOD_ALT;
         if ((binding.global.modifiers & HOTKEYF_CONTROL) != 0)
@@ -2401,7 +2405,7 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
     if (!package.IsLegacyCompatible()) return false;
     auto next = skin::LegacySkin::LoadPackage(package, cache, ttpcomm_module_, &settings_);
     if (!next.Valid()) return false;
-    if (!next.DesktopLyricBar().background.image) {
+    if (!next.DesktopLyricBar().background.image || !next.Browser().valid) {
         // 00449451 -> 004459CF: older packages such as PurpleMyth have no
         // DeskLrcBar. Bind the default package's complete bar descriptor;
         // never mix default buttons into a valid custom bar's empty slots.
@@ -2414,6 +2418,7 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
             const auto fallback = skin::LegacySkin::LoadPackage(
                 fallback_package, fallback_cache, ttpcomm_module_, &settings_);
             next.ApplyDesktopLyricBarFallback(fallback);
+            next.ApplyBrowserFallback(fallback);
         } catch (const std::exception&) {
             // A missing resource DLL must not prevent a valid external skin
             // from loading. No fallback image can be drawn in that case.
@@ -2773,6 +2778,8 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
     suppress_skin_window_activation_fade_ = skinned;
     ShowWindow(window_, SW_SHOW);
     UpdateWindow(window_);
+    if (ConfigureMusicBrowser() && !mini_mode_ && settings_.player.browser_auto_startup)
+        ShowMusicBrowser(TTP_BROWSER_VIEW_MUSIC);
     // Visibility commands for owned windows are posted during CPlayerWnd's
     // initialization and are dispatched by the two startup PeekMessage pumps
     // only after the main HWND has been shown.  Preserve that visible order.
@@ -3043,6 +3050,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         // 0046D21B resolves the first configured binding from lParam's
         // modifier/key pair instead of trusting the RegisterHotKey ID.
         for (const auto& binding : settings_.hotkey.key_map) {
+            if ((binding.command == kCmdShowBrowser || binding.command == kPlaylistDownload) && !BrowserAvailable()) continue;
             UINT modifiers{};
             if ((binding.global.modifiers & HOTKEYF_ALT) != 0)
                 modifiers |= MOD_ALT;
@@ -3857,10 +3865,11 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         mini_mode_fade_continuation_ = false;
         mini_mode_fade_queued_ = false;
         close_after_skin_window_fade_ = true;
+        if (browser_client_) browser_client_->DisableUiCallbacks();
         UpdateTaskbarPlayback();
         close_skin_window_fade_finished_ = false;
         for (const HWND target : {window_, lyric_window_, playlist_window_,
-                                  equalizer_window_}) {
+                                  equalizer_window_, MusicBrowserWindow()}) {
             if (target && IsWindow(target)) EnableWindow(target, FALSE);
         }
         PollFadingAudio(true);
@@ -3894,6 +3903,9 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         ClearTaskbarIconProperties(window_);
         break;
     case WM_DESTROY:
+        browser_shutting_down_ = true;
+        CaptureMusicBrowserState();
+        if (browser_client_) browser_client_->Shutdown();
         lyric_visibility_sync_queued_ = false;
         if (file_import_progress_ && IsWindow(file_import_progress_))
             EndDialog(file_import_progress_, IDCANCEL);
@@ -4008,6 +4020,7 @@ void PlayerWindow::CaptureWindowState() {
     // rectangle or visibility changes caused only by owner minimization.
     if (window_ && !ShouldCaptureWindowGeometry(IsIconic(window_) != FALSE))
         return;
+    CaptureMusicBrowserState();
 
     RECT current{};
     if (window_ && GetWindowRect(window_, &current)) {
@@ -4428,7 +4441,7 @@ void PlayerWindow::PaintSkin(HDC dc, const std::vector<std::wstring>* repaint) c
     const bool active = playback == audio::PlaybackState::opening ||
                         playback == audio::PlaybackState::playing;
     const skin::SkinLayers layers(PlayerSkinLayers(ActiveSkinElements(), active,
-        settings_.player.play_mode, CurrentLedText(), CurrentSkinIcon(), MainSkinButtonBounds(L"play")), skin_->TransparentColor(), repaint);
+        settings_.player.play_mode, CurrentLedText(), CurrentSkinIcon(), MainSkinButtonBounds(L"play"), BrowserAvailable()), skin_->TransparentColor(), repaint);
     for (const auto* name : {L"volume", L"progress"})
         if ((!repaint || std::find(repaint->begin(), repaint->end(), name) != repaint->end()))
             if (const auto* element = FindActiveSkinElement(name))
@@ -4436,7 +4449,7 @@ void PlayerWindow::PaintSkin(HDC dc, const std::vector<std::wstring>* repaint) c
     for (const auto& element : ActiveSkinElements()) {
         const skin::SkinLayerClip clip(canvas, layers, &element);
         if (!element.image || !element.four_state) continue;
-        if (IsSuppressedSkinControl(element.name)) continue;
+        if (IsSuppressedSkinControl(element.name, BrowserAvailable())) continue;
         if (!IsPlayModeSkinVisible(element.name, settings_.player.play_mode)) continue;
         if (element.name == L"play" && active) continue;
         if (element.name == L"pause" && !active) continue;
@@ -4683,7 +4696,7 @@ const playlist::Track* PlayerWindow::PlaybackTrackForUi() const noexcept {
 }
 
 bool PlayerWindow::IsSkinElementEnabled(std::wstring_view name) const {
-    if (IsSuppressedSkinControl(name)) return false;
+    if (IsSuppressedSkinControl(name, BrowserAvailable())) return false;
     const auto state = audio_->State();
     const bool have_track = PlaybackTrackForUi() != nullptr;
     const bool active = state == audio::PlaybackState::opening ||
@@ -4703,6 +4716,7 @@ bool PlayerWindow::IsSkinElementEnabled(std::wstring_view name) const {
 }
 
 bool PlayerWindow::IsSkinElementChecked(std::wstring_view name) const noexcept {
+    if (name == L"browser") return MusicBrowserWindow() && IsWindowVisible(MusicBrowserWindow());
     if (name == L"mute") return settings_.player.mute;
     if (name == L"lyric")
         return desktop_lyrics_.Visible() ||
@@ -4801,11 +4815,11 @@ std::wstring PlayerWindow::HitTestSkin(POINT point) const {
     const bool active = playback == audio::PlaybackState::opening ||
                         playback == audio::PlaybackState::playing;
     const skin::SkinLayers layers(PlayerSkinLayers(ActiveSkinElements(), active,
-        settings_.player.play_mode, CurrentLedText(), CurrentSkinIcon(), MainSkinButtonBounds(L"play")), skin_->TransparentColor());
+        settings_.player.play_mode, CurrentLedText(), CurrentSkinIcon(), MainSkinButtonBounds(L"play"), BrowserAvailable()), skin_->TransparentColor());
     if (const auto* layer = layers.Hit(point)) {
         const auto& name = layer->element->name;
         // Disabled and non-command children still occlude lower controls.
-        if ((!IsSkinButton(name) && name != L"info") || !IsSkinElementEnabled(name))
+        if ((!IsSkinButton(name, BrowserAvailable()) && name != L"info") || !IsSkinElementEnabled(name))
             return L"skin_blocked";
         return name;
     }
@@ -4813,7 +4827,7 @@ std::wstring PlayerWindow::HitTestSkin(POINT point) const {
 }
 
 void PlayerWindow::InvokeSkinAction(std::wstring_view action) {
-    if (IsSuppressedSkinControl(action)) return;
+    if (IsSuppressedSkinControl(action, BrowserAvailable())) return;
     if (action == L"info") {
         // 00409AC8 switches immediately, even with automatic cycling disabled;
         // 004092FC then resets the offsets and restarts this item's timers.
@@ -4877,7 +4891,7 @@ void PlayerWindow::InvokeSkinAction(std::wstring_view action) {
 std::vector<HWND> PlayerWindow::RegisteredDragWindows() const {
     std::vector<HWND> result;
     for (const HWND candidate : {window_, lyric_window_, playlist_window_,
-                                 equalizer_window_}) {
+                                 equalizer_window_, MusicBrowserWindow()}) {
         if (candidate && IsWindow(candidate) &&
             std::find(result.begin(), result.end(), candidate) == result.end()) {
             result.push_back(candidate);
@@ -5249,6 +5263,7 @@ void PlayerWindow::ToggleMiniMode() {
         top = normal_window_bounds_.top;
     }
 
+    if (next_mini) CaptureMusicBrowserState();
     // FUN_00464B6C hides the main HWND while its live control set and region
     // are replaced. Playlist/equalizer (and the original browser) are hidden
     // on entry. TTPlayer_LyricWnd is deliberately retained and rebound to its
@@ -5258,6 +5273,11 @@ void PlayerWindow::ToggleMiniMode() {
         ShowWindow(playlist_window_, SW_HIDE);
     if (next_mini && equalizer_window_ && IsWindowVisible(equalizer_window_))
         ShowWindow(equalizer_window_, SW_HIDE);
+    if (next_mini && browser_client_ && browser_client_->Created()) {
+        browser_state_applying_ = true;
+        browser_client_->Show(TTP_BROWSER_VIEW_HIDE);
+        browser_state_applying_ = false;
+    }
     const auto* previous_info = FindActiveSkinElement(L"info");
     mini_mode_ = next_mini;
     settings_.player.mini_mode = mini_mode_;
@@ -5299,6 +5319,7 @@ void PlayerWindow::ToggleMiniMode() {
         ShowWindow(playlist_window_, SW_SHOWNOACTIVATE);
     if (!next_mini && settings_.player.equalizer_visible && equalizer_window_)
         ShowWindow(equalizer_window_, SW_SHOWNOACTIVATE);
+    if (!next_mini) ApplyMusicBrowserState();
     ApplySkinWindowTopMost();
     suppress_skin_window_activation_fade_ = false;
     // The -1 sentinel at the end of 00464B6C restores the configured group
@@ -5925,6 +5946,12 @@ void PlayerWindow::HideSkinMenuToolTip() {
 }
 
 void PlayerWindow::PrepareContextMenu(HMENU menu) {
+    if (!BrowserAvailable()) {
+        if (const HMENU owner = FindCommandMenu(menu, kCmdShowBrowser))
+            DeleteMenu(owner, kCmdShowBrowser, MF_BYCOMMAND);
+    } else if (const HMENU owner = FindCommandMenu(menu, kCmdShowBrowser))
+        CheckMenuItem(owner, kCmdShowBrowser, MF_BYCOMMAND |
+            (MusicBrowserWindow() && IsWindowVisible(MusicBrowserWindow()) ? MF_CHECKED : MF_UNCHECKED));
     const auto state = audio_->State();
     const bool playing = state == audio::PlaybackState::playing || state == audio::PlaybackState::opening;
     const bool paused = state == audio::PlaybackState::paused;
@@ -6219,7 +6246,7 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
     case kCmdOpaqueWhenActive:
         settings_.player.opaque_when_active = !settings_.player.opaque_when_active;
         CompleteSkinWindowFadeForReplacement();
-        for (const HWND target : {window_, lyric_window_, playlist_window_, equalizer_window_})
+        for (const HWND target : {window_, lyric_window_, playlist_window_, equalizer_window_, MusicBrowserWindow()})
             ApplySkinWindowAlpha(target, EffectiveSkinWindowAlpha(target));
         rendered_skin_window_alpha_ = EffectiveSkinWindowAlpha(window_);
         break;
@@ -6241,16 +6268,7 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
     case kCmdShowLyrics: ToggleLyricWindow(); break;
     case kCmdShowEqualizer: ToggleEqualizerWindow(); break;
     case kCmdShowPlaylist: TogglePlaylistWindow(); break;
-    case kCmdShowBrowser: {
-        // FUN_0046CCC7 uses this exact ttpres.dll warning when the optional
-        // music-browser component is unavailable.  The rebuild currently has
-        // no browser host, so do not misroute the skin button to Open File.
-        wchar_t caption[128]{};
-        GetWindowTextW(window_, caption, static_cast<int>(std::size(caption)));
-        MessageBoxW(window_, ResourceText(0x827b).c_str(),
-                    caption, MB_ICONWARNING);
-        break;
-    }
+    case kCmdShowBrowser: ShowMusicBrowser(TTP_BROWSER_VIEW_TOGGLE); break;
     case kCmdOptions:
         // FUN_004658A3 is the sole options entry which first exits full-screen.
         LeaveFullScreen();
@@ -6357,6 +6375,7 @@ bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings, bool saved_bounds
     desktop_lyrics_.ApplySettings();
     UpdatePlaylistWindowSkin(saved_bounds);
     UpdateEqualizerWindowSkin(saved_bounds);
+    UpdateMusicBrowserSkin(saved_bounds);
     ApplySkinWindowTopMost();
     ApplyWindowShadow();
     UpdateVisualWindowLayout();
@@ -6417,7 +6436,8 @@ void PlayerWindow::ApplySkinWindowTopMost() {
                 h == p.desktop_lyrics_.PaintHandle() || h == p.desktop_lyrics_.BarHandle());
         };
         const bool skin_window = candidate == p.window_ || candidate == p.lyric_window_ ||
-            candidate == p.playlist_window_ || candidate == p.equalizer_window_ || is_desktop(candidate);
+            candidate == p.playlist_window_ || candidate == p.equalizer_window_ ||
+            candidate == p.MusicBrowserWindow() || is_desktop(candidate);
         // Standard owned dialogs inherit their owner's effective pin. Native
         // menus, tooltips, fullscreen surfaces and notification bubbles have
         // their own band policies, and are not ordinary captioned dialogs.
@@ -6477,7 +6497,7 @@ void PlayerWindow::ApplySkinWindowTopMost() {
 void PlayerWindow::ApplySkinWindowAlpha(BYTE alpha) {
     rendered_skin_window_alpha_ = alpha;
     for (const HWND target : {window_, lyric_window_, playlist_window_,
-                              equalizer_window_}) {
+                              equalizer_window_, MusicBrowserWindow()}) {
         ApplySkinWindowAlpha(target, alpha);
     }
 }
@@ -6489,6 +6509,11 @@ void PlayerWindow::ApplySkinWindowAlpha(HWND target, BYTE alpha) {
         SetWindowLongPtrW(target, GWL_EXSTYLE, extended | WS_EX_LAYERED);
     COLORREF color_key{};
     DWORD flags = LWA_ALPHA;
+    if (target == MusicBrowserWindow()) {
+        BYTE previous_alpha{}; DWORD previous_flags{};
+        if (GetLayeredWindowAttributes(target, &color_key, &previous_alpha, &previous_flags))
+            flags |= previous_flags & LWA_COLORKEY;
+    }
     if (target == lyric_window_ && settings_.lyric.transparent &&
         !NativeLyricContentActive() &&
         !(external_skin_ && external_skin_->Handles(lyric_window_))) {
@@ -6503,7 +6528,7 @@ void PlayerWindow::ApplyWindowShadow() {
     // FUN_004A43E8 applies FUN_004710A5 independently to all four skinned
     // top-level classes, preserving each HWND's visibility across GCL_STYLE.
     for (const HWND target : {window_, lyric_window_, playlist_window_,
-                              equalizer_window_}) {
+                              equalizer_window_, MusicBrowserWindow()}) {
         if (!target || !IsWindow(target)) continue;
         const LONG_PTR previous_style = GetClassLongPtrW(target, GCL_STYLE);
         LONG_PTR style = previous_style;
@@ -6645,7 +6670,7 @@ void PlayerWindow::AdvanceSkinWindowFade() {
         if (fade.group) {
             ApplySkinWindowAlpha(alpha);
             for (const HWND candidate : {window_, lyric_window_,
-                                          playlist_window_, equalizer_window_}) {
+                                          playlist_window_, equalizer_window_, MusicBrowserWindow()}) {
                 if (candidate && IsWindowVisible(candidate))
                     RedrawWindow(candidate, nullptr, nullptr,
                                  RDW_INVALIDATE | RDW_UPDATENOW);
@@ -6744,6 +6769,8 @@ void PlayerWindow::FinishCloseWhenFadesComplete() {
         return;
     }
     if (window_) KillTimer(window_, kCloseAudioFadeTimer);
+    browser_shutting_down_ = true;
+    if (browser_client_) browser_client_->Shutdown();
     if (window_ && IsWindow(window_)) DestroyWindow(window_);
     close_after_skin_window_fade_ = false;
 }
@@ -6819,6 +6846,7 @@ void PlayerWindow::ApplySkinProfileWindowState() {
         ShowWindow(equalizer_window_, !mini_mode_ && settings_.player.equalizer_visible
             ? SW_SHOWNOACTIVATE : SW_HIDE);
     }
+    ApplyMusicBrowserState();
 }
 
 void PlayerWindow::ToggleMute() {
@@ -7611,6 +7639,7 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
             static_cast<std::uint64_t>(format.bytes_per_second) * 8U;
         if (metadata.tags_authoritative) {
             auto refreshed = PlaybackPlaylist().Tracks()[*current_];
+            PreserveBrowserTrackIdentity(refreshed.metadata, entries);
             refreshed.metadata = entries;
             metadata_changed |= PlaybackPlaylist().SetTrack(*current_, std::move(refreshed));
         }
@@ -7645,9 +7674,11 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
         if (playlist_window_) InvalidateRect(playlist_window_, nullptr, FALSE);
     }
     if (!indexed_playback && metadata.tags_authoritative && opened_track_) {
+        const auto previous = opened_track_->metadata;
         opened_track_->metadata.clear();
         for (const auto& [name, value] : metadata.entries)
             opened_track_->metadata.emplace_back(core::WideToUtf8(name), core::WideToUtf8(value));
+        PreserveBrowserTrackIdentity(previous, opened_track_->metadata);
     }
     // Store the post-reader metadata as well as path/subtrack.  This copy is
     // the UI's CPlayItem once a later Clear/Remove invalidates current_.
@@ -7716,6 +7747,7 @@ void PlayerWindow::PollNetworkPlayback() {
         entries.reserve(metadata.entries.size());
         for (const auto& [name, value] : metadata.entries)
             entries.emplace_back(core::WideToUtf8(name), core::WideToUtf8(value));
+        PreserveBrowserTrackIdentity(opened_track_->metadata, entries);
         if (entries != opened_track_->metadata) {
             opened_track_->metadata = std::move(entries);
             metadata_changed = true;

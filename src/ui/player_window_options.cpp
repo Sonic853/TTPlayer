@@ -3386,6 +3386,7 @@ void PlayerWindow::ShowOptions(int page, UINT focus_control) {
     options_network_child_ = nullptr;
     options_network_pages_.fill(nullptr);
     options_hotkey_selection_ = -1;
+    options_hotkey_rows_.clear();
     options_dsp_paths_.clear();
     options_dsp_scan_complete_ = false;
 
@@ -4084,6 +4085,7 @@ void PlayerWindow::CloseOptions() {
     options_network_child_ = nullptr;
     options_network_pages_.fill(nullptr);
     options_hotkey_selection_ = -1;
+    options_hotkey_rows_.clear();
     options_deferred_apply_mask_ = 0;
     options_skin_entries_.clear();
     if (options_skin_preview_) DeleteObject(options_skin_preview_);
@@ -4713,6 +4715,7 @@ void PlayerWindow::SelectOptionsLyricMode(HWND dialog, UINT template_id) {
 }
 
 void PlayerWindow::SelectOptionsNetworkMode(HWND dialog, UINT template_id) {
+    if (template_id == 382 && !BrowserAvailable()) template_id = 381;
     const bool download = template_id == 382;
     const HWND next = options_network_pages_[download ? 1 : 0];
     if (!next || !IsWindow(next)) return;
@@ -4990,8 +4993,12 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                 column.pszText = title.data();
                 ListView_InsertColumn(list, column_index, &column);
             }
+            options_hotkey_rows_.clear();
             for (size_t row = 0; row < settings_.hotkey.key_map.size(); ++row) {
                 const auto& binding = settings_.hotkey.key_map[row];
+                if ((binding.command == kCmdShowBrowser || binding.command == kPlaylistDownload) && !BrowserAvailable()) continue;
+                const int visible_row = static_cast<int>(options_hotkey_rows_.size());
+                options_hotkey_rows_.push_back(row);
                 auto label = binding.command >= 0
                     ? ResourceCommandLabel(resources,
                         static_cast<UINT>(binding.command))
@@ -5012,16 +5019,16 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                     }
                 }
                 if (label.empty()) label = std::to_wstring(binding.command);
-                AddListText(list, static_cast<int>(row), label);
-                UpdateHotKeyListRow(list, static_cast<int>(row), binding);
+                AddListText(list, visible_row, label);
+                UpdateHotKeyListRow(list, visible_row, binding);
             }
-            if (!settings_.hotkey.key_map.empty()) {
+            if (!options_hotkey_rows_.empty()) {
                 ListView_SetItemState(list, 0, LVIS_SELECTED | LVIS_FOCUSED,
                                       LVIS_SELECTED | LVIS_FOCUSED);
                 SetHotKeyControl(dialog, 2054,
-                                 settings_.hotkey.key_map[0].application);
+                                 settings_.hotkey.key_map[options_hotkey_rows_[0]].application);
                 SetHotKeyControl(dialog, 2055,
-                                 settings_.hotkey.key_map[0].global);
+                                 settings_.hotkey.key_map[options_hotkey_rows_[0]].global);
                 options_hotkey_selection_ = 0;
             }
             ListView_SetColumnWidth(list, 0, LVSCW_AUTOSIZE_USEHEADER);
@@ -5160,15 +5167,16 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
     case 258: {
         const HWND tab = GetDlgItem(dialog, 1181);
         if (tab) {
-            for (int index = 0; index < 2; ++index) {
+            for (int index = 0; index < (BrowserAvailable() ? 2 : 1); ++index) {
                 auto title = ResourceText(33262 + index);
                 TCITEMW item{};
                 item.mask = TCIF_TEXT;
                 item.pszText = title.data();
                 TabCtrl_InsertItem(tab, index, &item);
             }
-            const UINT child_id = options_focus_control_ == 382 ? 382 : 381;
+            const UINT child_id = BrowserAvailable() && options_focus_control_ == 382 ? 382 : 381;
             for (const UINT identifier : {381U, 382U}) {
+                if (identifier == 382 && !BrowserAvailable()) continue;
                 OptionsChildInit init{this, identifier};
                 auto& child = options_network_pages_[identifier - 381];
                 child = CreateWtlDialog(resources, MAKEINTRESOURCEW(identifier), dialog,
@@ -5615,6 +5623,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         InstallButtonBitmap(dialog, 2154, resources, 0x160);
         break;
     case 381:
+        if (!BrowserAvailable()) ShowWindow(GetDlgItem(dialog, 2249), SW_HIDE);
         SetChecked(dialog, 2249,
                    settings_.network.accept_recommendation_list);
         // COptionsNetworkCache::OnInitDialog forces DAT_00547D70 on before
@@ -5635,6 +5644,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         EnableWindow(GetDlgItem(dialog, 1023), TRUE);
         break;
     case 382:
+        if (!BrowserAvailable()) break;
         SetChecked(dialog, 1175, settings_.network.create_folder_by_artist);
         SetChecked(dialog, 1176, settings_.network.replace_file);
         // The shipped 5.7.9 build creates this legacy replacement option from
@@ -5945,6 +5955,7 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         settings_.network.speed_mode = IsChecked(dialog, 1166) ? 1 : 0;
         break;
     case 382:
+        if (!BrowserAvailable()) break;
         settings_.network.create_folder_by_artist = IsChecked(dialog, 1175);
         settings_.network.replace_file = IsChecked(dialog, 1176);
         settings_.network.max_download_tasks = GetInteger(dialog, 1177,
@@ -6401,6 +6412,7 @@ bool PlayerWindow::CommitOptionsControl(
         }
         return true;
     case 382:
+        if (!BrowserAvailable()) return false;
         switch (control) {
         case 1175:
             settings_.network.create_folder_by_artist = IsChecked(dialog, 1175);
@@ -6470,6 +6482,9 @@ void PlayerWindow::ApplyOptionsPageRuntime(UINT template_id) {
 
 void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
     const bool all = template_id == 0;
+    if (all || template_id == 251 || template_id == 258 || template_id == 259 ||
+        template_id == 260 || template_id == 381 || template_id == 382)
+        ConfigureMusicBrowser();
     if (all) {
         // AppIconFile belongs to General settings but is edited from the
         // association page.  A full reset/save must refresh the same global
@@ -7283,9 +7298,9 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
             if (control == 1098 && notification == BN_CLICKED) {
                 const int row = options_hotkey_selection_;
                 if (row >= 0 && static_cast<size_t>(row) <
-                        settings_.hotkey.key_map.size()) {
+                        options_hotkey_rows_.size()) {
                     auto& binding = settings_.hotkey.key_map[
-                        static_cast<size_t>(row)];
+                        options_hotkey_rows_[static_cast<size_t>(row)]];
                     binding.application = GetHotKeyControl(dialog, 2054);
                     binding.global = GetHotKeyControl(dialog, 2055);
                     binding.raw_text.clear();
@@ -8087,9 +8102,9 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
             EnableWindow(GetDlgItem(dialog, 2055), selected);
             EnableWindow(GetDlgItem(dialog, 1098), selected);
             if (selected && static_cast<size_t>(options_hotkey_selection_) <
-                    settings_.hotkey.key_map.size()) {
+                    options_hotkey_rows_.size()) {
                 const auto& next = settings_.hotkey.key_map[
-                    static_cast<size_t>(options_hotkey_selection_)];
+                    options_hotkey_rows_[static_cast<size_t>(options_hotkey_selection_)]];
                 SetHotKeyControl(dialog, 2054, next.application);
                 SetHotKeyControl(dialog, 2055, next.global);
             } else {

@@ -192,6 +192,9 @@ LegacySkin& LegacySkin::operator=(LegacySkin&& other) noexcept {
     other.playlist_ = {};
     equalizer_ = std::move(other.equalizer_);
     other.equalizer_ = {};
+    browser_ = std::move(other.browser_);
+    other.browser_ = {};
+    metadata_ = std::move(other.metadata_);
     visual_ = std::move(other.visual_);
     other.visual_ = {};
     return *this;
@@ -562,6 +565,8 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
         throw std::runtime_error("unsupported Skin.xml version (expected 2)");
     }
     skin.transparent_color_ = ParseColor(Attribute(root, L"transparent_color"), CLR_INVALID);
+    skin.metadata_ = {2, Attribute(root, L"name"), Attribute(root, L"author"),
+        Attribute(root, L"url"), Attribute(root, L"email"), skin.transparent_color_};
 
     // 004A8536 writes fixed slots. Repeated definitions update the same slot;
     // missing/failed bitmap loads preserve its previous image (004A9D8C).
@@ -656,6 +661,49 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
     load_player(L"/*[1]/mini_window", skin.mini_.background, skin.mini_.window_size, skin.mini_.elements, skin.mini_.icons);
     if (!skin.background_) {
         throw std::runtime_error("player skin bitmap unavailable");
+    }
+
+    // 004A9051: the optional browser layout remains a host skin descriptor.
+    // The DLL receives owned bitmap copies through its C ABI when available.
+    for (auto* window : Nodes(document, L"/*[1]/browser_window")) {
+        auto& browser = skin.browser_;
+        browser.position = ParseRect(Attribute(window, L"position"), browser.position);
+        browser.resize_rect = ParseRect(Attribute(window, L"resize_rect"), browser.resize_rect);
+        browser.resize_tile = ParseInt(Attribute(window, L"resize_tile"), 0) != 0;
+        browser.transparent_color = ParseColor(Attribute(window, L"transparent_color"), skin.transparent_color_);
+        browser.background = LoadSkinBitmap(skin, directory, window, L"image", &browser.background);
+        browser.valid = browser.background.image != nullptr;
+        for (auto* node : window->Children()) {
+            const auto& name = node->name;
+            if (name == L"browser") {
+                browser.content = ParseRect(Attribute(node, L"position"), browser.content);
+                continue;
+            }
+            SkinElement* target{};
+            const struct { const wchar_t* name; SkinElement* field; } fields[] = {
+                {L"close", &browser.close}, {L"minibtn", &browser.music},
+                {L"downloadbtn", &browser.downloads}, {L"backward", &browser.back},
+                {L"forward", &browser.forward}, {L"refresh", &browser.refresh},
+                {L"startup", &browser.startup}, {L"linktxt", &browser.link}
+            };
+            for (const auto& field : fields) if (name == field.name) target = field.field;
+            if (!target) continue;
+            const bool button = name != L"startup" && name != L"linktxt";
+            *target = LoadEqualizerElement(skin, directory, node, name, button, false, target, true);
+            target->color = ParseColor(Attribute(node, L"color"), target->color);
+            target->font = Attribute(node, L"font");
+            target->font_size = ParseInt(Attribute(node, L"font_size"), 12);
+            if (button && target->image && !IsRectEmpty(&target->bounds)) {
+                target->bounds.right = target->bounds.left + target->image_size.cx / 4;
+                target->bounds.bottom = target->bounds.top + target->image_size.cy;
+            }
+            if (name == L"startup") {
+                browser.checkbox_interval = ParseInt(Attribute(node, L"interval"), 4);
+                const auto image = LoadSkinBitmap(skin, directory, node, L"ckbox_image");
+                target->image = image.image; target->image_size = image.size;
+                target->frames = 4;
+            }
+        }
     }
 
     // 004A88D0 stores lyric_window at skin-object offset +0x91C.  Its three
