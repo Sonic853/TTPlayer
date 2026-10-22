@@ -173,7 +173,8 @@ std::unique_ptr<AsioDriver> ActivateAsio(const std::wstring& name,
 }
 
 bool ValidSource(const WAVEFORMATEX& f) noexcept {
-    return f.wFormatTag == WAVE_FORMAT_PCM && f.nChannels > 0 && f.nChannels <= 64 &&
+    TtpCommPcmFormat pcm{};
+    return DescribeHiresPcm(f,pcm) && !pcm.floating_point && f.nChannels > 0 && f.nChannels <= 64 &&
         f.nSamplesPerSec > 0 && (f.wBitsPerSample == 16 || f.wBitsPerSample == 24 ||
         f.wBitsPerSample == 32) && f.nBlockAlign == f.nChannels * f.wBitsPerSample / 8;
 }

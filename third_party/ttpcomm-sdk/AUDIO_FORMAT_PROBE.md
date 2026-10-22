@@ -1,6 +1,10 @@
 # Optional audio-format ABI v1
 
-2026-10-20。声明：`include/ttpcomm/audio_format_probe.h`。可选辅助实现：`audio_format_probe_impl.h`。
+2026-10-23。声明：`include/ttpcomm/audio_format_probe.h`。可选辅助实现：`audio_format_probe_impl.h`。
+
+本次添加 `Dsd = 1u << 22`（DSF / DSDIFF），不改变 ABI 版本、结构尺寸或任何 IID。
+WAVE 探测可进一步报告 `codec=dts`，但仍保持 `family=Wave`、`container=wave`、建议扩展名 `.wav`；不能根据解码后的 PCM 格式或内部编码把容器改名为 `.dts`。
+有界辅助探测要求连续两个有效 DTS core 帧以及一致的采样率/声道字段，支持 16/14-bit BE/LE。前缀之外的 WAVE 块须在 Reader Open 中检查。独立 `ttp_dts` 工厂显式接受 DTS-WAV；现有仅声明 Dts 家族的 AC3/DTS 工厂不会因此自动接受所有 WAVE。
 
 ## 用途和兼容性
 

@@ -66,7 +66,7 @@ WasapiEndpoint Describe(IMMDevice* device, bool default_device) {
 }
 
 WAVEFORMATEXTENSIBLE PcmFormat(const WAVEFORMATEX& source, WORD bits,
-                             bool extended) {
+                             bool extended, DWORD channel_mask) {
     WAVEFORMATEXTENSIBLE value{};
     value.Format = source;
     value.Format.wFormatTag = extended ? WAVE_FORMAT_EXTENSIBLE : WAVE_FORMAT_PCM;
@@ -79,6 +79,7 @@ WAVEFORMATEXTENSIBLE PcmFormat(const WAVEFORMATEX& source, WORD bits,
     constexpr DWORD masks[]{0,0x4,0x3,0x7,0x33,0x37,0x3f,0x13f,0x63f};
     value.dwChannelMask = source.nChannels < std::size(masks)
         ? masks[source.nChannels] : 0;
+    if (channel_mask) value.dwChannelMask = channel_mask;
     value.SubFormat = kPcmSubtype;
     return value;
 }
@@ -183,9 +184,10 @@ bool WasapiStream::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
     if (!s.error.empty()) return false;
     s.source = source_format;
     s.active_mode = playback_mode;
-    if (playback_mode != PcmPlaybackMode::compatible &&
-        !DescribeHiresPcm(source_format,s.source_pcm))
+    if (!DescribeHiresPcm(source_format,s.source_pcm))
         return s.Fail(E_INVALIDARG,L"高精度源格式");
+    s.source.wFormatTag=s.source_pcm.floating_point?WAVE_FORMAT_IEEE_FLOAT:WAVE_FORMAT_PCM;
+    s.source.cbSize=0;
     if (playback_mode == PcmPlaybackMode::bit_exact && !exclusive)
         return s.Fail(E_INVALIDARG,L"原样输出需要独占模式");
     const auto lookahead = static_cast<std::uint64_t>(s.source.nSamplesPerSec) *
@@ -221,7 +223,8 @@ bool WasapiStream::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
     };
     if (!s.Fail(activate(), L"创建音频流")) return false;
     s.format = PcmFormat(s.source, s.source.wBitsPerSample,
-                        s.source.nChannels > 2 || s.source.wBitsPerSample > 16);
+                        s.source.nChannels > 2 || s.source.wBitsPerSample > 16,
+                        s.source_pcm.channel_mask);
     if (playback_mode != PcmPlaybackMode::compatible) {
         if (exclusive) {
             bool supported{};
@@ -244,7 +247,7 @@ bool WasapiStream::OpenDevice(const std::wstring& endpoint_id, bool exclusive,
         for (const WORD bits : {s.source.wBitsPerSample, WORD{32}, WORD{24}, WORD{16}}) {
             for (const bool extended : {true, false}) {
                 if (!extended && s.source.nChannels > 2) continue;
-                const auto candidate = PcmFormat(s.source, bits, extended);
+                const auto candidate = PcmFormat(s.source, bits, extended, s.source_pcm.channel_mask);
                 if (s.client->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE,
                                                 &candidate.Format, nullptr) == S_OK) {
                     s.format = candidate;

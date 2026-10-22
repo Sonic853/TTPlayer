@@ -116,7 +116,8 @@ bool PinIdentifier(HANDLE filter, ULONG pin, ULONG id, const GUID& set,
 }
 
 bool ValidPcm(const WAVEFORMATEX& format) {
-    if (format.wFormatTag != WAVE_FORMAT_PCM || !format.nChannels ||
+    TtpCommPcmFormat pcm{};
+    if (!DescribeHiresPcm(format, pcm) || pcm.floating_point || !format.nChannels ||
         !format.nSamplesPerSec || (format.wBitsPerSample != 8 && format.wBitsPerSample != 16 &&
         format.wBitsPerSample != 24 && format.wBitsPerSample != 32)) return false;
     const std::uint64_t align = std::uint64_t{format.nChannels} * format.wBitsPerSample / 8;
@@ -215,6 +216,7 @@ std::unique_ptr<KsStreamTransport> CreateNativeTransport(const std::wstring& pat
     if (mode!=PcmPlaybackMode::compatible) candidates=HiresOutputCandidates(source,mode);
     else for (int fallback = 0; fallback != (source.wBitsPerSample > 16 ? 2 : 1); ++fallback) {
         WAVEFORMATEX format = source;
+        format.wFormatTag = WAVE_FORMAT_PCM;
         format.cbSize = 0;
         if (fallback) {
             format.wBitsPerSample = 16;
@@ -222,13 +224,16 @@ std::unique_ptr<KsStreamTransport> CreateNativeTransport(const std::wstring& pat
             format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
         }
         for (bool extended : {false, true}) {
+            if (!extended && source.nChannels > 2) continue;
             WAVEFORMATEXTENSIBLE wave{};
             wave.Format=format;
             if (extended) {
                 wave.Format.wFormatTag=WAVE_FORMAT_EXTENSIBLE;
                 wave.Format.cbSize=22;
                 wave.Samples.wValidBitsPerSample=format.wBitsPerSample;
-                wave.dwChannelMask=LegacyOutputChannelMask(format.nChannels);
+                TtpCommPcmFormat source_pcm{};
+                wave.dwChannelMask=DescribeHiresPcm(source, source_pcm) ?
+                    source_pcm.channel_mask : LegacyOutputChannelMask(format.nChannels);
                 wave.SubFormat=kPcmType;
             }
             candidates.push_back(wave);
@@ -260,11 +265,6 @@ std::unique_ptr<KsStreamTransport> CreateNativeTransport(const std::wstring& pat
                 last_error = create_pin(filter, connect, GENERIC_WRITE, &opened);
                 if (last_error == ERROR_SUCCESS && opened != INVALID_HANDLE_VALUE) {
                     selected = candidate;
-                    // Legacy conversion expects a plain integer descriptor.
-                    if (mode==PcmPlaybackMode::compatible) {
-                        selected.Format.wFormatTag=WAVE_FORMAT_PCM;
-                        selected.Format.cbSize=0;
-                    }
                     return std::make_unique<NativeKsTransport>(opened);
                 }
             }
@@ -357,12 +357,11 @@ bool KernelStreamingSink::OpenDevice(const std::wstring& path, const WAVEFORMATE
     error_.clear();
     WAVEFORMATEXTENSIBLE actual{},requested{};
     TtpCommPcmFormat pcm{};
-    if (mode==PcmPlaybackMode::compatible) requested.Format=source;
-    else if (DescribeHiresPcm(source,pcm)) requested=MakeHiresWave(pcm);
+    if (DescribeHiresPcm(source,pcm)) requested=MakeHiresWave(pcm,source.nChannels>2);
     else {error_=L"Invalid KS high precision source";return false;}
     // 004AB1C4/004AC2B1 expands mono to the native stereo output pair.
     if(mode==PcmPlaybackMode::compatible && requested.Format.nChannels==1){
-        requested.Format.nChannels=2;requested.Format.nBlockAlign*=2;requested.Format.nAvgBytesPerSec*=2;}
+        requested.Format.nChannels=2;requested.Format.nBlockAlign*=2;requested.Format.nAvgBytesPerSec*=2;requested.dwChannelMask=3;}
     auto transport = CreateNativeTransport(path, requested.Format, actual, error_,mode);
     return transport && OpenTransport(std::move(transport), source, actual.Format, count, bytes,mode,module,dither);
 }
@@ -390,7 +389,12 @@ bool KernelStreamingSink::OpenTransport(std::unique_ptr<KsStreamTransport> trans
     state->source = source;
     state->device = device;
     state->actual=high ? MakeHiresWave(target_pcm) : WAVEFORMATEXTENSIBLE{};
-    if (!high) state->actual.Format=device;
+    if (!high) {
+        DescribeHiresPcm(device,target_pcm);
+        state->actual=MakeHiresWave(target_pcm,device.nChannels>2);
+        state->source.wFormatTag=state->device.wFormatTag=WAVE_FORMAT_PCM;
+        state->source.cbSize=state->device.cbSize=0;
+    }
     state->mode=mode;state->source_pcm=source_pcm;
     if (high && !state->encoder.Open(module,source_pcm,target_pcm,mode,
         bytes/source.nBlockAlign,error_,dither)) return false;

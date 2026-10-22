@@ -59,6 +59,51 @@ inline size_t AdtsFrame(View b,size_t at) noexcept {
     const size_t n=((b.p[at+3]&3u)<<11)|(unsigned(b.p[at+4])<<3)|(b.p[at+5]>>5);
     return n>=((b.p[at+1]&1)?7u:9u)?n:0;
 }
+// DTS core header normalized from 16/14-bit, big/little-endian words.
+// A sync word alone is not evidence that PCM contains compressed audio.
+inline size_t DtsFrame(View b,size_t at,unsigned& identity) noexcept {
+    if(at>b.n||b.n-at<16)return 0;
+    const bool little=b.is(at,"\xfe\x7f\x01\x80",4)||b.is(at,"\xff\x1f\x00\xe8",4);
+    const bool packed=b.is(at,"\x1f\xff\xe8\x00",4)||b.is(at,"\xff\x1f\x00\xe8",4);
+    if(!little&&!packed&&!b.is(at,"\x7f\xfe\x80\x01",4))return 0;
+    BYTE h[12]{};unsigned bit=0;
+    for(unsigned i=0;i<16&&bit<96;i+=2){
+        const unsigned word=little?b.le16(at+i):(unsigned(b.p[at+i])<<8)|b.p[at+i+1];
+        for(int j=packed?13:15;j>=0&&bit<96;--j,++bit)h[bit/8]|=BYTE(((word>>j)&1)<<(7-bit%8));
+    }
+    const size_t bytes=(((h[5]&3u)<<12)|(unsigned(h[6])<<4)|(h[7]>>4))+1;
+    const unsigned blocks=(((h[4]&1u)<<6)|(h[5]>>2))+1;
+    const unsigned rate=(h[8]>>2)&15,channels=((h[7]&15u)<<2)|(h[8]>>6);
+    constexpr unsigned rates[]{0,8000,16000,32000,0,0,11025,22050,44100,0,0,12000,24000,48000,96000,192000};
+    if(bytes<96||blocks<6||!rates[rate]||channels>15)return 0;
+    identity=(rate<<8)|channels;
+    return packed?((bytes*8+13)/14)*2:bytes;
+}
+inline bool HasDtsFrames(View b) noexcept {
+    for(size_t at=0;at+16<=b.n&&at<8192;++at){
+        unsigned first{},second{};const size_t n=DtsFrame(b,at,first);
+        if(!n||n>b.n-at)continue;
+        const size_t next=DtsFrame(b,at+n,second);
+        if(next&&first==second&&next<=b.n-at-n)return true;
+    }
+    return false;
+}
+inline bool WaveDts(View b) noexcept {
+    if(b.n<12||!(b.is(0,"RIFF")||b.is(0,"RF64")||b.is(0,"BW64"))||!b.is(8,"WAVE"))return false;
+    bool pcm=false;
+    for(size_t at=12;at+8<=b.n;){
+        const size_t n=unsigned(b.le16(at+4))|(unsigned(b.le16(at+6))<<16);
+        const size_t payload=at+8;
+        if(b.is(at,"fmt ")&&n>=16&&b.n-payload>=16){
+            const auto tag=b.le16(payload);
+            pcm=(tag==1||tag==0x2001||tag==0xfffe)&&b.le16(payload+2)==2&&b.le16(payload+14)==16;
+        }
+        if(b.is(at,"data"))return pcm&&HasDtsFrames({b.p+payload,std::min(n,b.n-payload)});
+        if(n>b.n-payload)return false;
+        at=payload+n+(n&1);
+    }
+    return false;
+}
 inline Result Identify(const Request& q,DWORD mask=All) noexcept {
     Result r;
     if(q.size!=sizeof(q)||q.version!=abi_version||q.bytes>prefix_limit||(!q.data&&q.bytes))return r;
@@ -69,7 +114,9 @@ inline Result Identify(const Request& q,DWORD mask=All) noexcept {
         Copy(r.container,c);Copy(r.codec,codec);Copy(r.extension,ext);Copy(r.aliases,aliases);Copy(r.display,name);
     };
     if(b.n<16){r.confidence=NeedMore;r.required_bytes=16;return r;}
-    if((b.is(0,"RIFF")||b.is(0,"RF64")||b.is(0,"BW64"))&&b.is(8,"WAVE"))set(Wave,"wave","",L".wav",L".wave;.bwf;.dtswav",L"WAVE");
+    if((b.is(0,"RIFF")||b.is(0,"RF64")||b.is(0,"BW64"))&&b.is(8,"WAVE"))set(Wave,"wave",WaveDts(b)?"dts":"",L".wav",L".wave;.bwf;.dtswav",L"WAVE");
+    else if(b.is(0,"DSD ")&&b.le16(4)==28)set(Dsd,"dsf","dsd",L".dsf",L"",L"DSD Stream File");
+    else if(b.is(0,"FRM8")&&b.is(12,"DSD "))set(Dsd,"dsdiff","dsd",L".dff",L".dsdiff",L"DSDIFF");
     else if(b.is(0,"RIFF")&&b.is(8,"RMID"))set(Midi,"rmid","midi",L".rmi",L"",L"RIFF MIDI");
     else if(b.is(0,"FORM")&&(b.is(8,"AIFF")||b.is(8,"AIFC")))set(Aiff,"aiff","",L".aiff",L".aif;.aifc",L"AIFF");
     else if(b.is(0,".snd")&&b.be32(4)>=24&&b.be32(4)<=q.file_size)set(Au,"au","",L".au",L".snd",L"Sun / NeXT Audio");

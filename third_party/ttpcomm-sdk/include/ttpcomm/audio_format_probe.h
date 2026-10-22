@@ -16,7 +16,7 @@ enum Family : DWORD {
     Real=1u<<9, Vqf=1u<<10, Tak=1u<<11, Ncm=1u<<12, Uc=1u<<13,
     Ac3=1u<<14, Dts=1u<<15, Module=1u<<16, Wave=1u<<17,
     Aiff=1u<<18, Au=1u<<19, Midi=1u<<20,
-    Mpc=1u<<21, Builtin=Mpeg|Wave|Aiff|Au|Midi, All=0x3fffffu
+    Mpc=1u<<21, Dsd=1u<<22, Builtin=Mpeg|Wave|Aiff|Au|Midi, All=0x7fffffu
 };
 enum Confidence : DWORD { NoMatch=0, NeedMore=1, Tentative=2, Strong=3, Opened=4 };
 enum ResultFlags : DWORD { HasLeadingTag=1, ContainerOnly=2 };

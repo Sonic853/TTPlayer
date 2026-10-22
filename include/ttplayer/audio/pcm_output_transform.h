@@ -51,6 +51,7 @@ public:
     void Reset() noexcept;
 
     [[nodiscard]] WAVEFORMATEX OutputFormat() const noexcept;
+    [[nodiscard]] WAVEFORMATEXTENSIBLE OutputWaveFormat() const noexcept;
     [[nodiscard]] bool UsesOrdinal102() const noexcept;
     [[nodiscard]] const std::wstring& Error() const noexcept;
 

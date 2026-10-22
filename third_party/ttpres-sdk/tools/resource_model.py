@@ -72,6 +72,26 @@ def aligned(data, saved=''):
     return data + (pad if len(pad) == size else bytes(size))
 
 
+def version_company_name(data, original=False):
+    """Apply/reverse the sole permitted change to the original VERSION resource.
+
+    Both CompanyName records occupy 52 aligned bytes, so parent lengths and
+    every other field stay byte-identical to the imported baseline.
+    """
+    def record(company):
+        value = field(company)
+        header = aligned(struct.pack('<HHH', 0, len(value) // 2, 1) + field('CompanyName'))
+        payload = header + value
+        return aligned(struct.pack('<H', len(payload)) + payload[2:])
+
+    before, after = record('Alen Soft'), record('Sonic853')
+    if original:
+        before, after = after, before
+    if len(before) != len(after) or data.count(before) != 1:
+        raise ValueError('Unexpected VERSION CompanyName record')
+    return data.replace(before, after, 1)
+
+
 def decode_menu(data):
     r = Reader(data)
     version, offset = r.unpack('HH')

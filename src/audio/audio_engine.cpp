@@ -2,6 +2,7 @@
 #include <ttpcomm/runtime_pcm.h>
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/audio_engine.h"
+#include <ttpcomm/audio_format_probe_impl.h>
 #include "ttplayer/audio/buffering_contract.h"
 #include "ttplayer/audio/precise_seek_source.h"
 #include "ttplayer/audio/file_mutation.h"
@@ -226,7 +227,7 @@ const std::wstring kSupportedPattern =
     L"*.mp3;*.mp2;*.mp1;*.mpa;*.mp3pro;"
     L"*.wav;*.wma;*.wmv;*.asf;*.cda;*.cue;*.mid;*.midi;*.rmi;"
     L"*.aif;*.aifc;*.aiff;*.au;*.snd;"
-    L"*.m4a;*.mp4;*.aac;*.aa;*.ac3;*.a52;*.dts;*.dtswav;*.ape;*.mac;"
+    L"*.m4a;*.mp4;*.aac;*.aa;*.ac3;*.a52;*.dts;*.dtshd;*.dtswav;*.dsf;*.dff;*.dsdiff;*.ape;*.mac;"
     L"*.flac;*.fla;*.tta;*.mod;*.far;*.it;*.s3m;*.stm;*.mtm;*.umx;*.xm;"
     L"*.mpc;*.mp+;*.ogg;*.ra;*.rm;*.ram;*.rmvb;*.tak;*.vqf";
 
@@ -989,7 +990,8 @@ public:
     }
 
     [[nodiscard]] const WAVEFORMATEX& OutputFormat() const override {
-        return wave_format_;
+        return extended_format_.Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE
+            ? extended_format_.Format : wave_format_;
     }
     [[nodiscard]] AudioFormat DisplayFormat() const override { return display_format_; }
     [[nodiscard]] std::chrono::milliseconds Duration() const override { return duration_; }
@@ -1028,7 +1030,8 @@ private:
                 wave_format_ = format.Format;
                 if (wave_format_.wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
                     if (size < sizeof(format) || wave_format_.cbSize < 22 ||
-                        format.Samples.wValidBitsPerSample != wave_format_.wBitsPerSample) return fail();
+                        format.Samples.wValidBitsPerSample > wave_format_.wBitsPerSample) return fail();
+                    extended_format_ = format;
                     if (format.SubFormat == MFAudioFormat_PCM) wave_format_.wFormatTag = WAVE_FORMAT_PCM;
                     else if (format.SubFormat == MFAudioFormat_Float) wave_format_.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
                     else return fail();
@@ -1058,7 +1061,23 @@ private:
             if (have_format && have_data) break;
             cursor = payload + size + (size & 1U);
         }
-        return have_format && have_data ? FinishOpen(L"WAVE") : fail();
+        if (!have_format || !have_data) return fail();
+        // DTS CDs store compressed frames behind a PCM stereo fmt chunk.
+        // Also inspect data after large JUNK/LIST chunks outside the host probe.
+        if (wave_format_.wFormatTag == WAVE_FORMAT_PCM &&
+            wave_format_.nChannels == 2 && wave_format_.wBitsPerSample == 16) {
+            std::array<BYTE, ttp::format::prefix_limit> probe{};
+            stream_.seekg(static_cast<std::streamoff>(data_offset_));
+            stream_.read(reinterpret_cast<char*>(probe.data()),
+                         static_cast<std::streamsize>(std::min<uint64_t>(data_bytes_, probe.size())));
+            const auto got = static_cast<size_t>(std::max<std::streamsize>(0, stream_.gcount()));
+            if (ttp::format::HasDtsFrames({probe.data(), got})) {
+                error_ = L"DTS-WAV requires the ttp_dts decoder plugin";
+                error_result_ = HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
+                return false;
+            }
+        }
+        return FinishOpen(L"WAVE");
     }
 
     bool OpenAiff(bool compressed) {
@@ -1205,7 +1224,8 @@ private:
         display_format_.sample_rate = wave_format_.nSamplesPerSec;
         display_format_.bytes_per_second = wave_format_.nAvgBytesPerSec;
         display_format_.block_align = wave_format_.nBlockAlign;
-        display_format_.bits_per_sample = wave_format_.wBitsPerSample;
+        display_format_.bits_per_sample = extended_format_.Samples.wValidBitsPerSample
+            ? extended_format_.Samples.wValidBitsPerSample : wave_format_.wBitsPerSample;
         display_format_.codec_name = wave_format_.wFormatTag == WAVE_FORMAT_IEEE_FLOAT
             ? std::wstring(L"IEEE Float ") + container
             : std::wstring(L"PCM ") + container;
@@ -1219,6 +1239,7 @@ private:
     HMODULE ttpcomm_{};
     HRESULT error_result_{E_FAIL};
     WAVEFORMATEX wave_format_{};
+    WAVEFORMATEXTENSIBLE extended_format_{};
     AudioFormat display_format_{};
     std::chrono::milliseconds duration_{};
     uint64_t data_offset_{};
@@ -1364,9 +1385,16 @@ public:
             if (attempt(std::make_unique<LegacyPluginSource>(*manager_, comm_,archive_stream_.Get()), false)) return true;
             if (IsTerminalAudioOpenError(result_)) return false;
         }
+        if (!std::strcmp(detected_builtin.codec, "dts") &&
+            !std::strcmp(detected_builtin.container, "wave")) {
+            error_ = L"DTS-WAV requires a working ttp_dts decoder plugin";
+            result_ = HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
+            return false;
+        }
         if (hint == L".wav" || hint == L".wave" || hint == L".aif" ||
             hint == L".aiff" || hint == L".aifc" || hint == L".au" || hint == L".snd") {
             if (attempt(std::make_unique<PcmFileSource>(comm_,archive_stream_.Get()), archive)) return true;
+            if (result_ == HRESULT_FROM_WIN32(ERROR_BAD_FORMAT)) return false;
             if (IsTerminalAudioOpenError(result_)) return false;
         }
         const auto system_source = [&]() -> std::unique_ptr<DecodedAudioSource> {
@@ -2777,7 +2805,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         original.block_align=original.channels*8;
         original.sample_rate=output_transform.OutputFormat().nSamplesPerSec;
         native_format=MakeHiresWave(original);
-    } else native_format.Format=output_transform.OutputFormat();
+    } else native_format=output_transform.OutputWaveFormat();
     WAVEFORMATEX wave_format=native_format.Format;
     // Queue accounting and visualization use a self-contained canonical
     // header; only endpoint opening receives the extended format object.
@@ -2836,7 +2864,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                         L"IDirectSound::CreateSoundBuffer(primary)", result));
                 return;
             }
-            result = primary->SetFormat(&wave_format);
+            result = primary->SetFormat(&native_format.Format);
             if (FAILED(result)) {
                 if (!stop_requested_)
                     SetError(HResultMessage(
@@ -2862,12 +2890,12 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         description.dwFlags = DSBCAPS_GETCURRENTPOSITION2 |
                               DSBCAPS_GLOBALFOCUS |
                               DSBCAPS_CTRLVOLUME |
-                              DSBCAPS_CTRLPAN |
+                              (wave_format.nChannels <= 2 ? DSBCAPS_CTRLPAN : 0) |
                               (options.hardware_buffer
                                    ? DSBCAPS_LOCHARDWARE
                                    : DSBCAPS_LOCSOFTWARE);
         description.dwBufferBytes = static_cast<DWORD>(ring_bytes);
-        description.lpwfxFormat = &wave_format;
+        description.lpwfxFormat = &native_format.Format;
         ComPtr<IDirectSoundBuffer> base_buffer;
         result = direct_sound->CreateSoundBuffer(
             &description, &base_buffer, nullptr);
@@ -3363,7 +3391,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         }
     }
     MMRESULT open_result = (ks_sink || asio_sink || wasapi_sink) ? MMSYSERR_NOERROR : waveOutOpen(
-        &opened_device, output_device, &wave_format,
+        &opened_device, output_device, &native_format.Format,
         reinterpret_cast<DWORD_PTR>(&WaveOutCallback),
         reinterpret_cast<DWORD_PTR>(completion), CALLBACK_FUNCTION);
     if (open_result != MMSYSERR_NOERROR) {

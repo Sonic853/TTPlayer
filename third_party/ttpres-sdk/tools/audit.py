@@ -3,7 +3,7 @@ import argparse
 import json
 import struct
 from pathlib import Path
-from resource_model import decode_dialog, decode_strings, legacy_checksum, load_json, pe, resources, save_json, sha256
+from resource_model import decode_dialog, decode_strings, legacy_checksum, load_json, pe, resources, save_json, sha256, version_company_name
 
 
 def audit(path, manifest):
@@ -22,9 +22,15 @@ def audit(path, manifest):
     actual = {key: raw for key, raw, _ in leaves}
     if len(actual) != len(leaves):
         raise ValueError('Duplicate resource leaves')
+    company_name_overrides = 0
     for entry in manifest['resources']:
         key = (entry['type'], entry['name'], entry['language'])
         raw = actual.get(key, b'')
+        if key == (16, 1, 2052) and sha256(raw) != entry['original_sha256']:
+            # Accept released baseline DLLs and the exact Sonic853 override.
+            # Reversing it must reproduce the entire original VERSION resource.
+            raw = version_company_name(raw, original=True)
+            company_name_overrides += 1
         if len(raw) != entry['original_size'] or sha256(raw) != entry['original_sha256']:
             raise ValueError(f'Original resource differs: {key}')
     if actual.get((10, 'TTPLAYER_RES_ABI', 2052)) != b'TTPRES1\0\1\0\0\0\1\0\0\0':
@@ -58,7 +64,9 @@ def audit(path, manifest):
                 (kind in (2,3,4,5,12,14,241) and 60000 <= name <= 65535))):
             raise ValueError('Unexpected future extension resource namespace')
     return dict(**metadata, sha256=sha256(data), bytes=len(data), resources=len(actual),
-                original_verified=192, architecture='x86', minimum_subsystem='5.01',
+                original_verified=192 - company_name_overrides,
+                company_name_overrides=company_name_overrides,
+                architecture='x86', minimum_subsystem='5.01',
                 imports={}, exports=[], entry_point=0, legacy_checksum=f'{checksum:08X}')
 
 
@@ -78,7 +86,9 @@ def main():
                 raise ValueError('Player EXE must not embed TTPlayerRes extension backups')
         report.update(host_sha256=sha256(executable), no_executable_backups=True)
     save_json(args.output, report)
-    print(f"Resource audit: {report['original_verified']}/192 identical; {report['resources'] - 192} extensions; no code/CRT; XP subsystem")
+    print(f"Resource audit: {report['original_verified']}/192 identical; "
+          f"{report['company_name_overrides']} CompanyName overrides; "
+          f"{report['resources'] - 192} extensions; no code/CRT; XP subsystem")
 
 
 if __name__ == '__main__':

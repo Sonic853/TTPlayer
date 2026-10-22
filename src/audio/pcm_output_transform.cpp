@@ -3,6 +3,7 @@
 #include "ttplayer/audio/pcm_output_transform.h"
 #include "ttplayer/audio/pcm_effects.h"
 #include "ttplayer/audio/winamp_dsp.h"
+#include "ttplayer/audio/hires_output.h"
 
 #include <algorithm>
 #include <array>
@@ -297,6 +298,15 @@ void PcmOutputTransform::Reset() noexcept {
 
 WAVEFORMATEX PcmOutputTransform::OutputFormat() const noexcept {
     return impl_ ? impl_->output : WAVEFORMATEX{};
+}
+WAVEFORMATEXTENSIBLE PcmOutputTransform::OutputWaveFormat() const noexcept {
+    if (!impl_) return {};
+    TtpCommPcmFormat pcm{};
+    if (!DescribeHiresPcm(impl_->output, pcm)) return {};
+    const bool custom_mask = impl_->input_channel_mask &&
+        impl_->input_channel_mask != pcm.channel_mask;
+    if (impl_->input_channel_mask) pcm.channel_mask = impl_->input_channel_mask;
+    return MakeHiresWave(pcm, pcm.channels > 2 || custom_mask);
 }
 
 bool PcmOutputTransform::UsesOrdinal102() const noexcept {
