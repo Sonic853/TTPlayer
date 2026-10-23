@@ -227,7 +227,7 @@ const std::wstring kSupportedPattern =
     L"*.mp3;*.mp2;*.mp1;*.mpa;*.mp3pro;"
     L"*.wav;*.wma;*.wmv;*.asf;*.cda;*.cue;*.mid;*.midi;*.rmi;"
     L"*.aif;*.aifc;*.aiff;*.au;*.snd;"
-    L"*.m4a;*.mp4;*.aac;*.aa;*.ac3;*.a52;*.dts;*.dtshd;*.dtswav;*.dsf;*.dff;*.dsdiff;*.ape;*.mac;"
+    L"*.m4a;*.mp4;*.aac;*.aa;*.ac3;*.a52;*.eac3;*.ec3;*.dts;*.dtshd;*.dtswav;*.dsf;*.dff;*.dsdiff;*.ape;*.mac;"
     L"*.flac;*.fla;*.tta;*.mod;*.far;*.it;*.s3m;*.stm;*.mtm;*.umx;*.xm;"
     L"*.mpc;*.mp+;*.ogg;*.ra;*.rm;*.ram;*.rmvb;*.tak;*.vqf";
 
@@ -1072,7 +1072,7 @@ private:
                          static_cast<std::streamsize>(std::min<uint64_t>(data_bytes_, probe.size())));
             const auto got = static_cast<size_t>(std::max<std::streamsize>(0, stream_.gcount()));
             if (ttp::format::HasDtsFrames({probe.data(), got})) {
-                error_ = L"DTS-WAV requires the ttp_dts decoder plugin";
+                error_ = L"DTS-WAV requires the ttp_ac3dts decoder plugin";
                 error_result_ = HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
                 return false;
             }
@@ -1387,7 +1387,7 @@ public:
         }
         if (!std::strcmp(detected_builtin.codec, "dts") &&
             !std::strcmp(detected_builtin.container, "wave")) {
-            error_ = L"DTS-WAV requires a working ttp_dts decoder plugin";
+            error_ = L"DTS-WAV requires a working ttp_ac3dts decoder plugin";
             result_ = HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
             return false;
         }

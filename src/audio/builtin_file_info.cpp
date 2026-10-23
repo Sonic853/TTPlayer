@@ -839,6 +839,7 @@ struct FileLayout {
     TagData id3v1;
     TagData lyrics3;
     bool has_id3v1{};
+    std::uint64_t id3v1_offset{};
 };
 
 template<class File>
@@ -864,6 +865,7 @@ bool ReadMp3Layout(File file, FileLayout& layout) {
         if (!layout.has_id3v1 && layout.body_end >= id3v1_bytes.size() &&
             HasId3v1At(file, layout.body_end - id3v1_bytes.size(), id3v1_bytes)) {
             layout.has_id3v1 = true;
+            layout.id3v1_offset = layout.body_end - id3v1_bytes.size();
             layout.id3v1 = ReadId3v1(id3v1_bytes);
             layout.body_end -= id3v1_bytes.size();
             continue;
@@ -2084,33 +2086,86 @@ private:
         if (replacement.empty() || replacement.size() > kMaximumTagBytes) return E_OUTOFMEMORY;
         if (replacement.size() == 64 && ReadLe32(replacement.data()+16) == 0)
             replacement.clear();
-        // Only the trailing tags change. Audio frames and leading ID3 data
-        // stay byte-for-byte intact; retain the existing ID3v1 bytes as well.
+        // Deleting the APE value must not resurrect a lower-priority ID3 value
+        // on the next open. Keep the leading tag's allocated length unchanged:
+        // native readers may retain absolute audio offsets on this IStream.
+        const auto removed = [&](std::wstring_view name) {
+            return !GetField(fields_, name).empty() && GetField(changed, name).empty();
+        };
+        Bytes leading, previous_leading;
+        if (layout_.id3v2.present) {
+            const bool deleting = action == BuiltinCoverAction::remove ||
+                std::any_of(fields_.fields.begin(), fields_.fields.end(),
+                    [&](const auto& field) { return removed(field.name); });
+            if (deleting) {
+                if (!layout_.id3v2.rewrite_safe || layout_.id3v2.major < 3 ||
+                    layout_.id3v2.total_size < 10 || layout_.id3v2.total_size > kMaximumTagBytes)
+                    return E_NOTIMPL;
+                if (!ReadRange(stream_, 0, layout_.id3v2.total_size, previous_leading))
+                    return STG_E_READFAULT;
+                Bytes frames;
+                for (const auto& frame : layout_.id3v2.frames) {
+                    const auto name = frame.metadata_name.empty()
+                        ? CanonicalField(frame.semantic) : frame.metadata_name;
+                    if ((!name.empty() && removed(name)) ||
+                        (action == BuiltinCoverAction::remove && frame.identifier == "APIC"))
+                        continue;
+                    frames.insert(frames.end(), frame.raw.begin(), frame.raw.end());
+                }
+                if (frames.size() > layout_.id3v2.total_size - 10) return E_NOTIMPL;
+                leading = {'I','D','3',layout_.id3v2.major,0,0};
+                AppendSynchsafe(leading, static_cast<std::uint32_t>(layout_.id3v2.total_size-10));
+                leading.insert(leading.end(), frames.begin(), frames.end());
+                leading.resize(static_cast<size_t>(layout_.id3v2.total_size), 0);
+            }
+        }
+        // Retain unrelated ID3v1 bytes, clearing only fields explicitly removed.
         if (layout_.has_id3v1) {
             std::array<unsigned char,128> v1{};
-            if (!ReadAt(stream_, layout_.file_size-128, v1)) return STG_E_READFAULT;
+            if (!ReadAt(stream_, layout_.id3v1_offset, v1)) return STG_E_READFAULT;
+            const auto clear = [&](std::wstring_view key, size_t offset, size_t length) {
+                if (removed(key)) std::fill_n(v1.begin()+offset, length, 0);
+            };
+            clear(L"Title",3,30); clear(L"Artist",33,30); clear(L"Album",63,30);
+            clear(L"Date",93,4); clear(L"Comment",97,v1[125]==0?28:30);
+            if (removed(L"Tracknumber") && v1[125]==0) v1[126]=0;
+            if (removed(L"Genre")) v1[127]=0xff;
             replacement.insert(replacement.end(), v1.begin(), v1.end());
         }
         Bytes previous;
         if (!ReadRange(stream_, layout_.body_end, layout_.file_size-layout_.body_end, previous))
             return STG_E_READFAULT;
-        const auto write_tail = [&](std::span<const unsigned char> bytes) {
+        const auto write_tail = [&](std::span<const unsigned char> prefix,
+                                    std::span<const unsigned char> bytes) {
             LARGE_INTEGER position{};
-            position.QuadPart = layout_.body_end;
-            HRESULT hr = stream_->Seek(position, STREAM_SEEK_SET, nullptr);
+            HRESULT hr = S_OK;
             ULONG written{};
+            if (!prefix.empty()) {
+                hr = stream_->Seek(position, STREAM_SEEK_SET, nullptr);
+                if (SUCCEEDED(hr)) hr = stream_->Write(prefix.data(), static_cast<ULONG>(prefix.size()), &written);
+                if (SUCCEEDED(hr) && written != prefix.size()) hr = STG_E_WRITEFAULT;
+                if (FAILED(hr)) return hr;
+            }
+            position.QuadPart = layout_.body_end;
+            hr = stream_->Seek(position, STREAM_SEEK_SET, nullptr);
+            written=0;
             if (SUCCEEDED(hr)) hr = stream_->Write(bytes.data(), static_cast<ULONG>(bytes.size()), &written);
             if (SUCCEEDED(hr) && written != bytes.size()) hr = STG_E_WRITEFAULT;
             ULARGE_INTEGER size{};
             size.QuadPart = layout_.body_end + bytes.size();
             if (SUCCEEDED(hr)) hr = stream_->SetSize(size);
-            if (SUCCEEDED(hr)) hr = stream_->Commit(STGC_DEFAULT);
+            if (SUCCEEDED(hr)) {
+                hr = stream_->Commit(STGC_DEFAULT);
+                if (hr == E_NOTIMPL || hr == STG_E_INVALIDFUNCTION) hr = S_OK;
+            }
             return hr;
         };
-        const HRESULT written = write_tail(replacement);
-        if (FAILED(written)) { static_cast<void>(write_tail(previous)); return written; }
+        const HRESULT written = write_tail(leading, replacement);
+        if (FAILED(written)) { static_cast<void>(write_tail(previous_leading, previous)); return written; }
         fields_ = std::move(changed);
         layout_.file_size = layout_.body_end + replacement.size();
+        if (!leading.empty()) layout_.id3v2 = ReadId3v2(stream_, layout_.file_size);
+        if (layout_.has_id3v1) layout_.id3v1_offset = layout_.file_size-128;
         if (const auto ape = ReadApeAt(stream_, layout_.file_size - (layout_.has_id3v1 ? 128 : 0)))
             layout_.ape = *ape;
         else layout_.ape = {};

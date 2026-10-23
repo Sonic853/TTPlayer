@@ -125,7 +125,7 @@ bool IsHttpDownloadMediaPath(const std::filesystem::path& path) {
     // an AudioEngine (or another network producer) into ttpbrowser.dll.
     constexpr std::wstring_view patterns =
         L".mp3;.mp2;.mp1;.mpa;.mp3pro;.wav;.wma;.wmv;.asf;.cda;.cue;.mid;.midi;.rmi;"
-        L".aif;.aifc;.aiff;.au;.snd;.m4a;.mp4;.aac;.aa;.ac3;.a52;.dts;.dtswav;.ape;.mac;"
+        L".aif;.aifc;.aiff;.au;.snd;.m4a;.mp4;.aac;.aa;.ac3;.a52;.eac3;.ec3;.dts;.dtswav;.ape;.mac;"
         L".flac;.fla;.tta;.mod;.far;.it;.s3m;.stm;.mtm;.umx;.xm;.mpc;.mp+;.ogg;.ra;.rm;.ram;.rmvb;.tak;.vqf";
     const auto extension=path.extension().wstring();
     if(extension.empty()) return false;

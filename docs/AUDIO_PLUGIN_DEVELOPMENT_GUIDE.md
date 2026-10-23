@@ -26,17 +26,18 @@
 | `ttp_flac` | libFLAC 1.5.0；恢复的 TTA 实现 | 两个工厂；无损 PCM；多值标签、封面、统一保存 | TTA 历史浮点分支和外部标签规则不是通用模板 |
 | `ttp_ape` | Monkey's Audio SDK 13.30 | Reader + Encoder；APEv2；读写流与可靠保存 | APL 指向外部文件，不能把 APL 的后缀改成 APE；还有额外历史导出 |
 | `ttp_webm` | 自有 EBML/WebM 容器处理，静态 Vorbis/Opus 核心 | **新容器首选模板**：`document`、`ebml`、`codec`、Reader 分层；容器标签/图片保存 | DocType、lacing、SeekHead/Cues、时间基等必须按目标容器重新实现 |
-| `ttp_ac3dts` | a52dec 0.8.0、libdca 0.0.7 | Reader 与 Decoder 独立；原始帧同步、字节序和声道 | 返回压缩数据时必须有配套 Decoder；DTS-WAV 不能仅凭内部 DTS 同步字改后缀 |
+| `ttp_ac3dts` | a52dec 0.8.0、FFmpeg 9.0.2 DCA／E-AC3；已整合原 ttp_dts | 旧四工厂兼容、追加 E-AC3 Reader；DTS-WAV、稀疏定位、RIFF 标签／封面事务 | 原版内置 WAVE 可抢先接收 `.wav`；HD 扩展层仍待真实样本；不能把容器后缀改成内部编码 |
 | `ttp_mod` | 默认 libmodplug 0.8.9.0；可选 libopenmpt 0.8.9 | 多子格式；旧引擎与现代引擎构建切换 | 无签名 MOD 不宜自动改名；换引擎会改变混音和播放行为 |
 | `ttp_mpc` | Musepack r475 | 小型 Reader、SV7/SV8、APEv2/ReplayGain | SV7 与 SV8 的识别和标签位置不同 |
 | `ttp_asf` | 自有 ASF/MP3 路径；Windows Media SDK、DMO 等系统组件 | 容器 Reader 与系统 Decoder 配合；动态探测系统能力 | 不能把系统编解码器可用性视为所有 XP 都相同；ASF 内部不只 WMA |
 | `ttp_rm` | 裁剪的 FFmpeg 9.0.2；原生 RM 标签实现 | **使用 FFmpeg 时的模板**：自定义 AVIO、错误桥接、最小解码配置 | 不要启用全部 FFmpeg 组件；RealMedia 写回不是通用文件重写 |
 | `ttp_tak` | 裁剪的 FFmpeg 9.0.2；TAK 标签适配 | 单格式 FFmpeg 解码、APEv2、静态发行 | 不要重新引入旧 `tak_deco_lib.dll` 依赖 |
-| `ttp_dts` | 裁剪 FFmpeg 9.0.2 DCA；独立 DTS / DTS-WAV Reader | 压缩流包装在 PCM 容器中的识别、保留容器后缀、缺失解码器保护 | 原版 WAV 工厂优先级另行验证；DTS-HD 待真实样本；只读标签 |
 | `ttp_dsd` | 裁剪 FFmpeg 9.0.2 DSD/DST、swresample | DSF/DSDIFF 转 PCM、有效样本裁剪、FIR 历史与准确定位 | 不是 DoP/原生 DSD/ISO；DST 待真实样本；只读标签 |
 | `ttp_vqf` | 裁剪的 FFmpeg 9.0.2；TwinVQ 标签适配 | TwinVQ 容器、旧编码支持、源代码附件生成 | 不要重新依赖旧 `tvqdec.dll` |
 
 这些 DLL 都在当前 x86 工具链上构建。多数解码核心以 SSE2 为基线，**支持 XP 不等于支持所有 XP 时代 CPU**。
+
+使用 YY-Thunks 对象文件链接 DLL 时，必须按其 Readme 配置 `DllMainCRTStartupForYY_Thunks` 入口与 x86 `YY_ThunksOriginalDllMainCRTStartup` 别名；不能只检查导入表。2026-10-23 的 `ttp_ac3dts` 真实宿主测试确认，漏掉入口会在 XP 动态加载时破坏 TLS，直至宿主退出才崩溃。应同时测试 DLL 动态加载、标签服务及进程正常退出。
 
 ### 选择原则
 
