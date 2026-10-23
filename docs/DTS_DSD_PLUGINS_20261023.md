@@ -48,6 +48,6 @@
 
 原版默认输出设置仍是 16 位，Winamp 链路（`004AC166`）也仍经过 PCM16；Reader 返回 float64 不等于声卡端保留同等精度。实际多声道布线、高采样率设备及原版 XP/Win7 完整 GUI 输出尚需另验。此前 XP/Win7 的 DLL / 旧 ABI 解码通过与本机原版宿主补验分别记录，不混称为同一项验证。
 
-详细实现见 `ttp_dts/docs/IMPLEMENTATION.md` 和 `ttp_dsd/docs/IMPLEMENTATION.md`。所有测试源码、样本及报告留在 `rebuild/tests/wav_feedback_20261023/`（补验为 `original-chain-results.json`、`original-coexist-results.json`）；Action 不运行测试。插件尚未发布远程仓库/Release，未向现有在线 CodecAddIn 聚合填入无法验证的仓库地址。
+历史 DTS 实现已归档，现行实现见 `ttp_ac3dts/docs/BOUNDARIES_3_5_20261023.md` 和 `ttp_dsd/docs/IMPLEMENTATION.md`。所有测试源码、样本及报告留在 `rebuild/tests/wav_feedback_20261023/`（补验为 `original-chain-results.json`、`original-coexist-results.json`）；Action 不运行测试。DSD 已登记到在线 CodecAddIn 合集，使用实际仓库 `TTPlayerRebuild/TTPlayerDSD`；2026-10-23 核对时其最新正式 Release 接口返回 404，需要先发布插件运行包。详见 [Release 插件包](ADDIN_RELEASE_BUNDLES.md)。
 
 发行输出：`rebuild/build/Release/`，播放器和插件分开打包；手动关闭播放器后覆盖 EXE，并将插件 DLL 放进 `AddIn/`。

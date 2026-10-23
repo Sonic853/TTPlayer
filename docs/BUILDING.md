@@ -136,7 +136,7 @@ GitHub tag/Release；勾选 Gitee 时还会分页读取 Gitee tag/Release，把�
 校验值的 `SHA256SUMS.txt`，不再额外构建或分发 XP-Win7 专用包。
 两组插件包仅在勾选 GitHub 或 Gitee 发布时生成；从各插件仓库最新正式 Release 下载，
 校验包内外 SHA-256、x86 架构与 XP／Win7 导入后打包。I18n 的翻译资源随 ExtraAddIn 分发。
-编解码合集共 14 个插件，已包含新重建的 MPC、AC3/DTS、MOD、CLI Encoder、ASF、TAK、RM、VQF；
+编解码合集共 15 个插件，已包含新重建的 MPC、AC3/DTS、MOD、CLI Encoder、ASF、TAK、RM、VQF、DSD（DSF／DSDIFF）；
 其上游地址取自各独立项目的 Git origin，运行包与源码包按精确文件名区分。
 具体仓库、文件布局、来源记录和本地命令见 [Release 插件包](ADDIN_RELEASE_BUNDLES.md)。
 例如 `2026.09.05p1` 对应 `TTPlayerRebuild-2026.09.05p1.zip`。EXE 文件版本、产品版本、

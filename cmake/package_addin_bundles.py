@@ -29,6 +29,7 @@ BUNDLES = {
         ('TTPlayerMod', 'ttp_mod'), ('TTPlayerClienc', 'ttp_clienc'),
         ('TTPlayerAsf', 'ttp_asf'), ('TTPlayerTak', 'ttp_tak'),
         ('TTPlayerRm', 'ttp_rm'), ('TTPlayerVqf', 'ttp_vqf'),
+        ('TTPlayerDSD', 'ttp_dsd'),
     ),
     'ExtraAddIn': (
         ('TTPlayerWaskin', 'ttp_waskin'), ('TTPlayerMaki', 'ttp_maki'),

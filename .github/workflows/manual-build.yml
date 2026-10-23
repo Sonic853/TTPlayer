@@ -307,7 +307,7 @@ jobs:
             7. 享受重建版千千静听。
 
             可选插件包（独立下载，退出播放器后解压到同一安装目录）：
-            - CodecAddIn-Rebuild-{version}.zip：共 14 个编解码插件，包含 WebM、APE、FLAC/TTA、MP3/WMA 编码、OGG/Opus、AAC、MPC、AC3/DTS、MOD、命令行编码器、ASF/WMA、TAK、RM/RA、VQF，合并 AddIn 文件夹。
+            - CodecAddIn-Rebuild-{version}.zip：共 15 个编解码插件，包含 WebM、APE、FLAC/TTA、MP3/WMA 编码、OGG/Opus、AAC、MPC、AC3/DTS、MOD、命令行编码器、ASF/WMA、TAK、RM/RA、VQF、DSD（DSF／DSDIFF），合并 AddIn 文件夹。
             - ExtraAddIn-{version}.zip：Winamp 皮肤、MAKI 虚拟机、多语言插件，合并 AddIn 和 i18n 文件夹；i18n 放在播放器旁。
             - 插件来自各自仓库本次构建解析到的最新正式 Release；插件自身版本独立于播放器，具体版本见下表。
             - SHA256SUMS.txt 可校验上述三个 ZIP；插件包内另有各运行文件的校验清单。新版更新器更新播放器包中除根目录 SHA256SUMS.txt 外的全部文件，并保留子目录；不删除包外文件。
