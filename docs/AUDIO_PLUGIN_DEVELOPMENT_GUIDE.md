@@ -32,7 +32,7 @@
 | `ttp_asf` | 自有 ASF/MP3 路径；Windows Media SDK、DMO 等系统组件 | 容器 Reader 与系统 Decoder 配合；动态探测系统能力 | 不能把系统编解码器可用性视为所有 XP 都相同；ASF 内部不只 WMA |
 | `ttp_rm` | 裁剪的 FFmpeg 9.0.2；原生 RM 标签实现 | **使用 FFmpeg 时的模板**：自定义 AVIO、错误桥接、最小解码配置 | 不要启用全部 FFmpeg 组件；RealMedia 写回不是通用文件重写 |
 | `ttp_tak` | 裁剪的 FFmpeg 9.0.2；TAK 标签适配 | 单格式 FFmpeg 解码、APEv2、静态发行 | 不要重新引入旧 `tak_deco_lib.dll` 依赖 |
-| `ttp_dsd` | 裁剪 FFmpeg 9.0.2 DSD/DST、swresample | DSF/DSDIFF 转 PCM、有效样本裁剪、FIR 历史与准确定位 | 不是 DoP/原生 DSD/ISO；DST 待真实样本；只读标签 |
+| `ttp_dsd` | 裁剪 FFmpeg 9.0.2 DSD/DST、swresample，DSD 专用 DST 修补 | DSF/DSDIFF 转 PCM、有效样本裁剪、相位对齐的快速定位、标签／封面事务保存 | 不是 DoP/原生 DSD/ISO；真实压缩 DST 仍待验收；复杂 ID3 只读回退 |
 | `ttp_vqf` | 裁剪的 FFmpeg 9.0.2；TwinVQ 标签适配 | TwinVQ 容器、旧编码支持、源代码附件生成 | 不要重新依赖旧 `tvqdec.dll` |
 
 这些 DLL 都在当前 x86 工具链上构建。多数解码核心以 SSE2 为基线，**支持 XP 不等于支持所有 XP 时代 CPU**。
