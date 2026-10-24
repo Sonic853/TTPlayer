@@ -1899,9 +1899,11 @@ struct StandardThumbnailInterface : IUnknown {
 };
 constexpr GUID kContentIid{0x7ad84e00,0x5fef,0x4481,{0xb5,0x32,0xfb,0xbd,0x67,0x7e,0x67,0xc2}};
 constexpr GUID kThumbnailIid{0xb5e770af,0xdfb0,0x43e5,{0x9b,0x0c,0x3e,0xe9,0x8e,0x7b,0x62,0x48}};
+constexpr GUID kStandardCommitIid{0x3ab643c1,0xd8a4,0x4d49,{0x9c,0xbb,0xef,0x19,0x6b,0x04,0xb6,0xe7}};
+struct StandardCommitInterface : IUnknown { virtual HRESULT STDMETHODCALLTYPE Commit() = 0; };
 
 class StandardContent final : public StandardContentInterface,
-                              public StandardThumbnailInterface {
+                              public StandardThumbnailInterface, public StandardCommitInterface {
 public:
     StandardContent(IStream* stream, DWORD write_type) : stream_(stream), write_type_(write_type) {
         stream_->AddRef();
@@ -1930,11 +1932,23 @@ public:
             *output = static_cast<StandardContentInterface*>(this);
         else if (InlineIsEqualGUID(iid, kThumbnailIid))
             *output = static_cast<StandardThumbnailInterface*>(this);
+        else if (InlineIsEqualGUID(iid, kStandardCommitIid))
+            *output = static_cast<StandardCommitInterface*>(this);
         else return E_NOINTERFACE;
         AddRef();
         return S_OK;
     }
     ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&references_); }
+    HRESULT STDMETHODCALLTYPE Commit() override {
+        if (committed_) return save_result_;
+        committed_ = true;
+        // Mutations are saved immediately; report their first failure and flush.
+        if (SUCCEEDED(save_result_) && writable_) {
+            const auto hr = stream_->Commit(STGC_DEFAULT);
+            if (hr != E_NOTIMPL && hr != STG_E_INVALIDFUNCTION) save_result_ = hr;
+        }
+        return save_result_;
+    }
     ULONG STDMETHODCALLTYPE Release() override {
         const LONG remaining = InterlockedDecrement(&references_);
         if (!remaining) delete this;
@@ -1977,6 +1991,7 @@ public:
         } catch (...) { return E_OUTOFMEMORY; }
     }
     HRESULT STDMETHODCALLTYPE ContentSet(const char* name, const wchar_t* value) override {
+        if (committed_) return E_UNEXPECTED;
         try {
             auto changed = fields_;
             if (!name) {
@@ -2046,6 +2061,12 @@ private:
         } catch (...) { return E_OUTOFMEMORY; }
     }
     HRESULT Save(TagData changed, BuiltinCoverAction action) {
+        if (committed_) return E_UNEXPECTED;
+        const auto hr = SaveImpl(std::move(changed), action);
+        if (FAILED(hr) && SUCCEEDED(save_result_)) save_result_ = hr;
+        return hr;
+    }
+    HRESULT SaveImpl(TagData changed, BuiltinCoverAction action) {
         if (!writable_) return STG_E_ACCESSDENIED;
         // Shipped APE/TAK/MPC readers request APEv2 (4). Do not silently
         // implement an unrequested ID3 rewriting policy for other callers.
@@ -2175,6 +2196,8 @@ private:
     IStream* stream_{};
     DWORD write_type_{};
     bool writable_{};
+    bool committed_{};
+    HRESULT save_result_{S_OK};
     FileLayout layout_;
     TagData fields_;
     StandardPicture picture_;

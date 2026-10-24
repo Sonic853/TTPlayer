@@ -1093,11 +1093,9 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
             bool complete = true;
             Report(path, L"正在读取压缩包目录并校验…", true);
             const auto stop = [&] { return IsCanceled(); };
-            const auto names = audio::ListArchiveMembers(path, module, stop,
-                [&](uint64_t n, uint64_t total) { Progress(n, total); }, &path);
             if (audio::IsOszArchive(path)) {
-                Report(path,L"正在读取 OSZ 谱面的音频引用…",true);
-                const auto media = audio::ResolveOszMedia(path,names,module,stop,
+                Report(path,L"正在解析 OSZ 压缩包…",true);
+                const auto media = audio::ResolveOszMedia(path,module,stop,
                     [&](uint64_t n,uint64_t total){Progress(n,total);});
                 if (media.empty()) {
                     Error(path.filename().wstring()+L"\n\nOSZ 中没有有效的 .osu 音频引用，或引用的音乐文件不存在。");
@@ -1113,6 +1111,8 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
                 completed_containers.push_back(path);
                 return tracks.size() != before;
             }
+            const auto names = audio::ListArchiveMembers(path, module, stop,
+                [&](uint64_t n, uint64_t total) { Progress(n, total); }, &path);
             size_t index = 0;
             for (const auto& member : names) {
                 if (stop()) return false;

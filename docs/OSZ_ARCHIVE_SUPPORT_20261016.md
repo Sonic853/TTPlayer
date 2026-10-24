@@ -2,6 +2,8 @@
 
 日期：2026-10-16。已根据第二个样本扩展为按谱面引用导入多音频，替代初版“一包一首”的限制。
 
+2026-10-25 更新：OSZ 解析已迁入独立 `ttp_osu.dll`，以下格式行为保持不变。当前接口、构建和测试见 [OSZ 插件迁移](OSZ_PLUGIN_MIGRATION_20261025.md)；第 6、7 节保留迁移前的历史验证和发行记录。
+
 ## 1. 格式与样本分析
 
 官方将 [`.osz` 定义为 ZIP 格式的谱面包](https://osu.ppy.sh/wiki/en/Client/File_formats/osz_(file_format))，其中可以包含多个难度的 `.osu`、音乐、击打音效、皮肤图片和视频。**`.osz` 是有效后缀，不应提示改名为 `.zip`。**
@@ -66,13 +68,14 @@
 
 | 位置 | 职责 |
 | --- | --- |
-| `include/ttplayer/audio/osz_archive.h`、`src/audio/osz_archive.cpp` | 谱面文本解析、按首次引用顺序收集音频、成员去重与各自的背景匹配 |
+| 独立项目 `ttp_osu/src/plugin.cpp`、`parser.cpp` | OSZ 包内枚举、引用解析、按首次引用顺序收集音频、成员去重与各自的背景匹配 |
+| `include/ttplayer/audio/osz_archive.h`、`src/audio/osu_plugin_client.cpp` | 动态加载 OSZ 插件、通用只读 I/O 回调和宿主结果转换 |
 | `src/ui/player_window_file_intake.cpp` | OSZ 专用导入分支，接入工作线程、取消和同批去重 |
 | `src/ui/player_window.cpp` | 打开文件筛选器 |
 | `src/audio/archive_member.cpp` | OSZ 路径识别与谱面背景读取 |
 | `src/audio/extension_correction.cpp` | 接受 OSZ 后缀，避免改名为 ZIP |
 
-现有重建 `ttpcomm.dll` 已按 ZIP 文件头提供只读成员访问，本轮不增加 DLL ABI 或外部解码依赖。这是重建版的新格式扩展，不代表原版播放器已经支持 OSZ 谱面筛选。
+现有重建 `ttpcomm.dll` 按 ZIP 文件头提供只读成员访问。2026-10-25 起新增 OSU ABI 1，由独立插件负责 OSZ 解析，音频继续复用已有解码器。这是重建版的新格式扩展，不代表原版播放器已经支持 OSZ 谱面筛选。
 
 ## 6. 验证
 

@@ -76,7 +76,7 @@ add_library(ttplayer_core
   src/app/output_device_worker.cpp
   src/audio/archive_member.cpp
   src/audio/archive_verified_info.cpp
-  src/audio/osz_archive.cpp
+  src/audio/osu_plugin_client.cpp
   src/audio/archive_password.cpp
   src/ui/archive_password_dialog.cpp
   src/audio/asio_sink.cpp
@@ -185,7 +185,7 @@ add_library(ttplayer_core
   src/ui/window_drag.cpp
 )
 target_include_directories(ttplayer_core
-  PUBLIC include third_party/ttpcomm-sdk/include third_party/ttpres-sdk/include ../ttpbrowser/include
+  PUBLIC include third_party/ttpcomm-sdk/include third_party/ttpres-sdk/include third_party/ttp-osu-sdk/include ../ttpbrowser/include
   PRIVATE "${TTPLAYER_GENERATED_INCLUDE_DIR}"
 )
 add_dependencies(ttplayer_core ttplayer_build_date ttplayer_file_version)
@@ -1078,6 +1078,11 @@ endif()
 if(NOT EXISTS "${TTPLAYER_LRCSH_DLL}")
   message(FATAL_ERROR "Build TTPlayerLrcsh first or set TTPLAYER_LRCSH_DLL. CI downloads the verified release with STAGE_RUNTIME=OFF.")
 endif()
+set(TTPLAYER_OSU_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../ttp_osu/build/Release/ttp_osu.dll" CACHE FILEPATH
+  "Independent TTPlayerOSU archive plugin (ABI 1)")
+if(NOT EXISTS "${TTPLAYER_OSU_DLL}")
+  message(FATAL_ERROR "Build TTPlayerOSU first or set TTPLAYER_OSU_DLL. CI downloads its verified release with STAGE_RUNTIME=OFF.")
+endif()
 
 add_custom_command(
   OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ttpcomm.dll"
@@ -1122,6 +1127,10 @@ add_custom_command(TARGET ttplayer_rebuild POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
           "${TTPLAYER_LRCSH_DLL}"
           "$<TARGET_FILE_DIR:ttplayer_rebuild>/AddIn/ttp_lrcsh.dll"
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/download_osu_component.py"
+          --local-dll "${TTPLAYER_OSU_DLL}" --output "$<TARGET_FILE_DIR:ttplayer_rebuild>"
+          --exports "${ttplayer_yy_thunks_SOURCE_DIR}/Config/x86/5.1.2600.txt"
+          --exports "${ttplayer_yy_thunks_SOURCE_DIR}/Config/x86/6.1.7600.txt"
   COMMAND "${CMAKE_COMMAND}" -E copy_directory
           "${CMAKE_CURRENT_SOURCE_DIR}/../PlayList"
           "$<TARGET_FILE_DIR:ttplayer_rebuild>/PlayList"

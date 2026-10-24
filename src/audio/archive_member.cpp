@@ -359,6 +359,8 @@ ArchiveError::ArchiveError(HRESULT result)
     : std::runtime_error("Archive operation failed: " + std::to_string(static_cast<unsigned long>(result))),result_(result) {}
 
 std::wstring ArchiveError::Message() const {
+    if(result_==kOszPluginMissing) return L"无法加载 AddIn\\ttp_osu.dll。请安装完整发行包中的 OSZ 插件。";
+    if(result_==kOszPluginIncompatible) return L"AddIn\\ttp_osu.dll 版本或接口不兼容。请更新 OSZ 插件后重新启动播放器。";
     if(result_==TTPCOMM_ARCHIVE_PASSWORD) return L"压缩包需要密码。请播放或重新添加该压缩包以输入密码。";
     if(result_==TTPCOMM_ARCHIVE_BAD_PASSWORD) return L"压缩包密码不正确，或加密数据已损坏。";
     if(result_==TTPCOMM_ARCHIVE_MISSING_VOLUME) return L"压缩包缺少分卷。请重新导入并选择所需分卷，或将全部分卷放在同一目录。";
@@ -497,13 +499,10 @@ std::vector<unsigned char> ReadArchiveSidecarCover(const std::filesystem::path& 
     ArchiveMemberPath member;
     if (!ParseArchiveMemberPath(media.native(),member)) return {};
     try {
-        const auto names = ListArchiveMembers(member.archive,module,canceled);
         if (IsOszArchive(member.archive)) {
-            const auto resolved = ResolveOszMedia(member.archive,names,module,canceled,{},member.member);
-            if (resolved.empty() || resolved.front().background.empty()) return {};
-            auto bytes = ReadArchiveMember({member.archive,resolved.front().background,member.kind},module,canceled);
-            return HasCoverSignature(bytes) ? std::move(bytes) : std::vector<unsigned char>{};
+            return ReadOszCover(member.archive,module,canceled,member.member);
         }
+        const auto names = ListArchiveMembers(member.archive,module,canceled);
         const std::filesystem::path file(member.member);
         for (const auto& stem : {file.stem().native(),std::wstring(L"cover"),std::wstring(L"folder"),std::wstring(L"front")}) {
             for (const auto* extension : {L".png",L".jpg",L".jpeg",L".bmp",L".gif"}) {
