@@ -167,6 +167,7 @@ add_library(ttplayer_core
     src/ui/player_window_lyric_services.cpp
   src/ui/player_window_lyric_input.cpp
   src/ui/player_window_library.cpp
+  src/ui/player_window_osu_library.cpp
   src/ui/player_window_options.cpp
   src/ui/player_window_playlist.cpp
   src/ui/player_window_playlist_native.cpp

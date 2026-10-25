@@ -17,6 +17,7 @@ public:
     OsuVisualClient(const OsuVisualClient&)=delete;
     OsuVisualClient& operator=(const OsuVisualClient&)=delete;
     void Configure(const settings::VisualSettings&);
+    void FallbackImage(const std::filesystem::path&); // shared fullscreen backup image
     void Source(const std::filesystem::path&, std::span<const unsigned char>, HMODULE);
     void Viewport(HWND, const RECT&); // actual provider canvas, in client coordinates
     void Update(const audio::ExtendedVisualizationSamples&, const audio::PlaybackClockSnapshot&, HWND, float volume);
@@ -24,6 +25,7 @@ public:
     void Detach();
     bool BeginExit();
     bool ExitComplete();
+    bool TransitionActive();
     void CancelTransition();
     // End a visual session on the UI/device thread. Caller serializes adapter
     // access; joins asset I/O before destroying CPU/GPU state and DLL references.

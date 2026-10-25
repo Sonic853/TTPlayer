@@ -6,7 +6,7 @@
 
 // Independent of OSZ ABI 1. Caller initializes size; borrowed inputs are copied
 // before return. No exceptions or allocator ownership cross the DLL boundary.
-#define TTP_OSU_VISUAL_ABI 3u
+#define TTP_OSU_VISUAL_ABI 5u
 #define TTP_OSU_VISUAL_ENTRY "ttp_osu_query_visual"
 #pragma pack(push, 8)
 enum TtpOsuVisualFlags {
@@ -29,7 +29,15 @@ typedef struct TtpOsuVisualFrame {
     float pointer_x, pointer_y; // normalized client coordinates 0..1
     uint32_t pointer_inside;
     uint32_t pcm_cursor_offset; // actual playback cursor within the PCM window
+    // Preserve the original pack(8) tail padding; old callers may leave these
+    // padding bytes uninitialized. Never reinterpret them as button state.
+    uint32_t reserved_abi1_padding;
+    // Optional size-versioned input extension. Bit 0: left button currently
+    // down. A shorter original frame implies no buttons. Only lazer consumes
+    // this field; no menu navigation or host playback action is triggered.
+    uint32_t pointer_buttons;
 } TtpOsuVisualFrame;
+#define TTP_OSU_VISUAL_FRAME_ABI1_SIZE ((uint32_t)offsetof(TtpOsuVisualFrame, pointer_buttons))
 typedef struct TtpOsuVisualImage {
     uint32_t size, width, height, stride;
     const uint8_t* bgra; // premultiplied BGRA; copied synchronously
@@ -73,8 +81,20 @@ typedef struct TtpOsuVisualApi {
     // Advancing this clock also permits transitions while audio is stopped.
     // Completed welcome reports phase 0; completed departure remains phase 2.
     HRESULT (WINAPI* transition_state)(void*, uint64_t now_ms, TtpOsuVisualTransitionState*);
+    // ABI 4: 0 osu!stable (default), 1 osu!lazer. Repeating the current style is
+    // idempotent; changing it clears style-specific temporal animation only.
+    // Logo, background, timing, options and host audio remain owned by the host.
+    HRESULT (WINAPI* style)(void*, uint32_t);
+    // ABI 5: lazer's three intro text fields, copied before return. Each is
+    // at most 64 UTF-16 units. All null restores automatic logo-based wording:
+    // TTPlayer -> "welcome to TTPlayer"; osu!/custom -> "welcome to osu!".
+    // All non-null enables custom wording (empty fields are allowed).
+    // Does not enable/restart intro, change style, or affect stable's animation.
+    HRESULT (WINAPI* intro_text)(void*, const wchar_t*, const wchar_t*, const wchar_t*);
 } TtpOsuVisualApi;
 #define TTP_OSU_VISUAL_ABI1_SIZE ((uint32_t)offsetof(TtpOsuVisualApi, logo))
 #define TTP_OSU_VISUAL_ABI2_SIZE ((uint32_t)offsetof(TtpOsuVisualApi, transition))
+#define TTP_OSU_VISUAL_ABI3_SIZE ((uint32_t)offsetof(TtpOsuVisualApi, style))
+#define TTP_OSU_VISUAL_ABI4_SIZE ((uint32_t)offsetof(TtpOsuVisualApi, intro_text))
 #pragma pack(pop)
 typedef HRESULT (WINAPI* TtpOsuQueryVisual)(uint32_t, TtpOsuVisualApi*);

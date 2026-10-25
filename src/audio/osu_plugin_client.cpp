@@ -1,4 +1,6 @@
 #include "ttplayer/audio/osz_archive.h"
+#include "ttplayer/audio/osu_library.h"
+#include <ttp_osu/library.h>
 #include "ttplayer/audio/archive_member.h"
 #include <ttp_osu/abi.h>
 #include "osu_visual_query.h"
@@ -30,7 +32,7 @@ struct Plugin {
 };
 const Plugin& LoadedPlugin() {static const Plugin plugin;return plugin;}
 const TtpOsuApi& Api() {return LoadedPlugin().api;}
-struct Capabilities {bool archive{},visual{},logo{},transitions{};};
+struct Capabilities {bool archive{},visual{},logo{},transitions{},lazer{},intro_text{};};
 const Capabilities& AvailableCapabilities() noexcept {
     static const Capabilities result=[]() noexcept {
         Capabilities value;
@@ -41,6 +43,8 @@ const Capabilities& AvailableCapabilities() noexcept {
             value.visual=detail::QueryOsuVisualApi(plugin.module,api);
             value.logo=value.visual && api.logo;
             value.transitions=value.visual && api.transition && api.transition_state;
+            value.lazer=value.visual && api.style;
+            value.intro_text=value.lazer && api.intro_text;
         } catch(...) {}
         return value;
     }();
@@ -88,6 +92,44 @@ bool HasOszSupport() noexcept {return AvailableCapabilities().archive;}
 bool HasOsuVisualSupport() noexcept {return AvailableCapabilities().visual;}
 bool HasOsuLogoSupport() noexcept {return AvailableCapabilities().logo;}
 bool HasOsuTransitionSupport() noexcept {return AvailableCapabilities().transitions;}
+bool HasOsuLazerSupport() noexcept {return AvailableCapabilities().lazer;}
+bool HasOsuIntroTextSupport() noexcept {return AvailableCapabilities().intro_text;}
+bool HasOsuLibrarySupport() noexcept {
+    static const bool supported=[] {
+        try {
+            TtpOsuLibraryApi api{sizeof(api)};
+            const auto query=reinterpret_cast<TtpOsuQueryLibrary>(GetProcAddress(LoadedPlugin().module,TTP_OSU_LIBRARY_ENTRY));
+            return query && SUCCEEDED(query(TTP_OSU_LIBRARY_ABI,&api)) && api.abi==TTP_OSU_LIBRARY_ABI && api.enumerate;
+        }catch(...){return false;}
+    }();
+    return supported;
+}
+HRESULT ReadOsuLibrary(unsigned source,const std::filesystem::path& root,
+    std::vector<OsuLibraryMedia>& result,const std::function<bool()>& canceled) noexcept {
+    result.clear();
+    return Callback([&] {
+        TtpOsuLibraryApi api{sizeof(api)};
+        const auto query=reinterpret_cast<TtpOsuQueryLibrary>(GetProcAddress(LoadedPlugin().module,TTP_OSU_LIBRARY_ENTRY));
+        if(!query || FAILED(query(TTP_OSU_LIBRARY_ABI,&api)) || api.abi!=TTP_OSU_LIBRARY_ABI || !api.enumerate)
+            throw ArchiveError(kOszPluginIncompatible);
+        struct State {const std::function<bool()>& canceled;std::vector<OsuLibraryMedia> records;} state{canceled,{}};
+        const TtpOsuLibraryHost host{sizeof(host),&state,[](void* data)->BOOL {
+            const auto& s=*static_cast<State*>(data);try{return s.canceled && s.canceled();}catch(...){return TRUE;}
+        },nullptr};
+        const TtpOsuLibraryRequest request{sizeof(request),source,root.c_str(),0};
+        Check(api.enumerate(&host,&request,[](void* data,const TtpOsuLibraryTrack* track)->HRESULT {
+            return Callback([&] {
+                if(!track || track->size<sizeof(*track) || !track->audio)throw ArchiveError(E_INVALIDARG);
+                const auto text=[](const wchar_t* s){return s?std::wstring(s):std::wstring{};};
+                auto& s=*static_cast<State*>(data);
+                s.records.push_back({track->audio,text(track->beatmap),text(track->background),
+                    text(track->identity),text(track->title),text(track->artist),text(track->album),
+                    text(track->creator),track->duration_ms});
+            });
+        },&state));
+        result=std::move(state.records);
+    });
+}
 bool IsOszArchive(const std::filesystem::path& path) {
     // Routing must survive a missing DLL: never import an OSZ as generic ZIP
     // or offer to rename it merely because the plugin is absent.

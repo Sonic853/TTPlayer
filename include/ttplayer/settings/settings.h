@@ -12,7 +12,7 @@
 
 namespace ttplayer::settings {
 inline constexpr wchar_t kSettingsFileName[] = L"TTPlayerRebuild.xml";
-inline constexpr int kMaximumVisualType = 7;
+inline constexpr int kMaximumVisualType = 8;
 inline constexpr int kVisualTypeCount = kMaximumVisualType + 1;
 struct GeneralSettings {
     // auto: Windows UI language; source: unchanged resource/code text.
@@ -159,8 +159,10 @@ struct HotKeySettings {
 // Type/FramesPerSec are global; the remaining colours, blur parameters and
 // LOGFONT are also serialized into each per-skin .skn.xml profile.
 struct VisualSettings {
-    int type{2}; // 0 none, 1 dream, 2 spectrum, 3 scope, 4 cover, 5 pulse, 6 ripple, 7 osu
+    int type{2}; // 0 none, 1 dream, 2 spectrum, 3 scope, 4 cover, 5 pulse, 6 ripple, 7 osu stable, 8 lazer
     int frames_per_second{25};
+    int osu_frames_per_second{60}; // global per-effect rate, 10..240 FPS
+    int osu_lazer_frames_per_second{60};
     COLORREF pulse_color{skin::DefaultSkinColors().lyric.highlight_color};
     COLORREF ripple_color{skin::DefaultSkinColors().lyric.highlight_color};
     COLORREF pulse_background{RGB(0, 0, 0)};
@@ -173,8 +175,14 @@ struct VisualSettings {
     int osu_bpm{120}; // fallback grid for sources without beatmap timing
     int osu_logo{}; // 0 TTPlayer, 1 osu!, 2 custom image; visual ABI 2
     std::wstring osu_logo_path;
+    int osu_lazer_logo{};
+    std::wstring osu_lazer_logo_path;
+    bool osu_lazer_custom_text{};
+    std::array<std::wstring, 3> osu_lazer_text{L"welcome", L"to", L"osu!"};
     bool osu_intro{}; // optional full-screen entrance animation; visual ABI 3
     bool osu_outro{}; // optional full-screen exit animation; visual ABI 3
+    bool osu_lazer_intro{}; // independent optional lazer transitions; visual ABI 4
+    bool osu_lazer_outro{};
     COLORREF spectrum_top_color{skin::DefaultSkinColors().visual.spectrum_top_color};
     COLORREF spectrum_bottom_color{skin::DefaultSkinColors().visual.spectrum_bottom_color};
     COLORREF spectrum_middle_color{skin::DefaultSkinColors().visual.spectrum_middle_color};
@@ -189,13 +197,15 @@ struct VisualSettings {
 };
 // CSettings +0x788..+0x7A8.  VisualType 0 uses the shared "All" profile;
 // values 1..3 select the independent Goom/Spectrum/BlurScope profile.
-// Extensions: 4 album background, 5 pulse, 6 ripple, 7 osu beat scene.
+// Extensions: 4 album background, 5 pulse, 6 ripple, 7 osu stable, 8 lazer.
 struct FullScreenSettings {
     int last_mode{3}; // 1 lyrics, 2 visual, 3 lyrics + visual; never the exit state.
     int last_visual_effect{}; // shared by visual/combined fullscreen; 0 = no history
+    bool single_click_visual{true};
+    bool double_click_fullscreen{}; // single_click_visual takes precedence
     int visual_type{1};
-    std::array<int, kVisualTypeCount> position_relation{0, 1, 0, 1, 1, 1, 1, 1};
-    std::array<int, kVisualTypeCount> lyric_size{2, 2, 2, 2, 10, 10, 10, 10};
+    std::array<int, kVisualTypeCount> position_relation{0, 1, 0, 1, 1, 1, 1, 1, 1};
+    std::array<int, kVisualTypeCount> lyric_size{2, 2, 2, 2, 10, 10, 10, 10, 10};
     std::wstring album_fallback_image;
     int album_transparency_percent{60}; // 0 = opaque, 100 = no image
     // Background colour is LyricSettings::fullscreen_background_color.
@@ -285,6 +295,16 @@ struct MediaLibrarySettings {
     bool monitor_directories{};
     std::vector<MediaLibraryDirectory> directories;
     int max_item_count{};
+};
+struct OsuLibrarySettings {
+    OsuLibrarySettings();
+    bool show_stable{},show_lazer{};
+    // Preserve environment variables in configuration; resolve them only
+    // when a consumer opens a path, not while saving another user's config.
+    std::wstring stable_executable{LR"(%USERPROFILE%\AppData\Local\osu!\osu!.exe)"};
+    std::wstring lazer_executable{LR"(%USERPROFILE%\AppData\Local\osulazer\current\osu!.exe)"};
+    std::wstring stable_songs{LR"(%USERPROFILE%\AppData\Local\osu!\Songs)"};
+    std::wstring lazer_files{LR"(%USERPROFILE%\AppData\Roaming\osu\files)"};
 };
 struct NetworkSettings {
     NetworkSettings();
@@ -436,6 +456,7 @@ struct Settings {
     EqualizerSettings equalizer;
     PlaylistSettings playlist;
     MediaLibrarySettings library;
+    OsuLibrarySettings osu_library;
     LyricSettings lyric;
     NetworkSettings network;
     ConvertSettings convert;

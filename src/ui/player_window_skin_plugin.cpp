@@ -775,7 +775,11 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     }
     case TTP_SKIN_PROPERTIES: HandleContextCommand(kCmdFileProperties);break;
     case TTP_SKIN_ALWAYS_ON_TOP: HandleContextCommand(kCmdAlwaysOnTop);break;
-    case TTP_SKIN_VISUAL_NEXT: SetVisualType((settings_.visual.type+1)%(AvailableVisualMaximum()+1));break;
+    case TTP_SKIN_VISUAL_NEXT:
+        SetVisualType(fullscreen_mode_!=0
+            ? (settings_.visual.type>=AvailableVisualMaximum(true)?1:settings_.visual.type+1)
+            : (settings_.visual.type+1)%(AvailableVisualMaximum()+1));
+        break;
     case TTP_SKIN_VISUAL_MENU: {POINT p{};GetCursorPos(&p);ShowVisualContextMenu(p);break;}
     case TTP_SKIN_EQ_BANDS:
         for(int i=0;i<10;++i) SetEqualizerSliderValue(kEqSliderFirstBand+i,std::clamp(value,-12,12),true);

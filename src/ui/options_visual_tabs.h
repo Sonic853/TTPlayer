@@ -15,6 +15,9 @@ inline constexpr int kVisualOsuLogoLabel = 0xe950;
 inline constexpr int kVisualOsuLogoChoice = 0xe951;
 inline constexpr int kVisualOsuLogoPath = 0xe952;
 inline constexpr int kVisualOsuLogoBrowse = 0xe953;
+inline constexpr int kVisualLazerCustomText = 0xe955;
+inline constexpr int kVisualLazerText1 = 0xe956; // three consecutive edit IDs
+inline constexpr UINT kVisualTabChanged = WM_APP + 0x392;
 
 // Preserve the resource controls, their IDs and their parent notifications.
 // Effect groups become pages; FPS/type/text/profile stay common.
@@ -23,6 +26,9 @@ class VisualOptionsTabs {
     HWND page_{}, tab_{};
     std::vector<Control> controls_;
     static constexpr UINT_PTR kSubclass = 0x54545654;
+    static bool InGroup(int control_group,int selected) noexcept {
+        return control_group==selected || (control_group==4 && selected==5);
+    }
 
     void Layout() {
         RECT bounds{7, 68, 273, 169}, client{}, margin{0, 0, 7, 4};
@@ -54,10 +60,11 @@ class VisualOptionsTabs {
         TabCtrl_SetCurSel(tab_, group);
         const HWND focus = GetFocus();
         for (const auto& control : controls_) {
-            if (group != control.group && (focus == control.window || IsChild(control.window, focus)))
+            if (!InGroup(control.group,group) && (focus == control.window || IsChild(control.window, focus)))
                 SetFocus(tab_);
-            ShowWindow(control.window, group == control.group && control.visible ? SW_SHOW : SW_HIDE);
+            ShowWindow(control.window, InGroup(control.group,group) && control.visible ? SW_SHOW : SW_HIDE);
         }
+        SendMessageW(page_,kVisualTabChanged,group,0);
         RedrawWindow(page_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 
@@ -98,7 +105,7 @@ public:
             return;
         }
         SendMessageW(self->tab_, WM_SETFONT, font, FALSE);
-        std::array<std::wstring, 5> captions;
+        std::array<std::wstring, 6> captions;
         RECT groups{0, 68, 0, 118}, bottom{0, 169, 0, 0};
         MapDialogRect(page, &groups);
         MapDialogRect(page, &bottom);
@@ -168,42 +175,64 @@ public:
         const UINT flag_labels[]{IDS_VISUAL_OSU_SPECTRUM, IDS_VISUAL_OSU_STARS,
             IDS_VISUAL_OSU_FLASHES, IDS_VISUAL_OSU_PARALLAX, IDS_VISUAL_OSU_LOGO};
         for (int field = 0; field < 5; ++field) {
-            const LONG x = 13 + (field % 4) * 62;
-            const LONG y = 80 + (field / 4) * 15;
+            const LONG x = 13 + field * 49;
+            const LONG y = 80;
             add_osu_control(IDC_VISUAL_OSU_SPECTRUM + field, flag_labels[field],
-                WC_BUTTONW, WS_TABSTOP | BS_AUTOCHECKBOX, {x, y, x + 59, y + 13});
+                WC_BUTTONW, WS_TABSTOP | BS_AUTOCHECKBOX, {x, y, x + 48, y + 13});
         }
         if(audio::HasOsuTransitionSupport()) {
             add_osu_control(IDC_VISUAL_OSU_INTRO,IDS_VISUAL_OSU_INTRO,
-                WC_BUTTONW,WS_TABSTOP|BS_AUTOCHECKBOX,{75,95,134,108});
+                WC_BUTTONW,WS_TABSTOP|BS_AUTOCHECKBOX,{13,95,72,108});
             add_osu_control(IDC_VISUAL_OSU_OUTRO,IDS_VISUAL_OSU_OUTRO,
-                WC_BUTTONW,WS_TABSTOP|BS_AUTOCHECKBOX,{137,95,196,108});
+                WC_BUTTONW,WS_TABSTOP|BS_AUTOCHECKBOX,{75,95,134,108});
         }
         add_osu_control(IDC_VISUAL_OSU_BPM_LABEL, IDS_VISUAL_OSU_BPM,
-            WC_STATICW, SS_LEFT, {13, 113, 156, 126});
+            WC_STATICW, SS_LEFT, {13, 113, 125, 126});
         const HWND bpm = add_osu_control(IDC_VISUAL_OSU_BPM, 0, WC_EDITW,
-            WS_TABSTOP | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, {158, 110, 193, 124});
+            WS_TABSTOP | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, {127, 110, 160, 124});
         if (bpm) SendMessageW(bpm, EM_SETLIMITTEXT, 3, 0);
         add_osu_control(IDC_VISUAL_OSU_ACCENT, IDS_VISUAL_BASE_COLOR,
-            WC_BUTTONW, WS_TABSTOP | BS_PUSHBUTTON, {199, 95, 258, 109});
+            WC_BUTTONW, WS_TABSTOP | BS_PUSHBUTTON, {137, 95, 196, 109});
         add_osu_control(IDC_VISUAL_OSU_BACKGROUND, IDS_VISUAL_OSU_BACKGROUND,
-            WC_BUTTONW, WS_TABSTOP | BS_PUSHBUTTON, {201, 110, 258, 124});
+            WC_BUTTONW, WS_TABSTOP | BS_PUSHBUTTON, {199, 95, 258, 109});
         if(audio::HasOsuLogoSupport()) {
             add_osu_control(kVisualOsuLogoLabel,IDS_OSU_LOGO_CHOICE,
                 WC_STATICW,SS_LEFT,{13,131,73,144});
             const HWND choice=add_osu_control(kVisualOsuLogoChoice,0,WC_COMBOBOXW,
-                WS_TABSTOP|WS_VSCROLL|CBS_DROPDOWNLIST,{75,127,258,187});
+                WS_TABSTOP|WS_VSCROLL|CBS_DROPDOWNLIST,{75,127,190,187});
             for(UINT text:{IDS_OSU_LOGO_TTPLAYER,IDS_OSU_LOGO_OSU,IDS_OSU_LOGO_CUSTOM}) {
                 const auto label=i18n::ResourceText(GetModuleHandleW(nullptr),text);
                 SendMessageW(choice,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));
             }
             add_osu_control(kVisualOsuLogoPath,0,WC_EDITW,
-                WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL|ES_READONLY,{13,145,190,159});
+                WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL|ES_READONLY,{13,145,258,159});
             add_osu_control(kVisualOsuLogoBrowse,IDS_OSU_LOGO_BROWSE,WC_BUTTONW,
-                WS_TABSTOP|BS_PUSHBUTTON,{196,144,258,160});
+                WS_TABSTOP|BS_PUSHBUTTON,{196,126,258,142});
         }
         }
-        for (int group = 0; group < (osu_available?5:4); ++group) {
+        if(audio::HasOsuIntroTextSupport()) {
+            const auto add_text=[&](int id, const wchar_t* klass, const wchar_t* caption, DWORD style, RECT r) {
+                MapDialogRect(page,&r);
+                HWND child=CreateWindowExW(0,klass,caption,WS_CHILD|WS_TABSTOP|style,
+                    r.left,r.top,r.right-r.left,r.bottom-r.top,page,
+                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),instance,nullptr);
+                if(child) {
+                    SendMessageW(child,WM_SETFONT,font,FALSE);
+                    self->controls_.push_back({child,r,r.bottom-r.top,5});
+                }
+                return child;
+            };
+            const auto caption=i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_CUSTOM_INTRO_TEXT);
+            add_text(kVisualLazerCustomText,WC_BUTTONW,caption.c_str(),BS_AUTOCHECKBOX,{174,111,258,125});
+            for(int i=0;i<3;++i) {
+                HWND child=add_text(kVisualLazerText1+i,WC_EDITW,L"",WS_BORDER|ES_AUTOHSCROLL,
+                    {13+i*84,145,90+i*84,159});
+                if(child)SendMessageW(child,EM_SETLIMITTEXT,64,0);
+            }
+        }
+        const bool lazer_available=audio::HasOsuLazerSupport();
+        if(lazer_available)captions[5]=i18n::ResourceText(GetModuleHandleW(nullptr),IDS_VISUAL_OSU_LAZER);
+        for (int group = 0; group < (lazer_available?6:osu_available?5:4); ++group) {
             TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = captions[group].data();
             TabCtrl_InsertItem(self->tab_, group, &item);
         }
@@ -217,14 +246,24 @@ public:
         auto* self=reinterpret_cast<VisualOptionsTabs*>(data);
         for(auto& control:self->controls_)if(GetDlgCtrlID(control.window)==id) {
             control.visible=visible;
-            ShowWindow(control.window,visible && TabCtrl_GetCurSel(self->tab_)==control.group?SW_SHOW:SW_HIDE);
+            ShowWindow(control.window,visible && InGroup(control.group,TabCtrl_GetCurSel(self->tab_))?SW_SHOW:SW_HIDE);
             return;
         }
     }
     static void SelectForType(HWND page, int type) {
         DWORD_PTR data{};
         if (GetWindowSubclass(page, PageProc, kSubclass, &data))
-            reinterpret_cast<VisualOptionsTabs*>(data)->Select(type == 3 ? 1 : type == 5 ? 2 : type == 6 ? 3 : type == 7 ? 4 : 0);
+            reinterpret_cast<VisualOptionsTabs*>(data)->Select(type == 3 ? 1 : type == 5 ? 2 : type == 6 ? 3 : type == 7 ? 4 : type == 8 ? 5 : 0);
+    }
+    static bool IsLazerSelected(HWND page) {
+        DWORD_PTR data{};
+        return GetWindowSubclass(page,PageProc,kSubclass,&data) &&
+            TabCtrl_GetCurSel(reinterpret_cast<VisualOptionsTabs*>(data)->tab_)==5;
+    }
+    static bool IsOsuSelected(HWND page) {
+        DWORD_PTR data{};
+        return GetWindowSubclass(page,PageProc,kSubclass,&data) &&
+            TabCtrl_GetCurSel(reinterpret_cast<VisualOptionsTabs*>(data)->tab_)>=4;
     }
 };
 } // namespace ttplayer::ui::detail

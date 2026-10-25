@@ -16,12 +16,17 @@ namespace ttplayer::playlist {
 class PlaylistStore {
 public:
     static constexpr size_t npos = static_cast<size_t>(-1);
+    static constexpr size_t kExternalStableSlot = 0x1ffe;
+    static constexpr size_t kExternalLazerSlot = 0x1fff;
 
     struct Entry {
         Playlist playlist;
         size_t slot{};
         unsigned int dirty_edits{};
         unsigned long long dirty_since{};
+        // Session-only source catalogues: 0 = ordinary, 1 = osu! stable,
+        // 2 = osu!lazer. They never become numbered TTBL files.
+        unsigned int external_kind{};
     };
 
     void Load(const std::filesystem::path& directory, int scan_hint, int active_slot,
@@ -30,6 +35,9 @@ public:
     [[nodiscard]] size_t Size() const noexcept { return entries_.size(); }
     [[nodiscard]] size_t ActiveIndex() const noexcept { return active_index_; }
     [[nodiscard]] size_t ActiveSlot() const noexcept;
+    // Persist the first ordinary slot when an external catalogue is active;
+    // ActiveSlot still identifies the actual runtime selection.
+    [[nodiscard]] size_t StoredActiveSlot() const noexcept;
     [[nodiscard]] Playlist& Active() noexcept { return entries_[active_index_].playlist; }
     [[nodiscard]] const Playlist& Active() const noexcept {
         return entries_[active_index_].playlist;
@@ -41,6 +49,10 @@ public:
     }
 
     bool SetActive(size_t index) noexcept;
+    size_t EnsureExternalList(unsigned int kind, std::wstring title);
+    [[nodiscard]] std::optional<size_t> ExternalListIndex(unsigned int kind) const noexcept;
+    [[nodiscard]] bool IsExternal(size_t index) const noexcept;
+    bool RemoveExternalList(unsigned int kind);
     size_t NewList(std::wstring title = {});
     bool Rename(size_t index, std::wstring title);
     size_t AddList(const std::filesystem::path& path,
@@ -62,6 +74,7 @@ public:
     SaveResult FlushDirty(bool force);
 
 private:
+    [[nodiscard]] size_t NextOrdinarySlot() const noexcept;
     [[nodiscard]] std::filesystem::path SlotPath(size_t slot, int digits = 4) const;
     void SaveEntry(Entry& entry);
     SaveResult CompactSlots();

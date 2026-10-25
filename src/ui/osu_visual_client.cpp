@@ -49,6 +49,9 @@ struct OsuVisualClient::Impl {
     std::atomic<uint64_t> generation{};
     uint64_t delivered{};
     uint64_t source_revision{},logo_revision{},delivered_source{},delivered_logo{};
+    uint64_t fallback_revision{},delivered_fallback{};
+    std::filesystem::path fallback_path;
+    uint64_t fallback_stamp{},fallback_size{};
     std::filesystem::path source;
     std::vector<unsigned char> art;
     int logo_kind{-1};
@@ -62,6 +65,10 @@ struct OsuVisualClient::Impl {
     RECT pointer_bounds{};
     bool pointer_override{};
     bool configured{};
+    int style{-1};
+    bool text_configured{},custom_text{};
+    int text_logo{-1};
+    std::array<std::wstring,3> intro_text;
 
     ~Impl() {
         worker.request_stop();
@@ -99,10 +106,13 @@ struct OsuVisualClient::Impl {
             const auto version=generation.load();
             delivered=version;
             const auto source_version=source_revision,logo_version=logo_revision;
+            const auto fallback_version=fallback_revision;
             const bool source_changed=source_version!=delivered_source;
+            const bool image_changed=source_changed || fallback_version!=delivered_fallback;
             const bool logo_changed=logo_version!=delivered_logo;
             const auto path=source;
             const auto encoded=art;
+            const auto backup_path=fallback_path;
             const auto wanted_logo=logo_kind;
             const auto custom_logo_path=logo_path;
             ttpcomm::client::ModuleReference module_ref(comm.get());
@@ -118,13 +128,19 @@ struct OsuVisualClient::Impl {
                     if(!selected.empty() && !selected.front().beatmap.empty())
                         timing=audio::ReadArchiveMember({member.archive,selected.front().beatmap,audio::ArchiveKind::zip},module_ref.get(),canceled);
                 }
-                if(source_changed && !canceled() && !encoded.empty())image=DecodeCoverImage(encoded,2048);
-                if(logo_changed && !canceled() && wanted_logo==2 && api.logo)
-                    LoadOsuLogoImage(custom_logo_path,custom_logo);
             } catch(...) {
-                // A corrupt optional timing/background must not stop playback.
+                // Optional beatmap failure must not skip cover/fallback loading.
                 timing.clear();
             }
+            if(image_changed && !canceled()) {
+                try {if(!encoded.empty())image=DecodeCoverImage(encoded,2048);}catch(...) {}
+                // Missing and corrupt track images both use the configured
+                // backup. File I/O and decoding stay on this asset worker.
+                if(!image.bitmap && !backup_path.empty() && !canceled())
+                    LoadOsuLogoImage(backup_path,image);
+            }
+            if(logo_changed && !canceled() && wanted_logo==2 && api.logo)
+                LoadOsuLogoImage(custom_logo_path,custom_logo);
             lock.lock();
             if(!canceled() && instance) {
                 if(logo_changed && api.logo && wanted_logo!=2)
@@ -142,16 +158,19 @@ struct OsuVisualClient::Impl {
                 // not reapply timing (which resets beat/particle state) or art.
                 if(logo_changed)delivered_logo=logo_version;
                 if(source_changed) {
-                if(FAILED(api.timing(instance,timing.data(),static_cast<uint32_t>(timing.size()))))
-                    api.timing(instance,nullptr,0);
-                DIBSECTION dib{};
-                if(image.bitmap && GetObjectW(image.bitmap,sizeof(dib),&dib)==sizeof(dib) && dib.dsBm.bmBits) {
-                    const TtpOsuVisualImage pixels{sizeof(pixels),static_cast<uint32_t>(image.size.cx),
-                        static_cast<uint32_t>(image.size.cy),static_cast<uint32_t>(dib.dsBm.bmWidthBytes),
-                        static_cast<const uint8_t*>(dib.dsBm.bmBits)};
-                    api.image(instance,&pixels);
-                } else api.image(instance,nullptr);
-                delivered_source=source_version;
+                    if(FAILED(api.timing(instance,timing.data(),static_cast<uint32_t>(timing.size()))))
+                        api.timing(instance,nullptr,0);
+                    delivered_source=source_version;
+                }
+                if(image_changed) {
+                    DIBSECTION dib{};
+                    if(image.bitmap && GetObjectW(image.bitmap,sizeof(dib),&dib)==sizeof(dib) && dib.dsBm.bmBits) {
+                        const TtpOsuVisualImage pixels{sizeof(pixels),static_cast<uint32_t>(image.size.cx),
+                            static_cast<uint32_t>(image.size.cy),static_cast<uint32_t>(dib.dsBm.bmWidthBytes),
+                            static_cast<const uint8_t*>(dib.dsBm.bmBits)};
+                        api.image(instance,&pixels);
+                    } else api.image(instance,nullptr);
+                    delivered_fallback=fallback_version;
                 }
             }
             lock.unlock();
@@ -163,17 +182,67 @@ struct OsuVisualClient::Impl {
 };
 OsuVisualClient::OsuVisualClient():impl_(std::make_unique<Impl>()){}
 OsuVisualClient::~OsuVisualClient()=default;
+void OsuVisualClient::FallbackImage(const std::filesystem::path& value) {
+    auto path=value;
+    if(!path.empty() && path.is_relative()) {
+        wchar_t exe[32768]{};
+        const DWORD length=GetModuleFileNameW(nullptr,exe,32768);
+        if(length && length<32768)path=std::filesystem::path(exe).parent_path()/path;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    uint64_t stamp{},size{};
+    if(!path.empty() && GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&attributes)) {
+        stamp=(static_cast<uint64_t>(attributes.ftLastWriteTime.dwHighDateTime)<<32) |
+            attributes.ftLastWriteTime.dwLowDateTime;
+        size=(static_cast<uint64_t>(attributes.nFileSizeHigh)<<32)|attributes.nFileSizeLow;
+    }
+    std::scoped_lock lock(impl_->mutex);
+    if(impl_->fallback_path==path && impl_->fallback_stamp==stamp && impl_->fallback_size==size)return;
+    impl_->fallback_path=std::move(path);impl_->fallback_stamp=stamp;impl_->fallback_size=size;
+    ++impl_->fallback_revision;
+    ++impl_->generation;impl_->wake.notify_all();
+}
 void OsuVisualClient::Configure(const settings::VisualSettings& settings) {
     std::scoped_lock lock(impl_->mutex);
     impl_->pointer_window=nullptr;impl_->pointer_bounds={};impl_->pointer_override=false;
     if(!impl_->Ensure())return;
+    const int style=settings.type==8?1:0;
+    if(impl_->style!=style) {
+        if(impl_->api.style) {
+            const auto result=impl_->api.style(impl_->instance,static_cast<uint32_t>(style));
+            if(FAILED(result)){impl_->error=result;return;}
+        } else if(style) {impl_->error=E_NOINTERFACE;return;}
+        impl_->style=style;
+        impl_->configured=false;
+        // A different scene can reset its timing/textures. Re-deliver the
+        // current source and logo even when track and custom path are equal.
+        ++impl_->source_revision;
+        ++impl_->logo_revision;
+        ++impl_->generation;impl_->wake.notify_all();
+    }
     const TtpOsuVisualOptions options{sizeof(options),static_cast<uint32_t>(settings.osu_flags),
         0x5454504fU,settings.osu_accent,settings.osu_background,static_cast<double>(settings.osu_bpm)};
     impl_->api.configure(impl_->instance,&options);
+    if(impl_->api.intro_text && (!impl_->text_configured ||
+        impl_->custom_text!=settings.osu_lazer_custom_text || impl_->intro_text!=settings.osu_lazer_text ||
+        (!settings.osu_lazer_custom_text && impl_->text_logo!=settings.osu_lazer_logo))) {
+        const bool custom=settings.osu_lazer_custom_text;
+        const std::array<std::wstring,3> automatic{L"welcome",L"to",
+            settings.osu_lazer_logo==0?L"TTPlayer":L"osu!"};
+        const auto& text=custom?settings.osu_lazer_text:automatic;
+        // Supply the selected wording immediately. Archive/background reads
+        // and custom image decoding may still be pending on the asset worker.
+        const auto result=impl_->api.intro_text(impl_->instance,text[0].c_str(),text[1].c_str(),text[2].c_str());
+        if(SUCCEEDED(result)) {
+            impl_->intro_text=settings.osu_lazer_text;impl_->custom_text=custom;
+            impl_->text_logo=settings.osu_lazer_logo;impl_->text_configured=true;
+        } else impl_->error=result;
+    }
+    const bool intro=style?settings.osu_lazer_intro:settings.osu_intro;
     if(impl_->api.transition && impl_->api.transition_state) {
-        if(!impl_->configured && settings.osu_intro)
+        if(!impl_->configured && intro)
             impl_->api.transition(impl_->instance,1,VisualNowMs());
-        else if(!settings.osu_intro) {
+        else if(!intro) {
             TtpOsuVisualTransitionState state{sizeof(state)};
             if(SUCCEEDED(impl_->api.transition_state(impl_->instance,VisualNowMs(),&state)) && state.phase==1)
                 impl_->api.transition(impl_->instance,0,VisualNowMs());
@@ -181,15 +250,16 @@ void OsuVisualClient::Configure(const settings::VisualSettings& settings) {
     }
     // Resize, track changes and settings updates must not replay welcome.
     impl_->configured=true;
-    const int kind=std::clamp(settings.osu_logo,0,2);
+    const int kind=std::clamp(style?settings.osu_lazer_logo:settings.osu_logo,0,2);
+    const auto& logo_path=style?settings.osu_lazer_logo_path:settings.osu_logo_path;
     WIN32_FILE_ATTRIBUTE_DATA attributes{};
     uint64_t stamp{};
-    if(kind==2 && GetFileAttributesExW(settings.osu_logo_path.c_str(),GetFileExInfoStandard,&attributes))
+    if(kind==2 && GetFileAttributesExW(logo_path.c_str(),GetFileExInfoStandard,&attributes))
         stamp=(static_cast<uint64_t>(attributes.ftLastWriteTime.dwHighDateTime)<<32) |
             attributes.ftLastWriteTime.dwLowDateTime;
-    if(impl_->api.logo && (impl_->logo_kind!=kind || impl_->logo_path!=settings.osu_logo_path ||
+    if(impl_->api.logo && (impl_->logo_kind!=kind || impl_->logo_path!=logo_path ||
                            impl_->logo_stamp!=stamp)) {
-        impl_->logo_kind=kind;impl_->logo_path=settings.osu_logo_path;impl_->logo_stamp=stamp;
+        impl_->logo_kind=kind;impl_->logo_path=logo_path;impl_->logo_stamp=stamp;
         ++impl_->logo_revision;
         ++impl_->generation;impl_->wake.notify_all();
     }
@@ -240,6 +310,7 @@ void OsuVisualClient::Update(const audio::ExtendedVisualizationSamples& samples,
         if(frame.pointer_inside) {
             frame.pointer_x=static_cast<float>(point.x-bounds.left)/(bounds.right-bounds.left);
             frame.pointer_y=static_cast<float>(point.y-bounds.top)/(bounds.bottom-bounds.top);
+            frame.pointer_buttons=(GetAsyncKeyState(VK_LBUTTON)&0x8000)?1U:0U;
         }
     }
     impl_->api.update(impl_->instance,&frame);
@@ -276,6 +347,15 @@ bool OsuVisualClient::ExitComplete() {
     TtpOsuVisualTransitionState state{sizeof(state)};
     return FAILED(impl_->api.transition_state(impl_->instance,VisualNowMs(),&state)) ||
         state.phase!=2 || state.complete!=0;
+}
+bool OsuVisualClient::TransitionActive() {
+    std::scoped_lock lock(impl_->mutex);
+    if(!impl_->instance || !impl_->api.transition_state)return false;
+    TtpOsuVisualTransitionState state{sizeof(state)};
+    if(FAILED(impl_->api.transition_state(impl_->instance,VisualNowMs(),&state)))return false;
+    // A completed departure remains black until the host restores its HWNDs.
+    // Keep lyrics hidden during that final frame too.
+    return (state.phase==1 && !state.complete) || state.phase==2;
 }
 void OsuVisualClient::CancelTransition() {
     std::scoped_lock lock(impl_->mutex);

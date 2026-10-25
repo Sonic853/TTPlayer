@@ -360,7 +360,8 @@ FileInfoRecord ReadFileInfoRecord(
     record.source_identity = probe->source_identity;
     audio::ArchiveMemberPath archive_member;
     record.writable = (probe->capabilities & 4U) != 0 &&
-        !audio::ParseArchiveMemberPath(record.path.native(), archive_member);
+        !audio::ParseArchiveMemberPath(record.path.native(), archive_member) &&
+        !detail::IsOsuLibraryTrack(track);
     record.cover_writable = record.writable && probe->cover_writable != 0;
     record.cover_maximum_bytes = probe->cover_maximum_bytes;
 
@@ -382,6 +383,16 @@ FileInfoRecord ReadFileInfoRecord(
         const auto name = SafeUtf8(entry.name);
         if (!name.empty())
             record.metadata.emplace_back(name, SafeUtf8(entry.value));
+    }
+    if (detail::IsOsuLibraryTrack(track)) {
+        detail::PreserveOsuTrackMetadata(track.metadata, record.metadata);
+        auto restored = track;
+        restored.metadata = record.metadata;
+        detail::RestoreOsuTrackMetadata(restored);
+        record.tags[0] = SafeWide(restored.title);
+        record.tags[1] = SafeWide(restored.artist);
+        record.tags[2] = SafeWide(restored.album);
+        record.metadata = std::move(restored.metadata);
     }
     const WAVEFORMATEX& format = probe->format;
     record.channel_count = format.nChannels;
@@ -943,6 +954,8 @@ void ApplyReadResult(FileInfoContext& context, FileInfoReadResult result) {
         const auto previous_metadata = track.metadata;
         track.metadata = record.metadata;
         detail::PreserveBrowserTrackIdentity(previous_metadata, track.metadata);
+        detail::PreserveOsuTrackMetadata(previous_metadata, track.metadata);
+        detail::RestoreOsuTrackMetadata(track);
         track.media_type = record.media_type;
         track.bitrate_bps = record.bitrate_bps;
         track.sample_rate_hz = record.sample_rate_hz;
@@ -1058,6 +1071,7 @@ void MergeTrackMetadata(playlist::Track& track, std::string_view name,
 bool MakeFilesWritable(FileInfoContext& context) {
     for (const size_t row : context.rows) {
         if (row >= context.tracks.size()) continue;
+        if (detail::IsOsuLibraryTrack(context.tracks[row])) continue;
         const auto& path = context.tracks[row].path;
         // CDA tags go to the local CDDB cache, never to the read-only CD.
         if (_wcsicmp(path.extension().c_str(), L".cda") == 0) continue;
@@ -1168,7 +1182,8 @@ void BeginSave(
             if (stop.stop_requested()) break;
             const auto& draft = drafts[record_index];
             const size_t row = draft.row;
-            if (row >= tracks.size() || !draft.writable) continue;
+            if (row >= tracks.size() || !draft.writable ||
+                detail::IsOsuLibraryTrack(tracks[row])) continue;
             const auto found = changes.find(row);
             const detail::FileInfoFields fields = found == changes.end()
                 ? detail::FileInfoFields{} : found->second;

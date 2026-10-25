@@ -1,4 +1,5 @@
 #include "player_window_internal.h"
+#include "track_metadata.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/audio/archive_password.h"
@@ -66,6 +67,8 @@ void PlayerWindow::CheckExtensionCorrection(const std::filesystem::path& path,in
     // request supersedes prompts deferred by an options/modal window.
     extension_corrections_.clear();
     if (!settings_.general.prompt_extension_correction) return;
+    if (opened_track_ && detail::IsOsuLibraryTrack(*opened_track_) &&
+        SamePath(opened_track_->path, path)) return;
     const auto metadata = audio_->Metadata();
     if (auto correction=audio::FindExtensionCorrection(path,subtrack,
             metadata.source_format ? &*metadata.source_format : nullptr,
@@ -92,6 +95,7 @@ void PlayerWindow::PromptExtensionCorrection() {
     extension_corrections_.pop_front();
     const auto playback_state=audio_->State();
     if (!playback_source_open_ || !opened_track_ ||
+        detail::IsOsuLibraryTrack(*opened_track_) ||
         (opened_track_->subtrack!=0 && opened_track_->path.native().find(L'|')==std::wstring::npos) ||
         !SamePath(opened_track_->path,correction.source) ||
         (playback_state!=audio::PlaybackState::playing &&

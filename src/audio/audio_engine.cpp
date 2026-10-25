@@ -80,7 +80,18 @@ public:
         stream_.Attach(OpenArchiveMemberStream(member, comm,
             [cancel = canceled_] { return cancel->load(); }));
         auto pending = wave_tags ? BeginArchiveInfoVerification(path, identity_) : ArchiveInfoVerification{};
+        metadata_.thumbnail_pending = metadata_.thumbnail.empty();
         worker_ = std::jthread([this, wave_tags, pending = std::move(pending)](std::stop_token stop) mutable {
+            struct FinishArtwork {
+                ArchivePlaybackSession& session;
+                ~FinishArtwork() {
+                    std::scoped_lock lock(session.mutex_);
+                    if (session.metadata_.thumbnail_pending) {
+                        session.metadata_.thumbnail_pending = false;
+                        ++session.revision_;
+                    }
+                }
+            } finish{*this};
             const auto canceled = [&] { return stop.stop_requested() || canceled_->load(); };
             try {
                 HRESULT status{};
@@ -115,6 +126,7 @@ public:
                 }
                 if (canceled()) return;
                 initial.thumbnail_interface = true;
+                initial.thumbnail_pending = false;
                 { std::scoped_lock lock(mutex_); metadata_ = std::move(initial); }
                 ++revision_;
             } catch (...) { /* Metadata failure cannot invalidate verified PCM. */ }
@@ -1731,6 +1743,7 @@ public:
         // Title/Artist/Lyrics or ReplayGain into each CUE subtrack.
         auto underlying_metadata=inner_->Metadata();
         metadata_.thumbnail_interface=underlying_metadata.thumbnail_interface;
+        metadata_.thumbnail_pending=underlying_metadata.thumbnail_pending;
         metadata_.thumbnail=std::move(underlying_metadata.thumbnail);
         metadata_.title = track_.title;
         metadata_.artist = track_.performer;
@@ -1874,6 +1887,7 @@ public:
             auto image = inner_->Metadata();
             value.thumbnail = std::move(image.thumbnail);
             value.thumbnail_interface = image.thumbnail_interface;
+            value.thumbnail_pending = image.thumbnail_pending;
         }
         return value;
     }
@@ -2736,6 +2750,10 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     if (stop_requested_) return;
     LyricSourceRegistration lyric_registration{*this, *source, path, subtrack,
         options.lyric_recovery_folder};
+    // Sample the revision before the snapshot: a deferred cover completing
+    // between these reads may cause one harmless refresh, never a lost update.
+    const auto initial_metadata_revision = source->MetadataRevision();
+    const auto source_metadata = source->Metadata();
     {
         std::scoped_lock lock(mutex_);
         // Stop removes the task owner under this same lock. Do not publish a
@@ -2745,7 +2763,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         lyric_source_subtrack_ = subtrack;
         // Publish identity and its metadata together. A read during output
         // initialization must never see the previous track's snapshot.
-        metadata_ = source->Metadata();
+        metadata_ = source_metadata;
         ++metadata_revision_;
         archive_session_ = source->ArchiveSession();
         source_can_overlap_ = source->CanOverlapPlayback() &&
@@ -2757,8 +2775,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             SetError(L"Decoder returned an invalid output format");
         return;
     }
-    const auto source_metadata = source->Metadata();
-    std::atomic<uint64_t> source_metadata_revision{source->MetadataRevision()};
+    std::atomic<uint64_t> source_metadata_revision{initial_metadata_revision};
     const auto refresh_metadata = [&] {
         const auto revision = source->MetadataRevision();
         if (!IsNetworkMediaLocation(path) && revision == source_metadata_revision) return;

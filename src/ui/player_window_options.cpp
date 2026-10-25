@@ -10,6 +10,7 @@
 #include "player_window_internal.h"
 #include "options_buttons.h"
 #include "options_general_tabs.h"
+#include "options_library_tabs.h"
 #include "options_fullscreen_tabs.h"
 #include "osu_visual_client.h"
 #include "hotkey_control.h"
@@ -4693,6 +4694,7 @@ void PlayerWindow::SelectOptionsPage(int page, UINT focus_control) {
     }
     if (target && IsWindow(target)) {
         if (current == options_pages_[kPageGeneral]) GeneralOptionsTabs::ShowControl(current, target);
+        LibraryOptionsTabs::ShowControl(current,target);
         SetFocus(target);
     }
     options_focus_control_ = 0;
@@ -5067,10 +5069,14 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         break;
     }
     case 255: {
+        RemovePropW(dialog,kPageReadyProperty);
         SetChecked(dialog, 2212, settings_.library.enabled);
         SetChecked(dialog, 2210, settings_.library.monitor_directories);
         const HWND list = GetDlgItem(dialog, 1038);
-        InsertSingleListColumn(list, L"");
+        if(list) {
+            ListView_DeleteAllItems(list);
+            if(Header_GetItemCount(ListView_GetHeader(list))==0)InsertSingleListColumn(list,L"");
+        }
         for (size_t index = 0; list &&
              index < settings_.library.directories.size(); ++index) {
             const auto& directory = settings_.library.directories[index];
@@ -5092,6 +5098,11 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         UpdateFolderListButtons(dialog, resources, false);
         if (!settings_.library.monitor_directories)
             EnableWindow(GetDlgItem(dialog, 1039), FALSE);
+        LibraryOptionsTabs::Attach(dialog,audio::HasOszSupport());
+        SetDlgItemTextW(dialog,kLibraryOsuStableExecutable,settings_.osu_library.stable_executable.c_str());
+        SetDlgItemTextW(dialog,kLibraryOsuLazerExecutable,settings_.osu_library.lazer_executable.c_str());
+        SetDlgItemTextW(dialog,kLibraryOsuStableSongs,settings_.osu_library.stable_songs.c_str());
+        SetDlgItemTextW(dialog,kLibraryOsuLazerFiles,settings_.osu_library.lazer_files.c_str());
         break;
     }
     case 256: {
@@ -5366,13 +5377,34 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         const auto album_label = AlbumOptionText(IDS_FULLSCREEN_ALBUM);
         SendDlgItemMessageW(dialog, 2232, CB_ADDSTRING, 0,
                             reinterpret_cast<LPARAM>(album_label.c_str()));
-        for (const UINT id : {IDS_VISUAL_PULSE, IDS_VISUAL_RIPPLE, IDS_VISUAL_OSU}) {
+        for (const UINT id : {IDS_VISUAL_PULSE, IDS_VISUAL_RIPPLE, IDS_VISUAL_OSU, IDS_VISUAL_OSU_LAZER}) {
             if(id==IDS_VISUAL_OSU && !audio::HasOsuVisualSupport())continue;
+            if(id==IDS_VISUAL_OSU_LAZER && !audio::HasOsuLazerSupport())continue;
             const auto label = AlbumOptionText(id);
             SendDlgItemMessageW(dialog, 2232, CB_ADDSTRING, 0,
                                 reinterpret_cast<LPARAM>(label.c_str()));
         }
         PopulateAlbumBackgroundOptions(dialog, instance_, settings_.fullscreen);
+        int click_option_y = 220;
+        for (const auto& option : {
+            std::pair{IDC_FULLSCREEN_SINGLE_CLICK, IDS_FULLSCREEN_SINGLE_CLICK},
+            std::pair{IDC_FULLSCREEN_DOUBLE_CLICK, IDS_FULLSCREEN_DOUBLE_CLICK}}) {
+            if (!GetDlgItem(dialog, option.first)) {
+                // The tab adapter maps this original album-group coordinate
+                // space into the visual-fullscreen tab, below its image options.
+                RECT bounds{13, click_option_y, 267, click_option_y + 12};
+                MapDialogRect(dialog, &bounds);
+                const auto label = AlbumOptionText(option.second);
+                const HWND checkbox = CreateWindowExW(0, WC_BUTTONW, label.c_str(),
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                    bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
+                    dialog, reinterpret_cast<HMENU>(static_cast<INT_PTR>(option.first)), instance_, nullptr);
+                SendMessageW(checkbox, WM_SETFONT, SendMessageW(dialog, WM_GETFONT, 0, 0), FALSE);
+            }
+            click_option_y += 18;
+        }
+        SetChecked(dialog, IDC_FULLSCREEN_SINGLE_CLICK, settings_.fullscreen.single_click_visual);
+        SetChecked(dialog, IDC_FULLSCREEN_DOUBLE_CLICK, settings_.fullscreen.double_click_fullscreen);
         SetChecked(dialog, 2233, unified);
         PopulateResourceCombo(dialog, 2230, resources, 2, -1);
         const bool layered = LayeredWindowsAvailableForOptions();
@@ -5670,7 +5702,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
     ready();
 }
 
-HRESULT PlayerWindow::SetOsuLogoChoice(int kind,const std::filesystem::path& path) {
+HRESULT PlayerWindow::SetOsuLogoChoice(int kind,const std::filesystem::path& path,bool lazer) {
     if(!audio::HasOsuLogoSupport() || kind<0 || kind>2)return E_INVALIDARG;
     if(kind==2) {
         CoverImage image{};
@@ -5678,8 +5710,8 @@ HRESULT PlayerWindow::SetOsuLogoChoice(int kind,const std::filesystem::path& pat
         if(image.bitmap)DeleteObject(image.bitmap);
         if(FAILED(result))return result;
     }
-    settings_.visual.osu_logo=kind;
-    if(kind==2)settings_.visual.osu_logo_path=path.wstring();
+    (lazer?settings_.visual.osu_lazer_logo:settings_.visual.osu_logo)=kind;
+    if(kind==2)(lazer?settings_.visual.osu_lazer_logo_path:settings_.visual.osu_logo_path)=path.wstring();
     UpdateVisualWindowLayout();UpdateVisualFrame();
     return S_OK;
 }
@@ -5778,6 +5810,12 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
     }
     case 255: {
         settings_.library.enabled = IsChecked(dialog, 2212);
+        if(GetDlgItem(dialog,kLibraryOsuStableExecutable)) {
+            settings_.osu_library.stable_executable=GetText(dialog,kLibraryOsuStableExecutable);
+            settings_.osu_library.lazer_executable=GetText(dialog,kLibraryOsuLazerExecutable);
+            settings_.osu_library.stable_songs=GetText(dialog,kLibraryOsuStableSongs);
+            settings_.osu_library.lazer_files=GetText(dialog,kLibraryOsuLazerFiles);
+        }
         settings_.library.monitor_directories = IsChecked(dialog, 2210);
         const HWND list = GetDlgItem(dialog, 1038);
         settings_.library.directories.clear();
@@ -6161,6 +6199,13 @@ bool PlayerWindow::CommitOptionsControl(
         return true;
     }
     case 255:
+        if(IsOsuLibraryPathControl(control) && !GetDlgItem(dialog,control))return false;
+        switch(control) {
+        case kLibraryOsuStableExecutable: settings_.osu_library.stable_executable=GetText(dialog,control);return true;
+        case kLibraryOsuLazerExecutable: settings_.osu_library.lazer_executable=GetText(dialog,control);return true;
+        case kLibraryOsuStableSongs: settings_.osu_library.stable_songs=GetText(dialog,control);return true;
+        case kLibraryOsuLazerFiles: settings_.osu_library.lazer_files=GetText(dialog,control);return true;
+        }
         if (control == 2212) {
             settings_.library.enabled = IsChecked(dialog, 2212);
             return true;
@@ -7259,6 +7304,11 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
     case WM_COMMAND: {
         const UINT control = LOWORD(wparam);
         const UINT notification = HIWORD(wparam);
+        if(template_id==255 && IsOsuLibraryPathControl(control) && GetPropW(dialog,kPageReadyProperty) &&
+           (notification==EN_CHANGE || notification==EN_KILLFOCUS)) {
+            CommitOptionsControl(dialog,template_id,control);
+            return TRUE; // path edits do not restart ordinary library watchers
+        }
         if (template_id == 256 && notification == STN_CLICKED) {
             if (control == 2087) {
                 HandleLyricCommand(kCmdLyricAssociate);
@@ -7765,6 +7815,13 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         }
         if (template_id == 263 &&
             GetPropW(dialog, kPageReadyProperty)) {
+            if ((control == IDC_FULLSCREEN_SINGLE_CLICK || control == IDC_FULLSCREEN_DOUBLE_CLICK) &&
+                notification == BN_CLICKED) {
+                settings_.fullscreen.single_click_visual = IsChecked(dialog, IDC_FULLSCREEN_SINGLE_CLICK);
+                settings_.fullscreen.double_click_fullscreen = IsChecked(dialog, IDC_FULLSCREEN_DOUBLE_CLICK);
+                window_state_saved_ = false;
+                return TRUE;
+            }
             if (control == IDC_FULLSCREEN_LYRIC_DRAG && notification == BN_CLICKED) {
                 settings_.lyric.fullscreen_drag_lyric = IsChecked(dialog, IDC_FULLSCREEN_LYRIC_DRAG);
                 if (fullscreen_lyric_detached_ && lyric_control_ && lyric_line_dragging_ &&

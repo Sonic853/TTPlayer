@@ -28,6 +28,7 @@ constexpr UINT kVisualProfileMenu = 0x009e;
 constexpr UINT kVisualType = 0x0452;
 constexpr UINT kVisualFrames = 0x0427;
 constexpr UINT kVisualFramesText = 0x07f3;
+constexpr UINT kVisualFramesMaximum = 0xe954; // runtime ID for immutable template's anonymous endpoint
 constexpr UINT kScopeSpeed = 0x0422;
 constexpr UINT kSpectrumWide = 0x0849;
 constexpr UINT kScopeBlur = 0x044d;
@@ -236,6 +237,29 @@ bool LoadVisualProfile(const std::filesystem::path& path,
     }
     if (XmlInteger(node, L"OsuIntro", integer)) visual.osu_intro = integer != 0;
     if (XmlInteger(node, L"OsuOutro", integer)) visual.osu_outro = integer != 0;
+    if (XmlInteger(node, L"OsuLazerLogo", integer)) {
+        visual.osu_lazer_logo=std::clamp(integer,0,2);
+        visual.osu_lazer_logo_path=XmlAttribute(node,L"OsuLazerLogoPath");
+    } else if (XmlInteger(node,L"OsuLogo",integer)) {
+        visual.osu_lazer_logo=visual.osu_logo;
+        visual.osu_lazer_logo_path=visual.osu_logo_path;
+    }
+    if (XmlInteger(node,L"OsuLazerCustomText",integer)) visual.osu_lazer_custom_text=integer!=0;
+    const wchar_t* text_keys[]{L"OsuLazerText1",L"OsuLazerText2",L"OsuLazerText3"};
+    for (size_t i=0;i<3;++i) {
+        IXMLDOMNamedNodeMap* attributes{};
+        IXMLDOMNode* attribute{};
+        if(SUCCEEDED(node->get_attributes(&attributes)) && attributes) {
+            attributes->getNamedItem(_bstr_t(text_keys[i]),&attribute);
+            attributes->Release();
+        }
+        if(attribute) {
+            attribute->Release();
+            visual.osu_lazer_text[i]=XmlAttribute(node,text_keys[i]).substr(0,64);
+        }
+    }
+    if (XmlInteger(node, L"OsuLazerIntro", integer)) visual.osu_lazer_intro = integer != 0;
+    if (XmlInteger(node, L"OsuLazerOutro", integer)) visual.osu_lazer_outro = integer != 0;
     LOGFONTW font = visual.font;
     if (XmlFont(node, font)) {
         visual.font = font;
@@ -310,8 +334,16 @@ bool SaveVisualProfile(const std::filesystem::path& path,
     SetXmlAttribute(element, L"OsuBpm", std::clamp(visual.osu_bpm, 20, 400));
     SetXmlAttribute(element, L"OsuLogo", std::clamp(visual.osu_logo, 0, 2));
     SetXmlAttribute(element, L"OsuLogoPath", visual.osu_logo_path);
+    SetXmlAttribute(element,L"OsuLazerLogo",std::clamp(visual.osu_lazer_logo,0,2));
+    SetXmlAttribute(element,L"OsuLazerLogoPath",visual.osu_lazer_logo_path);
+    SetXmlAttribute(element,L"OsuLazerCustomText",visual.osu_lazer_custom_text?1:0);
+    SetXmlAttribute(element,L"OsuLazerText1",visual.osu_lazer_text[0]);
+    SetXmlAttribute(element,L"OsuLazerText2",visual.osu_lazer_text[1]);
+    SetXmlAttribute(element,L"OsuLazerText3",visual.osu_lazer_text[2]);
     SetXmlAttribute(element, L"OsuIntro", visual.osu_intro ? 1 : 0);
     SetXmlAttribute(element, L"OsuOutro", visual.osu_outro ? 1 : 0);
+    SetXmlAttribute(element, L"OsuLazerIntro", visual.osu_lazer_intro ? 1 : 0);
+    SetXmlAttribute(element, L"OsuLazerOutro", visual.osu_lazer_outro ? 1 : 0);
     if (visual.font_valid)
         SetXmlAttribute(element, L"Font", FontText(visual.font));
 
@@ -344,12 +376,41 @@ void SetFramesText(HWND dialog, HMODULE resources, int frames) {
     SetDlgItemTextW(dialog, kVisualFramesText, text);
 }
 
+int& SelectedVisualFrames(HWND dialog, settings::VisualSettings& visual) {
+    return VisualOptionsTabs::IsLazerSelected(dialog) ? visual.osu_lazer_frames_per_second :
+        VisualOptionsTabs::IsOsuSelected(dialog) ? visual.osu_frames_per_second : visual.frames_per_second;
+}
+void SyncVisualFrames(HWND dialog, HMODULE resources, const settings::VisualSettings& visual) {
+    const bool osu=VisualOptionsTabs::IsOsuSelected(dialog);
+    const int maximum=osu?240:100;
+    const int value=VisualOptionsTabs::IsLazerSelected(dialog)?visual.osu_lazer_frames_per_second:
+        osu?visual.osu_frames_per_second:visual.frames_per_second;
+    SendDlgItemMessageW(dialog,kVisualFrames,TBM_SETRANGE,TRUE,MAKELPARAM(10,maximum));
+    SendDlgItemMessageW(dialog,kVisualFrames,TBM_SETTICFREQ,osu?10:1,0);
+    SendDlgItemMessageW(dialog,kVisualFrames,TBM_SETPOS,TRUE,value);
+    SetDlgItemInt(dialog,kVisualFramesMaximum,maximum,FALSE);
+    SetFramesText(dialog,resources,value);
+}
+
 void SyncOptionsOsuLogo(HWND dialog,const settings::VisualSettings& visual) {
     if(!GetDlgItem(dialog,kVisualOsuLogoChoice))return;
-    SendDlgItemMessageW(dialog,kVisualOsuLogoChoice,CB_SETCURSEL,std::clamp(visual.osu_logo,0,2),0);
-    SetDlgItemTextW(dialog,kVisualOsuLogoPath,visual.osu_logo_path.c_str());
-    VisualOptionsTabs::SetVisible(dialog,kVisualOsuLogoPath,visual.osu_logo==2);
-    VisualOptionsTabs::SetVisible(dialog,kVisualOsuLogoBrowse,visual.osu_logo==2);
+    const bool lazer=VisualOptionsTabs::IsLazerSelected(dialog);
+    const int kind=lazer?visual.osu_lazer_logo:visual.osu_logo;
+    const auto& path=lazer?visual.osu_lazer_logo_path:visual.osu_logo_path;
+    SendDlgItemMessageW(dialog,kVisualOsuLogoChoice,CB_SETCURSEL,std::clamp(kind,0,2),0);
+    SetDlgItemTextW(dialog,kVisualOsuLogoPath,path.c_str());
+    VisualOptionsTabs::SetVisible(dialog,kVisualOsuLogoPath,kind==2 && !lazer);
+    VisualOptionsTabs::SetVisible(dialog,kVisualOsuLogoBrowse,kind==2);
+    CheckDlgButton(dialog,kVisualLazerCustomText,visual.osu_lazer_custom_text?BST_CHECKED:BST_UNCHECKED);
+    VisualOptionsTabs::SetVisible(dialog,kVisualLazerCustomText,lazer);
+    // Ignore EN_CHANGE generated while refreshing the three shared edit HWNDs.
+    SetPropW(dialog,L"TTPlayer.OsuTextSync",reinterpret_cast<HANDLE>(1));
+    for(int i=0;i<3;++i) {
+        SetDlgItemTextW(dialog,kVisualLazerText1+i,visual.osu_lazer_text[i].c_str());
+        EnableWindow(GetDlgItem(dialog,kVisualLazerText1+i),visual.osu_lazer_custom_text);
+        VisualOptionsTabs::SetVisible(dialog,kVisualLazerText1+i,lazer);
+    }
+    RemovePropW(dialog,L"TTPlayer.OsuTextSync");
 }
 
 void SyncVisualPage(HWND dialog, HMODULE resources,
@@ -368,12 +429,6 @@ void SyncVisualPage(HWND dialog, HMODULE resources,
                    visual.spectrum_wide ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(dialog, kScopeBlur,
                    visual.blur ? BST_CHECKED : BST_UNCHECKED);
-    const HWND track = GetDlgItem(dialog, kVisualFrames);
-    if (track) {
-        SendMessageW(track, TBM_SETRANGE, TRUE, MAKELPARAM(10, 100));
-        SendMessageW(track, TBM_SETTICFREQ, 1, 0);
-        SendMessageW(track, TBM_SETPOS, TRUE, visual.frames_per_second);
-    }
     if (first) {
         // The immutable 5.7.9 template has an anonymous "40" static under
         // the slider. Keep its right edge, but update/size the new maximum.
@@ -388,13 +443,12 @@ void SyncVisualPage(HWND dialog, HMODULE resources,
             GetWindowRect(label, &bounds);
             MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&bounds), 2);
             MapDialogRect(dialog, &width);
-            SetWindowTextW(label, L"100");
+            SetWindowLongPtrW(label,GWLP_ID,kVisualFramesMaximum);
             SetWindowPos(label, nullptr, bounds.right - width.right, bounds.top,
                 width.right, bounds.bottom - bounds.top, SWP_NOZORDER | SWP_NOACTIVATE);
             break;
         }
     }
-    SetFramesText(dialog, resources, visual.frames_per_second);
     CheckDlgButton(dialog, IDC_VISUAL_PULSE_FOLLOW, visual.pulse_follow_lyric ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(dialog, IDC_VISUAL_RIPPLE_FOLLOW, visual.ripple_follow_lyric ? BST_CHECKED : BST_UNCHECKED);
     EnableWindow(GetDlgItem(dialog, IDC_VISUAL_PULSE_COLOR), !visual.pulse_follow_lyric);
@@ -403,10 +457,8 @@ void SyncVisualPage(HWND dialog, HMODULE resources,
         CheckDlgButton(dialog, IDC_VISUAL_OSU_SPECTRUM + bit,
             (visual.osu_flags & (1 << bit)) ? BST_CHECKED : BST_UNCHECKED);
     SetDlgItemInt(dialog, IDC_VISUAL_OSU_BPM, visual.osu_bpm, FALSE);
-    CheckDlgButton(dialog, IDC_VISUAL_OSU_INTRO, visual.osu_intro ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(dialog, IDC_VISUAL_OSU_OUTRO, visual.osu_outro ? BST_CHECKED : BST_UNCHECKED);
-    SyncOptionsOsuLogo(dialog,visual);
-    VisualOptionsTabs::SelectForType(dialog, AvailableVisualType(visual.type));
+    VisualOptionsTabs::SelectForType(dialog, AvailableVisualType(visual.type,true));
+    SyncVisualFrames(dialog,resources,visual);
     for (const UINT control : kColorControls) {
         const HWND button = GetDlgItem(dialog, static_cast<int>(control));
         if (first && button) {
@@ -555,6 +607,16 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
     };
 
     switch (message) {
+    case kVisualTabChanged: {
+        SyncOptionsOsuLogo(dialog,settings_.visual);
+        SyncVisualFrames(dialog,resources,settings_.visual);
+        const bool lazer=VisualOptionsTabs::IsLazerSelected(dialog);
+        CheckDlgButton(dialog,IDC_VISUAL_OSU_INTRO,
+            (lazer?settings_.visual.osu_lazer_intro:settings_.visual.osu_intro)?BST_CHECKED:BST_UNCHECKED);
+        CheckDlgButton(dialog,IDC_VISUAL_OSU_OUTRO,
+            (lazer?settings_.visual.osu_lazer_outro:settings_.visual.osu_outro)?BST_CHECKED:BST_UNCHECKED);
+        return TRUE;
+    }
     case WM_INITDIALOG: {
         const auto description = ResourceText(kVisualOptionsPage);
         if (!description.empty()) SetWindowTextW(dialog, description.c_str());
@@ -567,11 +629,12 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
     case WM_HSCROLL:
         if (reinterpret_cast<HWND>(lparam) ==
                 GetDlgItem(dialog, kVisualFrames)) {
-            settings_.visual.frames_per_second = static_cast<int>(
+            auto& frames=SelectedVisualFrames(dialog,settings_.visual);
+            frames = static_cast<int>(
                 SendDlgItemMessageW(dialog, kVisualFrames,
                                     TBM_GETPOS, 0, 0));
             SetFramesText(dialog, resources,
-                          settings_.visual.frames_per_second);
+                          frames);
             refresh();
             return TRUE;
         }
@@ -591,31 +654,50 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
         const UINT notification = HIWORD(wparam);
         if (audio::HasOsuTransitionSupport() && notification == BN_CLICKED &&
             (control == IDC_VISUAL_OSU_INTRO || control == IDC_VISUAL_OSU_OUTRO)) {
-            (control == IDC_VISUAL_OSU_INTRO ? settings_.visual.osu_intro : settings_.visual.osu_outro) =
+            const bool lazer=VisualOptionsTabs::IsLazerSelected(dialog);
+            (control == IDC_VISUAL_OSU_INTRO
+                ? (lazer?settings_.visual.osu_lazer_intro:settings_.visual.osu_intro)
+                : (lazer?settings_.visual.osu_lazer_outro:settings_.visual.osu_outro)) =
                 IsDlgButtonChecked(dialog, control) == BST_CHECKED;
             refresh();
             return TRUE;
+        }
+        if(audio::HasOsuIntroTextSupport() && VisualOptionsTabs::IsLazerSelected(dialog)) {
+            if(control==kVisualLazerCustomText && notification==BN_CLICKED) {
+                settings_.visual.osu_lazer_custom_text=IsDlgButtonChecked(dialog,control)==BST_CHECKED;
+                SyncOptionsOsuLogo(dialog,settings_.visual);refresh();return TRUE;
+            }
+            if(control>=kVisualLazerText1 && control<kVisualLazerText1+3 && notification==EN_CHANGE) {
+                if(!GetPropW(dialog,L"TTPlayer.OsuTextSync")) {
+                    wchar_t text[65]{};GetDlgItemTextW(dialog,control,text,65);
+                    settings_.visual.osu_lazer_text[control-kVisualLazerText1]=text;
+                    refresh();
+                }
+                return TRUE;
+            }
         }
         if(audio::HasOsuLogoSupport() &&
            ((control==kVisualOsuLogoChoice && notification==CBN_SELCHANGE) ||
             (control==kVisualOsuLogoBrowse && notification==BN_CLICKED))) {
             const int kind=control==kVisualOsuLogoBrowse?2:static_cast<int>(
                 SendDlgItemMessageW(dialog,kVisualOsuLogoChoice,CB_GETCURSEL,0,0));
+            const bool lazer=VisualOptionsTabs::IsLazerSelected(dialog);
+            const auto& logo_path=lazer?settings_.visual.osu_lazer_logo_path:settings_.visual.osu_logo_path;
             HRESULT result=S_OK;
             if(kind==2) {
                 ModernOpenFileOptions chooser;
-                chooser.owner=dialog;chooser.initial_path=settings_.visual.osu_logo_path;
+                chooser.owner=dialog;chooser.initial_path=logo_path;
                 chooser.title=i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_TITLE);
                 chooser.filters={{i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_FILTER),
                     L"*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff"}};
-                const bool reuse=control==kVisualOsuLogoChoice && !settings_.visual.osu_logo_path.empty() &&
-                    SUCCEEDED(SetOsuLogoChoice(2,settings_.visual.osu_logo_path));
+                const bool reuse=control==kVisualOsuLogoChoice && !logo_path.empty() &&
+                    SUCCEEDED(SetOsuLogoChoice(2,logo_path,lazer));
                 if(!reuse) {
                     // A moved/deleted previously selected file must not trap
                     // the user in a hidden custom-file row.
-                    if(const auto path=ModernOpenFile(chooser))result=SetOsuLogoChoice(2,*path);
+                    if(const auto path=ModernOpenFile(chooser))result=SetOsuLogoChoice(2,*path,lazer);
                 }
-            } else result=SetOsuLogoChoice(kind,{});
+            } else result=SetOsuLogoChoice(kind,{},lazer);
             if(FAILED(result))MessageBoxW(dialog,
                 i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_ERROR).c_str(),
                 i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_CHOICE).c_str(),MB_OK|MB_ICONERROR);

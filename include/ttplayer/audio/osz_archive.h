@@ -28,6 +28,8 @@ struct OszMedia {
 [[nodiscard]] bool HasOsuVisualSupport() noexcept;
 [[nodiscard]] bool HasOsuLogoSupport() noexcept;
 [[nodiscard]] bool HasOsuTransitionSupport() noexcept;
+[[nodiscard]] bool HasOsuLazerSupport() noexcept;
+[[nodiscard]] bool HasOsuIntroTextSupport() noexcept;
 // Return each referenced audio member once, in first beatmap-reference order.
 // Each audio keeps its first available background; paths stay inside the archive.
 // required_audio limits cover lookup to one member and permits an early return

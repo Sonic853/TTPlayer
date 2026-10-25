@@ -30,6 +30,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
@@ -297,8 +298,12 @@ private:
     void StopVisualWorker();
     void UpdateVisualWindowLayout();
     void UpdateVisualFrame();
+    void UpdateFullScreenLyricFade();
+    void ResetFullScreenLyricFade();
+    bool VisualArtworkPending() const;
+    bool VisualArtworkSource(std::filesystem::path& source, audio::AudioMetadata& metadata) const;
     void PaintVisualControl(HDC dc) const;
-    HRESULT SetOsuLogoChoice(int kind,const std::filesystem::path& path);
+    HRESULT SetOsuLogoChoice(int kind,const std::filesystem::path& path,bool lazer=false);
     int WindowedVisualType() const;
     void SetVisualType(int type);
     // FUN_0045D531/FUN_0049F4AD: one modeless 15-page options sheet.  A
@@ -539,6 +544,13 @@ private:
     // 00489ED4..0048A818. Music.library is the ordinary TTBL stream used by
     // 004AF7F4/004AF838; the UI index remains an independent identity model.
     struct MediaLibraryState;
+    struct OsuLibraryState;
+    void AppendOsuLibraryMenu(HMENU menu) const;
+    void SetOsuLibraryVisible(unsigned source,bool visible,bool interactive=true);
+    void RefreshOsuLibraries(bool interactive=false);
+    void ApplyOsuLibraryResults();
+    void ShutdownOsuLibraries();
+    std::shared_ptr<OsuLibraryState> osu_libraries_;
     void InitializeMediaLibraryTree();
     void UpdatePlaylistTreeFont();
     void SetMediaLibraryMode(bool enabled);
@@ -1060,11 +1072,17 @@ private:
     std::jthread visual_worker_;
     std::condition_variable_any visual_worker_condition_;
     std::mutex visual_worker_mutex_;
-    std::atomic_uint visual_interval_ms_{50};
+    std::atomic_uint visual_interval_ns_{50000000};
+    std::atomic_bool visual_high_resolution_{};
     std::atomic_bool visual_worker_enabled_{};
     std::atomic_bool visual_plugin_embedded_{};
     int fullscreen_mode_{}; // 0 normal, 1 lyric, 2 visual, 3 lyric+visual
     bool fullscreen_osu_exit_pending_{};
+    BYTE fullscreen_lyric_transition_alpha_{255};
+    BYTE fullscreen_lyric_transition_from_{255};
+    BYTE fullscreen_lyric_transition_target_{255};
+    std::chrono::steady_clock::time_point fullscreen_lyric_transition_start_{};
+    bool fullscreen_lyric_transition_timer_{};
     std::wstring fullscreen_monitor_device_; // active display, survives mode changes
     RECT fullscreen_monitor_rect_{}; // nearest-display fallback after unplugging
     std::vector<MONITORINFOEXW> fullscreen_menu_monitors_;
@@ -1185,6 +1203,7 @@ private:
     bool playback_was_active_{};
     bool playback_source_open_{};
     bool network_open_pending_{};
+    bool visual_track_change_in_progress_{};
     bool natural_completion_dispatch_{};
     bool pending_natural_play_{};
     std::optional<playlist::Track> pending_wave_track_change_;

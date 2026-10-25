@@ -3,6 +3,7 @@
 #include "ttplayer/core/build_version.h"
 #include "ttplayer/settings/personalization.h"
 #include "ttplayer/skin/skin_paths.h"
+#include "osu_storage_path.h"
 
 #include <algorithm>
 #include <atomic>
@@ -24,6 +25,14 @@
 namespace ttplayer::settings {
 namespace {
 using Microsoft::WRL::ComPtr;
+
+std::wstring DefaultLazerFiles(std::wstring_view executable) {
+    wchar_t appdata[MAX_PATH]{};
+    const auto root=SUCCEEDED(SHGetFolderPathW(nullptr,CSIDL_APPDATA,nullptr,SHGFP_TYPE_CURRENT,appdata))
+        ? std::filesystem::path(appdata)/L"osu"
+        : std::filesystem::path(detail::ExpandOsuPath(LR"(%USERPROFILE%\AppData\Roaming\osu)"));
+    return detail::FindLazerFiles(root,detail::ExpandOsuPath(executable));
+}
 
 template <class Interface>
 ComPtr<Interface> AdoptCom(Interface* value) noexcept {
@@ -406,6 +415,10 @@ void ApplyVisualAttributes(IXMLDOMNode* node, VisualSettings& visual,
         visual.type = std::clamp(IntAttr(node, L"Type", visual.type), 0, kMaximumVisualType);
         visual.frames_per_second = std::clamp(
             IntAttr(node, L"FramesPerSec", visual.frames_per_second), 0, 100);
+        visual.osu_frames_per_second = std::clamp(
+            IntAttr(node, L"OsuFramesPerSec", visual.osu_frames_per_second), 10, 240);
+        visual.osu_lazer_frames_per_second = std::clamp(
+            IntAttr(node, L"OsuLazerFramesPerSec", visual.osu_lazer_frames_per_second), 10, 240);
     }
     visual.spectrum_top_color = ColorAttr(
         node, L"SpectrumTopColor", visual.spectrum_top_color);
@@ -436,8 +449,23 @@ void ApplyVisualAttributes(IXMLDOMNode* node, VisualSettings& visual,
     visual.osu_logo = std::clamp(IntAttr(node, L"OsuLogo", visual.osu_logo), 0, 2);
     if (Attribute(node, L"OsuLogoPath").vt != VT_EMPTY)
         visual.osu_logo_path = StringAttr(node, L"OsuLogoPath");
+    // Old shared-logo files migrate once; subsequent saves keep both choices.
+    if (Attribute(node, L"OsuLazerLogo").vt != VT_EMPTY) {
+        visual.osu_lazer_logo = std::clamp(IntAttr(node, L"OsuLazerLogo", visual.osu_lazer_logo), 0, 2);
+        if (Attribute(node, L"OsuLazerLogoPath").vt != VT_EMPTY)
+            visual.osu_lazer_logo_path = StringAttr(node, L"OsuLazerLogoPath");
+    } else if (Attribute(node, L"OsuLogo").vt != VT_EMPTY) {
+        visual.osu_lazer_logo = visual.osu_logo;
+        visual.osu_lazer_logo_path = visual.osu_logo_path;
+    }
+    visual.osu_lazer_custom_text = IntAttr(node, L"OsuLazerCustomText", visual.osu_lazer_custom_text) != 0;
+    const wchar_t* text_keys[]{L"OsuLazerText1", L"OsuLazerText2", L"OsuLazerText3"};
+    for (size_t i=0;i<3;++i) if (Attribute(node, text_keys[i]).vt != VT_EMPTY)
+        visual.osu_lazer_text[i] = StringAttr(node, text_keys[i]).substr(0,64);
     visual.osu_intro = IntAttr(node, L"OsuIntro", visual.osu_intro) != 0;
     visual.osu_outro = IntAttr(node, L"OsuOutro", visual.osu_outro) != 0;
+    visual.osu_lazer_intro = IntAttr(node, L"OsuLazerIntro", visual.osu_lazer_intro) != 0;
+    visual.osu_lazer_outro = IntAttr(node, L"OsuLazerOutro", visual.osu_lazer_outro) != 0;
     LOGFONTW font = visual.font;
     if (LogFontAttr(node, L"Font", font)) {
         visual.font = font;
@@ -887,6 +915,10 @@ LyricSettings::LyricSettings() {
     fullscreen_font_valid = true;
 }
 
+OsuLibrarySettings::OsuLibrarySettings() {
+    lazer_files=DefaultLazerFiles(lazer_executable);
+}
+
 std::wstring LoadRuntimeLanguage(const std::filesystem::path& runtime_directory) noexcept {
     try {
         if (runtime_directory.empty()) return L"auto";
@@ -1107,6 +1139,8 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         s.fullscreen.last_mode=std::clamp(IntAttr(n,L"LastMode",3),1,3);
         s.fullscreen.last_visual_effect=std::clamp(
             IntAttr(n,L"LastVisualEffect",0),0,kMaximumVisualType);
+        s.fullscreen.single_click_visual=IntAttr(n,L"SingleClickVisual",1)!=0;
+        s.fullscreen.double_click_fullscreen=IntAttr(n,L"DoubleClickFullscreen",0)!=0;
         s.fullscreen.visual_type=std::clamp(
             IntAttr(n,L"VisualType",s.fullscreen.visual_type),0,kMaximumVisualType);
         s.fullscreen.album_fallback_image=StringAttr(n,L"AlbumFallbackImage");
@@ -1114,10 +1148,10 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
             n,L"AlbumTransparency",s.fullscreen.album_transparency_percent),0,100);
         constexpr std::array<const wchar_t*,kVisualTypeCount> relation_names{
             L"PosRelationAll",L"PosRelationGoom",
-            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum",L"PosRelationPulse",L"PosRelationRipple",L"PosRelationOsu"};
+            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum",L"PosRelationPulse",L"PosRelationRipple",L"PosRelationOsu",L"PosRelationOsuLazer"};
         constexpr std::array<const wchar_t*,kVisualTypeCount> size_names{
             L"LrcSizeAll",L"LrcSizeGoom",
-            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum",L"LrcSizePulse",L"LrcSizeRipple",L"LrcSizeOsu"};
+            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum",L"LrcSizePulse",L"LrcSizeRipple",L"LrcSizeOsu",L"LrcSizeOsuLazer"};
         for(size_t index=0;index<relation_names.size();++index) {
             // CSettings preserves the raw profile integers in TTPlayer.xml.
             // Full-screen layout normalizes them only when it consumes the
@@ -1233,6 +1267,20 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         }
         value.max_item_count=IntAttr(
             n,L"MaxItemCount",value.max_item_count);
+    }
+    if (auto node=SelectOwned(doc,L"/ttplayer/OsuLibrary")) {
+        s.osu_library.show_stable=IntAttr(node.Get(),L"ShowStable",0)!=0;
+        s.osu_library.show_lazer=IntAttr(node.Get(),L"ShowLazer",0)!=0;
+        const auto read=[&](const wchar_t* name,std::wstring& output) {
+            // An absent attribute uses the default; an explicitly empty
+            // value remains empty after clearing a path in the options UI.
+            if(Attribute(node.Get(),name).vt!=VT_EMPTY)output=StringAttr(node.Get(),name);
+        };
+        read(L"StableExecutable",s.osu_library.stable_executable);
+        read(L"LazerExecutable",s.osu_library.lazer_executable);
+        read(L"StableSongs",s.osu_library.stable_songs);
+        s.osu_library.lazer_files=DefaultLazerFiles(s.osu_library.lazer_executable);
+        read(L"LazerFiles",s.osu_library.lazer_files);
     }
     if (auto node=SelectOwned(doc,L"/ttplayer/Lyric")) {
         auto* const n=node.Get();
@@ -1703,8 +1751,16 @@ bool SaveSkinVisualProfile(const std::filesystem::path& path,
         SetAttribute(element,L"OsuBpm",std::clamp(visual.osu_bpm,20,400));
         SetAttribute(element,L"OsuLogo",std::clamp(visual.osu_logo,0,2));
         SetAttribute(element,L"OsuLogoPath",visual.osu_logo_path);
+        SetAttribute(element,L"OsuLazerLogo",std::clamp(visual.osu_lazer_logo,0,2));
+        SetAttribute(element,L"OsuLazerLogoPath",visual.osu_lazer_logo_path);
+        SetAttribute(element,L"OsuLazerCustomText",visual.osu_lazer_custom_text ? 1 : 0);
+        SetAttribute(element,L"OsuLazerText1",visual.osu_lazer_text[0]);
+        SetAttribute(element,L"OsuLazerText2",visual.osu_lazer_text[1]);
+        SetAttribute(element,L"OsuLazerText3",visual.osu_lazer_text[2]);
         SetAttribute(element,L"OsuIntro",visual.osu_intro ? 1 : 0);
         SetAttribute(element,L"OsuOutro",visual.osu_outro ? 1 : 0);
+        SetAttribute(element,L"OsuLazerIntro",visual.osu_lazer_intro ? 1 : 0);
+        SetAttribute(element,L"OsuLazerOutro",visual.osu_lazer_outro ? 1 : 0);
         if(visual.font_valid)
             SetAttribute(element,L"Font",LogFontText(visual.font));
     }
@@ -1939,11 +1995,21 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"OsuBpm",std::clamp(settings.visual.osu_bpm,20,400));
         SetAttribute(element,L"OsuLogo",std::clamp(settings.visual.osu_logo,0,2));
         SetAttribute(element,L"OsuLogoPath",settings.visual.osu_logo_path);
+        SetAttribute(element,L"OsuLazerLogo",std::clamp(settings.visual.osu_lazer_logo,0,2));
+        SetAttribute(element,L"OsuLazerLogoPath",settings.visual.osu_lazer_logo_path);
+        SetAttribute(element,L"OsuLazerCustomText",settings.visual.osu_lazer_custom_text ? 1 : 0);
+        SetAttribute(element,L"OsuLazerText1",settings.visual.osu_lazer_text[0]);
+        SetAttribute(element,L"OsuLazerText2",settings.visual.osu_lazer_text[1]);
+        SetAttribute(element,L"OsuLazerText3",settings.visual.osu_lazer_text[2]);
         SetAttribute(element,L"OsuIntro",settings.visual.osu_intro ? 1 : 0);
         SetAttribute(element,L"OsuOutro",settings.visual.osu_outro ? 1 : 0);
+        SetAttribute(element,L"OsuLazerIntro",settings.visual.osu_lazer_intro ? 1 : 0);
+        SetAttribute(element,L"OsuLazerOutro",settings.visual.osu_lazer_outro ? 1 : 0);
         SetAttribute(element,L"Type",std::clamp(settings.visual.type,0,kMaximumVisualType));
         SetAttribute(element,L"FramesPerSec",
                      std::clamp(settings.visual.frames_per_second,0,100));
+        SetAttribute(element,L"OsuFramesPerSec",std::clamp(settings.visual.osu_frames_per_second,10,240));
+        SetAttribute(element,L"OsuLazerFramesPerSec",std::clamp(settings.visual.osu_lazer_frames_per_second,10,240));
         if(settings.visual.font_valid)
             SetAttribute(element,L"Font",LogFontText(settings.visual.font));
     }
@@ -1952,6 +2018,8 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"LastMode",std::clamp(settings.fullscreen.last_mode,1,3));
         SetAttribute(element,L"LastVisualEffect",
                      std::clamp(settings.fullscreen.last_visual_effect,0,kMaximumVisualType));
+        SetAttribute(element,L"SingleClickVisual",settings.fullscreen.single_click_visual ? 1 : 0);
+        SetAttribute(element,L"DoubleClickFullscreen",settings.fullscreen.double_click_fullscreen ? 1 : 0);
         SetAttribute(element,L"VisualType",
                      std::clamp(settings.fullscreen.visual_type,0,kMaximumVisualType));
         SetAttribute(element,L"AlbumFallbackImage",settings.fullscreen.album_fallback_image);
@@ -1959,10 +2027,10 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
                      std::clamp(settings.fullscreen.album_transparency_percent,0,100));
         constexpr std::array<const wchar_t*,kVisualTypeCount> relation_names{
             L"PosRelationAll",L"PosRelationGoom",
-            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum",L"PosRelationPulse",L"PosRelationRipple",L"PosRelationOsu"};
+            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum",L"PosRelationPulse",L"PosRelationRipple",L"PosRelationOsu",L"PosRelationOsuLazer"};
         constexpr std::array<const wchar_t*,kVisualTypeCount> size_names{
             L"LrcSizeAll",L"LrcSizeGoom",
-            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum",L"LrcSizePulse",L"LrcSizeRipple",L"LrcSizeOsu"};
+            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum",L"LrcSizePulse",L"LrcSizeRipple",L"LrcSizeOsu",L"LrcSizeOsuLazer"};
         for(size_t index=0;index<relation_names.size();++index) {
             SetAttribute(element,relation_names[index],
                          settings.fullscreen.position_relation[index]);
@@ -2169,6 +2237,15 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
                          MediaLibraryDirectoryText(value.directories[index]));
         }
         SetAttribute(element,L"MaxItemCount",value.max_item_count);
+    }
+    if(auto* element=EnsureElement(document,L"OsuLibrary")) {
+        auto element_owner=AdoptCom(element);
+        SetAttribute(element,L"ShowStable",settings.osu_library.show_stable?1:0);
+        SetAttribute(element,L"ShowLazer",settings.osu_library.show_lazer?1:0);
+        SetAttribute(element,L"StableExecutable",settings.osu_library.stable_executable);
+        SetAttribute(element,L"LazerExecutable",settings.osu_library.lazer_executable);
+        SetAttribute(element,L"StableSongs",settings.osu_library.stable_songs);
+        SetAttribute(element,L"LazerFiles",settings.osu_library.lazer_files);
     }
     if(auto* element=EnsureElement(document,L"Network")) {
         auto element_owner=AdoptCom(element);

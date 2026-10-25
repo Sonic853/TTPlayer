@@ -1865,6 +1865,8 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
     const auto& layout = skin_->Lyric();
     const bool text_control = target || control == lyric_control_ ||
         GetDlgCtrlID(control) == kLyricControlId;
+    const BYTE transition_alpha=!target && control==lyric_control_ && fullscreen_mode_==3
+        ? fullscreen_lyric_transition_alpha_ : 255;
 
     const HDC canvas = CreateCompatibleDC(dc);
     BITMAPINFO bitmap_info{};
@@ -2204,6 +2206,25 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
             }
         }
         SelectObject(canvas, old_font);
+    }
+    if(transition_alpha<255 && lyric_pixels) {
+        GdiFlush();
+        auto* pixels=static_cast<BYTE*>(lyric_pixels);
+        const COLORREF background=ActiveLyricBackgroundColor();
+        const BYTE channels[]{GetBValue(background),GetGValue(background),GetRValue(background)};
+        for(size_t i=0;i<static_cast<size_t>(width)*height;++i) {
+            BYTE* pixel=pixels+i*4;
+            if(alpha_text) {
+                // Scale premultiplied colour AND coverage, for layered HWNDs
+                // and WM_PRINTCLIENT alike. Do not mix SLA with ULW_ALPHA.
+                for(int c=0;c<4;++c)pixel[c]=static_cast<BYTE>((pixel[c]*transition_alpha+127)/255);
+            } else {
+                // Split layouts retain their opaque lyric background. Fade
+                // just the painted content, never reveal the desktop below.
+                for(int c=0;c<3;++c)pixel[c]=static_cast<BYTE>((pixel[c]*transition_alpha+
+                    channels[c]*(255-transition_alpha)+127)/255);
+            }
+        }
     }
     if (overlay && target) {
         const BLENDFUNCTION blend{AC_SRC_OVER,0,255,AC_SRC_ALPHA};
@@ -4408,7 +4429,8 @@ void PlayerWindow::PrepareFullScreenLyricMenu(HMENU menu) const {
     for (UINT index = 0; index < static_cast<UINT>(AvailableVisualMaximum(true)); ++index) {
         const auto label = index >= 3
             ? LoadResourceText(GetModuleHandleW(nullptr), index == 3 ? IDS_FULLSCREEN_ALBUM
-                : index == 4 ? IDS_VISUAL_PULSE : index == 5 ? IDS_VISUAL_RIPPLE : IDS_VISUAL_OSU)
+                : index == 4 ? IDS_VISUAL_PULSE : index == 5 ? IDS_VISUAL_RIPPLE
+                : index == 6 ? IDS_VISUAL_OSU : IDS_VISUAL_OSU_LAZER)
             : ResourceListItem(ResourceModule(), 2232, index);
         const bool selected = fullscreen_mode_ == 3 &&
             settings_.visual.type == static_cast<int>(index + 1);

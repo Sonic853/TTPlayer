@@ -188,7 +188,9 @@ void ApplyMediaLibraryReaderInfo(playlist::Track& track,
     track.channels = info.channels;
     track.bits_per_sample = info.bits_per_sample;
     detail::PreserveBrowserTrackIdentity(track.metadata, info.metadata);
+    detail::PreserveOsuTrackMetadata(track.metadata, info.metadata);
     track.metadata = std::move(info.metadata);
+    detail::RestoreOsuTrackMetadata(track);
 }
 using namespace detail;
 
@@ -1369,6 +1371,8 @@ bool PlayerWindow::PublishTrackMetadataUpdate(
         if (!matches(target)) return false;
         auto replacement = target;
         update(replacement);
+        PreserveOsuTrackMetadata(target.metadata, replacement.metadata);
+        RestoreOsuTrackMetadata(replacement);
         if (record_edit)
             edited.try_emplace(MediaLibraryTrackIdentity(replacement), replacement);
         if (target == replacement) return false;

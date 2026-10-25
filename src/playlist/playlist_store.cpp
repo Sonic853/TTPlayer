@@ -180,19 +180,71 @@ size_t PlaylistStore::ActiveSlot() const noexcept {
     return entries_.empty() ? 0 : entries_[active_index_].slot;
 }
 
+size_t PlaylistStore::StoredActiveSlot() const noexcept {
+    if (!IsExternal(active_index_)) return ActiveSlot();
+    const auto normal = std::find_if(entries_.begin(), entries_.end(),
+        [](const Entry& entry) { return entry.external_kind == 0; });
+    return normal == entries_.end() ? 0 : normal->slot;
+}
+
 bool PlaylistStore::SetActive(size_t index) noexcept {
     if (index >= entries_.size() || index == active_index_) return false;
     active_index_ = index;
     return true;
 }
 
-size_t PlaylistStore::NewList(std::wstring title) {
+std::optional<size_t> PlaylistStore::ExternalListIndex(unsigned int kind) const noexcept {
+    if (kind != 1 && kind != 2) return std::nullopt;
+    const auto found = std::find_if(entries_.begin(), entries_.end(),
+        [kind](const Entry& entry) { return entry.external_kind == kind; });
+    if (found == entries_.end()) return std::nullopt;
+    return static_cast<size_t>(found - entries_.begin());
+}
+
+bool PlaylistStore::IsExternal(size_t index) const noexcept {
+    return index < entries_.size() && entries_[index].external_kind != 0;
+}
+
+size_t PlaylistStore::EnsureExternalList(unsigned int kind, std::wstring title) {
+    if (kind != 1 && kind != 2) return npos;
+    if (const auto index = ExternalListIndex(kind)) return *index;
+    // Also keep the invariant if called before Load: removing or hiding an
+    // external source must always leave a usable ordinary catalogue behind.
+    if (entries_.empty()) entries_.push_back({Playlist{}, 0, 1, TickCount()});
+    Entry entry;
+    entry.external_kind = kind;
+    entry.slot = kind == 1 ? kExternalStableSlot : kExternalLazerSlot;
+    entry.playlist.SetTitle(std::move(title));
+    entries_.push_back(std::move(entry));
+    return entries_.size() - 1;
+}
+
+bool PlaylistStore::RemoveExternalList(unsigned int kind) {
+    const auto index = ExternalListIndex(kind);
+    if (!index) return false;
+    const bool was_active = active_index_ == *index;
+    entries_.erase(entries_.begin() + static_cast<ptrdiff_t>(*index));
+    if (active_index_ > *index) --active_index_;
+    if (was_active) {
+        const auto normal = std::find_if(entries_.begin(), entries_.end(),
+            [](const Entry& entry) { return entry.external_kind == 0; });
+        active_index_ = static_cast<size_t>(normal - entries_.begin());
+    }
+    return true;
+}
+
+size_t PlaylistStore::NextOrdinarySlot() const noexcept {
     size_t slot = 0;
-    while (std::any_of(entries_.begin(), entries_.end(), [slot](const Entry& item) {
+    while (slot == kExternalStableSlot || slot == kExternalLazerSlot ||
+           std::any_of(entries_.begin(), entries_.end(), [slot](const Entry& item) {
         return item.slot == slot;
     })) ++slot;
+    return slot;
+}
+
+size_t PlaylistStore::NewList(std::wstring title) {
     Entry entry;
-    entry.slot = slot;
+    entry.slot = NextOrdinarySlot();
     entry.playlist.SetTitle(std::move(title));
     entries_.push_back(std::move(entry));
     active_index_ = entries_.size() - 1;
@@ -204,7 +256,7 @@ bool PlaylistStore::Rename(size_t index, std::wstring title) {
     // CPlayListWnd's LVN_ENDLABELEDITW handler (00489B06) accepts the label
     // only when pszText is non-null and its first character is non-zero.
     // Whitespace is deliberately retained: the original does not trim it.
-    if (index >= entries_.size() || title.empty()) return false;
+    if (index >= entries_.size() || IsExternal(index) || title.empty()) return false;
     auto& entry = entries_[index];
     entry.playlist.SetTitle(std::move(title));
     if (entry.dirty_edits == 0) entry.dirty_since = TickCount();
@@ -231,10 +283,7 @@ size_t PlaylistStore::InsertList(const std::filesystem::path& path,
     // target but never becomes an empty catalogue entry.
     if ((extension == L".m3u" || extension == L".m3u8") &&
         loaded.Tracks().empty()) return npos;
-    size_t slot = 0;
-    while (std::any_of(entries_.begin(), entries_.end(), [slot](const Entry& item) {
-        return item.slot == slot;
-    })) ++slot;
+    const size_t slot = NextOrdinarySlot();
     index = std::min(index, entries_.size());
     entries_.insert(entries_.begin() + static_cast<ptrdiff_t>(index),
                     {std::move(loaded), slot, 1, TickCount()});
@@ -245,7 +294,7 @@ size_t PlaylistStore::InsertList(const std::filesystem::path& path,
 bool PlaylistStore::ReplaceList(size_t index,
                                 const std::filesystem::path& path,
                                 const LoadOptions& options) {
-    if (index >= entries_.size()) return false;
+    if (index >= entries_.size() || IsExternal(index)) return false;
     Playlist loaded;
     loaded.SetTitle(path.stem().wstring());
     loaded.LoadFromFile(path, options);
@@ -264,7 +313,10 @@ bool PlaylistStore::ReplaceList(size_t index,
 }
 
 bool PlaylistStore::Delete(size_t index) {
-    if (entries_.size() <= 1 || index >= entries_.size()) return false;
+    if (index >= entries_.size() || IsExternal(index) ||
+        std::count_if(entries_.begin(), entries_.end(),
+            [](const Entry& entry) { return entry.external_kind == 0; }) <= 1)
+        return false;
     const size_t slot = entries_[index].slot;
     std::error_code ignored;
     std::filesystem::remove(SlotPath(slot), ignored);
@@ -321,7 +373,7 @@ void PlaylistStore::MarkDirty() {
 }
 
 void PlaylistStore::MarkDirty(size_t index, unsigned int edits) {
-    if (index >= entries_.size() || edits == 0) return;
+    if (index >= entries_.size() || IsExternal(index) || edits == 0) return;
     auto& entry = entries_[index];
     if (entry.dirty_edits == 0) entry.dirty_since = TickCount();
     if (edits > std::numeric_limits<unsigned int>::max() - entry.dirty_edits)
@@ -331,6 +383,7 @@ void PlaylistStore::MarkDirty(size_t index, unsigned int edits) {
 }
 
 void PlaylistStore::SaveEntry(Entry& entry) {
+    if (entry.external_kind != 0) return;
     const auto target = SlotPath(entry.slot);
     const auto temporary = std::filesystem::path(target.wstring() + L".tmp");
     entry.playlist.SaveTtbl(temporary);
@@ -348,24 +401,35 @@ void PlaylistStore::SaveEntry(Entry& entry) {
 
 SaveResult PlaylistStore::CompactSlots() {
     if (entries_.empty()) return {};
-    if (entries_.size() > kMaximumStoredSlots)
+    std::vector<size_t> ordinary;
+    ordinary.reserve(entries_.size());
+    size_t stored_active_index{};
+    for (size_t index = 0; index < entries_.size(); ++index) {
+        if (IsExternal(index)) continue;
+        if (index == active_index_) stored_active_index = ordinary.size();
+        ordinary.push_back(index);
+    }
+    if (ordinary.empty()) return {};
+    if (ordinary.size() > kMaximumStoredSlots)
         return SaveResult::Win32Failure(directory_, ERROR_TOO_MANY_NAMES);
     bool needed{};
-    for (size_t index = 0; index < entries_.size(); ++index) {
-        if (entries_[index].slot >= kMaximumStoredSlots)
+    for (size_t destination = 0; destination < ordinary.size(); ++destination) {
+        const auto& entry = entries_[ordinary[destination]];
+        if (entry.slot >= kMaximumStoredSlots)
             return SaveResult::Win32Failure(directory_, ERROR_TOO_MANY_NAMES);
-        needed = needed || entries_[index].slot != index;
+        needed = needed || entry.slot != destination;
     }
     if (!needed) return {};
 
     std::vector<std::filesystem::path> staged;
-    staged.reserve(entries_.size());
+    staged.reserve(ordinary.size());
     try {
-        for (size_t index = 0; index < entries_.size(); ++index) {
-            if (entries_[index].slot == index) continue;
-            const auto path = CompactionStagePath(directory_, index);
+        for (size_t destination = 0; destination < ordinary.size(); ++destination) {
+            const auto& entry = entries_[ordinary[destination]];
+            if (entry.slot == destination) continue;
+            const auto path = CompactionStagePath(directory_, destination);
             staged.push_back(path);
-            entries_[index].playlist.SaveTtbl(path);
+            entry.playlist.SaveTtbl(path);
         }
     } catch (const std::exception&) {
         std::error_code ignored;
@@ -382,10 +446,10 @@ SaveResult PlaylistStore::CompactSlots() {
                              std::ios::binary | std::ios::trunc);
         output.write("TTC2", 4);
         WriteMarkerValue(output,
-            static_cast<std::uint32_t>(entries_.size()));
-        WriteMarkerValue(output, static_cast<std::uint32_t>(active_index_));
-        for (const auto& entry : entries_)
-            WriteMarkerValue(output, static_cast<std::uint32_t>(entry.slot));
+            static_cast<std::uint32_t>(ordinary.size()));
+        WriteMarkerValue(output, static_cast<std::uint32_t>(stored_active_index));
+        for (const size_t index : ordinary)
+            WriteMarkerValue(output, static_cast<std::uint32_t>(entries_[index].slot));
         output.flush();
         output.close();
         if (!output) {
@@ -407,12 +471,14 @@ SaveResult PlaylistStore::CompactSlots() {
 
     // Once the marker is durable, Load can finish any interrupted sequence.
     // Publish the compact slot identities in memory before committing files
-    // so ActiveSlot and the persisted ActiveList setting stay in sync.
-    for (size_t index = 0; index < entries_.size(); ++index)
-        entries_[index].slot = index;
+    // so StoredActiveSlot and the persisted ActiveList setting stay in sync.
+    // External sources retain both their reserved identities and selection.
+    for (size_t destination = 0; destination < ordinary.size(); ++destination)
+        entries_[ordinary[destination]].slot = destination;
     if (RecoverCompaction(directory_)) return {};
     const auto failure = SaveResult::Win32Failure(marker);
     for (auto& entry : entries_) {
+        if (entry.external_kind != 0) continue;
         if (entry.dirty_edits == 0) entry.dirty_since = TickCount();
         entry.dirty_edits = std::max(1U, entry.dirty_edits);
     }
@@ -427,6 +493,7 @@ SaveResult PlaylistStore::FlushDirty(bool force) {
     const auto now = TickCount();
     SaveResult result;
     for (auto& entry : entries_) {
+        if (entry.external_kind != 0) continue;
         if (entry.dirty_edits == 0) continue;
         // Exact thresholds visible at 00480E75: elapsed > 29999 ms or edits > 4.
         if (!force && entry.dirty_edits <= 4 && now - entry.dirty_since < 30000) continue;

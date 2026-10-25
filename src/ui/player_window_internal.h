@@ -18,14 +18,22 @@
 #include <vector>
 
 namespace ttplayer::ui::detail {
-// Type 7 is an optional fullscreen renderer. Ordinary skin/lyric canvases
+// Types 7 and 8 are optional fullscreen renderers. Ordinary skin/lyric canvases
 // retain types 0..6 even when the DLL is installed.
 inline int AvailableVisualMaximum(bool fullscreen=false) noexcept {
-    return fullscreen && audio::HasOsuVisualSupport()?settings::kMaximumVisualType:6;
+    if(!fullscreen || !audio::HasOsuVisualSupport())return 6;
+    return audio::HasOsuLazerSupport()?8:7;
+}
+inline bool IsOsuVisualType(int type) noexcept {return type==7 || type==8;}
+inline unsigned VisualFrameIntervalNs(const settings::VisualSettings& visual) noexcept {
+    const int fps=visual.type==7?std::clamp(visual.osu_frames_per_second,10,240):
+        visual.type==8?std::clamp(visual.osu_lazer_frames_per_second,10,240):
+        std::clamp(visual.frames_per_second,0,100);
+    return fps?static_cast<unsigned>((1000000000ULL+fps/2)/fps):50000000U;
 }
 inline int AvailableVisualType(int type,bool fullscreen=false) noexcept {
     type=std::clamp(type,0,settings::kMaximumVisualType);
-    return type==7 && (!fullscreen || !audio::HasOsuVisualSupport())?2:type;
+    return IsOsuVisualType(type) && type>AvailableVisualMaximum(fullscreen)?2:type;
 }
 // Defer the immediate association commit until TreeView's NM_CLICK unwinds.
 inline constexpr UINT kApplyOptionsAssociations = WM_APP + 0x314;
@@ -93,6 +101,7 @@ constexpr UINT kMsgDiscLookup = WM_APP + 0x39e;
 constexpr UINT kMsgPlaylistInfoReady = WM_APP + 0x313;
 constexpr UINT kMsgExtensionCorrection = WM_APP + 0x316;
 constexpr UINT kMsgDeferredFileImport = WM_APP + 0x37c;
+constexpr UINT kMsgOsuLibraryReady = WM_APP + 0x39f;
 // A directory walk never calls back into PlayerWindow.  Its immutable result
 // is handed to the UI thread with this message and discarded when a newer
 // refresh generation has superseded it.
@@ -216,9 +225,10 @@ constexpr UINT kCmdVisualCover = 0x8089;
 constexpr UINT kCmdVisualPulse = 0x808a;
 constexpr UINT kCmdVisualRipple = 0x808b;
 constexpr UINT kCmdVisualOsu = 0x808c;
+constexpr UINT kCmdVisualOsuLazer = 0x808d;
 constexpr UINT kCmdVisualOptions = 0x8084;
 constexpr UINT kCmdVisualFirst = kCmdVisualNone;
-constexpr UINT kCmdVisualLast = kCmdVisualOsu;
+constexpr UINT kCmdVisualLast = kCmdVisualOsuLazer;
 constexpr UINT kCmdFullscreenToggle = 0x7de6;
 constexpr UINT kCmdFullscreenExit = 0x7de7;
 constexpr UINT kCmdFullscreenLyrics = 0x7de8;
@@ -347,6 +357,8 @@ constexpr UINT kPlaylistRenameList = 0x7f04;
 constexpr UINT kPlaylistActivateList = 0x7f05;
 constexpr UINT kPlaylistSaveAllLists = 0x7f06;
 constexpr UINT kPlaylistSwitchMenu = 0xb700;
+constexpr UINT kPlaylistShowOsu = 0xb701;
+constexpr UINT kPlaylistShowOsuLazer = 0xb702;
 // Stable numbered playlist slots, separate from track/skin/provider commands.
 constexpr UINT kPlaylistSwitchFirst = 0xc000;
 constexpr UINT kPlaylistSwitchLast = 0xdfff;

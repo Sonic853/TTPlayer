@@ -58,6 +58,13 @@ constexpr int kFadeCompleteFinishMini = 4;
 constexpr int kFadeCompleteStartupMinimize = 5;
 constexpr int kFadeCompleteFinishStartup = 6;
 
+struct ScopedVisualTrackChange {
+    bool& flag;
+    bool previous;
+    explicit ScopedVisualTrackChange(bool& value) : flag(value), previous(std::exchange(value, true)) {}
+    ~ScopedVisualTrackChange() { flag = previous; }
+};
+
 int CompareSkinNames(std::wstring_view left, std::wstring_view right) {
     // FUN_004C54D1 resolves this function dynamically and falls back to
     // lstrcmpiW on older shells.  Do the same instead of sorting package
@@ -2336,6 +2343,8 @@ bool PlayerWindow::LoadStartupSkin(HMODULE module) {
         // Type/FPS are global preferences, not per-skin profile fields.
         settings_.visual.type = global_visual.type;
         settings_.visual.frames_per_second = global_visual.frames_per_second;
+        settings_.visual.osu_frames_per_second = global_visual.osu_frames_per_second;
+        settings_.visual.osu_lazer_frames_per_second = global_visual.osu_lazer_frames_per_second;
         SetRectEmpty(&settings_.player.player_window);
         SetRectEmpty(&settings_.player.mini_player_window);
         SetRectEmpty(&settings_.player.lyric_window);
@@ -3742,13 +3751,16 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             if (playback_was_active_ && state == audio::PlaybackState::stopped) {
                 playback_was_active_ = false;
                 playback_source_open_ = false;
-                // FUN_0045B69B invokes FUN_00457BCF synchronously on natural
-                // completion, before it attempts to select a following item.
-                UpdateVisualFrame();
                 natural_completion_dispatch_ =
                     settings_.playback.track_interval > 0;
-                AdvanceAfterNaturalEnd();
+                {
+                    // Preserve the outgoing cover while choosing/opening the
+                    // successor, including the first refresh of its list row.
+                    ScopedVisualTrackChange cover_transition(visual_track_change_in_progress_);
+                    AdvanceAfterNaturalEnd();
+                }
                 natural_completion_dispatch_ = false;
+                UpdateVisualFrame(); // A real end still clears; a queued next track retains.
                 return 0;
             }
             if (state == audio::PlaybackState::failed) {
@@ -7046,7 +7058,7 @@ void PlayerWindow::RefreshPlaybackUi() {
     desktop_lyrics_.UpdatePlayback(
         audio_->Position(), audio_->State() == audio::PlaybackState::playing);
     UpdateDiscordPresence();
-    if (settings_.visual.type == 4 || settings_.visual.type == 7 ||
+    if (settings_.visual.type == 4 || IsOsuVisualType(settings_.visual.type) ||
         audio_->State() == audio::PlaybackState::stopped ||
         audio_->State() == audio::PlaybackState::failed)
         UpdateVisualFrame();
@@ -7532,6 +7544,7 @@ bool PlayerWindow::PlayCurrent() {
     // The decoder request may replace the object which backs opened_track_.
     // Keep a stable value while the engine and metadata paths run.
     const playlist::Track requested_track = *requested;
+    ScopedVisualTrackChange cover_transition(visual_track_change_in_progress_);
     SetSliderStatus({}); // Opening/replaying also resets status when state stays playing.
     // 00461E35 clears stop-fade bit 3 when replaying the playing row. Retain
     // row identity too: two separate rows may name the same file/subtrack.
@@ -7612,7 +7625,12 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
     settings_.player.playing_time = 0;
     playback_source_open_ = true;
     opened_track_ = requested_track;
-    const auto metadata = audio_->Metadata();
+    auto metadata = audio_->Metadata();
+    if (IsOsuLibraryTrack(requested_track)) {
+        metadata.title = core::Utf8ToWide(requested_track.title);
+        metadata.artist = core::Utf8ToWide(requested_track.artist);
+        metadata.album = core::Utf8ToWide(requested_track.album);
+    }
     taskbar_preview_.SetSource(window_, requested_track.path, metadata);
     system_media_controls_.SetSource(window_, BuildSystemMediaMetadata(requested_track, metadata),
                                     taskbar_preview_.CoverBitmap());
@@ -7641,6 +7659,7 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
         const auto format = audio_->Format();
         const std::uint64_t bitrate =
             static_cast<std::uint64_t>(format.bytes_per_second) * 8U;
+        PreserveOsuTrackMetadata(PlaybackPlaylist().Tracks()[*current_].metadata, entries);
         if (metadata.tags_authoritative) {
             auto refreshed = PlaybackPlaylist().Tracks()[*current_];
             PreserveBrowserTrackIdentity(refreshed.metadata, entries);
@@ -7654,6 +7673,11 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
             static_cast<std::uint32_t>(std::min<std::uint64_t>(
                 bitrate, std::numeric_limits<std::uint32_t>::max())),
             format.sample_rate);
+        if (IsOsuLibraryTrack(PlaybackPlaylist().Tracks()[*current_])) {
+            auto refreshed = PlaybackPlaylist().Tracks()[*current_];
+            RestoreOsuTrackMetadata(refreshed);
+            metadata_changed |= PlaybackPlaylist().SetTrack(*current_, std::move(refreshed));
+        }
         if (metadata_changed) {
             if (playback_playlist_index)
                 playlists_.MarkDirty(*playback_playlist_index);
@@ -7683,6 +7707,8 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
         for (const auto& [name, value] : metadata.entries)
             opened_track_->metadata.emplace_back(core::WideToUtf8(name), core::WideToUtf8(value));
         PreserveBrowserTrackIdentity(previous, opened_track_->metadata);
+        PreserveOsuTrackMetadata(previous, opened_track_->metadata);
+        RestoreOsuTrackMetadata(*opened_track_);
     }
     // Store the post-reader metadata as well as path/subtrack.  This copy is
     // the UI's CPlayItem once a later Clear/Remove invalidates current_.
@@ -7735,9 +7761,10 @@ void PlayerWindow::PollNetworkPlayback() {
     const auto active_metadata = audio_->CurrentMetadata(opened_track_->path, opened_track_->subtrack);
     if (!active_metadata) return;
     const auto& metadata = *active_metadata;
-    const auto title = core::WideToUtf8(metadata.title);
-    const auto artist = core::WideToUtf8(metadata.artist);
-    const auto album = core::WideToUtf8(metadata.album);
+    const bool osu_source = IsOsuLibraryTrack(*opened_track_);
+    const auto title = osu_source ? opened_track_->title : core::WideToUtf8(metadata.title);
+    const auto artist = osu_source ? opened_track_->artist : core::WideToUtf8(metadata.artist);
+    const auto album = osu_source ? opened_track_->album : core::WideToUtf8(metadata.album);
     const bool text_changed = (!title.empty() && opened_track_->title != title) ||
         (!artist.empty() && opened_track_->artist != artist) ||
         (!album.empty() && opened_track_->album != album);
@@ -7752,8 +7779,10 @@ void PlayerWindow::PollNetworkPlayback() {
         for (const auto& [name, value] : metadata.entries)
             entries.emplace_back(core::WideToUtf8(name), core::WideToUtf8(value));
         PreserveBrowserTrackIdentity(opened_track_->metadata, entries);
+        PreserveOsuTrackMetadata(opened_track_->metadata, entries);
         if (entries != opened_track_->metadata) {
             opened_track_->metadata = std::move(entries);
+            RestoreOsuTrackMetadata(*opened_track_);
             metadata_changed = true;
         }
     }
@@ -8117,6 +8146,7 @@ void PlayerWindow::AdvanceAfterNaturalEnd() {
 void PlayerWindow::Stop() {
     if (lyric_save_in_progress_ || file_info_write_in_progress_) return;
     SetSliderStatus({});
+    visual_track_change_in_progress_ = false;
     network_open_pending_ = false;
     CancelWaveTrackChange();
     FinishLyricDocument(false);

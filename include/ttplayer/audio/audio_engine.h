@@ -98,6 +98,8 @@ struct AudioMetadata {
     std::vector<std::pair<std::wstring, std::wstring>> entries;
     bool thumbnail_interface{};
     std::vector<unsigned char> thumbnail;
+    // Empty artwork is not a confirmed absence while archive/sidecar I/O runs.
+    bool thumbnail_pending{};
     std::optional<ttp::format::Result> source_format;
     std::wstring source_format_version;
     // An empty complete snapshot means deletion, not unavailable metadata.
