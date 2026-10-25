@@ -298,6 +298,8 @@ private:
     void UpdateVisualWindowLayout();
     void UpdateVisualFrame();
     void PaintVisualControl(HDC dc) const;
+    HRESULT SetOsuLogoChoice(int kind,const std::filesystem::path& path);
+    int WindowedVisualType() const;
     void SetVisualType(int type);
     // FUN_0045D531/FUN_0049F4AD: one modeless 15-page options sheet.  A
     // negative page restores Histroy/LastActivePage; focus_control implements

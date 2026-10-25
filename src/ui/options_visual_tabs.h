@@ -2,6 +2,7 @@
 
 #include "../app/resource_ids.h"
 #include "ttplayer/i18n/i18n.h"
+#include "ttplayer/audio/osz_archive.h"
 #include <algorithm>
 #include <array>
 #include <string>
@@ -12,7 +13,7 @@
 namespace ttplayer::ui::detail {
 
 // Preserve the resource controls, their IDs and their parent notifications.
-// Only the two effect groups become pages; FPS/type/text/profile stay common.
+// Effect groups become pages; FPS/type/text/profile stay common.
 class VisualOptionsTabs {
     struct Control { HWND window; RECT bounds; int height, group; };
     HWND page_{}, tab_{};
@@ -45,7 +46,7 @@ class VisualOptionsTabs {
     }
 
     void Select(int group) {
-        if (group < 0 || group > 3) return;
+        if (group < 0 || group >= TabCtrl_GetItemCount(tab_)) group=0;
         TabCtrl_SetCurSel(tab_, group);
         const HWND focus = GetFocus();
         for (const auto& control : controls_) {
@@ -93,7 +94,7 @@ public:
             return;
         }
         SendMessageW(self->tab_, WM_SETFONT, font, FALSE);
-        std::array<std::wstring, 4> captions;
+        std::array<std::wstring, 5> captions;
         RECT groups{0, 68, 0, 118}, bottom{0, 169, 0, 0};
         MapDialogRect(page, &groups);
         MapDialogRect(page, &bottom);
@@ -143,7 +144,42 @@ public:
                 }
             }
         }
-        for (int group = 0; group < 4; ++group) {
+        const bool osu_available=audio::HasOsuVisualSupport();
+        if(osu_available) {
+        captions[4] = i18n::ResourceText(GetModuleHandleW(nullptr), IDS_VISUAL_OSU);
+        const auto add_osu_control = [&](UINT id, UINT text_id, const wchar_t* klass,
+                                          DWORD style, RECT r) {
+            MapDialogRect(page, &r);
+            const auto caption = text_id ? i18n::ResourceText(GetModuleHandleW(nullptr), text_id)
+                                        : std::wstring{};
+            const HWND control = CreateWindowExW(0, klass, caption.c_str(),
+                WS_CHILD | style, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                page, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
+            if (control) {
+                SendMessageW(control, WM_SETFONT, font, FALSE);
+                self->controls_.push_back({control, r, r.bottom - r.top, 4});
+            }
+            return control;
+        };
+        const UINT flag_labels[]{IDS_VISUAL_OSU_SPECTRUM, IDS_VISUAL_OSU_STARS,
+            IDS_VISUAL_OSU_FLASHES, IDS_VISUAL_OSU_PARALLAX, IDS_VISUAL_OSU_LOGO};
+        for (int field = 0; field < 5; ++field) {
+            const LONG x = 13 + (field % 3) * 83;
+            const LONG y = 80 + (field / 3) * 17;
+            add_osu_control(IDC_VISUAL_OSU_SPECTRUM + field, flag_labels[field],
+                WC_BUTTONW, WS_TABSTOP | BS_AUTOCHECKBOX, {x, y, x + 80, y + 13});
+        }
+        add_osu_control(IDC_VISUAL_OSU_BPM_LABEL, IDS_VISUAL_OSU_BPM,
+            WC_STATICW, SS_LEFT, {13, 116, 161, 129});
+        const HWND bpm = add_osu_control(IDC_VISUAL_OSU_BPM, 0, WC_EDITW,
+            WS_TABSTOP | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, {166, 113, 209, 128});
+        if (bpm) SendMessageW(bpm, EM_SETLIMITTEXT, 3, 0);
+        add_osu_control(IDC_VISUAL_OSU_ACCENT, IDS_VISUAL_BASE_COLOR,
+            WC_BUTTONW, WS_TABSTOP | BS_PUSHBUTTON, {13, 136, 88, 150});
+        add_osu_control(IDC_VISUAL_OSU_BACKGROUND, IDS_VISUAL_OSU_BACKGROUND,
+            WC_BUTTONW, WS_TABSTOP | BS_PUSHBUTTON, {96, 136, 171, 150});
+        }
+        for (int group = 0; group < (osu_available?5:4); ++group) {
             TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = captions[group].data();
             TabCtrl_InsertItem(self->tab_, group, &item);
         }
@@ -154,7 +190,7 @@ public:
     static void SelectForType(HWND page, int type) {
         DWORD_PTR data{};
         if (GetWindowSubclass(page, PageProc, kSubclass, &data))
-            reinterpret_cast<VisualOptionsTabs*>(data)->Select(type == 3 ? 1 : type == 5 ? 2 : type == 6 ? 3 : 0);
+            reinterpret_cast<VisualOptionsTabs*>(data)->Select(type == 3 ? 1 : type == 5 ? 2 : type == 6 ? 3 : type == 7 ? 4 : 0);
     }
 };
 } // namespace ttplayer::ui::detail

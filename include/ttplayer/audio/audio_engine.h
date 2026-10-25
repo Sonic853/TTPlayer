@@ -125,6 +125,28 @@ struct VisualizationSamples {
     uint64_t revision{};
 };
 
+// Independent analysis window for newer visualization components. Each
+// snapshot is copied from contiguous output PCM at the actual output cursor;
+// a short/low-latency output queue uses retained preceding PCM to complete the
+// window. Callers must never concatenate successive (overlapping) snapshots.
+// Like the legacy snapshot, channels are front left/right (mono duplicated),
+// after decoding/resampling/DSP and before the output sink's volume/balance.
+// No analysis work or additional decoding takes place on the audio callback.
+struct ExtendedVisualizationSamples {
+    static constexpr size_t capacity = 2048;
+
+    std::array<int16_t, capacity> left{};
+    std::array<int16_t, capacity> right{};
+    size_t count{};
+    uint32_t sample_rate{};
+    uint32_t source_channels{};
+    uint64_t revision{};
+    uint64_t first_frame{}; // track position in output-rate sample frames
+    uint64_t playback_frame{}; // actual output cursor, also for beat timing
+    uint64_t timeline_revision{};
+    std::chrono::steady_clock::time_point observed_at;
+};
+
 // TTPlayer.xml /Playback and /Device values consumed by the recovered sound
 // pipeline.  Keeping them at the engine boundary prevents UI code from
 // silently substituting hard-coded buffering and output-format defaults.
@@ -305,6 +327,7 @@ public:
     [[nodiscard]] bool IsDspActive(const std::filesystem::path& module) const;
     [[nodiscard]] std::vector<HWND> DspWindows() const;
     void SetVolume(float volume);
+    [[nodiscard]] float Volume() const;
     void SetBalance(int balance);
     void SetEqualizer(int profile, int surround,
                       const std::array<int, 11>& values);
@@ -346,6 +369,7 @@ public:
         const std::filesystem::path& path, int subtrack) const;
     [[nodiscard]] std::vector<LyricSaveFailure> TakeLyricSaveFailures();
     [[nodiscard]] VisualizationSamples Visualization() const;
+    [[nodiscard]] ExtendedVisualizationSamples ExtendedVisualization() const;
 
 private:
     friend struct ttplayer::testing::ProgressSeekAccess;
@@ -392,7 +416,8 @@ private:
                          int64_t seek_target_ms = -1);
     void FadeWorker(std::stop_token stop_token);
     void UpdateTrackFade(int64_t position_ms);
-    void PublishVisualization(VisualizationSamples samples);
+    void PublishVisualization(VisualizationSamples samples,
+                              ExtendedVisualizationSamples extended);
     void ClearVisualization();
     void RecordDiagnostic(std::wstring message);
     void SetError(std::wstring message, HRESULT result = E_FAIL);
@@ -430,6 +455,7 @@ private:
     std::atomic<uint64_t> metadata_revision_{};
     mutable std::mutex visualization_mutex_;
     VisualizationSamples visualization_{};
+    ExtendedVisualizationSamples extended_visualization_{};
     PlaybackOptions options_{};
     std::atomic<uint64_t> processor_revision_{};
     std::atomic<Backend> backend_{Backend::none};

@@ -53,7 +53,10 @@ def validate(path, inventories, version):
                 if name not in available.get(library, set()):
                     raise ValueError(f'Unsupported OSZ import: {inventory.name}: {library}!{name}')
     exported = inspect_exports(path)
-    if set(exported) != {1} or exported[1]['name'] != 'ttp_osu_query' or exported[1].get('forwarder'):
+    expected = {1: 'ttp_osu_query', 2: 'ttp_osu_query_visual'}
+    if set(exported) != set(expected) or any(
+            exported[ordinal]['name'] != name or exported[ordinal].get('forwarder')
+            for ordinal, name in expected.items()):
         raise ValueError('Unexpected OSZ plugin export ABI')
     if file_version(path) != version:
         raise ValueError('OSZ DLL FileVersion does not match the release version')
@@ -173,6 +176,8 @@ def main():
     metadata['inventories'] = [p.name for p in args.exports]
     metadata['query_export'] = 'ttp_osu_query'
     metadata['required_abi'] = 1  # Runtime query also checks the actual function table.
+    metadata['visual_query_export'] = 'ttp_osu_query_visual'
+    metadata['visual_required_abi'] = 1
     (args.output / 'osu-component.json').write_text(
         json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
     print(f"Staged TTPlayerOSU {metadata['version']}: {len(dll)} bytes; SHA-256 and XP/Win7 imports verified")

@@ -338,7 +338,9 @@ std::vector<wchar_t> BuildAudioDialogFilter(
     for (const auto& format : formats) append_all_pattern(format.pattern);
     // FUN_004CB1DB explicitly adds archive and playlist extensions to the
     // combined filter after walking the registered readers.
-    append_all_pattern(L"*.zip;*.rar;*.7z;*.tar;*.gz;*.tgz;*.osz");
+    const std::wstring archive_patterns=audio::HasOszSupport()
+        ?L"*.zip;*.rar;*.7z;*.tar;*.gz;*.tgz;*.osz":L"*.zip;*.rar;*.7z;*.tar;*.gz;*.tgz";
+    append_all_pattern(archive_patterns);
     const auto playlist_description = LoadResourceText(resources, 0x8125);
     const auto playlist_pattern = PatternFromDescription(playlist_description);
     append_all_pattern(playlist_pattern);
@@ -360,7 +362,7 @@ std::vector<wchar_t> BuildAudioDialogFilter(
     // 0x8126/0x8127 are appended only to CSoundLibrary's playlist-specific
     // DAT_00547FD0 filter.  0048059D consumes DAT_00547FC8, whose sole
     // playlist entry is the combined 0x8125 item.
-    AppendDialogFilter(result, LoadResourceText(resources, 0x8118), L"*.zip;*.rar;*.7z;*.tar;*.gz;*.tgz;*.osz");
+    AppendDialogFilter(result, LoadResourceText(resources, 0x8118), archive_patterns);
     const auto all_files_description = LoadResourceText(resources, 0x8124);
     AppendDialogFilter(result, all_files_description,
                        PatternFromDescription(all_files_description));
@@ -3564,10 +3566,10 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
                 HandlePlaylistCommand(kPlaylistProperties);
             } else {
                 SetVisualType(fullscreen_mode_ != 0
-                    ? (settings_.visual.type >= 6 ? 1
+                    ? (settings_.visual.type >= AvailableVisualMaximum(true) ? 1
                         : (settings_.visual.type == 3 && fullscreen_mode_ != 3 ? 5
                            : settings_.visual.type + 1))
-                    : (settings_.visual.type + 1) % 7);
+                    : (settings_.visual.type + 1) % (AvailableVisualMaximum()+1));
             }
             return 0;
         default:
@@ -4100,9 +4102,10 @@ SaveResult PlayerWindow::SaveCurrentSkinProfile() {
     }
     // FUN_0045D5FA captures the outgoing package's windows and invokes the
     // common serializer with DAT_00547744 set before loading the replacement.
+    auto visual=settings_.visual;visual.type=WindowedVisualType();
     const bool saved = settings::SaveSkinVisualProfile(
         profile, settings_.player, settings_.playlist, settings_.lyric,
-        settings_.visual, settings_.source_path,have_layout?&plugin_state:nullptr);
+        visual, settings_.source_path,have_layout?&plugin_state:nullptr);
     return saved ? SaveResult{} : SaveResult{profile, E_FAIL};
 }
 
@@ -4131,7 +4134,8 @@ SaveResult PlayerWindow::PersistWindowState() {
     // when leaving a package; commit the active package snapshot at shutdown
     // as well, before the root state that owns mini visibility/top-most data.
     const auto profile = SaveCurrentSkinProfile();
-    const auto root = settings::SaveWindowState(settings_.source_path, settings_);
+    auto snapshot=settings_;snapshot.visual.type=WindowedVisualType();
+    const auto root = settings::SaveWindowState(settings_.source_path, snapshot);
     const auto associations = lyric_associations_.SaveChecked();
     window_state_saved_ = profile && root && associations;
     return !root ? root : !profile ? profile : associations;
@@ -4154,7 +4158,8 @@ SaveResult PlayerWindow::SavePersistentState() {
 
 bool PlayerWindow::SaveSettingsWithFeedback() {
     window_state_saved_ = false;
-    const auto result = settings::SaveWindowState(settings_.source_path, settings_);
+    auto snapshot=settings_;snapshot.visual.type=WindowedVisualType();
+    const auto result = settings::SaveWindowState(settings_.source_path, snapshot);
     if (!result) ReportPersistenceFailure(result);
     return static_cast<bool>(result);
 }
@@ -7042,7 +7047,7 @@ void PlayerWindow::RefreshPlaybackUi() {
     desktop_lyrics_.UpdatePlayback(
         audio_->Position(), audio_->State() == audio::PlaybackState::playing);
     UpdateDiscordPresence();
-    if (settings_.visual.type == 4 ||
+    if (settings_.visual.type == 4 || settings_.visual.type == 7 ||
         audio_->State() == audio::PlaybackState::stopped ||
         audio_->State() == audio::PlaybackState::failed)
         UpdateVisualFrame();

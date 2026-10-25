@@ -12,6 +12,8 @@
 
 namespace ttplayer::settings {
 inline constexpr wchar_t kSettingsFileName[] = L"TTPlayerRebuild.xml";
+inline constexpr int kMaximumVisualType = 7;
+inline constexpr int kVisualTypeCount = kMaximumVisualType + 1;
 struct GeneralSettings {
     // auto: Windows UI language; source: unchanged resource/code text.
     std::wstring language{L"auto"};
@@ -157,7 +159,7 @@ struct HotKeySettings {
 // Type/FramesPerSec are global; the remaining colours, blur parameters and
 // LOGFONT are also serialized into each per-skin .skn.xml profile.
 struct VisualSettings {
-    int type{2}; // 0 none, 1 dream, 2 spectrum, 3 scope, 4 cover, 5 pulse, 6 ripple
+    int type{2}; // 0 none, 1 dream, 2 spectrum, 3 scope, 4 cover, 5 pulse, 6 ripple, 7 osu
     int frames_per_second{25};
     COLORREF pulse_color{skin::DefaultSkinColors().lyric.highlight_color};
     COLORREF ripple_color{skin::DefaultSkinColors().lyric.highlight_color};
@@ -165,6 +167,12 @@ struct VisualSettings {
     COLORREF ripple_background{RGB(0, 0, 0)};
     bool pulse_follow_lyric{true};
     bool ripple_follow_lyric{true};
+    int osu_flags{31}; // spectrum, stars, flashes, parallax, logo; DLL ABI bits 0..4
+    COLORREF osu_accent{RGB(255, 102, 170)};
+    COLORREF osu_background{RGB(24, 20, 32)};
+    int osu_bpm{120}; // fallback grid for sources without beatmap timing
+    int osu_logo{}; // 0 TTPlayer, 1 osu!, 2 custom image; visual ABI 2
+    std::wstring osu_logo_path;
     COLORREF spectrum_top_color{skin::DefaultSkinColors().visual.spectrum_top_color};
     COLORREF spectrum_bottom_color{skin::DefaultSkinColors().visual.spectrum_bottom_color};
     COLORREF spectrum_middle_color{skin::DefaultSkinColors().visual.spectrum_middle_color};
@@ -179,12 +187,12 @@ struct VisualSettings {
 };
 // CSettings +0x788..+0x7A8.  VisualType 0 uses the shared "All" profile;
 // values 1..3 select the independent Goom/Spectrum/BlurScope profile.
-// Extensions: 4 album background, 5 Baidu pulse, 6 Baidu ripple.
+// Extensions: 4 album background, 5 pulse, 6 ripple, 7 osu beat scene.
 struct FullScreenSettings {
     int last_mode{3}; // 1 lyrics, 2 visual, 3 lyrics + visual; never the exit state.
     int visual_type{1};
-    std::array<int, 7> position_relation{0, 1, 0, 1, 1, 1, 1};
-    std::array<int, 7> lyric_size{2, 2, 2, 2, 10, 10, 10};
+    std::array<int, kVisualTypeCount> position_relation{0, 1, 0, 1, 1, 1, 1, 1};
+    std::array<int, kVisualTypeCount> lyric_size{2, 2, 2, 2, 10, 10, 10, 10};
     std::wstring album_fallback_image;
     int album_transparency_percent{60}; // 0 = opaque, 100 = no image
     // Background colour is LyricSettings::fullscreen_background_color.

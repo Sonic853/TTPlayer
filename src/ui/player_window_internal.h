@@ -7,8 +7,10 @@
 
 #include "ttplayer/ui/player_window.h"
 #include "ttplayer/skin/skin_layers.h"
+#include "ttplayer/audio/osz_archive.h"
 
 #include <chrono>
+#include <algorithm>
 #include <functional>
 #include <initializer_list>
 #include <optional>
@@ -16,6 +18,15 @@
 #include <vector>
 
 namespace ttplayer::ui::detail {
+// Type 7 is an optional fullscreen renderer. Ordinary skin/lyric canvases
+// retain types 0..6 even when the DLL is installed.
+inline int AvailableVisualMaximum(bool fullscreen=false) noexcept {
+    return fullscreen && audio::HasOsuVisualSupport()?settings::kMaximumVisualType:6;
+}
+inline int AvailableVisualType(int type,bool fullscreen=false) noexcept {
+    type=std::clamp(type,0,settings::kMaximumVisualType);
+    return type==7 && (!fullscreen || !audio::HasOsuVisualSupport())?2:type;
+}
 // Defer the immediate association commit until TreeView's NM_CLICK unwinds.
 inline constexpr UINT kApplyOptionsAssociations = WM_APP + 0x314;
 // The native skin rebinders (0046D0C1/0044E5CE/0046ACE2/0046BCBE)
@@ -204,9 +215,10 @@ constexpr UINT kCmdVisualScope = 0x8088;
 constexpr UINT kCmdVisualCover = 0x8089;
 constexpr UINT kCmdVisualPulse = 0x808a;
 constexpr UINT kCmdVisualRipple = 0x808b;
+constexpr UINT kCmdVisualOsu = 0x808c;
 constexpr UINT kCmdVisualOptions = 0x8084;
 constexpr UINT kCmdVisualFirst = kCmdVisualNone;
-constexpr UINT kCmdVisualLast = kCmdVisualRipple;
+constexpr UINT kCmdVisualLast = kCmdVisualOsu;
 constexpr UINT kCmdFullscreenToggle = 0x7de6;
 constexpr UINT kCmdFullscreenExit = 0x7de7;
 constexpr UINT kCmdFullscreenLyrics = 0x7de8;
@@ -219,7 +231,7 @@ constexpr UINT kCmdLyricContentFirst = 0xb680;
 constexpr UINT kCmdLyricContentLast = kCmdLyricContentFirst + 2;
 constexpr UINT kCmdLyricContentFullscreen = 0xb683;
 constexpr UINT kCmdLyricContentEffectFirst = 0xb690;
-constexpr UINT kCmdLyricContentEffectLast = kCmdLyricContentEffectFirst + 6;
+constexpr UINT kCmdLyricContentEffectLast = kCmdLyricContentEffectFirst + settings::kMaximumVisualType;
 constexpr UINT kCmdFullscreenMonitorFirst = 0xb610;
 constexpr UINT kCmdFullscreenMonitorLast = 0xb64f;
 constexpr UINT kCmdMinimize = 32211; // 0x7dd3, SC_MINIMIZE
@@ -459,7 +471,7 @@ std::vector<wchar_t> BuildAudioDialogFilter(
 void ReplaceAll(std::wstring& value, std::wstring_view needle,
                 std::wstring_view replacement);
 HMENU FindCommandMenu(HMENU menu, UINT command);
-void AppendPlayerVisualMenuItems(HMENU menu);
+void AppendPlayerVisualMenuItems(HMENU menu,bool fullscreen=false);
 void EnableCommand(HMENU root, UINT command, bool enabled);
 void CheckCommand(HMENU root, UINT command, bool checked);
 COLORREF InterpolateMenuColor(COLORREF first, COLORREF second, int numerator,

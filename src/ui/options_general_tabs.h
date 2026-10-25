@@ -15,6 +15,10 @@ namespace ttplayer::ui::detail {
 inline constexpr int kGeneralPersonalNameLabel = 0xe92d;
 inline constexpr int kGeneralPersonalName = 0xe92e;
 inline constexpr int kGeneralPersonalNameNotice = 0xe92f;
+inline constexpr int kGeneralOsuLogoLabel = 0xe950;
+inline constexpr int kGeneralOsuLogoChoice = 0xe951;
+inline constexpr int kGeneralOsuLogoPath = 0xe952;
+inline constexpr int kGeneralOsuLogoBrowse = 0xe953;
 
 // Keep the original controls and their parent HWND: switching tabs changes
 // visibility, while the existing notification and settings handlers stay intact.
@@ -108,7 +112,8 @@ public:
             MapWindowPoints(nullptr, page, reinterpret_cast<POINT*>(&rect), 2);
             const int id = GetDlgCtrlID(control);
             const bool personal = id == 2188 || id == 0xe913 ||
-                (id >= kGeneralPersonalNameLabel && id <= kGeneralPersonalNameNotice);
+                (id >= kGeneralPersonalNameLabel && id <= kGeneralPersonalNameNotice) ||
+                (id >= kGeneralOsuLogoLabel && id <= kGeneralOsuLogoBrowse);
             const int group = personal ? 1 :
                 id >= kUpdateSourceLabel && id <= kUpdateStatus ? 3 :
                 id >= 0xe900 ? 0 : rect.top >= groups.bottom ? 3 :
@@ -155,6 +160,21 @@ public:
         }
         self->Layout();
         self->Select(0);
+    }
+
+    static void SetVisible(HWND page,int id,bool visible) {
+        const HWND window=GetDlgItem(page,id);
+        if(!window)return;
+        DWORD_PTR data{};
+        if(GetWindowSubclass(page,PageProc,kSubclass,&data)) {
+            auto* self=reinterpret_cast<GeneralOptionsTabs*>(data);
+            for(auto& control:self->controls_)if(control.window==window) {
+                control.visible=visible;
+                ShowWindow(window,visible && self->selected_==control.group?SW_SHOW:SW_HIDE);
+                return;
+            }
+        }
+        ShowWindow(window,visible?SW_SHOW:SW_HIDE);
     }
 
     static void ShowControl(HWND page, HWND control) {

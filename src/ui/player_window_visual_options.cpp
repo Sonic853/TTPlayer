@@ -46,10 +46,11 @@ constexpr UINT kResetAllOptions = 0x04d3;
 constexpr int kPropertySheetApply = 0x3021;
 constexpr UINT_PTR kVisualOptionsSheetSubclass = 0x5454564f;
 
-constexpr std::array<UINT, 10> kColorControls{
+constexpr std::array<UINT, 12> kColorControls{
     kPeakColor, kTopColor, kMiddleColor, kBottomColor, kScopeColor,
     kVisualTextColor, IDC_VISUAL_PULSE_COLOR, IDC_VISUAL_RIPPLE_COLOR,
-    IDC_VISUAL_PULSE_BACKGROUND, IDC_VISUAL_RIPPLE_BACKGROUND};
+    IDC_VISUAL_PULSE_BACKGROUND, IDC_VISUAL_RIPPLE_BACKGROUND,
+    IDC_VISUAL_OSU_ACCENT, IDC_VISUAL_OSU_BACKGROUND};
 
 COLORREF* VisualColor(settings::VisualSettings& visual, UINT control) {
     switch (control) {
@@ -63,6 +64,8 @@ COLORREF* VisualColor(settings::VisualSettings& visual, UINT control) {
     case IDC_VISUAL_RIPPLE_COLOR: return &visual.ripple_color;
     case IDC_VISUAL_PULSE_BACKGROUND: return &visual.pulse_background;
     case IDC_VISUAL_RIPPLE_BACKGROUND: return &visual.ripple_background;
+    case IDC_VISUAL_OSU_ACCENT: return &visual.osu_accent;
+    case IDC_VISUAL_OSU_BACKGROUND: return &visual.osu_background;
     default: return nullptr;
     }
 }
@@ -205,7 +208,7 @@ bool LoadVisualProfile(const std::filesystem::path& path,
 
     int integer{};
     if (XmlInteger(node, L"Type", integer))
-        visual.type = std::clamp(integer, 0, 6);
+        visual.type = std::clamp(integer, 0, settings::kMaximumVisualType);
     XmlColor(node, L"SpectrumTopColor", visual.spectrum_top_color);
     XmlColor(node, L"SpectrumBtmColor", visual.spectrum_bottom_color);
     XmlColor(node, L"SpectrumMidColor", visual.spectrum_middle_color);
@@ -223,6 +226,14 @@ bool LoadVisualProfile(const std::filesystem::path& path,
     XmlColor(node, L"RippleBackground", visual.ripple_background);
     if (XmlInteger(node, L"PulseFollowLyric", integer)) visual.pulse_follow_lyric = integer != 0;
     if (XmlInteger(node, L"RippleFollowLyric", integer)) visual.ripple_follow_lyric = integer != 0;
+    if (XmlInteger(node, L"OsuFlags", integer)) visual.osu_flags = integer & 31;
+    XmlColor(node, L"OsuAccent", visual.osu_accent);
+    XmlColor(node, L"OsuBackground", visual.osu_background);
+    if (XmlInteger(node, L"OsuBpm", integer)) visual.osu_bpm = std::clamp(integer, 20, 400);
+    if (XmlInteger(node, L"OsuLogo", integer)) {
+        visual.osu_logo = std::clamp(integer, 0, 2);
+        visual.osu_logo_path = XmlAttribute(node, L"OsuLogoPath");
+    }
     LOGFONTW font = visual.font;
     if (XmlFont(node, font)) {
         visual.font = font;
@@ -281,7 +292,7 @@ bool SaveVisualProfile(const std::filesystem::path& path,
     SetXmlAttribute(element, L"SpectrumWide", visual.spectrum_wide);
     SetXmlAttribute(element, L"BlurSpeed", visual.blur_speed);
     SetXmlAttribute(element, L"Blur", visual.blur ? 1 : 0);
-    SetXmlAttribute(element, L"Type", std::clamp(visual.type, 0, 6));
+    SetXmlAttribute(element, L"Type", std::clamp(visual.type, 0, settings::kMaximumVisualType));
     SetXmlAttribute(element, L"BlurScopeColor",
                     ColorText(visual.blur_scope_color));
     SetXmlAttribute(element, L"TextColor", ColorText(visual.text_color));
@@ -291,6 +302,12 @@ bool SaveVisualProfile(const std::filesystem::path& path,
     SetXmlAttribute(element, L"RippleBackground", ColorText(visual.ripple_background));
     SetXmlAttribute(element, L"PulseFollowLyric", visual.pulse_follow_lyric ? 1 : 0);
     SetXmlAttribute(element, L"RippleFollowLyric", visual.ripple_follow_lyric ? 1 : 0);
+    SetXmlAttribute(element, L"OsuFlags", visual.osu_flags & 31);
+    SetXmlAttribute(element, L"OsuAccent", ColorText(visual.osu_accent));
+    SetXmlAttribute(element, L"OsuBackground", ColorText(visual.osu_background));
+    SetXmlAttribute(element, L"OsuBpm", std::clamp(visual.osu_bpm, 20, 400));
+    SetXmlAttribute(element, L"OsuLogo", std::clamp(visual.osu_logo, 0, 2));
+    SetXmlAttribute(element, L"OsuLogoPath", visual.osu_logo_path);
     if (visual.font_valid)
         SetXmlAttribute(element, L"Font", FontText(visual.font));
 
@@ -332,7 +349,7 @@ void SyncVisualPage(HWND dialog, HMODULE resources,
                             reinterpret_cast<LPARAM>(label.c_str()));
     }
     SendDlgItemMessageW(dialog, kVisualType, CB_SETCURSEL,
-                        std::clamp(visual.type, 0, 6), 0);
+                        AvailableVisualType(visual.type), 0);
     PopulateCombo(dialog, kScopeSpeed, resources, 3,
                   std::clamp((visual.blur_speed - 1) / 2, 0, 2));
     CheckDlgButton(dialog, kSpectrumWide,
@@ -341,16 +358,40 @@ void SyncVisualPage(HWND dialog, HMODULE resources,
                    visual.blur ? BST_CHECKED : BST_UNCHECKED);
     const HWND track = GetDlgItem(dialog, kVisualFrames);
     if (track) {
-        SendMessageW(track, TBM_SETRANGE, TRUE, MAKELPARAM(10, 40));
+        SendMessageW(track, TBM_SETRANGE, TRUE, MAKELPARAM(10, 100));
         SendMessageW(track, TBM_SETTICFREQ, 1, 0);
         SendMessageW(track, TBM_SETPOS, TRUE, visual.frames_per_second);
+    }
+    if (first) {
+        // The immutable 5.7.9 template has an anonymous "40" static under
+        // the slider. Keep its right edge, but update/size the new maximum.
+        for (HWND label = GetWindow(dialog, GW_CHILD); label;
+             label = GetWindow(label, GW_HWNDNEXT)) {
+            wchar_t klass[32]{}, text[16]{};
+            GetClassNameW(label, klass, 32);
+            GetWindowTextW(label, text, 16);
+            if (GetDlgCtrlID(label) != -1 || _wcsicmp(klass, WC_STATICW) != 0 ||
+                wcscmp(text, L"40") != 0) continue;
+            RECT bounds{}, width{0, 0, 15, 0};
+            GetWindowRect(label, &bounds);
+            MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&bounds), 2);
+            MapDialogRect(dialog, &width);
+            SetWindowTextW(label, L"100");
+            SetWindowPos(label, nullptr, bounds.right - width.right, bounds.top,
+                width.right, bounds.bottom - bounds.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            break;
+        }
     }
     SetFramesText(dialog, resources, visual.frames_per_second);
     CheckDlgButton(dialog, IDC_VISUAL_PULSE_FOLLOW, visual.pulse_follow_lyric ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(dialog, IDC_VISUAL_RIPPLE_FOLLOW, visual.ripple_follow_lyric ? BST_CHECKED : BST_UNCHECKED);
     EnableWindow(GetDlgItem(dialog, IDC_VISUAL_PULSE_COLOR), !visual.pulse_follow_lyric);
     EnableWindow(GetDlgItem(dialog, IDC_VISUAL_RIPPLE_COLOR), !visual.ripple_follow_lyric);
-    VisualOptionsTabs::SelectForType(dialog, visual.type);
+    for (UINT bit = 0; bit < 5; ++bit)
+        CheckDlgButton(dialog, IDC_VISUAL_OSU_SPECTRUM + bit,
+            (visual.osu_flags & (1 << bit)) ? BST_CHECKED : BST_UNCHECKED);
+    SetDlgItemInt(dialog, IDC_VISUAL_OSU_BPM, visual.osu_bpm, FALSE);
+    VisualOptionsTabs::SelectForType(dialog, AvailableVisualType(visual.type));
     for (const UINT control : kColorControls) {
         const HWND button = GetDlgItem(dialog, static_cast<int>(control));
         if (first && button) {
@@ -533,6 +574,27 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
     case WM_COMMAND: {
         const UINT control = LOWORD(wparam);
         const UINT notification = HIWORD(wparam);
+        if (control >= IDC_VISUAL_OSU_SPECTRUM && control <= IDC_VISUAL_OSU_LOGO &&
+            notification == BN_CLICKED) {
+            const int bit = 1 << (control - IDC_VISUAL_OSU_SPECTRUM);
+            settings_.visual.osu_flags = (settings_.visual.osu_flags & ~bit) |
+                (IsDlgButtonChecked(dialog, control) == BST_CHECKED ? bit : 0);
+            refresh();
+            return TRUE;
+        }
+        if (control == IDC_VISUAL_OSU_BPM &&
+            (notification == EN_CHANGE || notification == EN_KILLFOCUS)) {
+            BOOL valid{};
+            const UINT value = GetDlgItemInt(dialog, control, &valid, FALSE);
+            if (valid && value >= 20 && value <= 400 &&
+                settings_.visual.osu_bpm != static_cast<int>(value)) {
+                settings_.visual.osu_bpm = static_cast<int>(value);
+                refresh();
+            } else if (notification == EN_KILLFOCUS && (!valid || value < 20 || value > 400)) {
+                SetDlgItemInt(dialog, control, settings_.visual.osu_bpm, FALSE);
+            }
+            return TRUE;
+        }
         if ((control == IDC_VISUAL_PULSE_FOLLOW || control == IDC_VISUAL_RIPPLE_FOLLOW) &&
             notification == BN_CLICKED) {
             const bool follow = IsDlgButtonChecked(dialog, control) == BST_CHECKED;

@@ -22,6 +22,11 @@ struct OszMedia {
 };
 
 [[nodiscard]] bool IsOszArchive(const std::filesystem::path& path);
+// Capabilities are probed once per process. Install/remove add-ins while the
+// player is closed; a legacy OSZ-only DLL need not expose the visual ABI.
+[[nodiscard]] bool HasOszSupport() noexcept;
+[[nodiscard]] bool HasOsuVisualSupport() noexcept;
+[[nodiscard]] bool HasOsuLogoSupport() noexcept;
 // Return each referenced audio member once, in first beatmap-reference order.
 // Each audio keeps its first available background; paths stay inside the archive.
 // required_audio limits cover lookup to one member and permits an early return

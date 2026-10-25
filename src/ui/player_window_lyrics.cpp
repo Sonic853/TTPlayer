@@ -4405,10 +4405,10 @@ void PlayerWindow::PrepareFullScreenLyricMenu(HMENU menu) const {
     // positional deletions, so normal lyric commands keep their layout.
     // Reuse resource 2232's effect labels and the EXE's album label; the
     // existing 0x8086..0x8089 WM_COMMAND route applies the selected effect.
-    for (UINT index = 0; index < 6; ++index) {
+    for (UINT index = 0; index < static_cast<UINT>(AvailableVisualMaximum(true)); ++index) {
         const auto label = index >= 3
             ? LoadResourceText(GetModuleHandleW(nullptr), index == 3 ? IDS_FULLSCREEN_ALBUM
-                : index == 4 ? IDS_VISUAL_PULSE : IDS_VISUAL_RIPPLE)
+                : index == 4 ? IDS_VISUAL_PULSE : index == 5 ? IDS_VISUAL_RIPPLE : IDS_VISUAL_OSU)
             : ResourceListItem(ResourceModule(), 2232, index);
         const bool selected = fullscreen_mode_ == 3 &&
             settings_.visual.type == static_cast<int>(index + 1);
@@ -4416,7 +4416,7 @@ void PlayerWindow::PrepareFullScreenLyricMenu(HMENU menu) const {
                     (selected ? MF_CHECKED : MF_UNCHECKED),
                     kCmdVisualDream + index, label.c_str());
     }
-    InsertMenuW(menu, 6, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+    InsertMenuW(menu, AvailableVisualMaximum(true), MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
     PrepareLyricDoubleClickMenu(menu);
 }
 

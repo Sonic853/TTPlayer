@@ -16,7 +16,7 @@ bool PlayerWindow::NativeLyricContentActive() const noexcept {
 TtpSkinContent PlayerWindow::NativeLyricContentState(HWND surface) const {
     TtpSkinContent content{sizeof(content),surface};
     content.mode=std::clamp(settings_.lyric.window_content_mode,1,3);
-    content.visual_type=std::clamp(settings_.lyric.window_visual_type,0,6);
+    content.visual_type=AvailableVisualType(settings_.lyric.window_visual_type);
     if(surface==lyric_control_) GetClientRect(surface,&content.bounds);
     else {
         content.bounds=LyricTextBounds();
@@ -48,7 +48,7 @@ void PlayerWindow::SetNativeLyricContent(int mode,int visual_type) {
        (external_skin_ && external_skin_->Handles(lyric_window_)))return;
     if(lyric_control_)SendMessageW(lyric_control_,WM_CANCELMODE,0,0);
     settings_.lyric.window_content_mode=std::clamp(mode,1,3);
-    if(visual_type>=0)settings_.lyric.window_visual_type=std::clamp(visual_type,0,6);
+    if(visual_type>=0)settings_.lyric.window_visual_type=AvailableVisualType(visual_type);
     plugin_content_visual_enabled_.store(false,std::memory_order_release);
     plugin_content_visual_type_=-1;
     LayoutLyricControls();RebuildLyricFont(false);
@@ -82,10 +82,10 @@ HMENU PlayerWindow::CreateNativeLyricContentMenu() const {
         AppendMenuW(menu,MF_STRING|(settings_.lyric.window_content_mode==int(i)+1?MF_CHECKED:0),
             kCmdLyricContentFirst+i,i18n::Literal(modes[i]));
     AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-    for(UINT i=0;i<7;++i) {
+    for(UINT i=0;i<=static_cast<UINT>(AvailableVisualMaximum());++i) {
         const auto label=i==0?std::wstring(i18n::Literal(L"无")):i<4?ResourceListItem(ResourceModule(),2232,i-1):
-            LoadResourceText(GetModuleHandleW(nullptr),i==4?IDS_FULLSCREEN_ALBUM:i==5?IDS_VISUAL_PULSE:IDS_VISUAL_RIPPLE);
-        AppendMenuW(effects,MF_STRING|(settings_.lyric.window_visual_type==int(i)?MF_CHECKED:0),
+            LoadResourceText(GetModuleHandleW(nullptr),i==4?IDS_FULLSCREEN_ALBUM:i==5?IDS_VISUAL_PULSE:i==6?IDS_VISUAL_RIPPLE:IDS_VISUAL_OSU);
+        AppendMenuW(effects,MF_STRING|(AvailableVisualType(settings_.lyric.window_visual_type)==int(i)?MF_CHECKED:0),
             kCmdLyricContentEffectFirst+i,label.c_str());
     }
     AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(effects),i18n::Literal(L"视觉效果类型"));

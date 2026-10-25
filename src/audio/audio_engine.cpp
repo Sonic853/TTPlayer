@@ -2,6 +2,7 @@
 #include <ttpcomm/runtime_pcm.h>
 #include "ttplayer/platform/optional_windows_api.h"
 #include "ttplayer/audio/audio_engine.h"
+#include "visualization_history.h"
 #include <ttpcomm/audio_format_probe_impl.h>
 #include "ttplayer/audio/buffering_contract.h"
 #include "ttplayer/audio/precise_seek_source.h"
@@ -2144,9 +2145,10 @@ int16_t VisualizationPcmSample(const uint8_t* value,
     }
 }
 
+template <typename Samples>
 void AppendVisualizationFrames(const std::byte* bytes, size_t byte_count,
                                const WAVEFORMATEX& format,
-                               VisualizationSamples& samples) {
+                               Samples& samples) {
     const size_t sample_bytes = (format.wBitsPerSample + 7U) / 8U;
     if (!bytes || sample_bytes == 0 || format.nChannels == 0 ||
         format.nBlockAlign < sample_bytes * format.nChannels)
@@ -2158,7 +2160,7 @@ void AppendVisualizationFrames(const std::byte* bytes, size_t byte_count,
     const size_t frames = byte_count / format.nBlockAlign;
     const auto* input = reinterpret_cast<const uint8_t*>(bytes);
     for (size_t frame = 0;
-         frame < frames && samples.count < VisualizationSamples::capacity;
+         frame < frames && samples.count < Samples::capacity;
          ++frame) {
         const uint8_t* value = input + frame * format.nBlockAlign;
         const int16_t left = VisualizationPcmSample(value, format);
@@ -3238,8 +3240,32 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 if (samples.count < VisualizationSamples::capacity && offset != 0)
                     AppendVisualizationFrames(
                         ring_shadow.data(), offset, wave_format, samples);
+                ExtendedVisualizationSamples extended;
+                extended.sample_rate = wave_format.nSamplesPerSec;
+                extended.source_channels = wave_format.nChannels;
+                const uint64_t aligned_played = played_bytes -
+                    played_bytes % wave_format.nBlockAlign;
+                extended.first_frame = static_cast<uint64_t>(std::max<int64_t>(0, position_base_ms)) *
+                    wave_format.nSamplesPerSec / 1000 +
+                    aligned_played / wave_format.nBlockAlign;
+                extended.playback_frame = extended.first_frame;
+                // The legacy view may include the zero-padded ring tail.
+                // Analysis must exclude stale data beyond written input/EOF.
+                const uint64_t ready_end = final_stream_byte
+                    ? std::min(stream_write_byte, *final_stream_byte)
+                    : stream_write_byte;
+                const size_t available = ready_end > aligned_played
+                    ? static_cast<size_t>(std::min<uint64_t>(
+                        ready_end - aligned_played, ring_bytes)) : 0;
+                const size_t first = std::min(available, ring_bytes - offset);
+                AppendVisualizationFrames(ring_shadow.data() + offset, first,
+                    wave_format, extended);
+                if (available > first &&
+                    extended.count < ExtendedVisualizationSamples::capacity)
+                    AppendVisualizationFrames(ring_shadow.data(), available - first,
+                        wave_format, extended);
                 if (samples.count != 0)
-                    PublishVisualization(std::move(samples));
+                    PublishVisualization(std::move(samples), std::move(extended));
                 last_visual_byte = played_bytes;
             }
             if (final_stream_byte && played_bytes >= *final_stream_byte) {
@@ -3432,6 +3458,9 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     int64_t position_base_ms{};
     uint64_t next_stream_byte{};
     uint64_t last_visual_byte = std::numeric_limits<uint64_t>::max();
+    const bool retain_analysis_history = buffer_bytes / wave_format.nBlockAlign *
+        kOutputBufferCount < ExtendedVisualizationSamples::capacity;
+    detail::VisualizationHistory analysis_history;
 
     const size_t native_request = SourceReadBytes(
         source_format, wave_format, buffer_bytes, options.file_buffer_bytes);
@@ -3553,6 +3582,13 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             return false;
         }
         output.queued = true;
+        if (retain_analysis_history) {
+            ExtendedVisualizationSamples packet;
+            AppendVisualizationFrames(output.data.data(), written, wave_format, packet);
+            analysis_history.Append(output.stream_byte_offset / wave_format.nBlockAlign,
+                std::span(packet.left).first(packet.count),
+                std::span(packet.right).first(packet.count));
+        }
         ++queued;
         return true;
     };
@@ -3579,14 +3615,35 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
 
         VisualizationSamples samples;
         samples.sample_rate = wave_format.nSamplesPerSec;
+        ExtendedVisualizationSamples extended;
+        extended.sample_rate = wave_format.nSamplesPerSec;
+        extended.source_channels = wave_format.nChannels;
+        extended.first_frame = static_cast<uint64_t>(std::max<int64_t>(0, position_base_ms)) *
+            wave_format.nSamplesPerSec / 1000 + played_bytes / wave_format.nBlockAlign;
+        extended.playback_frame = extended.first_frame;
         uint64_t cursor = played_bytes;
+        uint64_t extended_cursor = played_bytes;
+        bool extended_contiguous = true;
         for (size_t index = 0;
              index < ordered_count &&
-             samples.count < VisualizationSamples::capacity;
+             (samples.count < VisualizationSamples::capacity ||
+              (extended_contiguous && extended.count < ExtendedVisualizationSamples::capacity));
              ++index) {
             const OutputBuffer& buffer = *ordered[index];
             const uint64_t begin = buffer.stream_byte_offset;
             const uint64_t end = begin + buffer.header.dwBufferLength;
+            if (extended_contiguous && end > extended_cursor) {
+                // Do not bridge a released/missing buffer with a later one.
+                // The legacy 512-frame behavior below remains unchanged.
+                if (extended_cursor < begin) extended_contiguous = false;
+                else {
+                    const size_t extended_offset = static_cast<size_t>(extended_cursor - begin);
+                    AppendVisualizationFrames(buffer.data.data() + extended_offset,
+                        buffer.header.dwBufferLength - extended_offset,
+                        wave_format, extended);
+                    extended_cursor = end;
+                }
+            }
             if (end <= cursor) continue;
             if (cursor < begin) {
                 if (samples.count != 0) break;
@@ -3599,7 +3656,15 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 wave_format, samples);
             cursor = end;
         }
-        if (samples.count != 0) PublishVisualization(std::move(samples));
+        if (retain_analysis_history && extended.count < ExtendedVisualizationSamples::capacity) {
+            uint64_t relative_first{};
+            extended.count = analysis_history.Read(played_bytes / wave_format.nBlockAlign,
+                extended.left, extended.right, relative_first);
+            extended.first_frame = static_cast<uint64_t>(std::max<int64_t>(0, position_base_ms)) *
+                wave_format.nSamplesPerSec / 1000 + relative_first;
+        }
+        if (samples.count != 0)
+            PublishVisualization(std::move(samples), std::move(extended));
         last_visual_byte = played_bytes;
     };
 
@@ -3666,6 +3731,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             }
             queued = 0;
             next_stream_byte = 0;
+            analysis_history.Clear();
             last_visual_byte = std::numeric_limits<uint64_t>::max();
             ClearVisualization();
             decoded.clear();
@@ -4287,6 +4353,11 @@ void AudioEngine::SetVolume(float volume) {
     ApplyVolumeLocked();
 }
 
+float AudioEngine::Volume() const {
+    std::scoped_lock lock(mutex_);
+    return volume_;
+}
+
 void AudioEngine::SetBalance(int balance) {
     std::scoped_lock lock(mutex_);
     balance_ = std::clamp(balance, -100, 100);
@@ -4517,10 +4588,25 @@ VisualizationSamples AudioEngine::Visualization() const {
     return visualization_;
 }
 
-void AudioEngine::PublishVisualization(VisualizationSamples samples) {
+ExtendedVisualizationSamples AudioEngine::ExtendedVisualization() const {
+    std::scoped_lock lock(visualization_mutex_);
+    return extended_visualization_;
+}
+
+void AudioEngine::PublishVisualization(VisualizationSamples samples,
+                                       ExtendedVisualizationSamples extended) {
+    std::scoped_lock state_lock(mutex_);
+    extended.timeline_revision = seek_revision_;
+    extended.observed_at = std::chrono::steady_clock::now();
+    // A seek may be queued while the output buffers are being inspected.
+    // Never label the outgoing PCM as belonging to the requested position.
+    if (pending_seek_position_ms_.load() >= 0 || stop_requested_)
+        extended.count = 0;
     std::scoped_lock lock(visualization_mutex_);
     samples.revision = visualization_.revision + 1;
+    extended.revision = extended_visualization_.revision + 1;
     visualization_ = std::move(samples);
+    extended_visualization_ = std::move(extended);
 }
 
 void AudioEngine::ClearVisualization() {
@@ -4528,6 +4614,9 @@ void AudioEngine::ClearVisualization() {
     const uint64_t revision = visualization_.revision + 1;
     visualization_ = {};
     visualization_.revision = revision;
+    const uint64_t extended_revision = extended_visualization_.revision + 1;
+    extended_visualization_ = {};
+    extended_visualization_.revision = extended_revision;
 }
 
 void AudioEngine::RecordDiagnostic(std::wstring message) {

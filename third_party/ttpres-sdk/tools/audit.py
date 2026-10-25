@@ -40,7 +40,7 @@ def audit(path, manifest):
         raise ValueError('Wrong baseline metadata')
     # Extension dialog/string IDs are separate from every original key.
     expected = {(5, n, 2052) for n in (4090,4200,4210,4220,4230,5800,5810,5820,5901)}
-    expected |= {(6, n, 2052) for n in range(256,260)}
+    expected |= {(6, n, 2052) for n in range(256,261)}
     expected |= {(10, n, 2052) for n in ('TTPLAYER_RES_ABI','TTPLAYER_RES_BUILD')}
     baseline = {(e['type'], e['name'], e['language']) for e in manifest['resources']}
     if not (baseline | expected) <= set(actual) or baseline & expected:
@@ -48,8 +48,8 @@ def audit(path, manifest):
     for kind, name, language in expected:
         if kind == 5:
             decode_dialog(actual[(kind, name, language)])
-    required_strings = {4091} | set(range(4093, 4107)) | set(range(4110, 4143))
-    for block in range(256, 260):
+    required_strings = {4091} | set(range(4093, 4107)) | set(range(4110, 4159))
+    for block in range(256, 261):
         for index, text in enumerate(decode_strings(actual[(6, block, 2052)])['strings']):
             if (block - 1) * 16 + index in required_strings and not text:
                 raise ValueError('Empty required extension string')
@@ -82,7 +82,7 @@ def main():
         executable = args.exe.read_bytes()
         for (kind, name, _), _, _ in resources(executable):
             if (kind == 5 and name in (4090,4200,4210,4220,4230,5800,5810,5820,5901)) or (
-                    kind == 6 and isinstance(name, int) and 256 <= name <= 259):
+                    kind == 6 and isinstance(name, int) and 256 <= name <= 260):
                 raise ValueError('Player EXE must not embed TTPlayerRes extension backups')
         report.update(host_sha256=sha256(executable), no_executable_backups=True)
     save_json(args.output, report)

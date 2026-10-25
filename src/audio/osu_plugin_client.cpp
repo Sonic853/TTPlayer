@@ -1,6 +1,7 @@
 #include "ttplayer/audio/osz_archive.h"
 #include "ttplayer/audio/archive_member.h"
 #include <ttp_osu/abi.h>
+#include "osu_visual_query.h"
 #include <new>
 
 namespace ttplayer::audio {
@@ -27,7 +28,23 @@ struct Plugin {
     }
     ~Plugin(){if(module)FreeLibrary(module);}
 };
-const TtpOsuApi& Api() {static const Plugin plugin;return plugin.api;}
+const Plugin& LoadedPlugin() {static const Plugin plugin;return plugin;}
+const TtpOsuApi& Api() {return LoadedPlugin().api;}
+struct Capabilities {bool archive{},visual{},logo{};};
+const Capabilities& AvailableCapabilities() noexcept {
+    static const Capabilities result=[]() noexcept {
+        Capabilities value;
+        try {
+            const auto& plugin=LoadedPlugin();
+            value.archive=true;
+            TtpOsuVisualApi api{};
+            value.visual=detail::QueryOsuVisualApi(plugin.module,api);
+            value.logo=value.visual && api.logo;
+        } catch(...) {}
+        return value;
+    }();
+    return result;
+}
 template<class F> HRESULT Callback(F&& body) noexcept {
     try {body();return S_OK;}
     catch(const ArchiveError& e){return e.Result();}
@@ -66,6 +83,9 @@ struct Context {
 };
 void Check(HRESULT hr){if(FAILED(hr))throw ArchiveError(hr);}
 }
+bool HasOszSupport() noexcept {return AvailableCapabilities().archive;}
+bool HasOsuVisualSupport() noexcept {return AvailableCapabilities().visual;}
+bool HasOsuLogoSupport() noexcept {return AvailableCapabilities().logo;}
 bool IsOszArchive(const std::filesystem::path& path) {
     // Routing must survive a missing DLL: never import an OSZ as generic ZIP
     // or offer to rename it merely because the plugin is absent.

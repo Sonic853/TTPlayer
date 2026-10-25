@@ -33,7 +33,7 @@ BUNDLES = {
     ),
     'ExtraAddIn': (
         ('TTPlayerWaskin', 'ttp_waskin'), ('TTPlayerMaki', 'ttp_maki'),
-        ('TTPlayerI18n', 'ttp_i18n'),
+        ('TTPlayerI18n', 'ttp_i18n'), ('TTPlayerOSU', 'ttp_osu'),
     ),
 }
 ARCHIVE_LIMIT = 16 * 1024 * 1024
@@ -190,6 +190,17 @@ def unpack_component(repository, target, release, archive):
 def audit_component(files, metadata, inventories, directory):
     path = directory / Path(metadata['dll']).name
     path.write_bytes(files[metadata['dll']])
+    if path.name == 'ttp_osu.dll':
+        from download_osu_component import file_version
+        from ttpcomm_abi import inspect_exports
+        exported = inspect_exports(path)
+        expected = {1: 'ttp_osu_query', 2: 'ttp_osu_query_visual'}
+        if set(exported) != set(expected) or any(
+                exported[ordinal]['name'] != name or exported[ordinal].get('forwarder')
+                for ordinal, name in expected.items()):
+            raise ValueError('Unexpected optional OSZ/visual plugin ABI')
+        if file_version(path) != metadata['version']:
+            raise ValueError('OSU file version does not match its release')
     imports = inspect(path)  # Enforces x86 PE32, XP subsystem and no delay imports.
     for inventory_name, available in inventories.items():
         for library, names in imports.items():

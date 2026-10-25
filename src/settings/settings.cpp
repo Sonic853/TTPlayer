@@ -403,7 +403,7 @@ void ApplyVisualAttributes(IXMLDOMNode* node, VisualSettings& visual,
                            bool include_global_fields) {
     if (!node) return;
     if (include_global_fields) {
-        visual.type = std::clamp(IntAttr(node, L"Type", visual.type), 0, 6);
+        visual.type = std::clamp(IntAttr(node, L"Type", visual.type), 0, kMaximumVisualType);
         visual.frames_per_second = std::clamp(
             IntAttr(node, L"FramesPerSec", visual.frames_per_second), 0, 100);
     }
@@ -429,6 +429,13 @@ void ApplyVisualAttributes(IXMLDOMNode* node, VisualSettings& visual,
     visual.ripple_background = ColorAttr(node, L"RippleBackground", visual.ripple_background);
     visual.pulse_follow_lyric = IntAttr(node, L"PulseFollowLyric", visual.pulse_follow_lyric) != 0;
     visual.ripple_follow_lyric = IntAttr(node, L"RippleFollowLyric", visual.ripple_follow_lyric) != 0;
+    visual.osu_flags = IntAttr(node, L"OsuFlags", visual.osu_flags) & 31;
+    visual.osu_accent = ColorAttr(node, L"OsuAccent", visual.osu_accent);
+    visual.osu_background = ColorAttr(node, L"OsuBackground", visual.osu_background);
+    visual.osu_bpm = std::clamp(IntAttr(node, L"OsuBpm", visual.osu_bpm), 20, 400);
+    visual.osu_logo = std::clamp(IntAttr(node, L"OsuLogo", visual.osu_logo), 0, 2);
+    if (Attribute(node, L"OsuLogoPath").vt != VT_EMPTY)
+        visual.osu_logo_path = StringAttr(node, L"OsuLogoPath");
     LOGFONTW font = visual.font;
     if (LogFontAttr(node, L"Font", font)) {
         visual.font = font;
@@ -1097,16 +1104,16 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         auto* const n=node.Get();
         s.fullscreen.last_mode=std::clamp(IntAttr(n,L"LastMode",3),1,3);
         s.fullscreen.visual_type=std::clamp(
-            IntAttr(n,L"VisualType",s.fullscreen.visual_type),0,6);
+            IntAttr(n,L"VisualType",s.fullscreen.visual_type),0,kMaximumVisualType);
         s.fullscreen.album_fallback_image=StringAttr(n,L"AlbumFallbackImage");
         s.fullscreen.album_transparency_percent=std::clamp(IntAttr(
             n,L"AlbumTransparency",s.fullscreen.album_transparency_percent),0,100);
-        constexpr std::array<const wchar_t*,7> relation_names{
+        constexpr std::array<const wchar_t*,kVisualTypeCount> relation_names{
             L"PosRelationAll",L"PosRelationGoom",
-            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum",L"PosRelationPulse",L"PosRelationRipple"};
-        constexpr std::array<const wchar_t*,7> size_names{
+            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum",L"PosRelationPulse",L"PosRelationRipple",L"PosRelationOsu"};
+        constexpr std::array<const wchar_t*,kVisualTypeCount> size_names{
             L"LrcSizeAll",L"LrcSizeGoom",
-            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum",L"LrcSizePulse",L"LrcSizeRipple"};
+            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum",L"LrcSizePulse",L"LrcSizeRipple",L"LrcSizeOsu"};
         for(size_t index=0;index<relation_names.size();++index) {
             // CSettings preserves the raw profile integers in TTPlayer.xml.
             // Full-screen layout normalizes them only when it consumes the
@@ -1234,7 +1241,7 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         s.lyric.mini_scroll_mode=IntAttr(n,L"ScrollMode2",1);
         s.lyric.double_click_fullscreen=IntAttr(n,L"DoubleClickFullScreen",0)!=0;
         s.lyric.window_content_mode=std::clamp(IntAttr(n,L"WindowContentMode",1),1,3);
-        s.lyric.window_visual_type=std::clamp(IntAttr(n,L"WindowVisualType",1),0,6);
+        s.lyric.window_visual_type=std::clamp(IntAttr(n,L"WindowVisualType",1),0,kMaximumVisualType);
         s.lyric.fullscreen_scroll_mode=IntAttr(n,L"ScrollModeFS",0);
         s.lyric.fullscreen_text_align=IntAttr(n,L"TextAlignFS",1);
         s.lyric.fullscreen_row_interval=IntAttr(n,L"RowIntervalFS",4);
@@ -1686,6 +1693,12 @@ bool SaveSkinVisualProfile(const std::filesystem::path& path,
         SetAttribute(element,L"RippleBackground",ColorText(visual.ripple_background));
         SetAttribute(element,L"PulseFollowLyric",visual.pulse_follow_lyric ? 1 : 0);
         SetAttribute(element,L"RippleFollowLyric",visual.ripple_follow_lyric ? 1 : 0);
+        SetAttribute(element,L"OsuFlags",visual.osu_flags & 31);
+        SetAttribute(element,L"OsuAccent",ColorText(visual.osu_accent));
+        SetAttribute(element,L"OsuBackground",ColorText(visual.osu_background));
+        SetAttribute(element,L"OsuBpm",std::clamp(visual.osu_bpm,20,400));
+        SetAttribute(element,L"OsuLogo",std::clamp(visual.osu_logo,0,2));
+        SetAttribute(element,L"OsuLogoPath",visual.osu_logo_path);
         if(visual.font_valid)
             SetAttribute(element,L"Font",LogFontText(visual.font));
     }
@@ -1914,7 +1927,13 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"RippleBackground",ColorText(settings.visual.ripple_background));
         SetAttribute(element,L"PulseFollowLyric",settings.visual.pulse_follow_lyric ? 1 : 0);
         SetAttribute(element,L"RippleFollowLyric",settings.visual.ripple_follow_lyric ? 1 : 0);
-        SetAttribute(element,L"Type",std::clamp(settings.visual.type,0,6));
+        SetAttribute(element,L"OsuFlags",settings.visual.osu_flags & 31);
+        SetAttribute(element,L"OsuAccent",ColorText(settings.visual.osu_accent));
+        SetAttribute(element,L"OsuBackground",ColorText(settings.visual.osu_background));
+        SetAttribute(element,L"OsuBpm",std::clamp(settings.visual.osu_bpm,20,400));
+        SetAttribute(element,L"OsuLogo",std::clamp(settings.visual.osu_logo,0,2));
+        SetAttribute(element,L"OsuLogoPath",settings.visual.osu_logo_path);
+        SetAttribute(element,L"Type",std::clamp(settings.visual.type,0,kMaximumVisualType));
         SetAttribute(element,L"FramesPerSec",
                      std::clamp(settings.visual.frames_per_second,0,100));
         if(settings.visual.font_valid)
@@ -1924,16 +1943,16 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
         auto element_owner=AdoptCom(element);
         SetAttribute(element,L"LastMode",std::clamp(settings.fullscreen.last_mode,1,3));
         SetAttribute(element,L"VisualType",
-                     std::clamp(settings.fullscreen.visual_type,0,6));
+                     std::clamp(settings.fullscreen.visual_type,0,kMaximumVisualType));
         SetAttribute(element,L"AlbumFallbackImage",settings.fullscreen.album_fallback_image);
         SetAttribute(element,L"AlbumTransparency",
                      std::clamp(settings.fullscreen.album_transparency_percent,0,100));
-        constexpr std::array<const wchar_t*,7> relation_names{
+        constexpr std::array<const wchar_t*,kVisualTypeCount> relation_names{
             L"PosRelationAll",L"PosRelationGoom",
-            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum",L"PosRelationPulse",L"PosRelationRipple"};
-        constexpr std::array<const wchar_t*,7> size_names{
+            L"PosRelationSpectrum",L"PosRelationBlurScope",L"PosRelationAlbum",L"PosRelationPulse",L"PosRelationRipple",L"PosRelationOsu"};
+        constexpr std::array<const wchar_t*,kVisualTypeCount> size_names{
             L"LrcSizeAll",L"LrcSizeGoom",
-            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum",L"LrcSizePulse",L"LrcSizeRipple"};
+            L"LrcSizeSpectrum",L"LrcSizeBlurScope",L"LrcSizeAlbum",L"LrcSizePulse",L"LrcSizeRipple",L"LrcSizeOsu"};
         for(size_t index=0;index<relation_names.size();++index) {
             SetAttribute(element,relation_names[index],
                          settings.fullscreen.position_relation[index]);
@@ -2010,7 +2029,7 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"ScrollMode2",settings.lyric.mini_scroll_mode);
         SetAttribute(element,L"DoubleClickFullScreen",settings.lyric.double_click_fullscreen ? 1 : 0);
         SetAttribute(element,L"WindowContentMode",std::clamp(settings.lyric.window_content_mode,1,3));
-        SetAttribute(element,L"WindowVisualType",std::clamp(settings.lyric.window_visual_type,0,6));
+        SetAttribute(element,L"WindowVisualType",std::clamp(settings.lyric.window_visual_type,0,kMaximumVisualType));
         SetAttribute(element,L"ScrollModeFS",settings.lyric.fullscreen_scroll_mode);
         SetAttribute(element,L"TextAlignFS",settings.lyric.fullscreen_text_align);
         SetAttribute(element,L"RowIntervalFS",settings.lyric.fullscreen_row_interval);

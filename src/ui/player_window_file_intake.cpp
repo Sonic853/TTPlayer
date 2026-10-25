@@ -1058,6 +1058,7 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
 
     const auto extension = LowerExtension(path);
     const bool archive_input=audio::IsArchivePath(path);
+    if(directory_member && audio::IsOszArchive(path) && !audio::HasOszSupport())return false;
     if (archive_input) path=ttpcomm::archive_format::Canonical(path.c_str());
     if (!archive_input && extension == L".cue") {
         try {

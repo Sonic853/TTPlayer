@@ -99,6 +99,7 @@ typedef struct TtpSkinContent {
     RECT bounds;
     uint32_t mode, visual_type;
     // visual_type: 0 none, 1 dream, 2 spectrum, 3 scope, 4 cover, 5 pulse, 6 ripple.
+    // The fullscreen-only host extension 7 is normalized to 2 for embedded content.
 } TtpSkinContent;
 typedef struct TtpSkinLyricColors {
     uint32_t size;

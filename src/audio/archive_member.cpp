@@ -359,7 +359,7 @@ ArchiveError::ArchiveError(HRESULT result)
     : std::runtime_error("Archive operation failed: " + std::to_string(static_cast<unsigned long>(result))),result_(result) {}
 
 std::wstring ArchiveError::Message() const {
-    if(result_==kOszPluginMissing) return L"无法加载 AddIn\\ttp_osu.dll。请安装完整发行包中的 OSZ 插件。";
+    if(result_==kOszPluginMissing) return L"未安装可用的 OSZ 插件。请将可选插件 ttp_osu.dll 放入 AddIn 目录后重新启动播放器。";
     if(result_==kOszPluginIncompatible) return L"AddIn\\ttp_osu.dll 版本或接口不兼容。请更新 OSZ 插件后重新启动播放器。";
     if(result_==TTPCOMM_ARCHIVE_PASSWORD) return L"压缩包需要密码。请播放或重新添加该压缩包以输入密码。";
     if(result_==TTPCOMM_ARCHIVE_BAD_PASSWORD) return L"压缩包密码不正确，或加密数据已损坏。";

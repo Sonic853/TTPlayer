@@ -454,7 +454,7 @@ BOOL WINAPI PlayerWindow::ResizeSkinPluginWindow(void* context,HWND source,SIZE 
 BOOL WINAPI PlayerWindow::HandleSkinPluginContentInput(void* context,const TtpSkinContent* content,
                                                        const MSG* event,LRESULT* result) {
     if(!context || !content || content->size<sizeof(*content) || !event || !result ||
-       content->mode<1 || content->mode>3 || content->visual_type>6) return FALSE;
+       content->mode<1 || content->mode>3 || content->visual_type>settings::kMaximumVisualType) return FALSE;
     auto& self=*static_cast<PlayerWindow*>(context);
     const bool native=content->window==self.lyric_control_ && self.NativeLyricContentActive();
     if(event->hwnd!=content->window || (!native && content->window!=self.lyric_window_ && content->window!=self.window_)) return FALSE;
@@ -610,7 +610,7 @@ HMENU PlayerWindow::CreateSkinPluginContentMenu(const TtpSkinContent& content,st
 void PlayerWindow::HandleSkinPluginContentMenuCommand(UINT command,TtpSkinContent content) {
     const bool plugin=external_skin_ && external_skin_->Handles(content.window);
     if(command>=kCmdVisualFirst && command<=kCmdVisualLast) {
-        content.visual_type=command-kCmdVisualFirst;
+        content.visual_type=AvailableVisualType(static_cast<int>(command-kCmdVisualFirst));
         if(plugin)external_skin_->ContentState(content,true);
         else SetNativeLyricContent(content.mode,content.visual_type);
     } else if(command>=kCmdFullscreenLyrics && command<=kCmdFullscreenAll) {
@@ -677,7 +677,7 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     case TTP_SKIN_LYRICS: ToggleLyricWindow();break;
     case TTP_SKIN_CONTENT_FULLSCREEN:
         if(external_skin_->Handles(lyric_window_) && (value&255)>=1 && (value&255)<=3 &&
-           ((value>>8)&255)<=6 && audio_->State()==audio::PlaybackState::playing) {
+           ((value>>8)&255)<=settings::kMaximumVisualType && audio_->State()==audio::PlaybackState::playing) {
             if(fullscreen_mode_==0) plugin_content_fullscreen_saved_type_=settings_.visual.type;
             SetFullScreenMode(value&255,lyric_window_,(value>>8)&255);
         }
@@ -773,7 +773,7 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
     }
     case TTP_SKIN_PROPERTIES: HandleContextCommand(kCmdFileProperties);break;
     case TTP_SKIN_ALWAYS_ON_TOP: HandleContextCommand(kCmdAlwaysOnTop);break;
-    case TTP_SKIN_VISUAL_NEXT: SetVisualType((settings_.visual.type+1)%7);break;
+    case TTP_SKIN_VISUAL_NEXT: SetVisualType((settings_.visual.type+1)%(AvailableVisualMaximum()+1));break;
     case TTP_SKIN_VISUAL_MENU: {POINT p{};GetCursorPos(&p);ShowVisualContextMenu(p);break;}
     case TTP_SKIN_EQ_BANDS:
         for(int i=0;i<10;++i) SetEqualizerSliderValue(kEqSliderFirstBand+i,std::clamp(value,-12,12),true);

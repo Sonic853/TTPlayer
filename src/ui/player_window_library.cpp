@@ -1938,6 +1938,7 @@ LRESULT PlayerWindow::HandleMediaLibraryDirectoryChange(
         // Signature probing and CUE/archive expansion run in the worker. Do
         // not open a large archive (or a slow share) on the window thread.
         const auto extension = Fold(path.extension().wstring());
+        if(extension==L".osz" && !audio::HasOszSupport())return 0;
         if (extension != L".cue" && !extensions.contains(extension) &&
             extension != L".osz" && ttpcomm::archive_format::Suffix(path.c_str()) ==
                 ttpcomm::archive_format::Kind::unknown) return 0;

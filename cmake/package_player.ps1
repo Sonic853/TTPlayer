@@ -73,18 +73,8 @@ if ($lrcshInfo.repository -cne 'https://github.com/TTPlayerRebuild/TTPlayerLrcsh
 Copy-Item -LiteralPath $lrcsh -Destination (Join-Path $package 'AddIn/ttp_lrcsh.dll')
 "$lrcshHash  AddIn/ttp_lrcsh.dll" | Add-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
 $entries += 'AddIn/ttp_lrcsh.dll'
-$osu = Join-Path $output 'AddIn/ttp_osu.dll'
-$osuInfo = Get-Content -LiteralPath (Join-Path $output 'osu-component.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-$osuHash = (Get-FileHash -LiteralPath $osu -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($osuInfo.repository -cne 'https://github.com/TTPlayerRebuild/TTPlayerOSU' -or
-    $osuInfo.sha256 -cne $osuHash -or $osuInfo.query_export -cne 'ttp_osu_query' -or $osuInfo.required_abi -ne 1 -or
-    $osuInfo.inventories -notcontains '5.1.2600.txt' -or $osuInfo.inventories -notcontains '6.1.7600.txt' -or
-    (Get-Item -LiteralPath $osu).VersionInfo.FileVersion -cne $osuInfo.version) {
-    throw 'Build/download and verify the TTPlayerOSU component before packaging.'
-}
-Copy-Item -LiteralPath $osu -Destination (Join-Path $package 'AddIn/ttp_osu.dll')
-"$osuHash  AddIn/ttp_osu.dll" | Add-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
-$entries += 'AddIn/ttp_osu.dll'
+# OSZ and beat visuals are opt-in. The DLL belongs to ExtraAddIn and its own
+# release, never to the required core package (even when installed locally).
 if (-not $TtpCommDirectory -and (Test-Path -LiteralPath (Join-Path $output 'ttpcomm-component.json'))) {
     $TtpCommDirectory = $output
 }
