@@ -10,6 +10,7 @@
 #include "player_window_internal.h"
 #include "options_buttons.h"
 #include "options_general_tabs.h"
+#include "options_fullscreen_tabs.h"
 #include "osu_visual_client.h"
 #include "hotkey_control.h"
 #include "project_links.h"
@@ -74,13 +75,6 @@ constexpr int kPageSkin = 12;
 constexpr int kPageFullscreen = 13;
 constexpr int kPageAssociation = 14;
 
-void SyncOptionsOsuLogo(HWND dialog,const settings::VisualSettings& visual) {
-    if(!GetDlgItem(dialog,kGeneralOsuLogoChoice))return;
-    SendDlgItemMessageW(dialog,kGeneralOsuLogoChoice,CB_SETCURSEL,std::clamp(visual.osu_logo,0,2),0);
-    SetDlgItemTextW(dialog,kGeneralOsuLogoPath,visual.osu_logo_path.c_str());
-    GeneralOptionsTabs::SetVisible(dialog,kGeneralOsuLogoPath,visual.osu_logo==2);
-    GeneralOptionsTabs::SetVisible(dialog,kGeneralOsuLogoBrowse,visual.osu_logo==2);
-}
 
 
 // /reg has the same sheet chrome, but only logical pages 0 and 14. Keep
@@ -4832,25 +4826,9 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             place(discord, {13, 59, 267, 69}, notice);
             const HWND lyrics = add(WC_BUTTONW, i18n::Literal(L"向 Discord 发送歌词"),
                 kOptionsDiscordLyrics, WS_TABSTOP | BS_AUTOCHECKBOX, {13, 72, 267, 82}, discord);
-            HWND personal_last=lyrics;
-            if(audio::HasOsuLogoSupport()) {
-                const auto label=i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_CHOICE);
-                const HWND caption=add(WC_STATICW,label.c_str(),kGeneralOsuLogoLabel,0,{13,96,111,108},lyrics);
-                const HWND choice=add(WC_COMBOBOXW,L"",kGeneralOsuLogoChoice,
-                    WS_TABSTOP|WS_VSCROLL|CBS_DROPDOWNLIST,{113,92,267,152},caption);
-                for(UINT text:{IDS_OSU_LOGO_TTPLAYER,IDS_OSU_LOGO_OSU,IDS_OSU_LOGO_CUSTOM}) {
-                    const auto value=i18n::ResourceText(GetModuleHandleW(nullptr),text);
-                    SendMessageW(choice,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value.c_str()));
-                }
-                const HWND path=add(WC_EDITW,L"",kGeneralOsuLogoPath,
-                    WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL|ES_READONLY,{13,115,197,129},choice);
-                const auto browse=i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_BROWSE);
-                personal_last=add(WC_BUTTONW,browse.c_str(),kGeneralOsuLogoBrowse,
-                    WS_TABSTOP|BS_PUSHBUTTON,{203,114,267,130},path);
-            }
             const HWND extension = add(WC_BUTTONW, i18n::Literal(L"识别到错误后缀时提示更改"),
                 kOptionsExtensionCorrection, WS_TABSTOP | BS_AUTOCHECKBOX,
-                {13, 122, 267, 132}, personal_last);
+                {13, 122, 267, 132}, lyrics);
             const HWND tray_label = add(WC_STATICW, i18n::Literal(L"最小化到系统栏"),
                 kOptionsMinimizeToTrayLabel, 0, {13, 139, 83, 151}, extension);
             const HWND tray_mode = add(WC_COMBOBOXW, L"", kOptionsMinimizeToTray,
@@ -4902,7 +4880,6 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetChecked(dialog, 2189, value.scroll_title);
         SetChecked(dialog, 2188, value.send_title_to_msn);
         SetDlgItemTextW(dialog, kGeneralPersonalName, settings_.player.personal_name.c_str());
-        SyncOptionsOsuLogo(dialog,settings_.visual);
         SetChecked(dialog, kOptionsDiscordLyrics, value.discord_sync_lyrics);
         SetChecked(dialog, kOptionsExtensionCorrection, value.prompt_extension_correction);
         EnableWindow(GetDlgItem(dialog, kOptionsDiscordLyrics),
@@ -5440,6 +5417,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         EnableWindow(GetDlgItem(dialog, 2232), !unified);
         EnableWindow(GetDlgItem(dialog, 2151), layered);
         InstallButtonBitmap(dialog, 1036, resources, 0x161);
+        detail::FullscreenOptionsTabs::Attach(dialog);
         break;
     }
     case 262: {
@@ -7281,31 +7259,6 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
     case WM_COMMAND: {
         const UINT control = LOWORD(wparam);
         const UINT notification = HIWORD(wparam);
-        if(template_id==250 && GetPropW(dialog,kPageReadyProperty) &&
-           ((control==kGeneralOsuLogoChoice && notification==CBN_SELCHANGE) ||
-            (control==kGeneralOsuLogoBrowse && notification==BN_CLICKED))) {
-            const int kind=control==kGeneralOsuLogoBrowse?2:ComboSelection(dialog,kGeneralOsuLogoChoice);
-            HRESULT result=S_OK;
-            if(kind==2) {
-                ModernOpenFileOptions chooser;
-                chooser.owner=dialog;chooser.initial_path=settings_.visual.osu_logo_path;
-                chooser.title=i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_TITLE);
-                chooser.filters={{i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_FILTER),
-                    L"*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff"}};
-                const bool reuse=control==kGeneralOsuLogoChoice && !settings_.visual.osu_logo_path.empty() &&
-                    SUCCEEDED(SetOsuLogoChoice(2,settings_.visual.osu_logo_path));
-                if(!reuse) {
-                    // A moved/deleted previously selected file must not trap
-                    // the user in a hidden custom-file row.
-                    if(const auto path=ModernOpenFile(chooser))result=SetOsuLogoChoice(2,*path);
-                }
-            } else result=SetOsuLogoChoice(kind,{});
-            if(FAILED(result))MessageBoxW(dialog,
-                i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_ERROR).c_str(),
-                i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_CHOICE).c_str(),MB_OK|MB_ICONERROR);
-            SyncOptionsOsuLogo(dialog,settings_.visual);
-            return TRUE;
-        }
         if (template_id == 256 && notification == STN_CLICKED) {
             if (control == 2087) {
                 HandleLyricCommand(kCmdLyricAssociate);

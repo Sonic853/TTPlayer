@@ -15,10 +15,6 @@ namespace ttplayer::ui::detail {
 inline constexpr int kGeneralPersonalNameLabel = 0xe92d;
 inline constexpr int kGeneralPersonalName = 0xe92e;
 inline constexpr int kGeneralPersonalNameNotice = 0xe92f;
-inline constexpr int kGeneralOsuLogoLabel = 0xe950;
-inline constexpr int kGeneralOsuLogoChoice = 0xe951;
-inline constexpr int kGeneralOsuLogoPath = 0xe952;
-inline constexpr int kGeneralOsuLogoBrowse = 0xe953;
 
 // Keep the original controls and their parent HWND: switching tabs changes
 // visibility, while the existing notification and settings handlers stay intact.
@@ -112,8 +108,7 @@ public:
             MapWindowPoints(nullptr, page, reinterpret_cast<POINT*>(&rect), 2);
             const int id = GetDlgCtrlID(control);
             const bool personal = id == 2188 || id == 0xe913 ||
-                (id >= kGeneralPersonalNameLabel && id <= kGeneralPersonalNameNotice) ||
-                (id >= kGeneralOsuLogoLabel && id <= kGeneralOsuLogoBrowse);
+                (id >= kGeneralPersonalNameLabel && id <= kGeneralPersonalNameNotice);
             const int group = personal ? 1 :
                 id >= kUpdateSourceLabel && id <= kUpdateStatus ? 3 :
                 id >= 0xe900 ? 0 : rect.top >= groups.bottom ? 3 :

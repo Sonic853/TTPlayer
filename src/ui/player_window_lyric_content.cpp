@@ -67,7 +67,10 @@ bool PlayerWindow::HandleNativeLyricContentCommand(UINT command) {
         if(!file_info_write_in_progress_ && !fullscreen_mode_ &&
            audio_->State()==audio::PlaybackState::playing) {
             plugin_content_fullscreen_saved_type_=settings_.visual.type;
-            SetFullScreenMode(settings_.lyric.window_content_mode,lyric_window_,settings_.lyric.window_visual_type);
+            // The content renderer seeds a first entry only. Later entries
+            // restore the independent fullscreen choice, including type 7.
+            SetFullScreenMode(settings_.lyric.window_content_mode,lyric_window_,
+                settings_.fullscreen.last_visual_effect>0?-1:settings_.lyric.window_visual_type);
         }
         return true;
     }

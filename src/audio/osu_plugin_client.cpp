@@ -30,7 +30,7 @@ struct Plugin {
 };
 const Plugin& LoadedPlugin() {static const Plugin plugin;return plugin;}
 const TtpOsuApi& Api() {return LoadedPlugin().api;}
-struct Capabilities {bool archive{},visual{},logo{};};
+struct Capabilities {bool archive{},visual{},logo{},transitions{};};
 const Capabilities& AvailableCapabilities() noexcept {
     static const Capabilities result=[]() noexcept {
         Capabilities value;
@@ -40,6 +40,7 @@ const Capabilities& AvailableCapabilities() noexcept {
             TtpOsuVisualApi api{};
             value.visual=detail::QueryOsuVisualApi(plugin.module,api);
             value.logo=value.visual && api.logo;
+            value.transitions=value.visual && api.transition && api.transition_state;
         } catch(...) {}
         return value;
     }();
@@ -86,6 +87,7 @@ void Check(HRESULT hr){if(FAILED(hr))throw ArchiveError(hr);}
 bool HasOszSupport() noexcept {return AvailableCapabilities().archive;}
 bool HasOsuVisualSupport() noexcept {return AvailableCapabilities().visual;}
 bool HasOsuLogoSupport() noexcept {return AvailableCapabilities().logo;}
+bool HasOsuTransitionSupport() noexcept {return AvailableCapabilities().transitions;}
 bool IsOszArchive(const std::filesystem::path& path) {
     // Routing must survive a missing DLL: never import an OSZ as generic ZIP
     // or offer to rename it merely because the plugin is absent.

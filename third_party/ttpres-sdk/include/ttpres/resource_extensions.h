@@ -7,10 +7,10 @@ namespace ttpres {
 inline constexpr char kSignature[8] = {'T','T','P','R','E','S','1','\0'};
 inline constexpr UINT kRequiredDialogs[] = {4090,4200,4210,4220,4230,5800,5810,5820,5901};
 inline bool IsRequiredString(UINT id) noexcept {
-    return id == 4091 || (id >= 4093 && id <= 4106) || (id >= 4110 && id <= 4158);
+    return id == 4091 || (id >= 4093 && id <= 4106) || (id >= 4110 && id <= 4163);
 }
 inline bool IsExtension(LPCWSTR type, UINT id) noexcept {
-    if (type == RT_STRING) return id >= 4091 && id <= 4158;
+    if (type == RT_STRING) return id >= 4091 && id <= 4163;
     if (type == RT_DIALOG)
         for (const auto dialog : kRequiredDialogs) if (id == dialog) return true;
     return false;
@@ -33,7 +33,7 @@ inline bool HasRequiredExtensions(HMODULE module) noexcept {
         if (!resource || !SizeofResource(module, resource) ||
             !LockResource(LoadResource(module, resource))) return false;
     }
-    for (UINT id = 4091; id <= 4158; ++id) {
+    for (UINT id = 4091; id <= 4163; ++id) {
         if (!IsRequiredString(id)) continue;
         const wchar_t* text{};
         if (LoadStringW(module, id, reinterpret_cast<LPWSTR>(&text), 0) <= 0) return false;

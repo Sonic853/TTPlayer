@@ -173,6 +173,8 @@ struct VisualSettings {
     int osu_bpm{120}; // fallback grid for sources without beatmap timing
     int osu_logo{}; // 0 TTPlayer, 1 osu!, 2 custom image; visual ABI 2
     std::wstring osu_logo_path;
+    bool osu_intro{}; // optional full-screen entrance animation; visual ABI 3
+    bool osu_outro{}; // optional full-screen exit animation; visual ABI 3
     COLORREF spectrum_top_color{skin::DefaultSkinColors().visual.spectrum_top_color};
     COLORREF spectrum_bottom_color{skin::DefaultSkinColors().visual.spectrum_bottom_color};
     COLORREF spectrum_middle_color{skin::DefaultSkinColors().visual.spectrum_middle_color};
@@ -190,6 +192,7 @@ struct VisualSettings {
 // Extensions: 4 album background, 5 pulse, 6 ripple, 7 osu beat scene.
 struct FullScreenSettings {
     int last_mode{3}; // 1 lyrics, 2 visual, 3 lyrics + visual; never the exit state.
+    int last_visual_effect{}; // shared by visual/combined fullscreen; 0 = no history
     int visual_type{1};
     std::array<int, kVisualTypeCount> position_relation{0, 1, 0, 1, 1, 1, 1, 1};
     std::array<int, kVisualTypeCount> lyric_size{2, 2, 2, 2, 10, 10, 10, 10};

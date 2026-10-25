@@ -54,6 +54,7 @@ namespace {
 
 constexpr size_t kAnalysisSamples = 512;
 constexpr uint32_t kMaximumPictureBytes = 64U * 1024U * 1024U;
+constexpr UINT_PTR kOsuExitTimer = 0x6121;
 
 void MarkShellFullscreen(HWND window, bool fullscreen) noexcept {
     if (!window || !IsWindow(window)) return;
@@ -512,7 +513,8 @@ public:
         settings_ = settings;
         settings_.type = AvailableVisualType(settings_.type,full_screen);
         if(settings_.type==7) {
-            osu_visual_.Detach(); // temporary resize/reparent: retain the scene
+            // HWND transitions detach explicitly. The renderer handles size
+            // changes with Reset; changing settings does not need a new GPU.
             osu_visual_.Configure(settings_);
         } else osu_visual_.Release(); // effect ended: release CPU assets and worker too
         settings_.frames_per_second = std::clamp(
@@ -676,6 +678,9 @@ public:
     }
     void DetachOsu() {std::scoped_lock lock(mutex_);osu_visual_.Detach();}
     void ReleaseOsu() {std::scoped_lock lock(mutex_);osu_visual_.Release();}
+    bool BeginOsuExit() {std::scoped_lock lock(mutex_);return settings_.type==7 && osu_visual_.BeginExit();}
+    bool OsuExitComplete() {std::scoped_lock lock(mutex_);return settings_.type!=7 || osu_visual_.ExitComplete();}
+    void CancelOsuTransition() {std::scoped_lock lock(mutex_);osu_visual_.CancelTransition();}
     void Update(const audio::VisualizationSamples& samples) {
         std::scoped_lock lock(mutex_);
         if (width_ <= 0 || height_ <= 0) return;
@@ -1517,7 +1522,17 @@ LRESULT PlayerWindow::HandleVisualMessage(
     case WM_ERASEBKGND:
         return 1;
     case WM_DESTROY:
+        CancelFullScreenExit();
         if(visual_runtime_)visual_runtime_->ReleaseOsu();
+        break;
+    case WM_TIMER:
+        if(wparam==kOsuExitTimer) {
+            if(fullscreen_osu_exit_pending_) {
+                if(!visual_runtime_ || visual_runtime_->OsuExitComplete())LeaveFullScreen();
+                else InvalidateRect(visual_window_,nullptr,FALSE);
+            }
+            return 0;
+        }
         break;
     case WM_PRINTCLIENT:
         if (wparam) PaintVisualControl(reinterpret_cast<HDC>(wparam));
@@ -1702,7 +1717,7 @@ void PlayerWindow::UpdateVisualWindowLayout() {
         GetClientRect(visual_window_, &client);
         const int width = std::max<LONG>(0, client.right - client.left);
         const int height = std::max<LONG>(0, client.bottom - client.top);
-        if (fullscreen_mode_ == 3 && settings_.visual.type == 4) {
+        if (settings_.visual.type == 4) {
             std::filesystem::path source;
             audio::AudioMetadata metadata;
             const auto state = audio_->State();
@@ -1765,7 +1780,7 @@ void PlayerWindow::UpdateVisualFrame() {
     if (!visual_runtime_ || !visual_window_) return;
     const auto state = audio_->State();
     if (state == audio::PlaybackState::playing ||
-        (state == audio::PlaybackState::paused && ((fullscreen_mode_ == 3 &&
+        (state == audio::PlaybackState::paused && ((fullscreen_visual_detached_ &&
          settings_.visual.type == 4) || settings_.visual.type==7))) {
         std::filesystem::path source;
         if (const auto* track = PlaybackTrackForUi()) source = track->path;
@@ -1946,7 +1961,7 @@ void PlayerWindow::PaintVisualControl(HDC dc) const {
     if (fullscreen_visual_detached_) {
         // Album backgrounds already publish a complete composited frame.
         // Erasing the visible DC first would reintroduce cover flicker.
-        if (!visual_runtime_ || fullscreen_mode_ != 3 || settings_.visual.type != 4)
+        if (!visual_runtime_ || settings_.visual.type != 4)
             FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
         if (visual_runtime_) visual_runtime_->Paint(dc, client);
         return;
@@ -1975,20 +1990,24 @@ int PlayerWindow::WindowedVisualType() const {
 }
 
 void PlayerWindow::SetVisualType(int type) {
+    CancelFullScreenExit();
     type=AvailableVisualType(type,fullscreen_mode_!=0);
     if (fullscreen_mode_ == 1 && type >= 1 && type <= settings::kMaximumVisualType) {
         // Choosing an effect in the fullscreen lyric menu must display it,
         // not change a hidden visual or clamp album art back to dream.
         // Publish the requested type before layout/render reconfiguration;
         // this is an in-session mode change, preserving monitor/restore state.
-        settings_.visual.type = type;
-        SetFullScreenMode(3, lyric_control_);
+        SetFullScreenMode(3, lyric_control_,type);
         return;
     }
     settings_.visual.type = fullscreen_mode_ != 0
-        ? ((type == 0 || (type == 4 && fullscreen_mode_ != 3)) ? 1
+        ? (type == 0 ? 1
             : std::clamp(type, 1, settings::kMaximumVisualType))
         : std::clamp(type, 0, settings::kMaximumVisualType);
+    if(fullscreen_mode_!=0) {
+        settings_.fullscreen.last_visual_effect=settings_.visual.type;
+        window_state_saved_=false;
+    }
     if (fullscreen_mode_ == 3) UpdateFullScreenLayout();
     UpdateVisualWindowLayout();
     UpdateVisualFrame();
@@ -2290,9 +2309,22 @@ void PlayerWindow::UpdateFullScreenLayout() {
 void PlayerWindow::SetFullScreenMode(int mode, HWND origin, int visual_type_override) {
     mode = std::clamp(mode, 0, 3);
     if (mode == 0) {
+        if(fullscreen_osu_exit_pending_)return;
+        // Explicit exit waits for the optional visual departure. Dialogs,
+        // shutdown and deactivation still use immediate LeaveFullScreen().
+        if(fullscreen_mode_!=0 && fullscreen_visual_detached_ && settings_.visual.type==7 &&
+           settings_.visual.osu_outro && visual_window_ && IsWindowVisible(visual_window_) &&
+           visual_runtime_ && visual_runtime_->BeginOsuExit()) {
+            if(SetTimer(visual_window_,kOsuExitTimer,16,nullptr)) {
+                fullscreen_osu_exit_pending_=true;
+                InvalidateRect(visual_window_,nullptr,FALSE);
+                return;
+            }
+        }
         LeaveFullScreen();
         return;
     }
+    CancelFullScreenExit();
     const bool entering = fullscreen_mode_ == 0;
     if (entering &&
         audio_->State() != audio::PlaybackState::playing) return;
@@ -2312,11 +2344,22 @@ void PlayerWindow::SetFullScreenMode(int mode, HWND origin, int visual_type_over
         if (lyric_editor_) LeaveLyricEditor(true);
         if (lyric_window_) ShowWindow(lyric_window_, SW_HIDE);
     }
-    if(visual_type_override>=0 && visual_type_override<=settings::kMaximumVisualType)
-        settings_.visual.type=AvailableVisualType(visual_type_override,true);
-    else if ((mode == 2 || mode == 3) &&
-        (settings_.visual.type == 0 || (mode == 2 && settings_.visual.type == 4)))
-        settings_.visual.type = 1;
+    if(mode==2 || mode==3) {
+        const bool explicit_type=visual_type_override>=0 &&
+            visual_type_override<=settings::kMaximumVisualType;
+        // FullScreen/VisualType selects the layout profile being edited; it
+        // is not the effect to play. Keep the last full-screen effect apart
+        // from Visual/Type, which can be restored/clamped on leaving type 7.
+        int requested=explicit_type?visual_type_override:
+            (settings_.fullscreen.last_visual_effect>0?
+                settings_.fullscreen.last_visual_effect:settings_.visual.type);
+        requested=std::clamp(requested,1,settings::kMaximumVisualType);
+        settings_.fullscreen.last_visual_effect=requested;
+        window_state_saved_=false;
+        settings_.visual.type=AvailableVisualType(requested,true);
+        // A missing optional DLL may fall back temporarily, without erasing
+        // the remembered preference. Album backgrounds work in both modes.
+    }
     fullscreen_mode_ = mode;
     settings_.fullscreen.last_mode = mode;
     if (entering) {
@@ -2340,7 +2383,15 @@ void PlayerWindow::SetFullScreenMode(int mode, HWND origin, int visual_type_over
         RegisterHotKey(window_, kFullscreenEscapeHotkey, 0, VK_ESCAPE);
 }
 
+void PlayerWindow::CancelFullScreenExit() {
+    if(!fullscreen_osu_exit_pending_)return;
+    fullscreen_osu_exit_pending_=false;
+    if(visual_window_)KillTimer(visual_window_,kOsuExitTimer);
+    if(visual_runtime_)visual_runtime_->CancelOsuTransition();
+}
+
 void PlayerWindow::LeaveFullScreen() {
+    CancelFullScreenExit();
     if (fullscreen_mode_ == 0 && !fullscreen_visual_detached_ &&
         !fullscreen_lyric_detached_) return;
     if(settings_.visual.type==7)settings_.visual.type=WindowedVisualType();
@@ -2413,7 +2464,7 @@ HMENU PlayerWindow::CreateVisualContextMenu(bool detached,int mode,int type) {
         // command deletions produce the compact seven-item menu and it uses
         // the saved main window directly as TrackPopupMenu's command owner.
         DeleteMenu(popup, 3, MF_BYPOSITION);
-        if (mode == 3) {
+        if (mode == 2 || mode == 3) {
             const auto label = FullScreenMenuText(IDS_FULLSCREEN_ALBUM);
             ModifyMenuW(popup, kCmdVisualCover, MF_BYCOMMAND | MF_STRING,
                         kCmdVisualCover, label.c_str());

@@ -436,6 +436,8 @@ void ApplyVisualAttributes(IXMLDOMNode* node, VisualSettings& visual,
     visual.osu_logo = std::clamp(IntAttr(node, L"OsuLogo", visual.osu_logo), 0, 2);
     if (Attribute(node, L"OsuLogoPath").vt != VT_EMPTY)
         visual.osu_logo_path = StringAttr(node, L"OsuLogoPath");
+    visual.osu_intro = IntAttr(node, L"OsuIntro", visual.osu_intro) != 0;
+    visual.osu_outro = IntAttr(node, L"OsuOutro", visual.osu_outro) != 0;
     LOGFONTW font = visual.font;
     if (LogFontAttr(node, L"Font", font)) {
         visual.font = font;
@@ -1103,6 +1105,8 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
     if (auto node=SelectOwned(doc,L"/ttplayer/FullScreen")) {
         auto* const n=node.Get();
         s.fullscreen.last_mode=std::clamp(IntAttr(n,L"LastMode",3),1,3);
+        s.fullscreen.last_visual_effect=std::clamp(
+            IntAttr(n,L"LastVisualEffect",0),0,kMaximumVisualType);
         s.fullscreen.visual_type=std::clamp(
             IntAttr(n,L"VisualType",s.fullscreen.visual_type),0,kMaximumVisualType);
         s.fullscreen.album_fallback_image=StringAttr(n,L"AlbumFallbackImage");
@@ -1699,6 +1703,8 @@ bool SaveSkinVisualProfile(const std::filesystem::path& path,
         SetAttribute(element,L"OsuBpm",std::clamp(visual.osu_bpm,20,400));
         SetAttribute(element,L"OsuLogo",std::clamp(visual.osu_logo,0,2));
         SetAttribute(element,L"OsuLogoPath",visual.osu_logo_path);
+        SetAttribute(element,L"OsuIntro",visual.osu_intro ? 1 : 0);
+        SetAttribute(element,L"OsuOutro",visual.osu_outro ? 1 : 0);
         if(visual.font_valid)
             SetAttribute(element,L"Font",LogFontText(visual.font));
     }
@@ -1933,6 +1939,8 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"OsuBpm",std::clamp(settings.visual.osu_bpm,20,400));
         SetAttribute(element,L"OsuLogo",std::clamp(settings.visual.osu_logo,0,2));
         SetAttribute(element,L"OsuLogoPath",settings.visual.osu_logo_path);
+        SetAttribute(element,L"OsuIntro",settings.visual.osu_intro ? 1 : 0);
+        SetAttribute(element,L"OsuOutro",settings.visual.osu_outro ? 1 : 0);
         SetAttribute(element,L"Type",std::clamp(settings.visual.type,0,kMaximumVisualType));
         SetAttribute(element,L"FramesPerSec",
                      std::clamp(settings.visual.frames_per_second,0,100));
@@ -1942,6 +1950,8 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
     if(auto* element=EnsureElement(document,L"FullScreen")) {
         auto element_owner=AdoptCom(element);
         SetAttribute(element,L"LastMode",std::clamp(settings.fullscreen.last_mode,1,3));
+        SetAttribute(element,L"LastVisualEffect",
+                     std::clamp(settings.fullscreen.last_visual_effect,0,kMaximumVisualType));
         SetAttribute(element,L"VisualType",
                      std::clamp(settings.fullscreen.visual_type,0,kMaximumVisualType));
         SetAttribute(element,L"AlbumFallbackImage",settings.fullscreen.album_fallback_image);

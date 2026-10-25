@@ -3,12 +3,19 @@
 Source: https://github.com/TTPlayerRebuild/TTPlayerOSU
 
 `include/ttp_osu/abi.h` is copied from the independent plugin's ABI 1 header.
-`include/ttp_osu/visual.h` defines the independent visual ABI 2, exported as
+`include/ttp_osu/visual.h` defines the independent visual ABI 3, exported as
 `ttp_osu_query_visual` at ordinal 2. OSZ ordinal 1 remains unchanged.
 Keep the two headers identical. The player dynamically loads
 `AddIn/ttp_osu.dll` and queries the versioned function table.
 ABI 2 appends the logo setter. ABI 1 queries still write only the old prefix;
 older visual plugins retain fullscreen support without the logo selector.
+ABI 3 appends `transition` and `transition_state`. Query 3, then 2, then 1;
+check the returned size before reading appended callbacks. The original welcome
+and departure use the same steady millisecond clock as `update`, independent of
+track position. These options default off and require both callbacks. The host
+keeps the full-screen surface alive until departure completes, then releases
+the entire session on its window thread. Forced closure must still clean up
+immediately. No animation code, welcome image or game audio lives in the host.
 
 The plugin receives an **OSZ archive path** and orchestrates enumeration,
 metadata reads, audio selection and per-track background selection. Host

@@ -3567,8 +3567,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             } else {
                 SetVisualType(fullscreen_mode_ != 0
                     ? (settings_.visual.type >= AvailableVisualMaximum(true) ? 1
-                        : (settings_.visual.type == 3 && fullscreen_mode_ != 3 ? 5
-                           : settings_.visual.type + 1))
+                        : settings_.visual.type + 1)
                     : (settings_.visual.type + 1) % (AvailableVisualMaximum()+1));
             }
             return 0;

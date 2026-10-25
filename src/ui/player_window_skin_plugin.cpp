@@ -618,7 +618,8 @@ void PlayerWindow::HandleSkinPluginContentMenuCommand(UINT command,TtpSkinConten
             (command-kCmdFullscreenLyrics+1)|(content.visual_type<<8));
         else if(!file_info_write_in_progress_ && audio_->State()==audio::PlaybackState::playing) {
             if(!fullscreen_mode_)plugin_content_fullscreen_saved_type_=settings_.visual.type;
-            SetFullScreenMode(command-kCmdFullscreenLyrics+1,content.window,content.visual_type);
+            SetFullScreenMode(command-kCmdFullscreenLyrics+1,content.window,
+                settings_.fullscreen.last_visual_effect>0?-1:content.visual_type);
         }
     } else if(!HandleLyricCommand(command)) HandleContextCommand(command,content.window);
 }
@@ -679,7 +680,8 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
         if(external_skin_->Handles(lyric_window_) && (value&255)>=1 && (value&255)<=3 &&
            ((value>>8)&255)<=settings::kMaximumVisualType && audio_->State()==audio::PlaybackState::playing) {
             if(fullscreen_mode_==0) plugin_content_fullscreen_saved_type_=settings_.visual.type;
-            SetFullScreenMode(value&255,lyric_window_,(value>>8)&255);
+            SetFullScreenMode(value&255,lyric_window_,
+                settings_.fullscreen.last_visual_effect>0?-1:(value>>8)&255);
         }
         break;
     case TTP_SKIN_CONTENT_MENU: ShowSkinPluginContentMenu(value==1);break;

@@ -48,7 +48,7 @@ def audit(path, manifest):
     for kind, name, language in expected:
         if kind == 5:
             decode_dialog(actual[(kind, name, language)])
-    required_strings = {4091} | set(range(4093, 4107)) | set(range(4110, 4159))
+    required_strings = {4091} | set(range(4093, 4107)) | set(range(4110, 4164))
     for block in range(256, 261):
         for index, text in enumerate(decode_strings(actual[(6, block, 2052)])['strings']):
             if (block - 1) * 16 + index in required_strings and not text:

@@ -11,11 +11,15 @@
 #include <commctrl.h>
 
 namespace ttplayer::ui::detail {
+inline constexpr int kVisualOsuLogoLabel = 0xe950;
+inline constexpr int kVisualOsuLogoChoice = 0xe951;
+inline constexpr int kVisualOsuLogoPath = 0xe952;
+inline constexpr int kVisualOsuLogoBrowse = 0xe953;
 
 // Preserve the resource controls, their IDs and their parent notifications.
 // Effect groups become pages; FPS/type/text/profile stay common.
 class VisualOptionsTabs {
-    struct Control { HWND window; RECT bounds; int height, group; };
+    struct Control { HWND window; RECT bounds; int height, group; bool visible{true}; };
     HWND page_{}, tab_{};
     std::vector<Control> controls_;
     static constexpr UINT_PTR kSubclass = 0x54545654;
@@ -52,7 +56,7 @@ class VisualOptionsTabs {
         for (const auto& control : controls_) {
             if (group != control.group && (focus == control.window || IsChild(control.window, focus)))
                 SetFocus(tab_);
-            ShowWindow(control.window, group == control.group ? SW_SHOW : SW_HIDE);
+            ShowWindow(control.window, group == control.group && control.visible ? SW_SHOW : SW_HIDE);
         }
         RedrawWindow(page_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
@@ -164,20 +168,40 @@ public:
         const UINT flag_labels[]{IDS_VISUAL_OSU_SPECTRUM, IDS_VISUAL_OSU_STARS,
             IDS_VISUAL_OSU_FLASHES, IDS_VISUAL_OSU_PARALLAX, IDS_VISUAL_OSU_LOGO};
         for (int field = 0; field < 5; ++field) {
-            const LONG x = 13 + (field % 3) * 83;
-            const LONG y = 80 + (field / 3) * 17;
+            const LONG x = 13 + (field % 4) * 62;
+            const LONG y = 80 + (field / 4) * 15;
             add_osu_control(IDC_VISUAL_OSU_SPECTRUM + field, flag_labels[field],
-                WC_BUTTONW, WS_TABSTOP | BS_AUTOCHECKBOX, {x, y, x + 80, y + 13});
+                WC_BUTTONW, WS_TABSTOP | BS_AUTOCHECKBOX, {x, y, x + 59, y + 13});
+        }
+        if(audio::HasOsuTransitionSupport()) {
+            add_osu_control(IDC_VISUAL_OSU_INTRO,IDS_VISUAL_OSU_INTRO,
+                WC_BUTTONW,WS_TABSTOP|BS_AUTOCHECKBOX,{75,95,134,108});
+            add_osu_control(IDC_VISUAL_OSU_OUTRO,IDS_VISUAL_OSU_OUTRO,
+                WC_BUTTONW,WS_TABSTOP|BS_AUTOCHECKBOX,{137,95,196,108});
         }
         add_osu_control(IDC_VISUAL_OSU_BPM_LABEL, IDS_VISUAL_OSU_BPM,
-            WC_STATICW, SS_LEFT, {13, 116, 161, 129});
+            WC_STATICW, SS_LEFT, {13, 113, 156, 126});
         const HWND bpm = add_osu_control(IDC_VISUAL_OSU_BPM, 0, WC_EDITW,
-            WS_TABSTOP | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, {166, 113, 209, 128});
+            WS_TABSTOP | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, {158, 110, 193, 124});
         if (bpm) SendMessageW(bpm, EM_SETLIMITTEXT, 3, 0);
         add_osu_control(IDC_VISUAL_OSU_ACCENT, IDS_VISUAL_BASE_COLOR,
-            WC_BUTTONW, WS_TABSTOP | BS_PUSHBUTTON, {13, 136, 88, 150});
+            WC_BUTTONW, WS_TABSTOP | BS_PUSHBUTTON, {199, 95, 258, 109});
         add_osu_control(IDC_VISUAL_OSU_BACKGROUND, IDS_VISUAL_OSU_BACKGROUND,
-            WC_BUTTONW, WS_TABSTOP | BS_PUSHBUTTON, {96, 136, 171, 150});
+            WC_BUTTONW, WS_TABSTOP | BS_PUSHBUTTON, {201, 110, 258, 124});
+        if(audio::HasOsuLogoSupport()) {
+            add_osu_control(kVisualOsuLogoLabel,IDS_OSU_LOGO_CHOICE,
+                WC_STATICW,SS_LEFT,{13,131,73,144});
+            const HWND choice=add_osu_control(kVisualOsuLogoChoice,0,WC_COMBOBOXW,
+                WS_TABSTOP|WS_VSCROLL|CBS_DROPDOWNLIST,{75,127,258,187});
+            for(UINT text:{IDS_OSU_LOGO_TTPLAYER,IDS_OSU_LOGO_OSU,IDS_OSU_LOGO_CUSTOM}) {
+                const auto label=i18n::ResourceText(GetModuleHandleW(nullptr),text);
+                SendMessageW(choice,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));
+            }
+            add_osu_control(kVisualOsuLogoPath,0,WC_EDITW,
+                WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL|ES_READONLY,{13,145,190,159});
+            add_osu_control(kVisualOsuLogoBrowse,IDS_OSU_LOGO_BROWSE,WC_BUTTONW,
+                WS_TABSTOP|BS_PUSHBUTTON,{196,144,258,160});
+        }
         }
         for (int group = 0; group < (osu_available?5:4); ++group) {
             TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = captions[group].data();
@@ -187,6 +211,16 @@ public:
         self->Select(0);
     }
 
+    static void SetVisible(HWND page,int id,bool visible) {
+        DWORD_PTR data{};
+        if(!GetWindowSubclass(page,PageProc,kSubclass,&data))return;
+        auto* self=reinterpret_cast<VisualOptionsTabs*>(data);
+        for(auto& control:self->controls_)if(GetDlgCtrlID(control.window)==id) {
+            control.visible=visible;
+            ShowWindow(control.window,visible && TabCtrl_GetCurSel(self->tab_)==control.group?SW_SHOW:SW_HIDE);
+            return;
+        }
+    }
     static void SelectForType(HWND page, int type) {
         DWORD_PTR data{};
         if (GetWindowSubclass(page, PageProc, kSubclass, &data))

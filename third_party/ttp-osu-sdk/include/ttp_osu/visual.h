@@ -6,7 +6,7 @@
 
 // Independent of OSZ ABI 1. Caller initializes size; borrowed inputs are copied
 // before return. No exceptions or allocator ownership cross the DLL boundary.
-#define TTP_OSU_VISUAL_ABI 2u
+#define TTP_OSU_VISUAL_ABI 3u
 #define TTP_OSU_VISUAL_ENTRY "ttp_osu_query_visual"
 #pragma pack(push, 8)
 enum TtpOsuVisualFlags {
@@ -40,6 +40,9 @@ typedef struct TtpOsuVisualStats {
     float logo_scale, left_flash, right_flash;
     uint64_t revision;
 } TtpOsuVisualStats;
+typedef struct TtpOsuVisualTransitionState {
+    uint32_t size, phase, complete, duration_ms;
+} TtpOsuVisualTransitionState;
 typedef struct TtpOsuVisualApi {
     uint32_t size, abi;
     HRESULT (WINAPI* create)(void**);
@@ -62,7 +65,16 @@ typedef struct TtpOsuVisualApi {
     // Built-ins require null; custom input is copied before return. Failure
     // preserves the current logo. Aspect ratio is retained for custom images.
     HRESULT (WINAPI* logo)(void*, uint32_t, const TtpOsuVisualImage*);
+    // ABI 3: 0 cancels, 1 starts the original welcome, 2 starts departure.
+    // now_ms uses the same steady millisecond clock as update(), independent
+    // of audio position and playback state. Repeating an active phase does not
+    // restart it. Departure may interrupt welcome; its final frame stays black.
+    HRESULT (WINAPI* transition)(void*, uint32_t, uint64_t now_ms);
+    // Advancing this clock also permits transitions while audio is stopped.
+    // Completed welcome reports phase 0; completed departure remains phase 2.
+    HRESULT (WINAPI* transition_state)(void*, uint64_t now_ms, TtpOsuVisualTransitionState*);
 } TtpOsuVisualApi;
 #define TTP_OSU_VISUAL_ABI1_SIZE ((uint32_t)offsetof(TtpOsuVisualApi, logo))
+#define TTP_OSU_VISUAL_ABI2_SIZE ((uint32_t)offsetof(TtpOsuVisualApi, transition))
 #pragma pack(pop)
 typedef HRESULT (WINAPI* TtpOsuQueryVisual)(uint32_t, TtpOsuVisualApi*);

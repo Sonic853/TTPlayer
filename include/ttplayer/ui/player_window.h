@@ -419,6 +419,7 @@ private:
     void DetachLyricControl(const RECT& target, HWND insert_after);
     void RestoreLyricControl();
     void LeaveFullScreen();
+    void CancelFullScreenExit();
     void ToggleMiniMode();
     void RearrangeWindows();
     bool ResetPluginWindowLayout();
@@ -1063,6 +1064,7 @@ private:
     std::atomic_bool visual_worker_enabled_{};
     std::atomic_bool visual_plugin_embedded_{};
     int fullscreen_mode_{}; // 0 normal, 1 lyric, 2 visual, 3 lyric+visual
+    bool fullscreen_osu_exit_pending_{};
     std::wstring fullscreen_monitor_device_; // active display, survives mode changes
     RECT fullscreen_monitor_rect_{}; // nearest-display fallback after unplugging
     std::vector<MONITORINFOEXW> fullscreen_menu_monitors_;

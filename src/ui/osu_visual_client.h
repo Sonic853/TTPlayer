@@ -22,6 +22,9 @@ public:
     void Update(const audio::ExtendedVisualizationSamples&, const audio::PlaybackClockSnapshot&, HWND, float volume);
     void Paint(HDC, const RECT&, bool gpu);
     void Detach();
+    bool BeginExit();
+    bool ExitComplete();
+    void CancelTransition();
     // End a visual session on the UI/device thread. Caller serializes adapter
     // access; joins asset I/O before destroying CPU/GPU state and DLL references.
     void Release();

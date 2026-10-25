@@ -14,6 +14,12 @@
 #include <objbase.h>
 
 namespace ttplayer::ui::detail {
+namespace {
+uint64_t VisualNowMs() noexcept {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+}
 HRESULT LoadOsuLogoImage(const std::filesystem::path& path,CoverImage& output) noexcept {
     output={};
     try {
@@ -55,6 +61,7 @@ struct OsuVisualClient::Impl {
     HWND pointer_window{};
     RECT pointer_bounds{};
     bool pointer_override{};
+    bool configured{};
 
     ~Impl() {
         worker.request_stop();
@@ -163,6 +170,17 @@ void OsuVisualClient::Configure(const settings::VisualSettings& settings) {
     const TtpOsuVisualOptions options{sizeof(options),static_cast<uint32_t>(settings.osu_flags),
         0x5454504fU,settings.osu_accent,settings.osu_background,static_cast<double>(settings.osu_bpm)};
     impl_->api.configure(impl_->instance,&options);
+    if(impl_->api.transition && impl_->api.transition_state) {
+        if(!impl_->configured && settings.osu_intro)
+            impl_->api.transition(impl_->instance,1,VisualNowMs());
+        else if(!settings.osu_intro) {
+            TtpOsuVisualTransitionState state{sizeof(state)};
+            if(SUCCEEDED(impl_->api.transition_state(impl_->instance,VisualNowMs(),&state)) && state.phase==1)
+                impl_->api.transition(impl_->instance,0,VisualNowMs());
+        }
+    }
+    // Resize, track changes and settings updates must not replay welcome.
+    impl_->configured=true;
     const int kind=std::clamp(settings.osu_logo,0,2);
     WIN32_FILE_ATTRIBUTE_DATA attributes{};
     uint64_t stamp{};
@@ -200,8 +218,7 @@ void OsuVisualClient::Update(const audio::ExtendedVisualizationSamples& samples,
     if(!impl_->instance)return;
     TtpOsuVisualFrame frame{};frame.size=sizeof(frame);
     frame.playback=static_cast<uint32_t>(clock.state);
-    frame.now_ms=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count());
+    frame.now_ms=VisualNowMs();
     frame.position_ms=static_cast<double>(clock.position.count());
     frame.timeline=clock.timeline_revision;frame.revision=samples.revision;
     frame.sample_rate=samples.sample_rate;
@@ -247,6 +264,23 @@ void OsuVisualClient::Paint(HDC dc,const RECT& bounds,bool gpu) {
 void OsuVisualClient::Detach() {
     std::scoped_lock lock(impl_->mutex);
     if(impl_->instance)impl_->api.detach(impl_->instance);
+}
+bool OsuVisualClient::BeginExit() {
+    std::scoped_lock lock(impl_->mutex);
+    return impl_->instance && impl_->api.transition && impl_->api.transition_state &&
+        SUCCEEDED(impl_->api.transition(impl_->instance,2,VisualNowMs()));
+}
+bool OsuVisualClient::ExitComplete() {
+    std::scoped_lock lock(impl_->mutex);
+    if(!impl_->instance || !impl_->api.transition_state)return true;
+    TtpOsuVisualTransitionState state{sizeof(state)};
+    return FAILED(impl_->api.transition_state(impl_->instance,VisualNowMs(),&state)) ||
+        state.phase!=2 || state.complete!=0;
+}
+void OsuVisualClient::CancelTransition() {
+    std::scoped_lock lock(impl_->mutex);
+    if(impl_->instance && impl_->api.transition)
+        impl_->api.transition(impl_->instance,0,VisualNowMs());
 }
 void OsuVisualClient::Release() {
     if(!impl_->attempted)return;

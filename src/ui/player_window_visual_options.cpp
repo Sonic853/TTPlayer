@@ -234,6 +234,8 @@ bool LoadVisualProfile(const std::filesystem::path& path,
         visual.osu_logo = std::clamp(integer, 0, 2);
         visual.osu_logo_path = XmlAttribute(node, L"OsuLogoPath");
     }
+    if (XmlInteger(node, L"OsuIntro", integer)) visual.osu_intro = integer != 0;
+    if (XmlInteger(node, L"OsuOutro", integer)) visual.osu_outro = integer != 0;
     LOGFONTW font = visual.font;
     if (XmlFont(node, font)) {
         visual.font = font;
@@ -308,6 +310,8 @@ bool SaveVisualProfile(const std::filesystem::path& path,
     SetXmlAttribute(element, L"OsuBpm", std::clamp(visual.osu_bpm, 20, 400));
     SetXmlAttribute(element, L"OsuLogo", std::clamp(visual.osu_logo, 0, 2));
     SetXmlAttribute(element, L"OsuLogoPath", visual.osu_logo_path);
+    SetXmlAttribute(element, L"OsuIntro", visual.osu_intro ? 1 : 0);
+    SetXmlAttribute(element, L"OsuOutro", visual.osu_outro ? 1 : 0);
     if (visual.font_valid)
         SetXmlAttribute(element, L"Font", FontText(visual.font));
 
@@ -338,6 +342,14 @@ void SetFramesText(HWND dialog, HMODULE resources, int frames) {
     wchar_t text[64]{};
     swprintf_s(text, format.c_str(), frames);
     SetDlgItemTextW(dialog, kVisualFramesText, text);
+}
+
+void SyncOptionsOsuLogo(HWND dialog,const settings::VisualSettings& visual) {
+    if(!GetDlgItem(dialog,kVisualOsuLogoChoice))return;
+    SendDlgItemMessageW(dialog,kVisualOsuLogoChoice,CB_SETCURSEL,std::clamp(visual.osu_logo,0,2),0);
+    SetDlgItemTextW(dialog,kVisualOsuLogoPath,visual.osu_logo_path.c_str());
+    VisualOptionsTabs::SetVisible(dialog,kVisualOsuLogoPath,visual.osu_logo==2);
+    VisualOptionsTabs::SetVisible(dialog,kVisualOsuLogoBrowse,visual.osu_logo==2);
 }
 
 void SyncVisualPage(HWND dialog, HMODULE resources,
@@ -391,6 +403,9 @@ void SyncVisualPage(HWND dialog, HMODULE resources,
         CheckDlgButton(dialog, IDC_VISUAL_OSU_SPECTRUM + bit,
             (visual.osu_flags & (1 << bit)) ? BST_CHECKED : BST_UNCHECKED);
     SetDlgItemInt(dialog, IDC_VISUAL_OSU_BPM, visual.osu_bpm, FALSE);
+    CheckDlgButton(dialog, IDC_VISUAL_OSU_INTRO, visual.osu_intro ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(dialog, IDC_VISUAL_OSU_OUTRO, visual.osu_outro ? BST_CHECKED : BST_UNCHECKED);
+    SyncOptionsOsuLogo(dialog,visual);
     VisualOptionsTabs::SelectForType(dialog, AvailableVisualType(visual.type));
     for (const UINT control : kColorControls) {
         const HWND button = GetDlgItem(dialog, static_cast<int>(control));
@@ -574,6 +589,39 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
     case WM_COMMAND: {
         const UINT control = LOWORD(wparam);
         const UINT notification = HIWORD(wparam);
+        if (audio::HasOsuTransitionSupport() && notification == BN_CLICKED &&
+            (control == IDC_VISUAL_OSU_INTRO || control == IDC_VISUAL_OSU_OUTRO)) {
+            (control == IDC_VISUAL_OSU_INTRO ? settings_.visual.osu_intro : settings_.visual.osu_outro) =
+                IsDlgButtonChecked(dialog, control) == BST_CHECKED;
+            refresh();
+            return TRUE;
+        }
+        if(audio::HasOsuLogoSupport() &&
+           ((control==kVisualOsuLogoChoice && notification==CBN_SELCHANGE) ||
+            (control==kVisualOsuLogoBrowse && notification==BN_CLICKED))) {
+            const int kind=control==kVisualOsuLogoBrowse?2:static_cast<int>(
+                SendDlgItemMessageW(dialog,kVisualOsuLogoChoice,CB_GETCURSEL,0,0));
+            HRESULT result=S_OK;
+            if(kind==2) {
+                ModernOpenFileOptions chooser;
+                chooser.owner=dialog;chooser.initial_path=settings_.visual.osu_logo_path;
+                chooser.title=i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_TITLE);
+                chooser.filters={{i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_FILTER),
+                    L"*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff"}};
+                const bool reuse=control==kVisualOsuLogoChoice && !settings_.visual.osu_logo_path.empty() &&
+                    SUCCEEDED(SetOsuLogoChoice(2,settings_.visual.osu_logo_path));
+                if(!reuse) {
+                    // A moved/deleted previously selected file must not trap
+                    // the user in a hidden custom-file row.
+                    if(const auto path=ModernOpenFile(chooser))result=SetOsuLogoChoice(2,*path);
+                }
+            } else result=SetOsuLogoChoice(kind,{});
+            if(FAILED(result))MessageBoxW(dialog,
+                i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_ERROR).c_str(),
+                i18n::ResourceText(GetModuleHandleW(nullptr),IDS_OSU_LOGO_CHOICE).c_str(),MB_OK|MB_ICONERROR);
+            SyncOptionsOsuLogo(dialog,settings_.visual);
+            return TRUE;
+        }
         if (control >= IDC_VISUAL_OSU_SPECTRUM && control <= IDC_VISUAL_OSU_LOGO &&
             notification == BN_CLICKED) {
             const int bit = 1 << (control - IDC_VISUAL_OSU_SPECTRUM);
