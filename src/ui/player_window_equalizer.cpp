@@ -719,24 +719,27 @@ void PlayerWindow::PaintEqualizer(HDC dc) const {
                      0, skin_->TransparentColor());
     {
         const skin::SkinLayerClip clip(canvas, layers, &layout.close);
-        DrawAnimatedSkinFrame(canvas, layout.close, EqualizerElementBounds(layout.close),
-                         button_state(kEqHitClose), equalizer_window_);
+        if (!skin::IsPngSkinButton(layout.close))
+            DrawAnimatedSkinFrame(canvas, layout.close, EqualizerElementBounds(layout.close),
+                button_state(kEqHitClose), equalizer_window_);
     }
     {
         const skin::SkinLayerClip clip(canvas, layers, &layout.enabled);
-        DrawAnimatedSkinFrame(canvas, layout.enabled, EqualizerElementBounds(layout.enabled),
-                         button_state(kEqHitEnabled, settings_.equalizer.profile != -2),
-                         equalizer_window_);
+        if (!skin::IsPngSkinButton(layout.enabled))
+            DrawAnimatedSkinFrame(canvas, layout.enabled, EqualizerElementBounds(layout.enabled),
+                button_state(kEqHitEnabled, settings_.equalizer.profile != -2), equalizer_window_);
     }
     {
         const skin::SkinLayerClip clip(canvas, layers, &layout.profile);
-        DrawAnimatedSkinFrame(canvas, layout.profile, EqualizerElementBounds(layout.profile),
-                         button_state(kEqHitProfile), equalizer_window_);
+        if (!skin::IsPngSkinButton(layout.profile))
+            DrawAnimatedSkinFrame(canvas, layout.profile, EqualizerElementBounds(layout.profile),
+                button_state(kEqHitProfile), equalizer_window_);
     }
     {
         const skin::SkinLayerClip clip(canvas, layers, &layout.reset);
-        DrawAnimatedSkinFrame(canvas, layout.reset, EqualizerElementBounds(layout.reset),
-                         button_state(kEqHitReset), equalizer_window_);
+        if (!skin::IsPngSkinButton(layout.reset))
+            DrawAnimatedSkinFrame(canvas, layout.reset, EqualizerElementBounds(layout.reset),
+                button_state(kEqHitReset), equalizer_window_);
     }
 
     const auto draw_slider = [&](int slider, const skin::SkinElement& element) {
@@ -799,6 +802,14 @@ void PlayerWindow::PaintEqualizer(HDC dc) const {
     draw_slider(kEqSliderPreamp, layout.preamp);
     for (size_t index = 0; index < layout.bands.size(); ++index)
         draw_slider(kEqSliderFirstBand + static_cast<int>(index), layout.bands[index]);
+    layers.PaintPngButtons(canvas, [&](const skin::SkinElement& element) {
+        const int hit = &element == &layout.enabled ? kEqHitEnabled :
+            &element == &layout.profile ? kEqHitProfile :
+            &element == &layout.reset ? kEqHitReset : kEqHitClose;
+        DrawAnimatedSkinFrame(canvas, element, EqualizerElementBounds(element),
+            button_state(hit, hit == kEqHitEnabled && settings_.equalizer.profile != -2),
+            equalizer_window_);
+    });
     BitBlt(dc, 0, 0, size.cx, size.cy, canvas, 0, 0, SRCCOPY);
     SelectObject(canvas, old_buffer);
     DeleteObject(buffer);

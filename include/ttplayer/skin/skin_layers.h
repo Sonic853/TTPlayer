@@ -2,9 +2,12 @@
 #include "ttplayer/skin/skin.h"
 
 namespace ttplayer::skin {
-// A native child owns its entire client rectangle, except SkinButton's
-// normal-frame window region. Hit testing follows HWND z-order. Some legacy
-// main-window children omit WS_CLIPSIBLINGS and overpaint earlier siblings.
+inline bool IsPngSkinButton(const SkinElement& element) {
+    return element.four_state && element.image.IsGdiPlus();
+}
+// Hit testing retains normal-frame button masks and HWND z-order. PNG paint
+// coverage is independent; BMPs retain the native colour-key clipping rules.
+// Some legacy children omit WS_CLIPSIBLINGS and overpaint earlier siblings.
 struct SkinLayer {
     const SkinElement* element{};
     RECT bounds{};
@@ -25,6 +28,9 @@ public:
     // Preserve siblings excluded by WS_CLIPSIBLINGS when transferring a
     // partial parent buffer, including its copied background.
     void ClipRepaint(HDC dc) const;
+    // PNG buttons composite over the completed lower layers, back to front.
+    // Their normal-frame hit mask must not clip other states or their backing.
+    void PaintPngButtons(HDC dc, const std::function<void(const SkinElement&)>& draw) const;
 private:
     std::vector<SkinLayer> layers_;
     std::vector<HRGN> regions_;

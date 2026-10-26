@@ -1095,7 +1095,8 @@ private:
                 Width(bounds), Height(bounds), FALSE);
             if (present && element && element->image) {
                 const HRGN region = element->image.IsGdiPlus() || element->image.ButtonColorKey(transparent) != CLR_INVALID
-                    ? element->image.CreateRegion(transparent, 4) : nullptr;
+                    ? (element->image.IsGdiPlus() && element->rectangular_hit_test
+                        ? nullptr : element->image.CreateRegion(transparent, 4)) : nullptr;
                 if (!SetWindowRgn(button.window, region, FALSE) && region) DeleteObject(region);
             } else SetWindowRgn(button.window, nullptr, FALSE);
             if (tooltip_) {
@@ -1182,9 +1183,15 @@ private:
             if (icon) skin::DrawNativeSkinIcon(dc, icon, bounds);
         }
         for (const auto& button : buttons_) {
+            const auto* element = ButtonElement(button.command);
+            if (element && skin::IsPngSkinButton(*element)) continue;
             const skin::SkinLayerClip clip(dc, layers, ButtonElement(button.command));
             DrawBarButton(dc, button);
         }
+        layers.PaintPngButtons(dc, [&](const skin::SkinElement& element) {
+            for (const auto& button : buttons_)
+                if (ButtonElement(button.command) == &element) DrawBarButton(dc, button);
+        });
     }
 
     bool ButtonChecked(UINT command) const {

@@ -248,6 +248,7 @@ private:
     void Paint(HDC dc) const;
     void PaintSkin(HDC dc, const std::vector<std::wstring>* repaint = nullptr) const;
     void InvalidateSkinElement(std::wstring_view name);
+    void InvalidateSkinBacking(const RECT& bounds);
     skin::SkinButtonState& MainSkinButton(std::wstring_view name) const;
     bool MainSkinButtonContains(std::wstring_view name, POINT point) const;
     RECT MainSkinButtonBounds(std::wstring_view name) const;
@@ -1175,12 +1176,14 @@ private:
     mutable const skin::SkinElement* play_button_layout_{};
     mutable std::wstring play_button_image_;
     mutable RECT play_button_bounds_{};
+    RECT play_button_refresh_bounds_{};
     std::wstring hover_skin_element_;
     std::optional<std::wstring> last_skin_mouse_down_target_;
     std::wstring captured_skin_button_;
     mutable std::unordered_map<std::wstring, skin::SkinButtonState> main_skin_buttons_;
     mutable std::unordered_map<HWND, skin::SkinButtonState> native_skin_buttons_;
     std::vector<std::wstring> dirty_skin_elements_;
+    bool skin_backing_dirty_{};
     std::unordered_map<std::wstring, std::wstring> skin_display_values_;
     mutable std::unordered_map<std::wstring, RECT> skin_slider_thumbs_;
     std::wstring pressed_skin_element_;

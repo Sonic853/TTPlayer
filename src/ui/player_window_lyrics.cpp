@@ -1912,6 +1912,45 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
             parent_client.right, parent_client.bottom, layout.resize_tile);
         DrawElementFrame(parent_dc, layout.title, LyricElementBounds(layout.title),
                          0, skin_->TransparentColor());
+        const bool png_chrome = skin::IsPngSkinButton(layout.close) ||
+            skin::IsPngSkinButton(layout.ontop) || skin::IsPngSkinButton(layout.desklrc);
+        if (png_chrome) {
+            // PNG children have rectangular paint surfaces and separate hit
+            // masks. Reconstruct overlapping chrome before copying the child
+            // backing, so transparent pixels do not erase a lower sibling.
+            std::vector<skin::SkinLayer> descriptors;
+            for (HWND child = GetWindow(lyric_window_, GW_CHILD); child;
+                 child = GetWindow(child, GW_HWNDNEXT)) {
+                if (child != control && !(GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE)) continue;
+                const int id = GetDlgCtrlID(child);
+                const auto* element = id == static_cast<int>(kCmdShowLyrics) ? &layout.close :
+                    id == static_cast<int>(kCmdLyricTopMost) ? &layout.ontop :
+                    id == static_cast<int>(kCmdDesktopLyrics) ? &layout.desklrc : nullptr;
+                if (!element) continue;
+                RECT bounds{}; GetWindowRect(child, &bounds);
+                MapWindowPoints(nullptr, lyric_window_, reinterpret_cast<POINT*>(&bounds), 2);
+                descriptors.push_back({element, bounds, id});
+            }
+            const skin::SkinLayers layers(descriptors, skin_->TransparentColor());
+            const auto draw = [&](const skin::SkinElement& element) {
+                const auto item = std::find_if(descriptors.begin(), descriptors.end(),
+                    [&](const auto& candidate) { return candidate.element == &element; });
+                if (item == descriptors.end()) return;
+                const HWND child = GetDlgItem(lyric_window_, item->id);
+                const int saved = SaveDC(parent_dc);
+                SetViewportOrgEx(parent_dc, item->bounds.left, item->bounds.top, nullptr);
+                const RECT local{0, 0, item->bounds.right - item->bounds.left,
+                    item->bounds.bottom - item->bounds.top};
+                DrawAnimatedSkinFrame(parent_dc, element, local,
+                    NativeSkinButton(child, item->id == static_cast<int>(kCmdLyricTopMost) && ActiveLyricTopMost()).Frame(), child);
+                if (saved) RestoreDC(parent_dc, saved);
+            };
+            for (const auto& layer : descriptors) if (!skin::IsPngSkinButton(*layer.element)) {
+                const skin::SkinLayerClip clip(parent_dc, layers, layer.element);
+                draw(*layer.element);
+            }
+            layers.PaintPngButtons(parent_dc, draw);
+        }
         POINT origin{};
         MapWindowPoints(control, lyric_window_, &origin, 1);
         BitBlt(canvas, 0, 0, width, height, parent_dc,
@@ -1925,7 +1964,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
         if (command == static_cast<int>(kCmdShowLyrics)) element = &layout.close;
         else if (command == static_cast<int>(kCmdLyricTopMost)) element = &layout.ontop;
         else if (command == static_cast<int>(kCmdDesktopLyrics)) element = &layout.desklrc;
-        if (element) {
+        if (element && !png_chrome) {
             const int state = NativeSkinButton(control,
                 command == static_cast<int>(kCmdLyricTopMost) && ActiveLyricTopMost()).Frame();
             const RECT local{0, 0, width, height};

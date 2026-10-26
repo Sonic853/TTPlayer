@@ -245,8 +245,11 @@ SkinAnimation LoadAnimation(LegacyXmlNode* node, int default_mode) {
     return result;
 }
 
-void LoadElementAnimation(LegacySkin& skin, const std::filesystem::path& directory,
+void LoadElementBehavior(LegacySkin& skin, const std::filesystem::path& directory,
                           LegacyXmlNode* node, SkinElement& element) {
+    const auto hit_test = Attribute(node, L"hit_test");
+    if (_wcsicmp(hit_test.c_str(), L"rect") == 0) element.rectangular_hit_test = true;
+    else if (_wcsicmp(hit_test.c_str(), L"alpha") == 0) element.rectangular_hit_test = false;
     element.animation = LoadAnimation(node, element.four_state ? 1 : 0);
     if (element.four_state && element.animation.mode > 2) element.animation.mode = 0;
     const auto flash = Attribute(node, L"flash_image");
@@ -302,7 +305,7 @@ SkinElement LoadEqualizerElement(LegacySkin& skin,
     load(L"fill_image", element.fill_image, element.fill_size);
     load(L"fill_image2", element.fill_image2, element.fill_size2);
     load(L"thumb_image", element.thumb_image, element.thumb_size);
-    LoadElementAnimation(skin, directory, node, element);
+    LoadElementBehavior(skin, directory, node, element);
     if (button && element.image) {
         element.frames = 4;
         // FUN_0042955B applies the XML position after FUN_00452FFF installs
@@ -336,7 +339,7 @@ SkinElement LoadPlaylistImageElement(LegacySkin& skin,
         element.bounds.left = element.bounds.right - element.image_size.cx / 4;
         element.bounds.bottom = element.bounds.top + element.image_size.cy;
     }
-    LoadElementAnimation(skin, directory, node, element);
+    LoadElementBehavior(skin, directory, node, element);
     return element;
 }
 
@@ -642,7 +645,7 @@ LegacySkin LegacySkin::Load(const std::filesystem::path& directory,
                             GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_LOADFROMFILE)));
                     }
                 }
-                LoadElementAnimation(skin, directory, node, element);
+                LoadElementBehavior(skin, directory, node, element);
             }
         }
         // The original always owns a SkinIcon child. 0045C937 installs the

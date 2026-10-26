@@ -1,4 +1,47 @@
-# BaiduMusic8209 用户更新包：全 PNG 升级
+# BaiduMusic8209 重建版 PNG 皮肤
+
+## 2026-10-26 当前修改
+
+以当前 `Skin/new/BaiduMusic8209.skn` 为输入，转换 24 张 BMP，明确保留
+`Playlist.bmp`、`Toolbar.bmp`、`ToolbarHot.bmp` 的原始字节。最终为 72 张 PNG、
+3 张 BMP、3 个 XML；原有 47 张 PNG 不变，控件坐标、大小、字体、颜色和工具栏区域不变。
+源 `BaiduMusic8209/Languages/zh-cn/skin/skin.zip` 不变。
+
+播放压缩包音频会产生缓存百分比。旧包未提供 `fill_image2`，宿主自动暗化整个
+`ProgressFill.bmp`，连已经合成的蓝色背景一起暗化，形成矩形条块。现在进度轨道与
+播放填充使用源 PNG 的 Alpha，新增 `ProgressCache.png`，来自 `play_slider_cache.png`，
+在 XML 中显式绑定 `fill_image2`。背景、缓存、播放填充、滑块依次合成。
+
+音量区域保留用户修改过的细轨道：`VolumeBar.bmp` 和 `VolumeFill.bmp` 按原像素转成 PNG。
+源 ZIP 的 `volume_slider_bg.png` 是 85×29 的面板，不能拉伸到本皮肤 73×18 的控件来代替细轨道。
+原有圆形 `VolumeThumb.png` 不变。0%、50%、100% 音量与原 BMP 皮肤的运行时绘制逐像素一致。
+
+PNG 按钮新增可选 `hit_test="rect"`，使透明留白也响应鼠标；`hit_test="alpha"` 或省略
+属性时仍按正常帧 Alpha 命中。主窗口、迷你窗口的最小化/模式切换/关闭，以及歌词和均衡器
+的关闭按钮启用矩形命中。虚拟控件的按下、悬停、捕获后释放，以及原生子窗口使用一致规则。
+命中区域不作为 PNG 的绘制遮挡区域，避免透明留白遮掉下层控件。
+
+复现方式：
+
+```powershell
+powershell -NoProfile -File BaiduMusic8209/compat/upgrade-to-png.ps1 -RebuildControls -OutputDirectory <新目录>
+python BaiduMusic8209/compat/verify-rebuild-png.py <原包> <候选包> <验证目录>
+rebuild/build/Release/skin_png_tests.exe <仓库根目录> <候选包> <验证目录>/silent-audio.zip
+powershell -NoProfile -File BaiduMusic8209/compat/test-png-windows.ps1 -RectangularButtons -Package <候选包>
+```
+
+验证覆盖：24 张图片尺寸与所有 XML 布局、3 张保留 BMP 与 47 张原 PNG 字节、
+6 个标题按钮共 1944 个像素命中、透明角落悬停/按下/释放、实际最小化/恢复/模式切换/关闭、
+24 次进度重绘、真实 ZIP WAV 的播放/缓存完成/暂停/跳转/恢复/停止，及旧有 40 次 PNG 播放暂停切换。
+宿主窗口、搜索/添加/预设菜单、文件对话框、音量及均衡器拖动通过。181 个旧皮肤加载通过。
+
+当前证据目录：`rebuild/out/analysis/baidu_png_upgrade_20261026/`。
+最终候选为 `candidate-v2/BaiduMusic8209.skn`，SHA256：
+`E4D28C3CC37757464751AC3C0A4C5D02C199B75049D8A6C4A155D4D20EB6245D`。
+使用 `rebuild/build/Release/TTPlayerRebuild.exe` 及其配套运行库运行；仓库根目录的原版 DLL
+不支持当前重建版的归档接口，不能用来验证压缩包音频。
+
+## 2026-09-13 历史升级记录（以下不是当前包清单）
 
 输入为用户修改后的 `Skin/new/BaiduMusic8209.skn`，不是重新运行早期的皮肤布局生成器。
 原始素材来自 `BaiduMusic8209/Languages/zh-cn/skin/skin.zip`，该 ZIP 保持不变。

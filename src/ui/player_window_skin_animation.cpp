@@ -53,6 +53,8 @@ void PlayerWindow::ResetSkinControlAnimations() {
     main_skin_buttons_.clear();
     native_skin_buttons_.clear();
     dirty_skin_elements_.clear();
+    skin_backing_dirty_ = false;
+    play_button_refresh_bounds_ = {};
     skin_display_values_.clear();
     skin_slider_thumbs_.clear();
     if (window_) KillTimer(window_, kSkinControlAnimationTimer);

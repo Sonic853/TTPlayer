@@ -2958,6 +2958,7 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source,
         FormatLedTime(std::chrono::milliseconds(0)), preview_icon), source.TransparentColor());
     for (const auto& element : source.Elements()) {
         const skin::SkinLayerClip clip(target, layers, &element);
+        if (skin::IsPngSkinButton(element)) continue;
         if (IsSuppressedSkinControl(element.name)) continue;
         if (element.name == L"pause") continue;
         if (element.name.starts_with(L"mode_") && element.name != L"mode_single") continue;
@@ -2997,6 +2998,10 @@ HBITMAP RenderLegacySkinPreview(const skin::LegacySkin& source,
         }
     }
 
+    layers.PaintPngButtons(target, [&](const skin::SkinElement& element) {
+        const int state = element.name == L"minimode" && !source.SupportsMiniMode() ? 3 : 0;
+        DrawElementFrame(target, element, element.bounds, state, source.TransparentColor());
+    });
     SelectObject(target, old_target);
     DeleteDC(image);
     DeleteDC(target);

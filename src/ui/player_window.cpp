@@ -875,11 +875,21 @@ HRGN CreateColorKeyRegion(HBITMAP bitmap, int width, int height,
 void ApplySkinButtonRegion(HWND window, const skin::SkinElement& element,
                            COLORREF transparent) {
     if (!window) return;
+    if (element.image.IsGdiPlus() && element.rectangular_hit_test) {
+        skin::SetPngButtonHitRegion(window, nullptr);
+        SetWindowRgn(window, nullptr, FALSE);
+        return;
+    }
     // 00452FFF -> 0040A1DD: normal-frame palette/key region, unless the
     // indexed path disables the key. In that case the entire HWND (including
     // XML padding) stays rectangular, just like an unkeyed BMP button.
     HRGN region = element.image.IsGdiPlus() || element.image.ButtonColorKey(transparent) != CLR_INVALID
         ? element.image.CreateRegion(transparent, 4) : nullptr;
+    if (element.image.IsGdiPlus() && region && skin::SetPngButtonHitRegion(window, region)) {
+        SetWindowRgn(window, nullptr, FALSE);
+        return;
+    }
+    skin::SetPngButtonHitRegion(window, nullptr);
     if (!SetWindowRgn(window, region, FALSE) && region) DeleteObject(region);
 }
 
@@ -3124,7 +3134,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         // pending element set if the update region contains no parent damage.
         const HRGN update = CreateRectRgn(0, 0, 0, 0);
         const HRGN pending = CreateRectRgn(0, 0, 0, 0);
-        bool partial = skin_ && !external_skin_ && !dirty_skin_elements_.empty();
+        const bool backing_dirty = std::exchange(skin_backing_dirty_, false);
+        bool partial = skin_ && !external_skin_ && !backing_dirty && !dirty_skin_elements_.empty();
         if (partial) {
             GetUpdateRgn(window_, update, FALSE);
             for (const auto& name : dirty_skin_elements_) if (const auto* element = FindActiveSkinElement(name)) {
@@ -4278,6 +4289,7 @@ bool PlayerWindow::MainSkinButtonContains(std::wstring_view name, POINT point) c
     if (!element || !skin_) return false;
     const RECT bounds = MainSkinButtonBounds(name);
     if (!PtInRect(&bounds, point)) return false;
+    if (element->image.IsGdiPlus() && element->rectangular_hit_test) return true;
     const HRGN region = element->image.CreateRegion(skin_->TransparentColor(), 4);
     const bool inside = !region || PtInRegion(region, point.x - bounds.left, point.y - bounds.top);
     if (region) DeleteObject(region);
@@ -4308,6 +4320,12 @@ RECT PlayerWindow::MainSkinButtonBounds(std::wstring_view name) const {
     return play_button_bounds_;
 }
 
+void PlayerWindow::InvalidateSkinBacking(const RECT& bounds) {
+    if (!window_ || IsRectEmpty(&bounds)) return;
+    skin_backing_dirty_ = true;
+    RedrawWindow(window_, &bounds, nullptr, RDW_INVALIDATE | RDW_NOCHILDREN);
+}
+
 void PlayerWindow::InvalidateSkinElement(std::wstring_view name) {
     if (!window_ || name.empty()) return;
     name = ActiveMainSkinButton(name);
@@ -4327,6 +4345,18 @@ void PlayerWindow::InvalidateSkinElement(std::wstring_view name) {
         auto& previous = skin_slider_thumbs_[element->name];
         UnionRect(&bounds, &previous, &next);
         previous = next;
+    }
+    // Any update beneath a PNG must recompose its backing and all overlapping
+    // controls. This also covers hover fades and the fully transparent state.
+    for (const auto& candidate : ActiveSkinElements()) {
+        if (!skin::IsPngSkinButton(candidate) ||
+            ActiveMainSkinButton(candidate.name) != candidate.name) continue;
+        RECT overlap{};
+        const RECT png_bounds = MainSkinButtonBounds(candidate.name);
+        if (IntersectRect(&overlap, &bounds, &png_bounds)) {
+            InvalidateSkinBacking(bounds);
+            return;
+        }
     }
     const HRGN region = element->four_state
         ? element->image.CreateRegion(skin_->TransparentColor(), 4) : nullptr;
@@ -4453,6 +4483,22 @@ void PlayerWindow::PaintSkin(HDC dc, const std::vector<std::wstring>* repaint) c
     if (skin_rebinding_) return;
     if (external_skin_) { external_skin_->Paint(window_, dc); return; }
     if (!skin_) return;
+    if (repaint) {
+        // Direct callers (including info animation) also need the lower
+        // layers when the requested area intersects an alpha button.
+        for (const auto& candidate : ActiveSkinElements()) {
+            if (!skin::IsPngSkinButton(candidate) ||
+                ActiveMainSkinButton(candidate.name) != candidate.name) continue;
+            const RECT png_bounds = MainSkinButtonBounds(candidate.name);
+            bool intersects = false;
+            for (const auto& name : *repaint) {
+                RECT overlap{};
+                const RECT bounds = MainSkinButtonBounds(name);
+                intersects |= IntersectRect(&overlap, &bounds, &png_bounds) != FALSE;
+            }
+            if (intersects) { repaint = nullptr; break; }
+        }
+    }
     const SIZE size = ActiveSkinSize();
     const HDC canvas = CreateCompatibleDC(dc);
     const HBITMAP buffer = CreateCompatibleBitmap(dc, size.cx, size.cy);
@@ -4472,7 +4518,7 @@ void PlayerWindow::PaintSkin(HDC dc, const std::vector<std::wstring>* repaint) c
                 skin_slider_thumbs_[name] = SkinSliderThumbRegion(*element);
     for (const auto& element : ActiveSkinElements()) {
         const skin::SkinLayerClip clip(canvas, layers, &element);
-        if (!element.image || !element.four_state) continue;
+        if (!element.image || !element.four_state || skin::IsPngSkinButton(element)) continue;
         if (IsSuppressedSkinControl(element.name, BrowserAvailable())) continue;
         if (!IsPlayModeSkinVisible(element.name, settings_.player.play_mode)) continue;
         if (element.name == L"play" && active) continue;
@@ -4672,6 +4718,13 @@ void PlayerWindow::PaintSkin(HDC dc, const std::vector<std::wstring>* repaint) c
             DrawSkinIcon(canvas, skin_icon, skin::NativeSkinIconBounds(skin_icon, icon->bounds));
         }
     }
+
+    layers.PaintPngButtons(canvas, [&](const skin::SkinElement& element) {
+        auto displayed = element;
+        if (element.name == L"play" || element.name == L"pause")
+            displayed.bounds = MainSkinButtonBounds(element.name);
+        DrawSkinElement(canvas, displayed, MainSkinButton(element.name).Frame());
+    });
 
     // VisualCtrl owns and presents this rectangle independently.  The
     // reconstructed 250 ms player refresh used to blit the complete parent
@@ -7095,19 +7148,29 @@ void PlayerWindow::RefreshPlaybackUi() {
         auto& previous_image = skin_display_values_[L"play-pause-image"];
         const auto current_image = ActiveMainSkinButton(L"play");
         if (previous_image != current_image) {
-            // 0040A1DD resizes the existing child and replaces its region with
-            // SetWindowRgn(..., FALSE). Only the area outside the new rectangle
-            // exposes parent damage; holes inside it keep the prior pixels
-            // until a parent repaint, just as with the native HWND.
             if (const auto* play = FindActiveSkinElement(L"play")) {
-                const RECT old_rect = play_button_layout_ ? play_button_bounds_ : play->bounds;
+                const auto* previous = FindActiveSkinElement(previous_image);
+                const auto* current = FindActiveSkinElement(current_image);
+                // Layout queries may already have resolved the new image.
+                // Keep the last refreshed bounds independently of that cache.
+                const RECT old_rect = previous_image.empty() ? play->bounds : play_button_refresh_bounds_;
                 const RECT new_rect = MainSkinButtonBounds(current_image);
-                const HRGN exposed = CreateRectRgnIndirect(&old_rect);
-                const HRGN next = CreateRectRgnIndirect(&new_rect);
-                CombineRgn(exposed, exposed, next, RGN_DIFF);
-                InvalidateRgn(window_, exposed, FALSE);
-                DeleteObject(next);
-                DeleteObject(exposed);
+                if ((previous && previous->image.IsGdiPlus()) ||
+                    (current && current->image.IsGdiPlus())) {
+                    RECT damage{};
+                    UnionRect(&damage, &old_rect, &new_rect);
+                    InvalidateSkinBacking(damage);
+                } else {
+                    // Preserve the legacy BMP SetWindowRgn(..., FALSE)
+                    // behaviour, including retained interior colour-key holes.
+                    const HRGN exposed = CreateRectRgnIndirect(&old_rect);
+                    const HRGN next = CreateRectRgnIndirect(&new_rect);
+                    CombineRgn(exposed, exposed, next, RGN_DIFF);
+                    InvalidateRgn(window_, exposed, FALSE);
+                    DeleteObject(next);
+                    DeleteObject(exposed);
+                }
+                play_button_refresh_bounds_ = new_rect;
             }
             previous_image = current_image;
             UpdateMainToolRects();

@@ -59,6 +59,9 @@ struct SkinElement {
     SIZE image_size{};
     int frames{1};
     bool four_state{};
+    // PNG extension: hit_test="rect" includes transparent button padding.
+    // The default keeps the normal frame's alpha silhouette for hit testing.
+    bool rectangular_hit_test{};
     bool vertical{};
     SkinImage bar_image{};
     SIZE bar_size{};

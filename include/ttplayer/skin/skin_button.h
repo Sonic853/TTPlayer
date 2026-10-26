@@ -1,6 +1,7 @@
 #pragma once
 
 #include <windows.h>
+#include <commctrl.h>
 
 namespace ttplayer::skin {
 // 5.7.9 SkinButton: +34 is transient state; +3c is the check state.
@@ -32,7 +33,48 @@ struct SkinButtonState {
     int Frame() const noexcept { return checked && transient != 1 ? 2 : transient; }
 };
 
+inline constexpr wchar_t kPngButtonHitRegion[] = L"TTPlayer.PngButtonHitRegion";
+inline constexpr UINT_PTR kPngButtonRegionSubclass = 0x54545041;
+
+inline void ClearPngButtonHitRegion(HWND window) {
+    if (const auto region = reinterpret_cast<HRGN>(RemovePropW(window, kPngButtonHitRegion)))
+        DeleteObject(region);
+}
+
+inline LRESULT CALLBACK PngButtonRegionSubclass(HWND window, UINT message,
+    WPARAM wparam, LPARAM lparam, UINT_PTR identifier, DWORD_PTR) {
+    if (message == WM_NCHITTEST) {
+        const auto region = reinterpret_cast<HRGN>(GetPropW(window, kPngButtonHitRegion));
+        POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+        ScreenToClient(window, &point);
+        if (region && !PtInRegion(region, point.x, point.y)) return HTTRANSPARENT;
+    } else if (message == WM_NCDESTROY) {
+        ClearPngButtonHitRegion(window);
+        RemoveWindowSubclass(window, PngButtonRegionSubclass, identifier);
+    }
+    return DefSubclassProc(window, message, wparam, lparam);
+}
+
+// Takes ownership on success. PNG HWNDs paint their complete client rectangle,
+// while the normal alpha mask still controls hit testing and captured releases.
+inline bool SetPngButtonHitRegion(HWND window, HRGN region) {
+    ClearPngButtonHitRegion(window);
+    RemoveWindowSubclass(window, PngButtonRegionSubclass, kPngButtonRegionSubclass);
+    if (!region) return true;
+    if (!SetWindowSubclass(window, PngButtonRegionSubclass, kPngButtonRegionSubclass, 0)) return false;
+    if (!SetPropW(window, kPngButtonHitRegion, region)) {
+        RemoveWindowSubclass(window, PngButtonRegionSubclass, kPngButtonRegionSubclass);
+        return false;
+    }
+    return true;
+}
+
 inline bool SkinButtonContains(HWND window, POINT point) {
+    if (const auto hit = reinterpret_cast<HRGN>(GetPropW(window, kPngButtonHitRegion))) {
+        RECT client{};
+        GetClientRect(window, &client);
+        return PtInRect(&client, point) && PtInRegion(hit, point.x, point.y);
+    }
     const HRGN region = CreateRectRgn(0, 0, 0, 0);
     const int kind = region ? GetWindowRgn(window, region) : ERROR;
     RECT bounds{};

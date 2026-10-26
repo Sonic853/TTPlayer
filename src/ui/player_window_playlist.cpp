@@ -3602,7 +3602,12 @@ void PlayerWindow::UpdatePlaylistToolRects() {
         if (identifier == kPlaylistToolFirst + 7) {
             const HRGN region = layers.Region(&skin_->Playlist().close);
             OffsetRgn(region, -metrics.close.left, -metrics.close.top);
-            if (!SetWindowRgn(control, region, TRUE)) DeleteObject(region);
+            if (skin_->Playlist().close.image.IsGdiPlus() && skin::SetPngButtonHitRegion(control, region)) {
+                SetWindowRgn(control, nullptr, TRUE);
+            } else {
+                skin::SetPngButtonHitRegion(control, nullptr);
+                if (!SetWindowRgn(control, region, TRUE)) DeleteObject(region);
+            }
             SetWindowPos(control, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
