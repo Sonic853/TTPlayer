@@ -2,6 +2,7 @@
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "player_window_internal.h"
 #include "track_metadata.h"
+#include "osu_library_artwork.h"
 #include "file_info_cover_policy.h"
 #include "file_info_probe_protocol.h"
 #include "file_info_probe_client.h"
@@ -421,6 +422,11 @@ FileInfoRecord ReadFileInfoRecord(
     record.duration = detail::FileInfoDuration(record.duration_ms);
     record.gain = ProbeMetadataValue(*probe, L"replaygain_track_gain");
     record.cover = probe->cover;
+    if (detail::IsOsuLibraryTrack(track) && !stop.stop_requested()) {
+        const auto embedded = DecodeCoverImage(record.cover, 1);
+        if (embedded.bitmap) DeleteObject(embedded.bitmap);
+        else record.cover = ReadCoverImageFile(detail::OsuLibraryBackgroundPath(track));
+    }
     record.media_type = SafeUtf8(record.codec);
     record.bitrate_bps = static_cast<std::uint32_t>(
         std::min<std::uint64_t>(encoded, 0x7fffffffU));

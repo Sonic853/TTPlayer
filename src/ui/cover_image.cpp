@@ -130,6 +130,25 @@ CoverImage DecodeGdiPlus(std::span<const unsigned char> bytes, UINT maximum_edge
 }
 } // namespace
 
+std::vector<unsigned char> ReadCoverImageFile(const std::filesystem::path& path) noexcept {
+    try {
+        if (path.empty()) return {};
+        const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return {};
+        struct Close { HANDLE value; ~Close() { CloseHandle(value); } } close{file};
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
+            size.QuadPart > kMaximumBytes) return {};
+        std::vector<unsigned char> bytes(static_cast<size_t>(size.QuadPart));
+        DWORD read{};
+        if (!ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr) ||
+            read != bytes.size()) return {};
+        return bytes;
+    } catch (...) { return {}; }
+}
+
 CoverImage DecodeCoverImage(std::span<const unsigned char> bytes, UINT maximum_edge,
                            CoverImageDecoder decoder) {
     if (bytes.empty() || bytes.size() > kMaximumBytes) return {};

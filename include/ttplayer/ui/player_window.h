@@ -701,6 +701,7 @@ private:
     void PrepareFullScreenLyricMenu(HMENU menu) const;
     void PrepareLyricDoubleClickMenu(HMENU menu) const;
     bool HandleLyricDoubleClick(HWND origin);
+    bool ConsumeFullScreenDoubleClickRelease(UINT message) const noexcept;
     void PrepareLyricEditorMenu(HMENU menu) const;
     bool HandleLyricCommand(UINT command);
     bool EnterLyricEditor();
@@ -1079,6 +1080,8 @@ private:
     std::atomic_bool visual_worker_enabled_{};
     std::atomic_bool visual_plugin_embedded_{};
     int fullscreen_mode_{}; // 0 normal, 1 lyric, 2 visual, 3 lyric+visual
+    // UI-thread gesture state also consumed by the const message filter.
+    mutable bool fullscreen_double_click_release_pending_{};
     bool fullscreen_osu_exit_pending_{};
     BYTE fullscreen_lyric_transition_alpha_{255};
     BYTE fullscreen_lyric_transition_from_{255};

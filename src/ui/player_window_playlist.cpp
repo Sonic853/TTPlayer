@@ -3361,6 +3361,9 @@ std::optional<size_t> PlayerWindow::ChooseMusicBrowserPlaylist() {
 }
 
 bool PlayerWindow::PreTranslateMessage(const MSG& message) const {
+    // Consume the release on whichever surface is now under the pointer,
+    // before a skin provider or a newly exposed control can act on it.
+    if (ConsumeFullScreenDoubleClickRelease(message.message)) return true;
     // Alt+F4 is an explicit exit, even in close-button-to-tray mode. Handle
     // the queued key before a skin provider or DefWindowProc turns it into
     // an indistinguishable WM_CLOSE. Owned dialogs keep their own Alt+F4.

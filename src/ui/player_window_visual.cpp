@@ -9,6 +9,7 @@
 #include "player_visual_effect.h"
 #include "osu_visual_client.h"
 #include "track_metadata.h"
+#include "osu_library_artwork.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/ui/cover_image.h"
 #include "ttplayer/app/worker_process.h"
@@ -388,7 +389,7 @@ void SafeSpectrumDestroy(void*) noexcept {}
 
 } // namespace
 
-HBITMAP detail::LoadTaskbarCoverBitmap(const std::filesystem::path& path,
+static HBITMAP LoadEmbeddedTaskbarCoverBitmap(const std::filesystem::path& path,
                                      const audio::AudioMetadata& metadata, SIZE* size) {
     *size = {};
     try {
@@ -438,6 +439,15 @@ HBITMAP detail::LoadTaskbarCoverBitmap(const std::filesystem::path& path,
         picture->Release();
         return bitmap;
     } catch (const std::exception&) { return nullptr; }
+}
+
+HBITMAP detail::LoadTaskbarCoverBitmap(const std::filesystem::path& path,
+                                     const audio::AudioMetadata& metadata, SIZE* size) {
+    if (auto cover = LoadEmbeddedTaskbarCoverBitmap(path, metadata, size)) return cover;
+    const auto background = OsuLibraryBackgroundPath(metadata);
+    const auto image = DecodeCoverImage(ReadCoverImageFile(background), 1024);
+    *size = image.size;
+    return image.bitmap;
 }
 
 // Runtime counterpart of the original CVisualCtrl object at CPlayerWnd+0x438.
@@ -587,6 +597,7 @@ public:
         // may repopulate Type 4 after any mode/geometry configuration.
         if (preserve_cover) return;
         source_.clear();
+        osu_background_.clear();
         fallback_.clear();
         thumbnail_interface_ = false;
         thumbnail_.clear();
@@ -634,7 +645,8 @@ public:
         // compatibility metadata path may still yield a picture or prompt.
         fallback_ = metadata.thumbnail_interface && metadata.thumbnail.empty()
             ? std::wstring{} : std::move(fallback);
-        const bool metadata_changed =
+        const auto osu_background = OsuLibraryBackgroundPath(metadata);
+        const bool metadata_changed = osu_background_ != osu_background ||
             thumbnail_interface_ != metadata.thumbnail_interface ||
             thumbnail_ != metadata.thumbnail;
         if(IsOsuVisualType(settings_.type)) {
@@ -647,6 +659,7 @@ public:
         }
         if (source_ == source && !metadata_changed && !force_reload) return;
         source_ = source;
+        osu_background_ = osu_background;
         thumbnail_interface_ = metadata.thumbnail_interface;
         thumbnail_ = metadata.thumbnail;
         if (settings_.type == 4) LoadCover();
@@ -674,6 +687,7 @@ public:
         if(IsOsuVisualType(settings_.type))osu_visual_.Source({}, {}, module_);
         ClearDynamic();
         source_.clear();
+        osu_background_.clear();
         // FUN_00457BCF releases the decoded picture and calls FUN_00403A2B on
         // CVisualCtrl+0x1588, clearing the 0x821B prompt as well. Spectrum,
         // scope and cover expose the backing; a prior dream frame is the
@@ -1495,6 +1509,12 @@ private:
                 if (!next_bitmap) next_picture = DecodePictureWithOle(bytes);
             }
         }} catch (const std::exception&) {}
+        if (!next_bitmap && !next_picture && !osu_background_.empty()) {
+            const auto decoded = DecodeCoverImage(ReadCoverImageFile(osu_background_));
+            next_bitmap = decoded.bitmap;
+            next_size = decoded.size;
+            next_payload |= next_bitmap != nullptr;
+        }
         LoadAlbumFallback(next_bitmap, next_size, next_picture);
         // Keep the displayed bitmap alive through all I/O and decoding. The
         // render lock publishes only the completed cover/fallback/background.
@@ -1589,6 +1609,7 @@ private:
     std::filesystem::path source_;
     std::wstring fallback_;
     bool thumbnail_interface_{};
+    std::filesystem::path osu_background_;
     std::vector<unsigned char> thumbnail_;
     bool cover_payload_present_{};
     HBITMAP cover_bitmap_{};
@@ -1614,8 +1635,21 @@ LRESULT CALLBACK PlayerWindow::VisualWindowProc(HWND window, UINT message,
         });
 }
 
+bool PlayerWindow::ConsumeFullScreenDoubleClickRelease(UINT message) const noexcept {
+    if (message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK ||
+        message == WM_NCLBUTTONDOWN || message == WM_NCLBUTTONDBLCLK) {
+        // A new press must work even if the previous release went to another
+        // application. Do not use a timeout: holding the second press is valid.
+        fullscreen_double_click_release_pending_ = false;
+    } else if (message == WM_LBUTTONUP || message == WM_NCLBUTTONUP) {
+        return std::exchange(fullscreen_double_click_release_pending_, false);
+    }
+    return false;
+}
+
 LRESULT PlayerWindow::HandleVisualMessage(
     UINT message, WPARAM wparam, LPARAM lparam) {
+    if (ConsumeFullScreenDoubleClickRelease(message)) return 0;
     switch (message) {
     case WM_NCHITTEST:
         if (skin_ && !external_skin_ && !fullscreen_visual_detached_) {
@@ -1963,8 +1997,7 @@ bool PlayerWindow::VisualArtworkSource(std::filesystem::path& source, audio::Aud
     if (!snapshot) return false;
     source = track->path;
     metadata = *snapshot;
-    if(IsOsuLibraryTrack(*track))for(const auto& [name,value]:track->metadata)
-        if(name.starts_with("TTPlayer.Osu."))metadata.entries.emplace_back(core::Utf8ToWide(name),core::Utf8ToWide(value));
+    MergeOsuLibraryArtwork(*track, metadata);
     return true;
 }
 

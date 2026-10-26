@@ -400,6 +400,14 @@ LRESULT PlayerWindow::ApplyPlaylistInfoResult(LPARAM value) {
                         playlist::Track updated = *result;
                         updated.path = list.Tracks()[row].path;
                         updated.rating = list.Tracks()[row].rating;
+                        // The isolated worker knows only the audio path. Its
+                        // result cannot replace the row's game/service identity.
+                        // Merge per row: two beatmap sets may share one hash but
+                        // have different titles, timing files and backgrounds.
+                        const auto& original = list.Tracks()[row].metadata;
+                        detail::PreserveBrowserTrackIdentity(original, updated.metadata);
+                        detail::PreserveOsuTrackMetadata(original, updated.metadata);
+                        detail::RestoreOsuTrackMetadata(updated);
                         changed = list.SetTrack(row, std::move(updated));
                     }
                     if (changed) changed_rows.push_back(row);

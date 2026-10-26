@@ -460,6 +460,7 @@ BOOL WINAPI PlayerWindow::HandleSkinPluginContentInput(void* context,const TtpSk
     if(event->hwnd!=content->window || (!native && content->window!=self.lyric_window_ && content->window!=self.window_)) return FALSE;
     *result=0;
     const UINT message=event->message;
+    if(self.ConsumeFullScreenDoubleClickRelease(message))return TRUE;
     const HWND window=content->window;
     RECT visual{},lyric{};bool overlay{};
     self.SkinPluginContentRects(content->bounds,content->mode,content->visual_type,visual,lyric,overlay);

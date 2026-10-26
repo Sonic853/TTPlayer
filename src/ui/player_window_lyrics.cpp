@@ -516,12 +516,19 @@ bool PlayerWindow::HandleLyricDoubleClick(HWND origin) {
     lyric_line_drag_offset_ = 0;
     if (skin_drag_window_ == origin) EndSkinMouseCapture();
     if (GetCapture() == origin) ReleaseCapture();
+    const int previous_mode = fullscreen_mode_;
     SetFullScreenMode(fullscreen_mode_ == 0 ? settings_.fullscreen.last_mode : 0, origin);
+    // Reparenting/hiding lyrics can put the visual HWND under the pointer.
+    // The remaining UP still belongs to this double-click, not a new visual
+    // click (which would advance e.g. stable's star ring straight to lazer).
+    fullscreen_double_click_release_pending_ = fullscreen_mode_ != previous_mode ||
+        fullscreen_osu_exit_pending_;
     return true;
 }
 
 LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
                                                 WPARAM wparam, LPARAM lparam, bool content_surface) {
+    if (ConsumeFullScreenDoubleClickRelease(message)) return 0;
     if(DeferSkinRebindPaint(control,message)) return message==WM_ERASEBKGND;
     if(control==lyric_control_ && !content_surface && NativeLyricContentActive()) {
         // Re-enter only for the lyric portion, using the same hit testing and
@@ -791,6 +798,7 @@ LRESULT PlayerWindow::HandleLyricControlMessage(HWND control, UINT message,
 
 LRESULT PlayerWindow::HandleLyricMessage(UINT message, WPARAM wparam,
                                          LPARAM lparam) {
+    if (ConsumeFullScreenDoubleClickRelease(message)) return 0;
     if(DeferSkinRebindPaint(lyric_window_,message)) return message==WM_ERASEBKGND;
     static const UINT find_message = RegisterWindowMessageW(FINDMSGSTRINGW);
     if (message == find_message) {

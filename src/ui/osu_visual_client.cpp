@@ -144,8 +144,16 @@ struct OsuVisualClient::Impl {
                 timing.clear();
             }
             if(image_changed && !canceled()) {
-                try {if(!encoded.empty())image=DecodeCoverImage(encoded,2048);}catch(...) {}
-                if(!image.bitmap && !background_image.empty() && !canceled())LoadOsuLogoImage(background_image,image);
+                // Both star-ring scenes use the beatmap wallpaper first. The
+                // separate album-cover renderer keeps embedded-art priority.
+                if(!background_image.empty())LoadOsuLogoImage(background_image,image);
+                if(!image.bitmap && !canceled()) try {
+                    const audio::ScopedArchiveBackgroundRead background_read;
+                    audio::ArchiveMemberPath member;
+                    if(audio::ParseArchiveMemberPath(path.native(),member) && audio::IsOszArchive(member.archive))
+                        image=DecodeCoverImage(audio::ReadOszCover(member.archive,module_ref.get(),canceled,member.member),2048);
+                } catch(...) {}
+                if(!image.bitmap && !encoded.empty() && !canceled())try {image=DecodeCoverImage(encoded,2048);}catch(...) {}
                 // Missing and corrupt track images both use the configured
                 // backup. File I/O and decoding stay on this asset worker.
                 if(!image.bitmap && !backup_path.empty() && !canceled())

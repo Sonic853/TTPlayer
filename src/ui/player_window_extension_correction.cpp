@@ -79,6 +79,8 @@ void PlayerWindow::CheckExtensionCorrection(const std::filesystem::path& path,in
 void PlayerWindow::QueueExtensionCorrection(audio::ExtensionCorrection correction) {
     if (!settings_.general.prompt_extension_correction || !window_ ||
         close_after_skin_window_fade_ || extension_corrections_.size()>=128) return;
+    if (opened_track_ && detail::IsOsuLibraryTrack(*opened_track_) &&
+        SamePath(opened_track_->path, correction.source)) return;
     if (extension_corrections_seen_.contains(SeenKey(correction))) return;
     if (std::any_of(extension_corrections_.begin(),extension_corrections_.end(),
         [&](const auto& queued){return SamePath(queued.source,correction.source);})) return;

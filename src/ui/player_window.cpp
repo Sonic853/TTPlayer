@@ -6,6 +6,7 @@
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
 #include "track_metadata.h"
+#include "osu_library_artwork.h"
 #include "ttplayer/ui/wtl_runtime.h"
 #include "project_links.h"
 #include "archive_password_dialog.h"
@@ -7704,7 +7705,9 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
         metadata.artist = core::Utf8ToWide(requested_track.artist);
         metadata.album = core::Utf8ToWide(requested_track.album);
     }
-    taskbar_preview_.SetSource(window_, requested_track.path, metadata);
+    auto artwork = metadata;
+    MergeOsuLibraryArtwork(requested_track, artwork);
+    taskbar_preview_.SetSource(window_, requested_track.path, artwork);
     system_media_controls_.SetSource(window_, BuildSystemMediaMetadata(requested_track, metadata),
                                     taskbar_preview_.CoverBitmap());
     if (indexed_playback) try {
@@ -7881,7 +7884,11 @@ void PlayerWindow::PollNetworkPlayback() {
     }
     // Source-owned metadata cannot outlive a track change. This also updates
     // artwork-only results, whose title can legitimately be empty.
-    if (!network) taskbar_preview_.SetSource(window_, opened_track_->path, metadata);
+    if (!network) {
+        auto artwork = metadata;
+        MergeOsuLibraryArtwork(*opened_track_, artwork);
+        taskbar_preview_.SetSource(window_, opened_track_->path, artwork);
+    }
     if (text_changed || !network)
         system_media_controls_.SetSource(window_, BuildSystemMediaMetadata(*opened_track_, metadata),
                                          taskbar_preview_.CoverBitmap());
