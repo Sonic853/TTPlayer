@@ -3,10 +3,10 @@
   "extension_abi": 1,
   "repository": "https://github.com/TTPlayerRebuild/TTPlayerRes",
   "files": {
-    "include/ttpres/resource_extensions.h": "a3d56c56afc6f5cf22b418ce5f44d4b3b8e7fbcdaf1b60b7888ccfaa2f4ba527",
-    "include/ttpres/resource_ids.h": "11878ffbbbd184c82132c07af4536ee5885c4fab4d10c2d2eb07d3a15594c2d2",
+    "include/ttpres/resource_extensions.h": "463ddb63a5b491bf3dfeb4beac94f314796a632f93ecc811020f6c4dbb797473",
+    "include/ttpres/resource_ids.h": "bb3c74020ea0aec37be1b9a56d15f91ac5c94aed4cdf4064a47503752e00d6e0",
     "baseline.json": "f210a59109f09b7e6d77146e04fbfe102d1b0c552dc038b5110db37f6c026d87",
     "tools/resource_model.py": "9d7d853327391cc2d25b9843f3d4c574610431a503ab69416f1daca42b72b405",
-    "tools/audit.py": "be76e452a2d2bdd944ee772f2d563defa165e842db3bf71a31e2d0b77d455431"
+    "tools/audit.py": "be9d0731497de7d90322c8f7f0dc9f8167498170d9d2250cc1f7cd3c7748c7f7"
   }
 }

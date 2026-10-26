@@ -12,6 +12,7 @@
 #include "options_general_tabs.h"
 #include "options_library_tabs.h"
 #include "options_fullscreen_tabs.h"
+#include "options_fullscreen_dream.h"
 #include "osu_visual_client.h"
 #include "hotkey_control.h"
 #include "project_links.h"
@@ -5385,14 +5386,15 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                                 reinterpret_cast<LPARAM>(label.c_str()));
         }
         PopulateAlbumBackgroundOptions(dialog, instance_, settings_.fullscreen);
-        int click_option_y = 220;
+        DreamFullscreenOptions::Populate(dialog, instance_, settings_.fullscreen);
+        int click_option_x = 13;
         for (const auto& option : {
             std::pair{IDC_FULLSCREEN_SINGLE_CLICK, IDS_FULLSCREEN_SINGLE_CLICK},
             std::pair{IDC_FULLSCREEN_DOUBLE_CLICK, IDS_FULLSCREEN_DOUBLE_CLICK}}) {
             if (!GetDlgItem(dialog, option.first)) {
                 // The tab adapter maps this original album-group coordinate
-                // space into the visual-fullscreen tab, below its image options.
-                RECT bounds{13, click_option_y, 267, click_option_y + 12};
+                // space into the visual-fullscreen tab, below Dream options.
+                RECT bounds{click_option_x, 289, click_option_x + 122, 301};
                 MapDialogRect(dialog, &bounds);
                 const auto label = AlbumOptionText(option.second);
                 const HWND checkbox = CreateWindowExW(0, WC_BUTTONW, label.c_str(),
@@ -5401,7 +5403,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                     dialog, reinterpret_cast<HMENU>(static_cast<INT_PTR>(option.first)), instance_, nullptr);
                 SendMessageW(checkbox, WM_SETFONT, SendMessageW(dialog, WM_GETFONT, 0, 0), FALSE);
             }
-            click_option_y += 18;
+            click_option_x += 132;
         }
         SetChecked(dialog, IDC_FULLSCREEN_SINGLE_CLICK, settings_.fullscreen.single_click_visual);
         SetChecked(dialog, IDC_FULLSCREEN_DOUBLE_CLICK, settings_.fullscreen.double_click_fullscreen);
@@ -5960,7 +5962,10 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
     case 263:
         // COptionsFullScreen has no deferred DDX pass.  FUN_00491571 writes
         // each setting from its own WM_COMMAND handler, so leaving or closing
-        // the page must not normalize untouched combo/edit values.
+        // the page must not normalize untouched legacy combo/edit values.
+        // The new Dream numeric fields also commit on keyboard Save/Close,
+        // when a focus-loss notification has not arrived yet.
+        DreamFullscreenOptions::Commit(dialog,settings_.fullscreen);
         break;
     case 262:
         settings_.player.check_association = IsChecked(dialog, 2121);
@@ -7817,6 +7822,34 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         }
         if (template_id == 263 &&
             GetPropW(dialog, kPageReadyProperty)) {
+            if(control==IDC_FULLSCREEN_DREAM_RESOLUTION && notification==CBN_SELCHANGE) {
+                settings_.fullscreen.dream_resolution=std::clamp(ComboSelection(dialog,control),0,2);
+                DreamFullscreenOptions::EnableCustom(dialog,settings_.fullscreen.dream_resolution==2);
+                window_state_saved_=false;
+                if(fullscreen_visual_detached_ && settings_.visual.type==1)ApplyOptionsPageRuntime(template_id);
+                return TRUE;
+            }
+            if(control==IDC_FULLSCREEN_DREAM_STRETCH && notification==BN_CLICKED) {
+                settings_.fullscreen.dream_stretch=IsChecked(dialog,control);
+                window_state_saved_=false;
+                if(fullscreen_visual_detached_ && settings_.visual.type==1)ApplyOptionsPageRuntime(template_id);
+                return TRUE;
+            }
+            if((control==IDC_FULLSCREEN_DREAM_WIDTH || control==IDC_FULLSCREEN_DREAM_HEIGHT ||
+                control==IDC_FULLSCREEN_DREAM_FPS) && notification==EN_KILLFOCUS) {
+                if(DreamFullscreenOptions::CommitNumber(dialog,control,settings_.fullscreen)) {
+                    window_state_saved_=false;
+                    if(fullscreen_visual_detached_ && settings_.visual.type==1) {
+                        if(control==IDC_FULLSCREEN_DREAM_FPS) {
+                            const auto interval=VisualFrameIntervalNs(settings_.visual,&settings_.fullscreen);
+                            visual_interval_ns_.store(interval,std::memory_order_relaxed);
+                            visual_high_resolution_.store(interval<20000000,std::memory_order_relaxed);
+                            visual_worker_condition_.notify_all();
+                        } else if(settings_.fullscreen.dream_resolution==2)ApplyOptionsPageRuntime(template_id);
+                    }
+                }
+                return TRUE;
+            }
             if ((control == IDC_FULLSCREEN_SINGLE_CLICK || control == IDC_FULLSCREEN_DOUBLE_CLICK) &&
                 notification == BN_CLICKED) {
                 settings_.fullscreen.single_click_visual = IsChecked(dialog, IDC_FULLSCREEN_SINGLE_CLICK);

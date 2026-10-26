@@ -199,10 +199,17 @@ struct VisualSettings {
 // values 1..3 select the independent Goom/Spectrum/BlurScope profile.
 // Extensions: 4 album background, 5 pulse, 6 ripple, 7 osu stable, 8 lazer.
 struct FullScreenSettings {
+    static constexpr int dream_min_size = 2;
+    static constexpr int dream_max_size = 4096;
     int last_mode{3}; // 1 lyrics, 2 visual, 3 lyrics + visual; never the exit state.
     int last_visual_effect{}; // shared by visual/combined fullscreen; 0 = no history
     bool single_click_visual{true};
     bool double_click_fullscreen{}; // single_click_visual takes precedence
+    int dream_resolution{}; // 0 legacy 320x240 caps, 1 fixed 800x800, 2 custom
+    int dream_width{800}; // remembered custom dimensions, independent of preset
+    int dream_height{800};
+    bool dream_stretch{true}; // false: preserve aspect, fill and crop at centre
+    int dream_frames_per_second{25}; // fullscreen only, 10..120
     int visual_type{1};
     std::array<int, kVisualTypeCount> position_relation{0, 1, 0, 1, 1, 1, 1, 1, 1};
     std::array<int, kVisualTypeCount> lyric_size{2, 2, 2, 2, 10, 10, 10, 10, 10};

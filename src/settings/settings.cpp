@@ -1141,6 +1141,13 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
             IntAttr(n,L"LastVisualEffect",0),0,kMaximumVisualType);
         s.fullscreen.single_click_visual=IntAttr(n,L"SingleClickVisual",1)!=0;
         s.fullscreen.double_click_fullscreen=IntAttr(n,L"DoubleClickFullscreen",0)!=0;
+        s.fullscreen.dream_resolution=std::clamp(IntAttr(n,L"DreamResolution",0),0,2);
+        s.fullscreen.dream_width=std::clamp(IntAttr(n,L"DreamWidth",800),
+            FullScreenSettings::dream_min_size,FullScreenSettings::dream_max_size);
+        s.fullscreen.dream_height=std::clamp(IntAttr(n,L"DreamHeight",800),
+            FullScreenSettings::dream_min_size,FullScreenSettings::dream_max_size);
+        s.fullscreen.dream_stretch=IntAttr(n,L"DreamStretch",1)!=0;
+        s.fullscreen.dream_frames_per_second=std::clamp(IntAttr(n,L"DreamFramesPerSec",25),10,120);
         s.fullscreen.visual_type=std::clamp(
             IntAttr(n,L"VisualType",s.fullscreen.visual_type),0,kMaximumVisualType);
         s.fullscreen.album_fallback_image=StringAttr(n,L"AlbumFallbackImage");
@@ -2020,6 +2027,13 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
                      std::clamp(settings.fullscreen.last_visual_effect,0,kMaximumVisualType));
         SetAttribute(element,L"SingleClickVisual",settings.fullscreen.single_click_visual ? 1 : 0);
         SetAttribute(element,L"DoubleClickFullscreen",settings.fullscreen.double_click_fullscreen ? 1 : 0);
+        SetAttribute(element,L"DreamResolution",std::clamp(settings.fullscreen.dream_resolution,0,2));
+        SetAttribute(element,L"DreamWidth",std::clamp(settings.fullscreen.dream_width,
+            FullScreenSettings::dream_min_size,FullScreenSettings::dream_max_size));
+        SetAttribute(element,L"DreamHeight",std::clamp(settings.fullscreen.dream_height,
+            FullScreenSettings::dream_min_size,FullScreenSettings::dream_max_size));
+        SetAttribute(element,L"DreamStretch",settings.fullscreen.dream_stretch ? 1 : 0);
+        SetAttribute(element,L"DreamFramesPerSec",std::clamp(settings.fullscreen.dream_frames_per_second,10,120));
         SetAttribute(element,L"VisualType",
                      std::clamp(settings.fullscreen.visual_type,0,kMaximumVisualType));
         SetAttribute(element,L"AlbumFallbackImage",settings.fullscreen.album_fallback_image);

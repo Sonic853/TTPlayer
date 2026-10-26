@@ -482,7 +482,8 @@ public:
 
     void Configure(const settings::VisualSettings& settings, SIZE size,
                    bool full_screen = false, const skin::SkinImage& background = {},
-                   const RECT* background_bounds = nullptr, bool preserve_cover = false) {
+                   const RECT* background_bounds = nullptr, bool preserve_cover = false,
+                   const settings::FullScreenSettings* dream_options = nullptr) {
         std::scoped_lock lock(mutex_);
         output_width_ = std::max(0, static_cast<int>(size.cx));
         output_height_ = std::max(0, static_cast<int>(size.cy));
@@ -492,11 +493,21 @@ public:
         // empty and renders at the visual element's exact skin dimensions.
         int next_width = output_width_;
         int next_height = output_height_;
+        dream_stretch_ = !full_screen || !dream_options || dream_options->dream_stretch;
         if (full_screen) {
             switch (settings.type) {
             case 1:
-                next_width = std::min(next_width, 320);
-                next_height = std::min(next_height, 240);
+                if(dream_options && dream_options->dream_resolution!=0 &&
+                   next_width>=2 && next_height>=2) {
+                    const bool custom=dream_options->dream_resolution==2;
+                    next_width=custom?std::clamp(dream_options->dream_width,
+                        settings::FullScreenSettings::dream_min_size,settings::FullScreenSettings::dream_max_size):800;
+                    next_height=custom?std::clamp(dream_options->dream_height,
+                        settings::FullScreenSettings::dream_min_size,settings::FullScreenSettings::dream_max_size):800;
+                } else {
+                    next_width = std::min(next_width, 320);
+                    next_height = std::min(next_height, 240);
+                }
                 break;
             case 2:
                 next_width = std::min(next_width, 240);
@@ -758,7 +769,12 @@ public:
         struct Restore {
             VisualRuntime& runtime;
             const settings::VisualSettings& settings;
-            ~Restore() {runtime.settings_ = settings; runtime.paint_colors_ = nullptr;}
+            ~Restore() {
+                // Complete GDI reads of our reusable DIB before releasing the
+                // render lock and letting another thread overwrite its pixels.
+                GdiFlush();
+                runtime.settings_ = settings; runtime.paint_colors_ = nullptr;
+            }
         } restore{*this, original};
         paint_colors_ = colors;
         if (colors) {
@@ -774,8 +790,10 @@ public:
             osu_visual_.Paint(dc,bounds,full_screen_ && allow_gpu);
             break;
         case 1:
-            PaintCachedBackground(dc, bounds);
-            PaintDream(dc, bounds);
+            // Dream is an opaque, complete frame. Clearing the live DC first
+            // publishes a black intermediate image between two GDI calls.
+            // Only expose the cached background when there is no frame.
+            if (!PaintDream(dc, bounds)) PaintCachedBackground(dc, bounds);
             break;
         case 2:
             if (have_dynamic_frame_) PaintSpectrum(dc, bounds);
@@ -850,6 +868,47 @@ public:
             return;
         if (album_background_mode_) PaintCover(dc, bounds);
         else PaintCachedBackground(dc, bounds);
+        GdiFlush();
+    }
+
+    template<class Painter>
+    BOOL PaintContentFrame(HDC target, const RECT& bounds, Painter&& paint) {
+        // Providers normally supply a memory canvas. Preserve that fast path;
+        // only a visible target needs a second, whole-content transaction.
+        if (GetObjectType(target) == OBJ_MEMDC) return paint(target);
+        const int64_t width = int64_t(bounds.right) - bounds.left;
+        const int64_t height = int64_t(bounds.bottom) - bounds.top;
+        constexpr int64_t max_pixels = 64 * 1024 * 1024;
+        if (width <= 0 || height <= 0 || width > INT_MAX || height > INT_MAX ||
+            width * height > max_pixels) return FALSE;
+        // This lock is separate from the effect lock: fetching track/lyric
+        // state must not hold up the audio visualization worker.
+        std::scoped_lock lock(content_mutex_);
+        if (content_frame_in_use_) return FALSE;
+        content_frame_in_use_ = true;
+        struct End {bool& active;~End(){active=false;}} end{content_frame_in_use_};
+        if (!content_frame_ || content_frame_->size.cx < width || content_frame_->size.cy < height) {
+            SIZE capacity{std::max<LONG>(static_cast<LONG>(width),content_frame_?content_frame_->size.cx:0),
+                          std::max<LONG>(static_cast<LONG>(height),content_frame_?content_frame_->size.cy:0)};
+            if (int64_t(capacity.cx)*capacity.cy > max_pixels)
+                capacity={static_cast<LONG>(width),static_cast<LONG>(height)};
+            auto next=std::make_unique<CoverFrame>(capacity);
+            if (!next->previous || next->previous==HGDI_ERROR) return FALSE;
+            content_frame_=std::move(next);
+        }
+        const HDC canvas=content_frame_->dc;
+        const int saved=SaveDC(canvas);
+        if (!saved) return FALSE;
+        struct Restore {HDC dc;int saved;~Restore(){RestoreDC(dc,saved);}} restore{canvas,saved};
+        // Keep the provider's logical coordinates, including non-zero/negative
+        // origins. The caller's clip and mapping remain on the final target.
+        if (!SetWindowOrgEx(canvas,bounds.left,bounds.top,nullptr)) return FALSE;
+        GdiFlush();
+        if (!paint(canvas)) return FALSE;
+        const BOOL copied=BitBlt(target,bounds.left,bounds.top,static_cast<int>(width),static_cast<int>(height),
+            canvas,bounds.left,bounds.top,SRCCOPY);
+        GdiFlush(); // Finish using this frame before another callback reuses it.
+        return copied;
     }
 
     [[nodiscard]] bool FallbackHit(POINT point) const noexcept {
@@ -1149,9 +1208,9 @@ private:
         have_dynamic_frame_ = true;
     }
 
-    void PaintDream(HDC dc, const RECT& bounds) const {
+    bool PaintDream(HDC dc, const RECT& bounds) const {
         if (!have_dynamic_frame_ || !dream_bits_ ||
-            dream_width_ <= 0 || dream_height_ <= 0) return;
+            dream_width_ <= 0 || dream_height_ <= 0) return false;
         if (dream_bits_ && dream_width_ > 0 && dream_height_ > 0) {
             BITMAPINFO information{};
             information.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -1162,13 +1221,24 @@ private:
             information.bmiHeader.biCompression = BI_RGB;
             // 0045697F presents the positive-height 32-bit DIB through one
             // persistent DrawDib handle, including scaling and clipping.
-            if (!dream_draw_) return;
-            DrawDibDraw(dream_draw_, dc, bounds.left, bounds.top,
-                bounds.right - bounds.left, bounds.bottom - bounds.top,
+            if (!dream_draw_) return false;
+            const int output_width=bounds.right-bounds.left, output_height=bounds.bottom-bounds.top;
+            if(output_width<=0 || output_height<=0)return false;
+            int source_width=dream_width_, source_height=dream_height_;
+            if(!dream_stretch_) {
+                if(static_cast<int64_t>(source_width)*output_height>
+                   static_cast<int64_t>(source_height)*output_width)
+                    source_width=std::max(1,static_cast<int>(static_cast<int64_t>(source_height)*output_width/output_height));
+                else
+                    source_height=std::max(1,static_cast<int>(static_cast<int64_t>(source_width)*output_height/output_width));
+            }
+            return DrawDibDraw(dream_draw_, dc, bounds.left, bounds.top,
+                output_width, output_height,
                 &information.bmiHeader, const_cast<uint32_t*>(dream_bits_),
-                0, 0, dream_width_, dream_height_, DDF_BACKGROUNDPAL);
-            return;
+                (dream_width_-source_width)/2, (dream_height_-source_height)/2,
+                source_width, source_height, DDF_BACKGROUNDPAL) != FALSE;
         }
+        return false;
     }
 
     void PaintSpectrum(HDC dc, const RECT& bounds) {
@@ -1482,11 +1552,15 @@ private:
     HGDIOBJ surface_old_bitmap_{};
     uint32_t* surface_bits_{};
     std::unique_ptr<CoverFrame> cover_frame_;
+    std::recursive_mutex content_mutex_;
+    std::unique_ptr<CoverFrame> content_frame_;
+    bool content_frame_in_use_{};
     void* dream_{};
     HDRAWDIB dream_draw_{};
     const uint32_t* dream_bits_{};
     int dream_width_{};
     int dream_height_{};
+    bool dream_stretch_{true};
     settings::VisualSettings settings_{};
     int width_{};
     int height_{};
@@ -1816,12 +1890,13 @@ void PlayerWindow::UpdateVisualWindowLayout() {
         } else {
             if(IsOsuVisualType(settings_.visual.type))
                 visual_runtime_->SetOsuFallbackImage(settings_.fullscreen.album_fallback_image);
-            visual_runtime_->Configure(settings_.visual, {width, height}, true);
+            visual_runtime_->Configure(settings_.visual, {width, height}, true, {}, nullptr, false,
+                                       &settings_.fullscreen);
         }
-        const auto interval=VisualFrameIntervalNs(settings_.visual);
+        const auto interval=VisualFrameIntervalNs(settings_.visual,&settings_.fullscreen);
         visual_legacy_wait_.store(settings_.visual.type==1,std::memory_order_relaxed);
         visual_interval_ns_.store(interval,std::memory_order_relaxed);
-        visual_high_resolution_.store(IsOsuVisualType(settings_.visual.type) && interval<20000000,
+        visual_high_resolution_.store((settings_.visual.type==1 || IsOsuVisualType(settings_.visual.type)) && interval<20000000,
                                       std::memory_order_relaxed);
         visual_worker_enabled_.store(settings_.visual.type != 0,
                                      std::memory_order_release);
@@ -2002,79 +2077,85 @@ BOOL WINAPI PlayerWindow::PaintSkinPluginContent(void* context,HDC dc,const RECT
         return FALSE;
     try {
         auto& self=*static_cast<PlayerWindow*>(context);
-        visual_type=static_cast<uint32_t>(AvailableVisualType(static_cast<int>(visual_type)));
-        const int saved=SaveDC(dc);
-        if(!saved) return FALSE;
-        struct Restore {HDC dc;int saved;~Restore(){RestoreDC(dc,saved);}} restore{dc,saved};
-        IntersectClipRect(dc,bounds->left,bounds->top,bounds->right,bounds->bottom);
-        FillRect(dc,bounds,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-        const bool combined=mode==TTP_SKIN_CONTENT_COMBINED;
-        RECT visual{},lyric{};
-        bool overlay=false;
-        self.SkinPluginContentRects(*bounds,mode,visual_type,visual,lyric,overlay);
-        const bool have_visual=!self.lyric_editor_ && mode!=TTP_SKIN_CONTENT_LYRICS && !IsRectEmpty(&visual) && visual_type!=0;
-        HWND content_window=self.lyric_editor_?self.lyric_window_:self.lyric_control_;
-        if(self.external_skin_) {
-            TtpSkinContent main{sizeof(main),self.window_};
-            if(self.external_skin_->ContentState(main) && !IsRectEmpty(&main.bounds))content_window=self.window_;
-            else if(self.external_skin_->Handles(self.lyric_window_))content_window=self.lyric_window_;
+        if (!self.plugin_content_runtime_) {
+            self.plugin_content_runtime_=std::make_shared<VisualRuntime>();
+            self.plugin_content_runtime_->SetModule(self.ttpcomm_module_);
         }
-        self.content_visual_window_.store(content_window,std::memory_order_release);
-        self.plugin_content_visual_enabled_.store(have_visual && !self.fullscreen_mode_,std::memory_order_release);
-        if(have_visual && self.plugin_content_runtime_) {
-            auto settings=self.settings_.visual;
-            settings.type=static_cast<int>(visual_type);
-            const SIZE size{visual.right-visual.left,visual.bottom-visual.top};
-            std::filesystem::path source;
-            audio::AudioMetadata metadata;
-            const auto playback=self.audio_->State();
-            bool source_ready = false;
-            if (visual_type == 4 || IsOsuVisualType(visual_type)) source_ready = self.VisualArtworkSource(source, metadata);
-            else if(playback==audio::PlaybackState::playing || playback==audio::PlaybackState::paused) {
-                if(const auto* track=self.PlaybackTrackForUi()) source=track->path;
-                metadata=self.audio_->Metadata();
-            }
-            auto& runtime=*self.plugin_content_runtime_;
-            runtime.SetPlayerEffectColor(self.settings_.lyric.highlight_color);
-            if(self.plugin_content_visual_type_!=settings.type || self.plugin_content_size_.cx!=size.cx ||
-               self.plugin_content_size_.cy!=size.cy || self.plugin_content_combined_!=combined) {
-                // Reconfigure only at a mode/geometry/settings boundary. Doing
-                // this on every paint would reset spectrum decay and Goom.
-                if(visual_type==4 && combined)
-                    runtime.ConfigureAlbum(settings,size,self.settings_.fullscreen,
-                        self.settings_.lyric.fullscreen_background_color,source,metadata,
-                        source_ready || (!self.VisualArtworkPending() &&
-                            playback!=audio::PlaybackState::playing && playback!=audio::PlaybackState::paused));
-                else runtime.Configure(settings,size,true);
-                self.plugin_content_visual_type_=settings.type;
-                self.plugin_content_size_=size;self.plugin_content_combined_=combined;
-            }
-            if((playback==audio::PlaybackState::playing || playback==audio::PlaybackState::paused) &&
-                (visual_type != 4 || source_ready))
-                runtime.SetSource(source,self.ResourceText(0x821b),metadata);
-            // Providers own clipping and overlay composition. A swap chain
-            // would bypass their HDC and overwrite neighbouring content.
-            RECT pointer_visual=visual;
+        return self.plugin_content_runtime_->PaintContentFrame(dc,*bounds,[&](HDC dc)->BOOL {
+            visual_type=static_cast<uint32_t>(AvailableVisualType(static_cast<int>(visual_type)));
+            const int saved=SaveDC(dc);
+            if(!saved) return FALSE;
+            struct Restore {HDC dc;int saved;~Restore(){RestoreDC(dc,saved);}} restore{dc,saved};
+            IntersectClipRect(dc,bounds->left,bounds->top,bounds->right,bounds->bottom);
+            FillRect(dc,bounds,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            const bool combined=mode==TTP_SKIN_CONTENT_COMBINED;
+            RECT visual{},lyric{};
+            bool overlay=false;
+            self.SkinPluginContentRects(*bounds,mode,visual_type,visual,lyric,overlay);
+            const bool have_visual=!self.lyric_editor_ && mode!=TTP_SKIN_CONTENT_LYRICS && !IsRectEmpty(&visual) && visual_type!=0;
+            HWND content_window=self.lyric_editor_?self.lyric_window_:self.lyric_control_;
             if(self.external_skin_) {
-                TtpSkinContent canvas{sizeof(canvas),content_window};
-                if(self.external_skin_->ContentState(canvas) && !IsRectEmpty(&canvas.bounds)) {
-                    const RECT source_canvas=*bounds;
-                    const RECT target=canvas.bounds;
-                    pointer_visual={
-                        target.left+MulDiv(visual.left-source_canvas.left,target.right-target.left,source_canvas.right-source_canvas.left),
-                        target.top+MulDiv(visual.top-source_canvas.top,target.bottom-target.top,source_canvas.bottom-source_canvas.top),
-                        target.left+MulDiv(visual.right-source_canvas.left,target.right-target.left,source_canvas.right-source_canvas.left),
-                        target.top+MulDiv(visual.bottom-source_canvas.top,target.bottom-target.top,source_canvas.bottom-source_canvas.top)};
-                }
+                TtpSkinContent main{sizeof(main),self.window_};
+                if(self.external_skin_->ContentState(main) && !IsRectEmpty(&main.bounds))content_window=self.window_;
+                else if(self.external_skin_->Handles(self.lyric_window_))content_window=self.lyric_window_;
             }
-            runtime.SetOsuViewport(content_window,pointer_visual);
-            runtime.Paint(dc,visual,nullptr,false);
-        }
-        // RichEdit owns these pixels while editing. Do not keep an animated
-        // lyric frame underneath it that can flash during a child repaint.
-        if(!self.lyric_editor_ && mode!=TTP_SKIN_CONTENT_VISUAL && !IsRectEmpty(&lyric))
-            self.PaintLyricControl(self.lyric_control_,dc,false,&lyric,overlay);
-        return TRUE;
+            self.content_visual_window_.store(content_window,std::memory_order_release);
+            self.plugin_content_visual_enabled_.store(have_visual && !self.fullscreen_mode_,std::memory_order_release);
+            if(have_visual && self.plugin_content_runtime_) {
+                auto settings=self.settings_.visual;
+                settings.type=static_cast<int>(visual_type);
+                const SIZE size{visual.right-visual.left,visual.bottom-visual.top};
+                std::filesystem::path source;
+                audio::AudioMetadata metadata;
+                const auto playback=self.audio_->State();
+                bool source_ready = false;
+                if (visual_type == 4 || IsOsuVisualType(visual_type)) source_ready = self.VisualArtworkSource(source, metadata);
+                else if(playback==audio::PlaybackState::playing || playback==audio::PlaybackState::paused) {
+                    if(const auto* track=self.PlaybackTrackForUi()) source=track->path;
+                    metadata=self.audio_->Metadata();
+                }
+                auto& runtime=*self.plugin_content_runtime_;
+                runtime.SetPlayerEffectColor(self.settings_.lyric.highlight_color);
+                if(self.plugin_content_visual_type_!=settings.type || self.plugin_content_size_.cx!=size.cx ||
+                   self.plugin_content_size_.cy!=size.cy || self.plugin_content_combined_!=combined) {
+                    // Reconfigure only at a mode/geometry/settings boundary. Doing
+                    // this on every paint would reset spectrum decay and Goom.
+                    if(visual_type==4 && combined)
+                        runtime.ConfigureAlbum(settings,size,self.settings_.fullscreen,
+                            self.settings_.lyric.fullscreen_background_color,source,metadata,
+                            source_ready || (!self.VisualArtworkPending() &&
+                                playback!=audio::PlaybackState::playing && playback!=audio::PlaybackState::paused));
+                    else runtime.Configure(settings,size,true);
+                    self.plugin_content_visual_type_=settings.type;
+                    self.plugin_content_size_=size;self.plugin_content_combined_=combined;
+                }
+                if((playback==audio::PlaybackState::playing || playback==audio::PlaybackState::paused) &&
+                    (visual_type != 4 || source_ready))
+                    runtime.SetSource(source,self.ResourceText(0x821b),metadata);
+                // Providers own clipping and overlay composition. A swap chain
+                // would bypass their HDC and overwrite neighbouring content.
+                RECT pointer_visual=visual;
+                if(self.external_skin_) {
+                    TtpSkinContent canvas{sizeof(canvas),content_window};
+                    if(self.external_skin_->ContentState(canvas) && !IsRectEmpty(&canvas.bounds)) {
+                        const RECT source_canvas=*bounds;
+                        const RECT target=canvas.bounds;
+                        pointer_visual={
+                            target.left+MulDiv(visual.left-source_canvas.left,target.right-target.left,source_canvas.right-source_canvas.left),
+                            target.top+MulDiv(visual.top-source_canvas.top,target.bottom-target.top,source_canvas.bottom-source_canvas.top),
+                            target.left+MulDiv(visual.right-source_canvas.left,target.right-target.left,source_canvas.right-source_canvas.left),
+                            target.top+MulDiv(visual.bottom-source_canvas.top,target.bottom-target.top,source_canvas.bottom-source_canvas.top)};
+                    }
+                }
+                runtime.SetOsuViewport(content_window,pointer_visual);
+                runtime.Paint(dc,visual,nullptr,false);
+            }
+            // RichEdit owns these pixels while editing. Do not keep an animated
+            // lyric frame underneath it that can flash during a child repaint.
+            if(!self.lyric_editor_ && mode!=TTP_SKIN_CONTENT_VISUAL && !IsRectEmpty(&lyric))
+                self.PaintLyricControl(self.lyric_control_,dc,false,&lyric,overlay);
+            return TRUE;
+        });
     } catch(...) {return FALSE;}
 }
 
@@ -2083,16 +2164,15 @@ void PlayerWindow::PaintVisualControl(HDC dc) const {
     if(external_skin_ && !fullscreen_visual_detached_) return;
     RECT client{};
     GetClientRect(visual_window_, &client);
-    if (settings_.visual.type >= 5 && visual_runtime_) {
+    if (visual_runtime_) {
+        // Every renderer owns its complete frame and no-frame background.
+        // Never publish a background-only image before that completed frame,
+        // or clear outside the renderer lock while the worker is painting.
         visual_runtime_->Paint(dc, client);
         return;
     }
     if (fullscreen_visual_detached_) {
-        // Album backgrounds already publish a complete composited frame.
-        // Erasing the visible DC first would reintroduce cover flicker.
-        if (!visual_runtime_ || settings_.visual.type != 4)
-            FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-        if (visual_runtime_) visual_runtime_->Paint(dc, client);
+        FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
         return;
     }
     const auto* element = FindActiveSkinElement(L"visual");
@@ -2100,15 +2180,11 @@ void PlayerWindow::PaintVisualControl(HDC dc) const {
     if (background && element) {
         // Use the already-composited backing, including PNG alpha. Do not
         // reinterpret its DIB compatibility view as an opaque drawing source.
-        if (visual_runtime_) visual_runtime_->PaintBackgroundOnly(dc, client);
-        else {
-            FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-            background.Draw(dc, 0, 0, client.right, client.bottom,
-                            element->bounds.left, element->bounds.top,
-                            client.right, client.bottom);
-        }
+        FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        background.Draw(dc, 0, 0, client.right, client.bottom,
+                        element->bounds.left, element->bounds.top,
+                        client.right, client.bottom);
     }
-    if (visual_runtime_) visual_runtime_->Paint(dc, client);
 }
 
 int PlayerWindow::WindowedVisualType() const {

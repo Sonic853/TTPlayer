@@ -25,7 +25,14 @@ inline int AvailableVisualMaximum(bool fullscreen=false) noexcept {
     return audio::HasOsuLazerSupport()?8:7;
 }
 inline bool IsOsuVisualType(int type) noexcept {return type==7 || type==8;}
-inline unsigned VisualFrameIntervalNs(const settings::VisualSettings& visual) noexcept {
+inline unsigned VisualFrameIntervalNs(const settings::VisualSettings& visual,
+                                     const settings::FullScreenSettings* fullscreen=nullptr) noexcept {
+    if(visual.type==1 && fullscreen) {
+        const unsigned fps=static_cast<unsigned>(std::clamp(fullscreen->dream_frames_per_second,10,120));
+        // Preserve Dream's post-work wait, but do not round 120 FPS to 8 ms
+        // (125 Hz). The default 25 FPS still has the original 40 ms wait.
+        return static_cast<unsigned>((1000000000ULL+fps-1)/fps);
+    }
     const int fps=visual.type==7?std::clamp(visual.osu_frames_per_second,10,240):
         visual.type==8?std::clamp(visual.osu_lazer_frames_per_second,10,240):
         std::clamp(visual.frames_per_second,0,100);
