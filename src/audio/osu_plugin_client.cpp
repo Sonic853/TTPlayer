@@ -99,7 +99,8 @@ bool HasOsuLibrarySupport() noexcept {
         try {
             TtpOsuLibraryApi api{sizeof(api)};
             const auto query=reinterpret_cast<TtpOsuQueryLibrary>(GetProcAddress(LoadedPlugin().module,TTP_OSU_LIBRARY_ENTRY));
-            return query && SUCCEEDED(query(TTP_OSU_LIBRARY_ABI,&api)) && api.abi==TTP_OSU_LIBRARY_ABI && api.enumerate;
+            return query && SUCCEEDED(query(TTP_OSU_LIBRARY_ABI,&api)) && api.size>=sizeof(api) &&
+                api.abi==TTP_OSU_LIBRARY_ABI && api.enumerate;
         }catch(...){return false;}
     }();
     return supported;
@@ -110,7 +111,8 @@ HRESULT ReadOsuLibrary(unsigned source,const std::filesystem::path& root,
     return Callback([&] {
         TtpOsuLibraryApi api{sizeof(api)};
         const auto query=reinterpret_cast<TtpOsuQueryLibrary>(GetProcAddress(LoadedPlugin().module,TTP_OSU_LIBRARY_ENTRY));
-        if(!query || FAILED(query(TTP_OSU_LIBRARY_ABI,&api)) || api.abi!=TTP_OSU_LIBRARY_ABI || !api.enumerate)
+        if(!query || FAILED(query(TTP_OSU_LIBRARY_ABI,&api)) || api.size<sizeof(api) ||
+           api.abi!=TTP_OSU_LIBRARY_ABI || !api.enumerate)
             throw ArchiveError(kOszPluginIncompatible);
         struct State {const std::function<bool()>& canceled;std::vector<OsuLibraryMedia> records;} state{canceled,{}};
         const TtpOsuLibraryHost host{sizeof(host),&state,[](void* data)->BOOL {

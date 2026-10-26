@@ -54,6 +54,8 @@ TrackInfoState ApplyFileInfoProbeToTrack(
     for (const auto& entry : probe->metadata)
         if (!entry.name.empty()) track.metadata.emplace_back(utf8(entry.name), utf8(entry.value));
     PreserveBrowserTrackIdentity(previous, track.metadata);
+    PreserveOsuTrackMetadata(previous, track.metadata);
+    RestoreOsuTrackMetadata(track);
     return probe->status == S_FALSE ? TrackInfoState::provisional : TrackInfoState::success;
 }
 

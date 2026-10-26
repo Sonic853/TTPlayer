@@ -1520,6 +1520,7 @@ PlayerWindow::~PlayerWindow() {
     CloseLyricServiceEditor();
     DestroyFullScreenLyricInput();
     ShutdownMediaLibrary();
+    ShutdownOsuLibraries();
     ShutdownPlaylistInfoLoading();
     if (playlist_metadata_cancel_)
         playlist_metadata_cancel_->store(true, std::memory_order_release);
@@ -2909,6 +2910,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
     if (message == kMsgDiscLookup) { RunAutomaticDiscQuery(); return 0; }
     if (message == kMsgPlaylistInfoReady)
         return ApplyPlaylistInfoResult(lparam);
+    if (message == kMsgOsuLibraryReady) {ApplyOsuLibraryResults();return 0;}
     if (message == kMsgExtensionCorrection) {
         PromptExtensionCorrection();
         return 0;
@@ -3011,6 +3013,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         CreateLyricWindow();
         CreateEqualizerWindow();
         CreatePlaylistWindow();
+        RefreshOsuLibraries();
         // CPlayerWnd::OnCreate (0045FAD8) exposes files through an OLE drop
         // target.  WM_DROPFILES is not enabled on the original top-level
         // window and cannot preserve IDataObject ordering or drop effects.
@@ -3945,6 +3948,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         // an unbounded join during WM_DESTROY.
         ShutdownPlaylistInfoLoading();
         ShutdownMediaLibrary();
+        ShutdownOsuLibraries();
         desktop_lyrics_.CaptureBounds();
         desktop_lyrics_.Destroy();
         desktop_lyric_mode_ = false;
@@ -4124,8 +4128,9 @@ SaveResult PlayerWindow::PersistWindowState() {
     if (window_state_saved_ && !lyric_associations_.Dirty()) return {};
     CaptureWindowState();
     settings_.player.mini_mode = mini_mode_;
-    settings_.player.playlist_scan_count = static_cast<int>(playlists_.Size());
-    settings_.player.active_playlist = static_cast<int>(playlists_.ActiveSlot());
+    settings_.player.playlist_scan_count = static_cast<int>(std::count_if(
+        playlists_.Entries().begin(),playlists_.Entries().end(),[](const auto& entry){return entry.external_kind==0;}));
+    settings_.player.active_playlist = static_cast<int>(playlists_.StoredActiveSlot());
     // The original keeps Player/PlayingFileName after an explicit Stop (and
     // after natural end); it is the playlist's last-playing identity, not a
     // synonym for "decoder currently open". Close-file, list replacement,
@@ -4170,6 +4175,9 @@ SaveResult PlayerWindow::SavePersistentState() {
 bool PlayerWindow::SaveSettingsWithFeedback() {
     window_state_saved_ = false;
     auto snapshot=settings_;snapshot.visual.type=WindowedVisualType();
+    snapshot.player.active_playlist=static_cast<int>(playlists_.StoredActiveSlot());
+    snapshot.player.playlist_scan_count=static_cast<int>(std::count_if(
+        playlists_.Entries().begin(),playlists_.Entries().end(),[](const auto& entry){return entry.external_kind==0;}));
     const auto result = settings::SaveWindowState(settings_.source_path, snapshot);
     if (!result) ReportPersistenceFailure(result);
     return static_cast<bool>(result);
@@ -7583,6 +7591,8 @@ bool PlayerWindow::PlayCurrent() {
         return true;
     }
     ConfigureNetworkDownloads();
+    audio_->Configure(PlaybackOptionsFromSettings(
+        settings_, PlayerRuntimeDirectory(), &requested_track));
     if (!audio_->Play(requested_track.path, requested_track.subtrack)) {
         taskbar_preview_.Clear();
         system_media_controls_.Clear();

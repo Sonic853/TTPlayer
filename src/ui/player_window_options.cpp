@@ -6558,7 +6558,8 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
     }
     if (all || template_id == 251 || template_id == 258 || template_id == 259 ||
         template_id == 260) {
-        audio_->Configure(PlaybackOptionsFromSettings(settings_, PlayerRuntimeDirectory()));
+        audio_->Configure(PlaybackOptionsFromSettings(
+            settings_, PlayerRuntimeDirectory(), PlaybackTrackForUi()));
         audio_->SetVolume(settings_.player.mute ? 0.0F :
             static_cast<float>(settings_.player.volume) / 100.0F);
     }
@@ -7307,6 +7308,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         if(template_id==255 && IsOsuLibraryPathControl(control) && GetPropW(dialog,kPageReadyProperty) &&
            (notification==EN_CHANGE || notification==EN_KILLFOCUS)) {
             CommitOptionsControl(dialog,template_id,control);
+            if(notification==EN_KILLFOCUS)RefreshOsuLibraries(true);
             return TRUE; // path edits do not restart ordinary library watchers
         }
         if (template_id == 256 && notification == STN_CLICKED) {

@@ -29,6 +29,9 @@ inline unsigned VisualFrameIntervalNs(const settings::VisualSettings& visual) no
     const int fps=visual.type==7?std::clamp(visual.osu_frames_per_second,10,240):
         visual.type==8?std::clamp(visual.osu_lazer_frames_per_second,10,240):
         std::clamp(visual.frames_per_second,0,100);
+    // CPlayerWnd::Run (0045F12D) waits this whole number of milliseconds
+    // after a Dream frame, including at 30 FPS (33 ms, not 33.333 ms).
+    if(visual.type==1)return fps?static_cast<unsigned>(1000/fps)*1000000U:50000000U;
     return fps?static_cast<unsigned>((1000000000ULL+fps/2)/fps):50000000U;
 }
 inline int AvailableVisualType(int type,bool fullscreen=false) noexcept {

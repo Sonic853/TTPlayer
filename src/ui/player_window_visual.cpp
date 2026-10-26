@@ -8,6 +8,8 @@
 #include "album_background.h"
 #include "player_visual_effect.h"
 #include "osu_visual_client.h"
+#include "track_metadata.h"
+#include "ttplayer/core/text.h"
 #include "ttplayer/ui/cover_image.h"
 #include "ttplayer/app/worker_process.h"
 #include "../app/resource_ids.h"
@@ -31,6 +33,7 @@
 #include <shlwapi.h>
 #include <windowsx.h>
 #include <mmsystem.h>
+#include <vfw.h>
 
 namespace ttplayer::ui {
 using namespace detail;
@@ -623,12 +626,19 @@ public:
         const bool metadata_changed =
             thumbnail_interface_ != metadata.thumbnail_interface ||
             thumbnail_ != metadata.thumbnail;
+        if(IsOsuVisualType(settings_.type)) {
+            std::filesystem::path beatmap,background;
+            for(const auto& [name,value]:metadata.entries) {
+                if(name==L"TTPlayer.Osu.Beatmap")beatmap=value;
+                else if(name==L"TTPlayer.Osu.Background")background=value;
+            }
+            osu_visual_.Source(source,metadata.thumbnail,module_,beatmap,background);
+        }
         if (source_ == source && !metadata_changed && !force_reload) return;
         source_ = source;
         thumbnail_interface_ = metadata.thumbnail_interface;
         thumbnail_ = metadata.thumbnail;
         if (settings_.type == 4) LoadCover();
-        if (IsOsuVisualType(settings_.type)) osu_visual_.Source(source,metadata.thumbnail,module_);
     }
 
     void ClearDynamic() {
@@ -697,23 +707,30 @@ public:
     void Update(const audio::VisualizationSamples& samples) {
         std::scoped_lock lock(mutex_);
         if (width_ <= 0 || height_ <= 0) return;
-        // FUN_004ABBDC asks the reader for exactly 0x200 samples per channel
-        // and refuses a short block.  The previous frame is retained until a
-        // complete analysis block is available.
-        if (samples.count < audio::VisualizationSamples::capacity) return;
+        // 004ABCC2 rejects only an empty read, not a positive short block.
+        // Dream still advances for those blocks. Define the missing tail as
+        // silence instead of repeating the original's uninitialized reads.
+        const size_t count=std::min(samples.count,kAnalysisSamples);
+        if (!count || (settings_.type != 1 && count < kAnalysisSamples)) return;
         // FUN_004ABBDC writes into one persistent 0xC00-byte scratch block.
         // Every visual mode refreshes the first 512 shorts, while only the
         // stereo dream mode refreshes the second 512; ordinal 105 owns the
         // final 512 spectrum slots.  Keeping this block persistent matters
         // for unusually wide embedded scope controls after a mode switch.
-        std::copy_n(samples.left.begin(), kAnalysisSamples,
+        std::copy_n(samples.left.begin(), count,
                     analysis_work_.begin());
         if (settings_.type == 1) {
-            std::copy_n(samples.right.begin(), kAnalysisSamples,
+            std::fill(analysis_work_.begin()+count,
+                      analysis_work_.begin()+kAnalysisSamples,int16_t{});
+            std::copy_n(samples.right.begin(), count,
                         analysis_work_.begin() + kAnalysisSamples);
+            std::fill(analysis_work_.begin()+kAnalysisSamples+count,
+                      analysis_work_.begin()+2*kAnalysisSamples,int16_t{});
         }
-        std::copy_n(samples.left.begin(),kAnalysisSamples,skin_pcm_left_.begin());
-        std::copy_n(samples.right.begin(),kAnalysisSamples,skin_pcm_right_.begin());
+        std::copy_n(analysis_work_.begin(),kAnalysisSamples,skin_pcm_left_.begin());
+        if(settings_.type==1)
+            std::copy_n(analysis_work_.begin()+kAnalysisSamples,kAnalysisSamples,skin_pcm_right_.begin());
+        else std::copy_n(samples.right.begin(),kAnalysisSamples,skin_pcm_right_.begin());
         switch (settings_.type) {
         case 1: UpdateDream(samples); break;
         case 2: UpdateSpectrum(samples); break;
@@ -937,6 +954,8 @@ private:
 
     void DestroyDream() noexcept {
         if (dream_) SafeDreamDestroy(destroy_, dream_);
+        if (dream_draw_) DrawDibClose(dream_draw_);
+        dream_draw_ = nullptr;
         dream_ = nullptr;
         dream_bits_ = nullptr;
         dream_width_ = 0;
@@ -983,6 +1002,7 @@ private:
         if (!dream_)
             dream_ = SafeDreamCreate(create_, static_cast<uint32_t>(width), height);
         if (dream_) {
+            if (!dream_draw_) dream_draw_ = DrawDibOpen();
             dream_width_ = width;
             dream_height_ = height;
         }
@@ -1140,11 +1160,13 @@ private:
             information.bmiHeader.biPlanes = 1;
             information.bmiHeader.biBitCount = 32;
             information.bmiHeader.biCompression = BI_RGB;
-            SetStretchBltMode(dc, COLORONCOLOR);
-            StretchDIBits(dc, bounds.left, bounds.top,
+            // 0045697F presents the positive-height 32-bit DIB through one
+            // persistent DrawDib handle, including scaling and clipping.
+            if (!dream_draw_) return;
+            DrawDibDraw(dream_draw_, dc, bounds.left, bounds.top,
                 bounds.right - bounds.left, bounds.bottom - bounds.top,
-                0, 0, dream_width_, dream_height_, dream_bits_, &information,
-                DIB_RGB_COLORS, SRCCOPY);
+                &information.bmiHeader, const_cast<uint32_t*>(dream_bits_),
+                0, 0, dream_width_, dream_height_, DDF_BACKGROUNDPAL);
             return;
         }
     }
@@ -1461,6 +1483,7 @@ private:
     uint32_t* surface_bits_{};
     std::unique_ptr<CoverFrame> cover_frame_;
     void* dream_{};
+    HDRAWDIB dream_draw_{};
     const uint32_t* dream_bits_{};
     int dream_width_{};
     int dream_height_{};
@@ -1638,6 +1661,7 @@ void PlayerWindow::StartVisualWorker() {
         auto deadline=std::chrono::steady_clock::now();
         for (;;) {
             const unsigned period=visual_interval_ns_.load(std::memory_order_relaxed);
+            const bool legacy_wait=visual_legacy_wait_.load(std::memory_order_relaxed);
             const auto interval=std::chrono::nanoseconds(std::max(1U,period));
             const bool precise=visual_high_resolution_.load(std::memory_order_relaxed) &&
                 visual_worker_enabled_.load(std::memory_order_acquire);
@@ -1645,16 +1669,24 @@ void PlayerWindow::StartVisualWorker() {
             // A deadline includes time spent on audio/scene work. Fractional
             // 240 Hz periods must not become integer 4 ms (250 Hz) or sleep
             // for another complete interval after each processed frame.
-            deadline+=interval;
-            deadline=std::max(deadline,std::chrono::steady_clock::now());
+            if(legacy_wait) {
+                // Dream follows 0045F12D: its frame-count-based evolution
+                // includes render time plus a complete post-frame wait.
+                deadline=std::chrono::steady_clock::now()+interval;
+            } else {
+                deadline+=interval;
+                deadline=std::max(deadline,std::chrono::steady_clock::now());
+            }
             std::unique_lock lock(visual_worker_mutex_);
             visual_worker_condition_.wait_until(lock,stop,deadline,[&] {
-                return visual_interval_ns_.load(std::memory_order_relaxed)!=period;
+                return visual_interval_ns_.load(std::memory_order_relaxed)!=period ||
+                    visual_legacy_wait_.load(std::memory_order_relaxed)!=legacy_wait;
             });
             const auto audio = audio_;
             lock.unlock();
             if (stop.stop_requested()) return;
-            if(visual_interval_ns_.load(std::memory_order_relaxed)!=period) {
+            if(visual_interval_ns_.load(std::memory_order_relaxed)!=period ||
+               visual_legacy_wait_.load(std::memory_order_relaxed)!=legacy_wait) {
                 deadline=std::chrono::steady_clock::now();continue;
             }
             const HWND content_window=content_visual_window_.load(std::memory_order_acquire);
@@ -1787,6 +1819,7 @@ void PlayerWindow::UpdateVisualWindowLayout() {
             visual_runtime_->Configure(settings_.visual, {width, height}, true);
         }
         const auto interval=VisualFrameIntervalNs(settings_.visual);
+        visual_legacy_wait_.store(settings_.visual.type==1,std::memory_order_relaxed);
         visual_interval_ns_.store(interval,std::memory_order_relaxed);
         visual_high_resolution_.store(IsOsuVisualType(settings_.visual.type) && interval<20000000,
                                       std::memory_order_relaxed);
@@ -1821,6 +1854,7 @@ void PlayerWindow::UpdateVisualWindowLayout() {
     const auto background = ActiveSkinBackground();
     visual_runtime_->Configure(settings_.visual, {width, height}, false,
                                plugin_embedded?skin::SkinImage{}:background, &analysis_bounds);
+    visual_legacy_wait_.store(settings_.visual.type==1,std::memory_order_relaxed);
     visual_interval_ns_.store(VisualFrameIntervalNs(settings_.visual),std::memory_order_relaxed);
     visual_high_resolution_.store(false,std::memory_order_relaxed);
     visual_worker_enabled_.store(settings_.visual.type != 0,
@@ -1854,6 +1888,8 @@ bool PlayerWindow::VisualArtworkSource(std::filesystem::path& source, audio::Aud
     if (!snapshot) return false;
     source = track->path;
     metadata = *snapshot;
+    if(IsOsuLibraryTrack(*track))for(const auto& [name,value]:track->metadata)
+        if(name.starts_with("TTPlayer.Osu."))metadata.entries.emplace_back(core::Utf8ToWide(name),core::Utf8ToWide(value));
     return true;
 }
 
@@ -1864,7 +1900,7 @@ void PlayerWindow::UpdateVisualFrame() {
         (state == audio::PlaybackState::paused && ((fullscreen_visual_detached_ &&
          settings_.visual.type == 4) || IsOsuVisualType(settings_.visual.type)))) {
         std::filesystem::path source;
-        if (settings_.visual.type == 4) {
+        if (settings_.visual.type == 4 || IsOsuVisualType(settings_.visual.type)) {
             audio::AudioMetadata metadata;
             if (VisualArtworkSource(source, metadata))
                 visual_runtime_->SetSource(source, ResourceText(0x821b), metadata);
@@ -1993,7 +2029,7 @@ BOOL WINAPI PlayerWindow::PaintSkinPluginContent(void* context,HDC dc,const RECT
             audio::AudioMetadata metadata;
             const auto playback=self.audio_->State();
             bool source_ready = false;
-            if (visual_type == 4) source_ready = self.VisualArtworkSource(source, metadata);
+            if (visual_type == 4 || IsOsuVisualType(visual_type)) source_ready = self.VisualArtworkSource(source, metadata);
             else if(playback==audio::PlaybackState::playing || playback==audio::PlaybackState::paused) {
                 if(const auto* track=self.PlaybackTrackForUi()) source=track->path;
                 metadata=self.audio_->Metadata();

@@ -1274,7 +1274,7 @@ bool PlayerWindow::CommitImportedTracks(std::vector<playlist::Track> tracks,
                                         size_t insertion,
                                         bool replace_current,
                                         ImportPlayback playback) {
-    if (playlist_index >= playlists_.Size()) return false;
+    if (playlist_index >= playlists_.Size() || playlists_.IsExternal(playlist_index)) return false;
     // FUN_0048059D calls 00480386 only when the temporary batch is non-empty.
     // A successful replace operation has already requested 0047F67C and must
     // still clear; an empty append is a strict no-op, including selection and

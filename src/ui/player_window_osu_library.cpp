@@ -2,7 +2,9 @@
 #include "ttplayer/audio/osu_library.h"
 #include "ttplayer/audio/osz_archive.h"
 #include "ttplayer/core/text.h"
+#include "ttplayer/i18n/i18n.h"
 #include "../settings/osu_storage_path.h"
+#include "track_metadata.h"
 #include <mutex>
 
 namespace ttplayer::ui {
@@ -92,6 +94,7 @@ void PlayerWindow::RefreshOsuLibraries(bool interactive) {
                             {"TTPlayer.Osu.Title",track.title},{"TTPlayer.Osu.Artist",track.artist},{"TTPlayer.Osu.Album",track.album},
                             {"TTPlayer.Osu.Beatmap",core::WideToUtf8(entry.beatmap.native())},
                             {"TTPlayer.Osu.Background",core::WideToUtf8(entry.background.native())}};
+                        RestoreOsuTrackMetadata(track);
                         tracks.push_back(std::move(track));
                     }
                 }catch(const std::bad_alloc&){status=E_OUTOFMEMORY;}catch(...){status=E_FAIL;}

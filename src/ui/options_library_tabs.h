@@ -74,6 +74,7 @@ class LibraryOptionsTabs {
     }
 public:
     static void Attach(HWND page,bool osu_enabled) {
+        if(!osu_enabled)return;
         DWORD_PTR existing{};if(GetWindowSubclass(page,PageProc,kSubclass,&existing))return;
         auto* self=new LibraryOptionsTabs;self->page_=page;self->osu_enabled_=osu_enabled;
         RECT origin{7,7,0,0},compact{0,48,0,97};MapDialogRect(page,&origin);MapDialogRect(page,&compact);
@@ -98,11 +99,10 @@ public:
             if(self->tab_)DestroyWindow(self->tab_);delete self;return;
         }
         const auto font=SendMessageW(page,WM_GETFONT,0,0);SendMessageW(self->tab_,WM_SETFONT,font,FALSE);
-        for(int i=0;i<(osu_enabled?2:1);++i) {
+        for(int i=0;i<2;++i) {
             auto text=i18n::Text(i?L"osu!":L"媒体库");TCITEMW item{};item.mask=TCIF_TEXT;item.pszText=text.data();
             TabCtrl_InsertItem(self->tab_,i,&item);
         }
-        if(!osu_enabled){self->Layout();self->Select(0);return;}
         const auto add=[&](LPCWSTR klass,LPCWSTR text,int id,DWORD style,RECT r,DWORD ex=0) {
             const auto caption=i18n::Text(text);
             HWND control=CreateWindowExW(ex,klass,caption.c_str(),WS_CHILD|style,0,0,0,0,page,

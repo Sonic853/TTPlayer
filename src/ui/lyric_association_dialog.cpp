@@ -69,6 +69,7 @@ struct Dialog {
     lyrics::SongKey song;
     lyrics::LocalSearchRequest request;
     std::function<void()> changed;
+    std::function<bool(const std::filesystem::path&)> can_write_path;
     LyricAssociationChoice choice;
     std::filesystem::path associated;
     std::vector<std::filesystem::path> paths;
@@ -94,9 +95,15 @@ struct Dialog {
         return DefSubclassProc(window, message, wparam, lparam);
     }
     void CancelSearch() { if (job) job->canceled = true; job.reset(); }
+    bool CanWrite(const std::filesystem::path& path) const {
+        return !can_write_path || can_write_path(path);
+    }
     void Selection(HWND window) {
-        const bool selected = ListView_GetNextItem(GetDlgItem(window, kFiles), -1, LVNI_SELECTED) >= 0;
-        for (int id : {kAssociate, kRename, kDelete}) EnableWindow(GetDlgItem(window, id), selected && !blocked);
+        const int row = ListView_GetNextItem(GetDlgItem(window, kFiles), -1, LVNI_SELECTED);
+        const bool selected = row >= 0 && static_cast<size_t>(row) < paths.size() && !blocked;
+        EnableWindow(GetDlgItem(window, kAssociate), selected);
+        const bool writable = selected && CanWrite(paths[static_cast<size_t>(row)]);
+        for (int id : {kRename, kDelete}) EnableWindow(GetDlgItem(window, id), writable);
     }
     void Populate(HWND window) {
         const HWND list = GetDlgItem(window, kFiles);
@@ -138,6 +145,13 @@ struct Dialog {
     void Search(HWND window) {
         CancelSearch(); paths.clear();
         if (!associated.empty() && !blocked) paths.push_back(associated);
+        // A caller may provide its private saved lyric as an additional
+        // candidate without inserting a persistent .rll association.
+        std::error_code error;
+        if (!blocked && !request.associated.empty() &&
+            _wcsicmp(request.associated.c_str(), associated.c_str()) &&
+            std::filesystem::is_regular_file(request.associated, error))
+            paths.push_back(request.associated);
         Populate(window);
         const auto query = Field(window, kQuery);
         if (query.empty()) { SetFocus(GetDlgItem(window, kQuery)); return; }
@@ -159,7 +173,9 @@ struct Dialog {
         if (!result) return;
         CancelSearch(); KillTimer(window, 1);
         for (auto& path : result->matches)
-            if (_wcsicmp(path.c_str(), associated.c_str())) paths.push_back(std::move(path));
+            if (std::none_of(paths.begin(), paths.end(), [&](const auto& existing) {
+                    return _wcsicmp(path.c_str(), existing.c_str()) == 0;
+                })) paths.push_back(std::move(path));
         Populate(window);
         if (!paths.empty()) {
             ListView_SetColumnWidth(GetDlgItem(window, kFiles), 0, LVSCW_AUTOSIZE_USEHEADER);
@@ -259,6 +275,12 @@ INT_PTR CALLBACK AssociateProc(HWND window, UINT message, WPARAM wparam, LPARAM 
         const auto code = reinterpret_cast<NMHDR*>(lparam)->code;
         if (code == LVN_ITEMCHANGED) self->Selection(window);
         if (code == NM_DBLCLK || code == LVN_ITEMACTIVATE) SendMessageW(window, WM_COMMAND, kAssociate, 0);
+        if (code == LVN_BEGINLABELEDITW) {
+            const auto row = reinterpret_cast<NMLVDISPINFOW*>(lparam)->item.iItem;
+            const bool reject = self->blocked || row < 0 || static_cast<size_t>(row) >= self->paths.size() ||
+                !self->CanWrite(self->paths[static_cast<size_t>(row)]);
+            SetWindowLongPtrW(window, DWLP_MSGRESULT, reject);return TRUE;
+        }
         if (code == LVN_ENDLABELEDITW) {
             const auto& item = reinterpret_cast<NMLVDISPINFOW*>(lparam)->item;
             bool okay{};
@@ -266,6 +288,11 @@ INT_PTR CALLBACK AssociateProc(HWND window, UINT message, WPARAM wparam, LPARAM 
                 const std::wstring name = item.pszText;
                 const auto old = self->paths[item.iItem];
                 const auto target = old.parent_path() / name;
+                // Repeat the check at commit time: keyboard editing and
+                // programmatic notifications must not bypass disabled buttons.
+                if (self->blocked || !self->CanWrite(old) || !self->CanWrite(target)) {
+                    SetWindowLongPtrW(window, DWLP_MSGRESULT, FALSE);return TRUE;
+                }
                 if (!name.empty() && name != L"." && name != L".." && name.find_first_of(L"<>:\"/\\|?*") == name.npos)
                     okay = MoveFileW(old.c_str(), target.c_str()) != FALSE;
                 if (okay) self->paths[item.iItem] = target;
@@ -295,8 +322,12 @@ INT_PTR CALLBACK AssociateProc(HWND window, UINT message, WPARAM wparam, LPARAM 
         return TRUE;
     }
     if (command == kAssociate && valid) { self->choice.path = self->paths[selected]; EndDialog(window, IDOK); return TRUE; }
-    if (command == kRename && valid) { SetFocus(list); ListView_EditLabel(list, selected); return TRUE; }
+    if (command == kRename && valid) {
+        if (self->CanWrite(self->paths[selected])) { SetFocus(list); ListView_EditLabel(list, selected); }
+        return TRUE;
+    }
     if (command == kDelete && valid) {
+        if (!self->CanWrite(self->paths[selected])) return TRUE;
         // 004480E8: delete precisely the selected file, with recycle/confirmation.
         auto path = self->paths[selected].wstring(); path.push_back(L'\0'); path.push_back(L'\0');
         SHFILEOPSTRUCTW operation{}; operation.hwnd = window; operation.wFunc = FO_DELETE;
@@ -311,10 +342,12 @@ INT_PTR CALLBACK AssociateProc(HWND window, UINT message, WPARAM wparam, LPARAM 
 }
 LyricAssociationChoice ChooseLyricAssociation(HMODULE resources, HWND owner,
     lyrics::AssociationStore& store, const lyrics::SongKey& song,
-    lyrics::LocalSearchRequest request, std::function<void()> changed) {
+    lyrics::LocalSearchRequest request, std::function<void()> changed,
+    std::function<bool(const std::filesystem::path&)> can_write_path) {
     Dialog dialog;
     dialog.resources = resources; dialog.store = &store; dialog.song = song;
     dialog.request = std::move(request); dialog.changed = std::move(changed);
+    dialog.can_write_path = std::move(can_write_path);
     dialog.choice.action = ShowWtlModalDialog(resources, MAKEINTRESOURCEW(206), owner,
         AssociateProc, reinterpret_cast<LPARAM>(&dialog));
     return dialog.choice;

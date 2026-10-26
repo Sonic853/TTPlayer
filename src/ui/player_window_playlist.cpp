@@ -4095,7 +4095,7 @@ void PlayerWindow::ActivatePlaylistCatalogueRow(size_t index) {
 }
 
 void PlayerWindow::BeginPlaylistListEdit(size_t index) {
-    if (!playlist_window_ || !skin_ || index >= playlists_.Size()) return;
+    if (!playlist_window_ || !skin_ || index >= playlists_.Size() || playlists_.IsExternal(index)) return;
     FinishPlaylistListEdit(false);
     if (playlist_list_control_)
         SendMessageW(playlist_list_control_, LVM_ENSUREVISIBLE, index, FALSE);
@@ -4814,6 +4814,7 @@ void PlayerWindow::PreparePlaylistMenu(HMENU menu) const {
 
     PreparePlaylistModeMenu(menu);
     CheckCommand(menu, kPlaylistLibraryMode, settings_.playlist.library_mode);
+    FinalizePlaylistContextMenu(menu);
 
     // Remaining resource items retain their default state. Shared IDs are
     // dispatched by HandlePlaylistCommand/HandleContextCommand; see the
@@ -4883,6 +4884,15 @@ void PlayerWindow::PreparePlaylistModeMenu(HMENU menu) const {
 }
 
 void PlayerWindow::PopulatePlaylistSendToMenu(HMENU menu) {
+    if(std::any_of(playlist_selected_rows_.begin(),playlist_selected_rows_.end(),[&](size_t row) {
+        const auto* track=VisiblePlaylistTrack(row);return track && IsOsuLibraryTrack(*track);
+    })) {
+        // Shell SendTo targets can negotiate MOVE even after being offered
+        // COPY/LINK. Do not dispatch these targets with a game's source files.
+        for(int index=0;index<GetMenuItemCount(menu);++index)
+            EnableMenuItem(menu,index,MF_BYPOSITION|MF_GRAYED);
+        return;
+    }
     playlist_send_to_catalog_.PopulateMenu(
         menu, playlist_window_, kPlaylistSendToFirst, kPlaylistSendToLast,
         [this](UINT command, HICON icon) {
@@ -4946,7 +4956,15 @@ HMENU PlayerWindow::CreatePlaylistFilesMenu(std::optional<size_t> row) const {
     return menu;
 }
 
-void PlayerWindow::FinalizePlaylistContextMenu(HMENU menu) {
+void PlayerWindow::FinalizePlaylistContextMenu(HMENU menu) const {
+    const bool protected_track=std::any_of(playlist_selected_rows_.begin(),playlist_selected_rows_.end(),[&](size_t row) {
+        const auto* track=VisiblePlaylistTrack(row);return track && IsOsuLibraryTrack(*track);
+    });
+    if(protected_track)for(UINT command:{kPlaylistDeleteFiles,kPlaylistRenameTitle,kPlaylistRenameArtistTitle,
+        kPlaylistRenameTitleArtist,kPlaylistRenameCustom,kPlaylistReplayGainScan,kPlaylistReplayGainRemove,
+        kPlaylistSendToFolder})EnableCommand(menu,command,false);
+    const auto target=playlist_context_list_.value_or(playlists_.ActiveIndex());
+    if(playlists_.IsExternal(target))for(UINT command:{kPlaylistDeleteList,kPlaylistRenameList,kPlaylistOpenList})EnableCommand(menu,command,false);
     // Run after position-based resource trimming and before owner-draw setup.
     // Both native and provider-owned lists must retire this obsolete service.
     if (const HMENU report_menu = FindCommandMenu(menu, kPlaylistReportOnline)) {
@@ -5016,6 +5034,7 @@ void PlayerWindow::ShowPlaylistContextMenu(POINT screen_point, POINT client_poin
         EnableCommand(menu, kPlaylistDeleteList, false);
         EnableCommand(menu, kPlaylistRenameList, false);
         EnableCommand(menu, kPlaylistActivateList, true);
+        AppendOsuLibraryMenu(menu);
     } else if (converted_blank_menu) {
         // Files/NM_RCLICK with iItem == -1 follows FUN_00488FEF's 0x8B
         // branch.  It preserves every resource-default command state and
@@ -5592,6 +5611,9 @@ void PlayerWindow::ShowPlaylistFindDialog(bool quick) {
 
 void PlayerWindow::BeginPlaylistOleDrag() {
     if (playlist_selected_rows_.empty()) return;
+    const bool protected_source=std::any_of(playlist_selected_rows_.begin(),playlist_selected_rows_.end(),[&](size_t row) {
+        const auto* track=VisiblePlaylistTrack(row);return track && IsOsuLibraryTrack(*track);
+    });
     const bool media_library_source = settings_.playlist.library_mode;
     const auto media_library_identities = media_library_source
         ? CaptureSelectedMediaLibraryIdentities()
@@ -5644,12 +5666,12 @@ void PlayerWindow::BeginPlaylistOleDrag() {
 
     DWORD effect = DROPEFFECT_NONE;
     const HRESULT result = DoDragDrop(data, source,
-        DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK, &effect);
+        DROPEFFECT_COPY | DROPEFFECT_LINK | (protected_source?0:DROPEFFECT_MOVE), &effect);
     source->Release();
     data->Release();
     // 004894AF dispatches 0x7F13 for a completed drop when pdwEffect is zero
     // or contains MOVE.  COPY/LINK and cancel/error results keep the source.
-    if (ShouldRemovePlaylistDragSource(result, effect)) {
+    if (!protected_source && ShouldRemovePlaylistDragSource(result, effect)) {
         if (media_library_source) {
             RemoveMediaLibraryTracksByIdentity(media_library_identities);
             return;
@@ -5899,6 +5921,21 @@ void PlayerWindow::ReorderSelectedPlaylistRows(size_t insertion,bool copy) {
 }
 
 bool PlayerWindow::HandlePlaylistCommand(UINT command) {
+    if(command==kPlaylistShowOsu || command==kPlaylistShowOsuLazer) {
+        const unsigned source=command==kPlaylistShowOsu?1:2;
+        SetOsuLibraryVisible(source,!(source==1?settings_.osu_library.show_stable:settings_.osu_library.show_lazer));
+        return true;
+    }
+    const bool physical_write=command==kPlaylistDeleteFiles || command==kPlaylistRenameTitle ||
+        command==kPlaylistRenameArtistTitle || command==kPlaylistRenameTitleArtist || command==kPlaylistRenameCustom ||
+        command==kPlaylistReplayGainScan || command==kPlaylistReplayGainRemove || command==kPlaylistSendToFolder ||
+        (command>=kPlaylistSendToFirst && command<=kPlaylistSendToLast);
+    if(physical_write && std::any_of(playlist_selected_rows_.begin(),playlist_selected_rows_.end(),[&](size_t row) {
+        const auto* track=VisiblePlaylistTrack(row);return track && IsOsuLibraryTrack(*track);
+    }))return true;
+    if(command==kPlaylistDeleteList || command==kPlaylistRenameList || command==kPlaylistOpenList) {
+        if(playlists_.IsExternal(playlist_context_list_.value_or(playlists_.ActiveIndex())))return true;
+    }
     if (command >= kPlaylistSwitchFirst && command <= kPlaylistSwitchLast) {
         if (!settings_.playlist.library_mode) {
             // A background import or catalogue reorder must not redirect an
@@ -6866,6 +6903,9 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
 }
 
 bool PlayerWindow::HandlePlaylistSendToCommand(UINT command) {
+    if(std::any_of(playlist_selected_rows_.begin(),playlist_selected_rows_.end(),[&](size_t row) {
+        const auto* track=VisiblePlaylistTrack(row);return track && IsOsuLibraryTrack(*track);
+    }))return true;
     if (!playlist_send_to_catalog_.Contains(command)) return true;
 
     std::vector<std::filesystem::path> local_paths;

@@ -18,7 +18,8 @@ public:
     OsuVisualClient& operator=(const OsuVisualClient&)=delete;
     void Configure(const settings::VisualSettings&);
     void FallbackImage(const std::filesystem::path&); // shared fullscreen backup image
-    void Source(const std::filesystem::path&, std::span<const unsigned char>, HMODULE);
+    void Source(const std::filesystem::path&, std::span<const unsigned char>, HMODULE,
+                const std::filesystem::path& beatmap={},const std::filesystem::path& background={});
     void Viewport(HWND, const RECT&); // actual provider canvas, in client coordinates
     void Update(const audio::ExtendedVisualizationSamples&, const audio::PlaybackClockSnapshot&, HWND, float volume);
     void Paint(HDC, const RECT&, bool gpu);

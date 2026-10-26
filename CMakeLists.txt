@@ -195,7 +195,7 @@ target_compile_definitions(ttplayer_core PRIVATE UNICODE _UNICODE NOMINMAX WIN32
 target_compile_options(ttplayer_core PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(ttplayer_core PUBLIC
   ttplayer_wtl_headers
-  advapi32 crypt32 winmm msacm32 ole32 oleaut32 comsuppw uuid strmiids msimg32 shell32 shlwapi comctl32 comdlg32
+  advapi32 crypt32 winmm vfw32 msacm32 ole32 oleaut32 comsuppw uuid strmiids msimg32 shell32 shlwapi comctl32 comdlg32
   windowscodecs gdiplus dsound setupapi dwmapi uxtheme
   mfplat mfreadwrite mfuuid propsys winhttp wininet
 )

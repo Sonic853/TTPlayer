@@ -1,5 +1,6 @@
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "player_window_internal.h"
+#include "osu_library_write_policy.h"
 #include "ttplayer/core/text.h"
 
 #include <algorithm>
@@ -181,8 +182,9 @@ void PlayerWindow::DownloadOnlineLyric(int index) {
         (settings_.lyric.same_file_title && !lyric_search_track_.path.empty()
             ? lyric_search_track_.path.stem().wstring() : item.artist + L" - " + item.title);
     if (filename.empty()) return;
-    lyric_download_path_ = lyrics::DownloadDirectory(settings_.lyric, lyric_search_track_.path,
-        PlayerRuntimeDirectory()) / lyrics::LyricFileName(std::move(filename));
+    lyric_download_path_ = LyricDownloadPathForTrack(lyric_search_track_, settings_,
+        PlayerRuntimeDirectory(), std::move(filename));
+    if (lyric_download_path_.empty()) return;
     lyric_download_overwrite_ = settings_.lyric.overwrite;
     std::error_code error;
     if (!lyric_download_overwrite_ && std::filesystem::exists(lyric_download_path_, error)) {

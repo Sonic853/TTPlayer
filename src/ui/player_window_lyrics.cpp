@@ -4,6 +4,8 @@
 #include "ttplayer/ui/wtl_window.h"
 #include "ttplayer/ui/player_window.h"
 #include "player_window_internal.h"
+#include "track_metadata.h"
+#include "osu_library_write_policy.h"
 #include "ttplayer/audio/archive_member.h"
 #include "ttplayer/audio/builtin_file_info.h"
 #include <wrl/client.h>
@@ -52,6 +54,7 @@ bool SameLyricSource(const playlist::Track& track,
 }
 
 bool CanWriteEmbeddedLyrics(const playlist::Track* track) {
+    if(track && detail::IsOsuLibraryTrack(*track))return false;
     if (!track || track->path.empty() || track->subtrack != 0 ||
         audio::AudioEngine::IsNetworkMediaLocation(track->path) ||
         _wcsicmp(track->path.extension().c_str(), L".cue") == 0) return false;
@@ -2498,6 +2501,8 @@ std::filesystem::path PlayerWindow::DefaultLyricEditorPath() const {
     const auto* track = lyric_document_track_ ? &*lyric_document_track_ : PlaybackTrackForUi();
     if (!track)
         return std::filesystem::path(L"New Lyrics.lrc");
+    if (IsOsuLibraryTrack(*track))
+        return OsuLibraryDefaultLyricPath(*track, settings_, PlayerRuntimeDirectory());
     auto path = track->path;
     audio::ArchiveMemberPath member;
     if (audio::ParseArchiveMemberPath(path.native(),member))
@@ -3149,10 +3154,20 @@ void PlayerWindow::DestroyLyricEditor() {
 }
 
 bool PlayerWindow::SaveLyricEditor(bool save_as, bool automatic) {
-    if (!save_as && lyrics_embedded_)
+    const auto* current_track = lyric_document_track_ ? &*lyric_document_track_ : PlaybackTrackForUi();
+    const auto source = current_track ? std::optional<playlist::Track>(*current_track) : std::nullopt;
+    const bool game_source = source && IsOsuLibraryTrack(*source);
+    if (!save_as && lyrics_embedded_ && !game_source)
         return WriteEmbeddedLyrics(lyric_editor_ ? LyricEditorText()
             : SerializeLyricDocument(lyrics_, true), false);
     auto target = lyric_editor_ ? lyric_editor_path_ : lyric_path_;
+    // A lyric loaded from Songs or lazer's files store is still game-owned.
+    // Saving edits (including formerly embedded text) creates a player copy.
+    if (game_source && (target.empty() || lyrics_embedded_ ||
+            IsOsuLibrarySourcePath(*source, settings_, target))) {
+        target = OsuLibraryDefaultLyricPath(*source, settings_, PlayerRuntimeDirectory());
+        if (target.empty()) return false;
+    }
     audio::ArchiveMemberPath member;
     const bool archived = audio::ParseArchiveMemberPath(target.native(),member);
     if (archived && !save_as) {
@@ -3177,6 +3192,19 @@ bool PlayerWindow::SaveLyricEditor(bool save_as, bool automatic) {
         if (!selected) return false;
         target = *selected;
     }
+    if (game_source) {
+        if (IsOsuLibrarySourcePath(*source, settings_, target)) {
+            MessageBoxW(lyric_window_ ? lyric_window_ : window_,
+                L"游戏歌曲目录为只读，请选择其它文件夹保存歌词。", L"保存歌词", MB_OK | MB_ICONINFORMATION);
+            return false;
+        }
+        const auto cache = OsuLibraryLyricDirectory(*source, settings_, PlayerRuntimeDirectory());
+        if (!cache.empty() && OsuPathWithin(target, cache)) {
+            std::error_code error;
+            std::filesystem::create_directories(cache, error);
+            if (error) return false;
+        }
+    }
     const std::wstring text = NormalizeEditorNewlines(lyric_editor_
         ? LyricEditorText() : SerializeLyricDocument(lyrics_, settings_.lyric.save_compress));
     if (!WriteEditorFile(target, text, lyric_editor_encoding_,
@@ -3195,7 +3223,7 @@ bool PlayerWindow::SaveLyricEditor(bool save_as, bool automatic) {
     }
     lyric_editor_path_ = target;
     lyric_path_ = target;
-    if (save_as) {
+    if (save_as || game_source) {
         associated_lyric_path_ = target;
         lyrics_embedded_ = false;
     }
@@ -4943,6 +4971,14 @@ void PlayerWindow::LoadCurrentLyrics(bool force) {
     request.associated = association.value_or(std::filesystem::path{});
     request.roots = lyrics::LocalSearchRoots(track.path, PlayerRuntimeDirectory(),
         settings_.lyric.download_folder, settings_.lyric.folders);
+    if (IsOsuLibraryTrack(track)) {
+        const auto cache = OsuLibraryLyricDirectory(track, settings_, PlayerRuntimeDirectory());
+        if (!cache.empty()) request.roots.insert(request.roots.begin(), {cache, false});
+        const auto saved = OsuLibraryDefaultLyricPath(track, settings_, PlayerRuntimeDirectory());
+        std::error_code error;
+        if (request.associated.empty() && !saved.empty() && std::filesystem::is_regular_file(saved, error))
+            request.associated = saved;
+    }
     local_lyric_song_ = {track.path, track.subtrack};
     local_lyric_search_ = lyrics::SearchLocalLyricsAsync(std::move(request));
     ApplyAutoLyricVisibility();
@@ -5025,9 +5061,19 @@ void PlayerWindow::ShowLyricAssociation() {
     try { request.artist = core::Utf8ToWide(track->artist); request.title = core::Utf8ToWide(track->title); } catch (...) {}
     request.roots = lyrics::LocalSearchRoots(track->path, PlayerRuntimeDirectory(),
         settings_.lyric.download_folder, settings_.lyric.folders);
+    std::function<bool(const std::filesystem::path&)> can_write_path;
+    if (IsOsuLibraryTrack(*track)) {
+        const auto cache = OsuLibraryLyricDirectory(*track, settings_, PlayerRuntimeDirectory());
+        if (!cache.empty()) request.roots.insert(request.roots.begin(), {cache, false});
+        request.associated = OsuLibraryDefaultLyricPath(*track, settings_, PlayerRuntimeDirectory());
+        can_write_path = [this, source = *track](const std::filesystem::path& path) {
+            return !IsOsuLibrarySourcePath(source, settings_, path);
+        };
+    }
     lyric_association_open_ = true;
     const auto choice = ChooseLyricAssociation(ResourceModule(), lyric_window_ ? lyric_window_ : window_,
-        lyric_associations_, song, std::move(request), [this] { LoadCurrentLyrics(true); });
+        lyric_associations_, song, std::move(request), [this] { LoadCurrentLyrics(true); },
+        std::move(can_write_path));
     lyric_association_open_ = false;
     const auto* current = PlaybackTrackForUi();
     const bool same = current && song == lyrics::SongKey{current->path, current->subtrack};

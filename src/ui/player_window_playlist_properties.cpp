@@ -393,6 +393,11 @@ FileInfoRecord ReadFileInfoRecord(
         record.tags[1] = SafeWide(restored.artist);
         record.tags[2] = SafeWide(restored.album);
         record.metadata = std::move(restored.metadata);
+        // Source bookkeeping is not a user-editable audio tag. The original
+        // track retains it when ApplyReadResult publishes the reader data.
+        std::erase_if(record.metadata, [](const auto& field) {
+            return field.first.starts_with("TTPlayer.Osu.");
+        });
     }
     const WAVEFORMATEX& format = probe->format;
     record.channel_count = format.nChannels;

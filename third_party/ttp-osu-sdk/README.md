@@ -3,9 +3,11 @@
 Source: https://github.com/TTPlayerRebuild/TTPlayerOSU
 
 `include/ttp_osu/abi.h` is copied from the independent plugin's ABI 1 header.
-`include/ttp_osu/visual.h` defines the independent visual ABI 4, exported as
+`include/ttp_osu/visual.h` defines the independent visual ABI 5, exported as
 `ttp_osu_query_visual` at ordinal 2. OSZ ordinal 1 remains unchanged.
-Keep the two headers identical. The player dynamically loads
+`include/ttp_osu/library.h` defines library ABI 1, exported as
+`ttp_osu_library_query` at ordinal 3. Keep all three headers identical to the
+plugin copies. The player dynamically loads
 `AddIn/ttp_osu.dll` and queries the versioned function table.
 ABI 2 appends the logo setter. ABI 1 queries still write only the old prefix;
 older visual plugins retain fullscreen support without the logo selector.
@@ -62,3 +64,10 @@ Use `TTP_OSU_VISUAL_ABI4_SIZE`, not `sizeof(TtpOsuVisualApi)`, to validate an
 ABI 4 table. The host hides custom text for older plugins. Per-effect FPS is a
 host scheduling preference (10..240), separate from the DLL ABI; two star-ring
 settings default to 60 and are not overwritten by skin/visual colour presets.
+
+Library enumeration reads stable `.osu` directories and lazer's `client.realm`
+and hash store inside the optional DLL. Call it on a worker thread, copy borrowed
+record strings synchronously, honor cancellation, and only publish a complete
+successful result. No Realm objects cross the ABI. A missing library export in
+an older DLL leaves the two list commands disabled; a missing DLL hides the
+commands and osu! options page entirely. Source audio and database are read-only.

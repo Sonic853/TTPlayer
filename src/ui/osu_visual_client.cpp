@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <fstream>
 #include <objbase.h>
 
 namespace ttplayer::ui::detail {
@@ -53,6 +54,7 @@ struct OsuVisualClient::Impl {
     std::filesystem::path fallback_path;
     uint64_t fallback_stamp{},fallback_size{};
     std::filesystem::path source;
+    std::filesystem::path library_beatmap,library_background;
     std::vector<unsigned char> art;
     int logo_kind{-1};
     std::filesystem::path logo_path;
@@ -111,6 +113,7 @@ struct OsuVisualClient::Impl {
             const bool image_changed=source_changed || fallback_version!=delivered_fallback;
             const bool logo_changed=logo_version!=delivered_logo;
             const auto path=source;
+            const auto beatmap=library_beatmap,background_image=library_background;
             const auto encoded=art;
             const auto backup_path=fallback_path;
             const auto wanted_logo=logo_kind;
@@ -128,12 +131,21 @@ struct OsuVisualClient::Impl {
                     if(!selected.empty() && !selected.front().beatmap.empty())
                         timing=audio::ReadArchiveMember({member.archive,selected.front().beatmap,audio::ArchiveKind::zip},module_ref.get(),canceled);
                 }
+                else if(source_changed && !beatmap.empty() && !canceled()) {
+                    std::ifstream input(beatmap,std::ios::binary|std::ios::ate);
+                    const auto bytes=input?input.tellg():std::streampos(-1);
+                    if(bytes>0 && bytes<=32*1024*1024) {
+                        timing.resize(static_cast<size_t>(bytes));input.seekg(0);
+                        if(!input.read(reinterpret_cast<char*>(timing.data()),timing.size()))timing.clear();
+                    }
+                }
             } catch(...) {
                 // Optional beatmap failure must not skip cover/fallback loading.
                 timing.clear();
             }
             if(image_changed && !canceled()) {
                 try {if(!encoded.empty())image=DecodeCoverImage(encoded,2048);}catch(...) {}
+                if(!image.bitmap && !background_image.empty() && !canceled())LoadOsuLogoImage(background_image,image);
                 // Missing and corrupt track images both use the configured
                 // backup. File I/O and decoding stay on this asset worker.
                 if(!image.bitmap && !backup_path.empty() && !canceled())
@@ -265,13 +277,15 @@ void OsuVisualClient::Configure(const settings::VisualSettings& settings) {
     }
 }
 void OsuVisualClient::Source(const std::filesystem::path& path,
-    std::span<const unsigned char> art, HMODULE comm) {
+    std::span<const unsigned char> art, HMODULE comm,
+    const std::filesystem::path& beatmap,const std::filesystem::path& background) {
     std::scoped_lock lock(impl_->mutex);
     if(!impl_->instance)return;
-    if(impl_->source==path && impl_->art.size()==art.size() &&
+    if(impl_->source==path && impl_->library_beatmap==beatmap && impl_->library_background==background && impl_->art.size()==art.size() &&
        std::equal(art.begin(),art.end(),impl_->art.begin()))return;
-    const bool changed=impl_->source!=path;
+    const bool changed=impl_->source!=path || impl_->library_beatmap!=beatmap;
     impl_->source=path;impl_->art.assign(art.begin(),art.end());
+    impl_->library_beatmap=beatmap;impl_->library_background=background;
     impl_->comm=ttpcomm::client::ModuleReference(comm);
     if(changed){impl_->api.timing(impl_->instance,nullptr,0);impl_->api.image(impl_->instance,nullptr);}
     ++impl_->source_revision;

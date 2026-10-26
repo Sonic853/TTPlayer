@@ -1,13 +1,15 @@
 #pragma once
 #include "ttplayer/audio/audio_engine.h"
 #include "ttplayer/settings/settings.h"
+#include "track_metadata.h"
 
 namespace ttplayer::ui::detail {
 
 // Value snapshot shared by playback, conversion and background downloads.
 // Each consumer supplies its own cancellation/lifetime after taking this copy.
 inline audio::PlaybackOptions PlaybackOptionsFromSettings(
-    const settings::Settings& settings, const std::filesystem::path& runtime) {
+    const settings::Settings& settings, const std::filesystem::path& runtime,
+    const playlist::Track* source = nullptr) {
     audio::PlaybackOptions options;
     options.pcm_mode = settings.device.pcm_mode == 1 ? audio::PcmPlaybackMode::high_precision :
         settings.device.pcm_mode == 2 ? audio::PcmPlaybackMode::bit_exact : audio::PcmPlaybackMode::compatible;
@@ -24,7 +26,10 @@ inline audio::PlaybackOptions PlaybackOptionsFromSettings(
     options.thread_priority = settings.playback.thread_priority;
     options.balance = settings.player.balance;
     options.auto_gain = settings.playback.auto_gain;
-    options.auto_scan_gain = settings.playback.auto_scan_gain;
+    // ReplayGain's automatic scan commits tags after its reader closes. Game
+    // storage (especially lazer's content-addressed files) must remain intact.
+    options.auto_scan_gain = settings.playback.auto_scan_gain &&
+        (!source || !IsOsuLibraryTrack(*source));
     options.skip_scan_gain = settings.playback.skip_scan_gain;
     options.equalizer_profile = settings.equalizer.profile;
     options.surround = settings.equalizer.surround;

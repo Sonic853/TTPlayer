@@ -811,7 +811,7 @@ private:
     void PreparePlaylistMenu(HMENU menu) const;
     void PopulatePlaylistSwitchMenu(HMENU menu) const;
     HMENU CreatePlaylistFilesMenu(std::optional<size_t> row) const;
-    static void FinalizePlaylistContextMenu(HMENU menu);
+    void FinalizePlaylistContextMenu(HMENU menu) const;
     void PreparePlaylistModeMenu(HMENU menu) const;
     void PopulatePlaylistSendToMenu(HMENU menu);
     bool HandlePlaylistSendToCommand(UINT command);
@@ -1073,6 +1073,7 @@ private:
     std::condition_variable_any visual_worker_condition_;
     std::mutex visual_worker_mutex_;
     std::atomic_uint visual_interval_ns_{50000000};
+    std::atomic_bool visual_legacy_wait_{};
     std::atomic_bool visual_high_resolution_{};
     std::atomic_bool visual_worker_enabled_{};
     std::atomic_bool visual_plugin_embedded_{};

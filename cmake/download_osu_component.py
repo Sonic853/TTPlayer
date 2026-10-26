@@ -54,6 +54,8 @@ def validate(path, inventories, version):
                     raise ValueError(f'Unsupported OSZ import: {inventory.name}: {library}!{name}')
     exported = inspect_exports(path)
     expected = {1: 'ttp_osu_query', 2: 'ttp_osu_query_visual'}
+    if 3 in exported:
+        expected[3] = 'ttp_osu_library_query'
     if set(exported) != set(expected) or any(
             exported[ordinal]['name'] != name or exported[ordinal].get('forwarder')
             for ordinal, name in expected.items()):
@@ -178,6 +180,7 @@ def main():
     metadata['required_abi'] = 1  # Runtime query also checks the actual function table.
     metadata['visual_query_export'] = 'ttp_osu_query_visual'
     metadata['visual_required_abi'] = 1
+    metadata['library_query_export'] = 'ttp_osu_library_query'
     (args.output / 'osu-component.json').write_text(
         json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
     print(f"Staged TTPlayerOSU {metadata['version']}: {len(dll)} bytes; SHA-256 and XP/Win7 imports verified")
