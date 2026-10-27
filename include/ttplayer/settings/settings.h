@@ -304,14 +304,14 @@ struct MediaLibrarySettings {
     int max_item_count{};
 };
 struct OsuLibrarySettings {
-    OsuLibrarySettings();
+    OsuLibrarySettings()=default;
     bool show_stable{},show_lazer{};
     // Preserve environment variables in configuration; resolve them only
     // when a consumer opens a path, not while saving another user's config.
-    std::wstring stable_executable{LR"(%USERPROFILE%\AppData\Local\osu!\osu!.exe)"};
-    std::wstring lazer_executable{LR"(%USERPROFILE%\AppData\Local\osulazer\current\osu!.exe)"};
-    std::wstring stable_songs{LR"(%USERPROFILE%\AppData\Local\osu!\Songs)"};
-    std::wstring lazer_files{LR"(%USERPROFILE%\AppData\Roaming\osu\files)"};
+    std::wstring stable_executable,lazer_executable,stable_songs,lazer_files;
+    // Distinguish deliberately empty user paths from defaults unavailable
+    // because an optional DLL is absent/old. Do not persist the latter.
+    unsigned explicit_paths{}; // bits: stable exe, lazer exe, Songs, files
 };
 struct NetworkSettings {
     NetworkSettings();

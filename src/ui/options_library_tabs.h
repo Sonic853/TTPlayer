@@ -15,17 +15,37 @@ inline constexpr int kLibraryOsuLazerExecutable=0xe972;
 inline constexpr int kLibraryOsuStableSongs=0xe973;
 inline constexpr int kLibraryOsuLazerFiles=0xe974;
 inline constexpr int kLibraryOsuNotice=0xe975;
+inline constexpr int kLibraryOsuStableExecutableBrowse=0xe976;
+inline constexpr int kLibraryOsuLazerExecutableBrowse=0xe977;
+inline constexpr int kLibraryOsuStableSongsBrowse=0xe978;
+inline constexpr int kLibraryOsuLazerFilesBrowse=0xe979;
+inline constexpr int kLibraryOsuStableStatus=0xe97a;
+inline constexpr int kLibraryOsuLazerStatus=0xe97b;
+inline constexpr int kLibraryOsuStableExecutableLabel=0xe97c;
+inline constexpr int kLibraryOsuLazerExecutableLabel=0xe97d;
+inline constexpr int kLibraryOsuStableSongsLabel=0xe97e;
+inline constexpr int kLibraryOsuLazerFilesLabel=0xe97f;
+inline constexpr int kLibraryOsuLazerNotice=0xe980;
 inline bool IsOsuLibraryPathControl(UINT id) {
     return id>=kLibraryOsuStableExecutable && id<=kLibraryOsuLazerFiles;
+}
+inline bool IsOsuLibraryBrowseControl(UINT id) {
+    return id>=kLibraryOsuStableExecutableBrowse && id<=kLibraryOsuLazerFilesBrowse;
+}
+inline UINT OsuLibraryPathControlForBrowse(UINT id) {
+    return IsOsuLibraryBrowseControl(id)?
+        kLibraryOsuStableExecutable+(id-kLibraryOsuStableExecutableBrowse):0;
 }
 
 // Keep dialog 255 and its original library controls/notifications intact.
 // Only their position and visibility change when selecting the nested tab.
 class LibraryOptionsTabs {
-    struct Control { HWND window; RECT bounds; int group; bool visible; };
+    enum class Anchor { Fixed, Stretch, Right };
+    struct Control { HWND window; RECT bounds; int group; bool visible; Anchor anchor{Anchor::Fixed}; };
     HWND page_{},tab_{};
     bool osu_enabled_{};
     std::vector<Control> controls_;
+    int reference_width_{};
     bool laying_out_{};
     static constexpr UINT_PTR kSubclass=0x54544c54;
 
@@ -36,11 +56,18 @@ class LibraryOptionsTabs {
         SetWindowPos(tab_,HWND_BOTTOM,0,0,client.right,client.bottom,SWP_NOACTIVATE);
         RECT content{};GetClientRect(tab_,&content);TabCtrl_AdjustRect(tab_,FALSE,&content);
         MapWindowPoints(tab_,page_,reinterpret_cast<POINT*>(&content),2);
+        const int left=content.left+inset.right;
+        const int right=content.right-inset.right;
         for(const auto& control:controls_) {
             const auto& r=control.bounds;
-            const int x=content.left+inset.right+r.left;
-            const int width=control.group==1?content.right-inset.right-x:
-                std::min<LONG>(r.right-r.left,content.right-inset.right-x);
+            // All bounds remain relative to the original design, not the last
+            // WM_SIZE result. Labels keep their width, edits stretch, and the
+            // browse buttons stay at the right edge without stretching.
+            const int x=control.anchor==Anchor::Right?
+                std::max<LONG>(left,right-(reference_width_-r.left)):left+r.left;
+            const int width=control.anchor==Anchor::Stretch?
+                right-(reference_width_-r.right)-x:
+                std::min<LONG>(r.right-r.left,right-x);
             SetWindowPos(control.window,nullptr,x,content.top+inset.bottom+r.top,
                 std::max(1,width),r.bottom-r.top,SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOREDRAW);
         }
@@ -48,7 +75,7 @@ class LibraryOptionsTabs {
         laying_out_=false;
     }
     void Select(int group) {
-        if(group<0 || group>(osu_enabled_?1:0))return;
+        if(group<0 || group>(osu_enabled_?2:0))return;
         TabCtrl_SetCurSel(tab_,group);
         const HWND focus=GetFocus();
         for(const auto& control:controls_) {
@@ -99,28 +126,49 @@ public:
             if(self->tab_)DestroyWindow(self->tab_);delete self;return;
         }
         const auto font=SendMessageW(page,WM_GETFONT,0,0);SendMessageW(self->tab_,WM_SETFONT,font,FALSE);
-        for(int i=0;i<2;++i) {
-            auto text=i18n::Text(i?L"osu!":L"媒体库");TCITEMW item{};item.mask=TCIF_TEXT;item.pszText=text.data();
+        const wchar_t* tabs[]{L"媒体库",L"osu!lazer",L"osu!"};
+        for(int i=0;i<3;++i) {
+            auto text=i18n::Text(tabs[i]);TCITEMW item{};item.mask=TCIF_TEXT;item.pszText=text.data();
             TabCtrl_InsertItem(self->tab_,i,&item);
         }
-        const auto add=[&](LPCWSTR klass,LPCWSTR text,int id,DWORD style,RECT r,DWORD ex=0) {
+        RECT reference{0,0,259,0};MapDialogRect(page,&reference);
+        self->reference_width_=reference.right;
+        const auto add=[&](LPCWSTR klass,LPCWSTR text,int id,DWORD style,RECT r,
+                          int group,Anchor anchor=Anchor::Fixed,DWORD ex=0) {
             const auto caption=i18n::Text(text);
             HWND control=CreateWindowExW(ex,klass,caption.c_str(),WS_CHILD|style,0,0,0,0,page,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),instance,nullptr);
             if(!control)return;
             SendMessageW(control,WM_SETFONT,font,FALSE);MapDialogRect(page,&r);
-            self->controls_.push_back({control,r,1,true});
+            self->controls_.push_back({control,r,group,true,anchor});
             if(IsOsuLibraryPathControl(id))SendMessageW(control,EM_SETLIMITTEXT,32767,0);
         };
-        const wchar_t* labels[]{L"osu!stable 路径",L"osulazer 路径",L"osu!stable 歌曲路径",L"osulazer 歌曲路径"};
-        for(int row=0;row<4;++row) {
-            const LONG y=row*35;
-            add(WC_STATICW,labels[row],-1,SS_LEFT,{3,y+1,259,y+12});
-            add(WC_EDITW,L"",kLibraryOsuStableExecutable+row,WS_TABSTOP|ES_AUTOHSCROLL,
-                {3,y+14,259,y+28},WS_EX_CLIENTEDGE);
+        struct PathRow { int edit; int browse; int label; };
+        const PathRow rows[2][2]{
+            {{kLibraryOsuLazerExecutable,kLibraryOsuLazerExecutableBrowse,kLibraryOsuLazerExecutableLabel},
+             {kLibraryOsuLazerFiles,kLibraryOsuLazerFilesBrowse,kLibraryOsuLazerFilesLabel}},
+            {{kLibraryOsuStableExecutable,kLibraryOsuStableExecutableBrowse,kLibraryOsuStableExecutableLabel},
+             {kLibraryOsuStableSongs,kLibraryOsuStableSongsBrowse,kLibraryOsuStableSongsLabel}}};
+        for(int page_index=0;page_index<2;++page_index) {
+            const int group=page_index+1;
+            for(int row=0;row<2;++row) {
+                const LONG y=3+row*23;
+                const auto& ids=rows[page_index][row];
+                add(WC_STATICW,row?L"歌曲目录：":L"程序文件：",ids.label,SS_LEFT,
+                    {3,y+2,60,y+14},group);
+                add(WC_EDITW,L"",ids.edit,WS_TABSTOP|ES_AUTOHSCROLL,
+                    {62,y,237,y+14},group,Anchor::Stretch,WS_EX_CLIENTEDGE);
+                add(WC_BUTTONW,L"",ids.browse,WS_TABSTOP|BS_PUSHBUTTON,
+                    {241,y,259,y+14},group,Anchor::Right);
+            }
+            add(WC_STATICW,L"",page_index?kLibraryOsuStableStatus:kLibraryOsuLazerStatus,
+                SS_LEFT,{3,52,259,78},group,Anchor::Stretch);
+            add(WC_STATICW,page_index?
+                L"歌曲目录通常为 osu! 程序目录下的 Songs 文件夹。\r\n路径可使用 %USERPROFILE% 等环境变量。":
+                L"歌曲目录为 lazer 存储位置下的 files 文件夹。\r\n路径可使用 %USERPROFILE% 等环境变量。",
+                page_index?kLibraryOsuNotice:kLibraryOsuLazerNotice,
+                SS_LEFT,{3,86,259,128},group,Anchor::Stretch);
         }
-        add(WC_STATICW,L"路径可保留 %USERPROFILE% 等环境变量。\r\nlazer 歌曲路径优先从 storage.ini 获取；歌曲索引位于 files 上级目录的 client.realm。",
-            kLibraryOsuNotice,SS_LEFT,{3,146,259,180});
         self->Layout();self->Select(0);
     }
     static void ShowControl(HWND page,HWND control) {

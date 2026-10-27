@@ -1,6 +1,7 @@
 #include "ttplayer/ui/browser_client.h"
 #include "ttplayer/audio/http_stream.h"
 #include <filesystem>
+#include <cstring>
 #include <new>
 #include <string>
 
@@ -56,14 +57,24 @@ HRESULT BrowserClient::Create(const ttp_browser_host& host, const ttp_browser_co
                               const audio::PlaybackOptions& options) {
     if (!Available()) return kUnavailable;
     if (instance_) return Configure(config, options);
+    if (host.size < TTP_BROWSER_HOST_V1_SIZE || host.version != TTP_BROWSER_ABI_VERSION)
+        return E_INVALIDARG;
     Snapshot(options);
-    callbacks_ = host; ui_thread_ = GetCurrentThreadId(); ui_enabled_ = true;
+    callbacks_ = {};
+    std::memcpy(&callbacks_, &host, TTP_BROWSER_HOST_V1_SIZE);
+    if (host.size >= offsetof(ttp_browser_host, adjust_window_rect) + sizeof(host.adjust_window_rect))
+        callbacks_.adjust_window_rect = host.adjust_window_rect;
+    if (host.size >= offsetof(ttp_browser_host, resolve_associated_lyric) + sizeof(host.resolve_associated_lyric))
+        callbacks_.resolve_associated_lyric = host.resolve_associated_lyric;
+    callbacks_.size = sizeof(callbacks_);
+    ui_thread_ = GetCurrentThreadId(); ui_enabled_ = true;
     stopping_->store(false, std::memory_order_release);
-    auto bridge = host;
+    auto bridge = callbacks_;
     bridge.context = this;
     bridge.submit_tracks = Submit; bridge.query_info = Query;
     bridge.open_stream = OpenStream; bridge.state_changed = Changed; bridge.setup_pack = Setup;
-    bridge.adjust_window_rect = host.adjust_window_rect ? AdjustWindowRect : nullptr;
+    bridge.adjust_window_rect = callbacks_.adjust_window_rect ? AdjustWindowRect : nullptr;
+    bridge.resolve_associated_lyric = callbacks_.resolve_associated_lyric ? ResolveAssociatedLyric : nullptr;
     const HRESULT result = api_.create(&bridge, &config, &instance_);
     if (FAILED(result)) {
         ui_enabled_ = false;
@@ -140,6 +151,15 @@ HRESULT WINAPI BrowserClient::AdjustWindowRect(void* context, HWND window, uint3
     auto& self = *static_cast<BrowserClient*>(context);
     if (!self.UiCallbacksAllowed() || !self.callbacks_.adjust_window_rect) return RPC_E_DISCONNECTED;
     try { return self.callbacks_.adjust_window_rect(self.callbacks_.context, window, hit, bounds); }
+    catch (const std::bad_alloc&) { return E_OUTOFMEMORY; } catch (...) { return E_FAIL; }
+}
+HRESULT WINAPI BrowserClient::ResolveAssociatedLyric(void* context, const wchar_t* path, BSTR* output) {
+    if (!output) return E_POINTER;
+    *output = nullptr;
+    if (!context) return E_INVALIDARG;
+    auto& self = *static_cast<BrowserClient*>(context);
+    if (!self.UiCallbacksAllowed() || !self.callbacks_.resolve_associated_lyric) return RPC_E_DISCONNECTED;
+    try { return self.callbacks_.resolve_associated_lyric(self.callbacks_.context, path, output); }
     catch (const std::bad_alloc&) { return E_OUTOFMEMORY; } catch (...) { return E_FAIL; }
 }
 HRESULT WINAPI BrowserClient::OpenStream(void* context, const wchar_t* url, HANDLE cancel,

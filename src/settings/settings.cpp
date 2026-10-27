@@ -3,7 +3,6 @@
 #include "ttplayer/core/build_version.h"
 #include "ttplayer/settings/personalization.h"
 #include "ttplayer/skin/skin_paths.h"
-#include "osu_storage_path.h"
 
 #include <algorithm>
 #include <atomic>
@@ -25,14 +24,6 @@
 namespace ttplayer::settings {
 namespace {
 using Microsoft::WRL::ComPtr;
-
-std::wstring DefaultLazerFiles(std::wstring_view executable) {
-    wchar_t appdata[MAX_PATH]{};
-    const auto root=SUCCEEDED(SHGetFolderPathW(nullptr,CSIDL_APPDATA,nullptr,SHGFP_TYPE_CURRENT,appdata))
-        ? std::filesystem::path(appdata)/L"osu"
-        : std::filesystem::path(detail::ExpandOsuPath(LR"(%USERPROFILE%\AppData\Roaming\osu)"));
-    return detail::FindLazerFiles(root,detail::ExpandOsuPath(executable));
-}
 
 template <class Interface>
 ComPtr<Interface> AdoptCom(Interface* value) noexcept {
@@ -915,10 +906,6 @@ LyricSettings::LyricSettings() {
     fullscreen_font_valid = true;
 }
 
-OsuLibrarySettings::OsuLibrarySettings() {
-    lazer_files=DefaultLazerFiles(lazer_executable);
-}
-
 std::wstring LoadRuntimeLanguage(const std::filesystem::path& runtime_directory) noexcept {
     try {
         if (runtime_directory.empty()) return L"auto";
@@ -1278,16 +1265,17 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
     if (auto node=SelectOwned(doc,L"/ttplayer/OsuLibrary")) {
         s.osu_library.show_stable=IntAttr(node.Get(),L"ShowStable",0)!=0;
         s.osu_library.show_lazer=IntAttr(node.Get(),L"ShowLazer",0)!=0;
-        const auto read=[&](const wchar_t* name,std::wstring& output) {
+        const auto read=[&](const wchar_t* name,std::wstring& output,unsigned bit) {
             // An absent attribute uses the default; an explicitly empty
             // value remains empty after clearing a path in the options UI.
-            if(Attribute(node.Get(),name).vt!=VT_EMPTY)output=StringAttr(node.Get(),name);
+            if(Attribute(node.Get(),name).vt!=VT_EMPTY) {
+                output=StringAttr(node.Get(),name);s.osu_library.explicit_paths|=bit;
+            }
         };
-        read(L"StableExecutable",s.osu_library.stable_executable);
-        read(L"LazerExecutable",s.osu_library.lazer_executable);
-        read(L"StableSongs",s.osu_library.stable_songs);
-        s.osu_library.lazer_files=DefaultLazerFiles(s.osu_library.lazer_executable);
-        read(L"LazerFiles",s.osu_library.lazer_files);
+        read(L"StableExecutable",s.osu_library.stable_executable,1);
+        read(L"LazerExecutable",s.osu_library.lazer_executable,2);
+        read(L"StableSongs",s.osu_library.stable_songs,4);
+        read(L"LazerFiles",s.osu_library.lazer_files,8);
     }
     if (auto node=SelectOwned(doc,L"/ttplayer/Lyric")) {
         auto* const n=node.Get();
@@ -2256,10 +2244,14 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
         auto element_owner=AdoptCom(element);
         SetAttribute(element,L"ShowStable",settings.osu_library.show_stable?1:0);
         SetAttribute(element,L"ShowLazer",settings.osu_library.show_lazer?1:0);
-        SetAttribute(element,L"StableExecutable",settings.osu_library.stable_executable);
-        SetAttribute(element,L"LazerExecutable",settings.osu_library.lazer_executable);
-        SetAttribute(element,L"StableSongs",settings.osu_library.stable_songs);
-        SetAttribute(element,L"LazerFiles",settings.osu_library.lazer_files);
+        const auto write=[&](const wchar_t* name,const std::wstring& path,unsigned bit) {
+            if(!path.empty() || (settings.osu_library.explicit_paths&bit))SetAttribute(element,name,path);
+            else element->removeAttribute(_bstr_t(name));
+        };
+        write(L"StableExecutable",settings.osu_library.stable_executable,1);
+        write(L"LazerExecutable",settings.osu_library.lazer_executable,2);
+        write(L"StableSongs",settings.osu_library.stable_songs,4);
+        write(L"LazerFiles",settings.osu_library.lazer_files,8);
     }
     if(auto* element=EnsureElement(document,L"Network")) {
         auto element_owner=AdoptCom(element);

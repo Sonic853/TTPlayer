@@ -3,7 +3,7 @@
 #include "track_metadata.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/lyrics/online_search.h"
-#include "../settings/osu_storage_path.h"
+#include "../core/environment_path.h"
 #include <wincrypt.h>
 
 namespace ttplayer::ui::detail {
@@ -34,7 +34,7 @@ inline bool IsOsuLibrarySourcePath(const playlist::Track& track,
     for (const auto* configured : {&settings.osu_library.stable_songs,
                                    &settings.osu_library.lazer_files}) {
         if (!configured->empty() && OsuPathWithin(target,
-                settings::detail::ExpandOsuPath(*configured))) return true;
+                core::ExpandEnvironmentPath(*configured))) return true;
     }
     if (OsuPathWithin(target, track.path.parent_path())) return true;
     for (const auto& [key, value] : track.metadata) {

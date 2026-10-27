@@ -197,6 +197,8 @@ def audit_component(files, metadata, inventories, directory):
         expected = {1: 'ttp_osu_query', 2: 'ttp_osu_query_visual'}
         if 3 in exported:
             expected[3] = 'ttp_osu_library_query'
+        if 4 in exported:
+            expected[4] = 'ttp_osu_installation_query'
         if set(exported) != set(expected) or any(
                 exported[ordinal]['name'] != name or exported[ordinal].get('forwarder')
                 for ordinal, name in expected.items()):

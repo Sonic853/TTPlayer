@@ -3,6 +3,7 @@
 #include "../app/resource_ids.h"
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/audio/osz_archive.h"
+#include "osu_visual_availability.h"
 #include <algorithm>
 #include <array>
 #include <string>
@@ -18,6 +19,7 @@ inline constexpr int kVisualOsuLogoBrowse = 0xe953;
 inline constexpr int kVisualLazerCustomText = 0xe955;
 inline constexpr int kVisualLazerText1 = 0xe956; // three consecutive edit IDs
 inline constexpr UINT kVisualTabChanged = WM_APP + 0x392;
+inline constexpr UINT kVisualAvailabilityChanged = WM_APP + 0x393;
 
 // Preserve the resource controls, their IDs and their parent notifications.
 // Effect groups become pages; FPS/type/text/profile stay common.
@@ -25,6 +27,7 @@ class VisualOptionsTabs {
     struct Control { HWND window; RECT bounds; int height, group; bool visible{true}; };
     HWND page_{}, tab_{};
     std::vector<Control> controls_;
+    std::array<std::wstring,6> captions_;
     static constexpr UINT_PTR kSubclass = 0x54545654;
     static bool InGroup(int control_group,int selected) noexcept {
         return control_group==selected || (control_group==4 && selected==5);
@@ -47,8 +50,11 @@ class VisualOptionsTabs {
             MapDialogRect(page_, &origin);
             const auto& r = control.bounds;
             const int x = r.left + content.left + margin.bottom - origin.left;
+            RECT browse_offset{0,0,0,18};MapDialogRect(page_,&browse_offset);
+            const int dy=GetDlgCtrlID(control.window)==kVisualOsuLogoBrowse &&
+                TabCtrl_GetCurSel(tab_)==5?browse_offset.bottom:0;
             SetWindowPos(control.window, nullptr, x,
-                r.top + content.top + margin.bottom - origin.top,
+                r.top + content.top + margin.bottom - origin.top-dy,
                 std::max(1L, std::min(r.right - r.left, content.right - margin.bottom - x)),
                 control.height, SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOREDRAW);
         }
@@ -65,6 +71,7 @@ class VisualOptionsTabs {
             ShowWindow(control.window, InGroup(control.group,group) && control.visible ? SW_SHOW : SW_HIDE);
         }
         SendMessageW(page_,kVisualTabChanged,group,0);
+        Layout();
         RedrawWindow(page_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 
@@ -105,7 +112,7 @@ public:
             return;
         }
         SendMessageW(self->tab_, WM_SETFONT, font, FALSE);
-        std::array<std::wstring, 6> captions;
+        auto& captions=self->captions_;
         RECT groups{0, 68, 0, 118}, bottom{0, 169, 0, 0};
         MapDialogRect(page, &groups);
         MapDialogRect(page, &bottom);
@@ -163,8 +170,9 @@ public:
             MapDialogRect(page, &r);
             const auto caption = text_id ? i18n::ResourceText(GetModuleHandleW(nullptr), text_id)
                                         : std::wstring{};
-            const HWND control = CreateWindowExW(0, klass, caption.c_str(),
-                WS_CHILD | style, r.left, r.top, r.right - r.left, r.bottom - r.top,
+            const bool edit=_wcsicmp(klass,WC_EDITW)==0;
+            const HWND control = CreateWindowExW(edit?WS_EX_CLIENTEDGE:0, klass, caption.c_str(),
+                WS_CHILD | (edit?(style&~WS_BORDER):style), r.left, r.top, r.right - r.left, r.bottom - r.top,
                 page, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
             if (control) {
                 SendMessageW(control, WM_SETFONT, font, FALSE);
@@ -205,15 +213,17 @@ public:
                 SendMessageW(choice,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));
             }
             add_osu_control(kVisualOsuLogoPath,0,WC_EDITW,
-                WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL|ES_READONLY,{13,145,258,159});
-            add_osu_control(kVisualOsuLogoBrowse,IDS_OSU_LOGO_BROWSE,WC_BUTTONW,
-                WS_TABSTOP|BS_PUSHBUTTON,{196,126,258,142});
+                WS_TABSTOP|ES_AUTOHSCROLL|ES_READONLY,{13,145,236,159});
+            add_osu_control(kVisualOsuLogoBrowse,0,WC_BUTTONW,
+                WS_TABSTOP|BS_PUSHBUTTON,{240,145,258,159});
         }
         }
         if(audio::HasOsuIntroTextSupport()) {
             const auto add_text=[&](int id, const wchar_t* klass, const wchar_t* caption, DWORD style, RECT r) {
                 MapDialogRect(page,&r);
-                HWND child=CreateWindowExW(0,klass,caption,WS_CHILD|WS_TABSTOP|style,
+                const bool edit=_wcsicmp(klass,WC_EDITW)==0;
+                HWND child=CreateWindowExW(edit?WS_EX_CLIENTEDGE:0,klass,caption,
+                    WS_CHILD|WS_TABSTOP|(edit?(style&~WS_BORDER):style),
                     r.left,r.top,r.right-r.left,r.bottom-r.top,page,
                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),instance,nullptr);
                 if(child) {
@@ -232,14 +242,24 @@ public:
         }
         const bool lazer_available=audio::HasOsuLazerSupport();
         if(lazer_available)captions[5]=i18n::ResourceText(GetModuleHandleW(nullptr),IDS_VISUAL_OSU_LAZER);
-        for (int group = 0; group < (lazer_available?6:osu_available?5:4); ++group) {
-            TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = captions[group].data();
-            TabCtrl_InsertItem(self->tab_, group, &item);
-        }
+        RefreshAvailability(page);
         self->Layout();
         self->Select(0);
     }
 
+    static void RefreshAvailability(HWND page) {
+        DWORD_PTR data{};
+        if(!GetWindowSubclass(page,PageProc,kSubclass,&data))return;
+        auto* self=reinterpret_cast<VisualOptionsTabs*>(data);
+        const int selected=TabCtrl_GetCurSel(self->tab_);
+        TabCtrl_DeleteAllItems(self->tab_);
+        const int count=OsuLazerAvailable()?6:OsuVisualAvailable()?5:4;
+        for(int group=0;group<count;++group) {
+            TCITEMW item{};item.mask=TCIF_TEXT;item.pszText=self->captions_[group].data();
+            TabCtrl_InsertItem(self->tab_,group,&item);
+        }
+        self->Select(selected);
+    }
     static void SetVisible(HWND page,int id,bool visible) {
         DWORD_PTR data{};
         if(!GetWindowSubclass(page,PageProc,kSubclass,&data))return;

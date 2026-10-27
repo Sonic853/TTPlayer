@@ -56,6 +56,8 @@ def validate(path, inventories, version):
     expected = {1: 'ttp_osu_query', 2: 'ttp_osu_query_visual'}
     if 3 in exported:
         expected[3] = 'ttp_osu_library_query'
+    if 4 in exported:
+        expected[4] = 'ttp_osu_installation_query'
     if set(exported) != set(expected) or any(
             exported[ordinal]['name'] != name or exported[ordinal].get('forwarder')
             for ordinal, name in expected.items()):
@@ -181,6 +183,8 @@ def main():
     metadata['visual_query_export'] = 'ttp_osu_query_visual'
     metadata['visual_required_abi'] = 1
     metadata['library_query_export'] = 'ttp_osu_library_query'
+    metadata['installation_query_export'] = (
+        'ttp_osu_installation_query' if 4 in inspect_exports(folder / 'ttp_osu.dll') else None)
     (args.output / 'osu-component.json').write_text(
         json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
     print(f"Staged TTPlayerOSU {metadata['version']}: {len(dll)} bytes; SHA-256 and XP/Win7 imports verified")

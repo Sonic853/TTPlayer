@@ -3,7 +3,7 @@
 #include "ttplayer/audio/osz_archive.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/i18n/i18n.h"
-#include "../settings/osu_storage_path.h"
+#include "../core/environment_path.h"
 #include "track_metadata.h"
 #include <mutex>
 
@@ -66,7 +66,7 @@ void PlayerWindow::RefreshOsuLibraries(bool interactive) {
     for(unsigned source=1;source<=2;++source) {
         if(!(source==1?settings_.osu_library.show_stable:settings_.osu_library.show_lazer))continue;
         const auto raw=source==1?settings_.osu_library.stable_songs:settings_.osu_library.lazer_files;
-        const auto path=std::filesystem::path(settings::detail::ExpandOsuPath(raw));
+        const auto path=std::filesystem::path(core::ExpandEnvironmentPath(raw));
         auto& job=osu_libraries_->jobs[source-1];
         if(job && job->path==path)continue;
         if(job)job->canceled=true;

@@ -46,8 +46,8 @@ void detail::AppendPlayerVisualMenuItems(HMENU menu,bool fullscreen) {
         if (GetMenuItemID(popup, position) == kCmdVisualScope) { ++position; break; }
     for (const UINT id : {IDS_VISUAL_PULSE, IDS_VISUAL_RIPPLE, IDS_VISUAL_OSU, IDS_VISUAL_OSU_LAZER}) {
         const UINT command=id==IDS_VISUAL_PULSE?kCmdVisualPulse:id==IDS_VISUAL_RIPPLE?kCmdVisualRipple:id==IDS_VISUAL_OSU?kCmdVisualOsu:kCmdVisualOsuLazer;
-        if((id==IDS_VISUAL_OSU && (!fullscreen || !audio::HasOsuVisualSupport())) ||
-           (id==IDS_VISUAL_OSU_LAZER && (!fullscreen || !audio::HasOsuLazerSupport()))) {
+        if((id==IDS_VISUAL_OSU && (!fullscreen || !OsuVisualAvailable())) ||
+           (id==IDS_VISUAL_OSU_LAZER && (!fullscreen || !OsuLazerAvailable()))) {
             DeleteMenu(popup,command,MF_BYCOMMAND);continue;
         }
         if(FindCommandMenu(popup,command)){++position;continue;}

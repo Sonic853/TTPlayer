@@ -71,3 +71,13 @@ record strings synchronously, honor cancellation, and only publish a complete
 successful result. No Realm objects cross the ABI. A missing library export in
 an older DLL leaves the two list commands disabled; a missing DLL hides the
 commands and osu! options page entirely. Source audio and database are read-only.
+
+Installation ABI 1 (`installation.h`, `ttp_osu_installation_query`, ordinal 4)
+owns executable identification, default locations and stable/lazer storage
+configuration. Query it independently; older DLLs can still support archives
+and library enumeration. No PE identity or game storage parser is linked into
+the player. Copy callback strings before returning; NULL requests discovery,
+whereas an empty executable preserves an explicitly cleared path. The player
+hides star effects until either configured executable is recognized, and asks
+to update an older DLL that lacks this interface. Unavailable defaults must not
+be serialized as deliberately empty user settings.

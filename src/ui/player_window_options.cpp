@@ -11,6 +11,8 @@
 #include "options_buttons.h"
 #include "options_general_tabs.h"
 #include "options_library_tabs.h"
+#include "../core/environment_path.h"
+#include "options_visual_tabs.h"
 #include "options_fullscreen_tabs.h"
 #include "options_fullscreen_dream.h"
 #include "osu_visual_client.h"
@@ -126,9 +128,9 @@ void PopulateAlbumBackgroundOptions(HWND dialog, HINSTANCE instance,
         add(WC_BUTTONW, IDS_FULLSCREEN_ALBUM_GROUP, -1, BS_GROUPBOX, {7,162,273,213});
         add(WC_STATICW, IDS_FULLSCREEN_ALBUM_FALLBACK, -1, 0, {13,176,54,189});
         add(WC_EDITW, 0, IDC_FULLSCREEN_ALBUM_PATH, WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL,
-            {55,174,194,188}, WS_EX_CLIENTEDGE);
-        add(WC_BUTTONW, IDS_FULLSCREEN_ALBUM_BROWSE, IDC_FULLSCREEN_ALBUM_BROWSE,
-            WS_TABSTOP | BS_PUSHBUTTON, {198,174,230,188});
+            {55,174,208,188}, WS_EX_CLIENTEDGE);
+        add(WC_BUTTONW, 0, IDC_FULLSCREEN_ALBUM_BROWSE,
+            WS_TABSTOP | BS_PUSHBUTTON, {212,174,230,188});
         add(WC_BUTTONW, IDS_FULLSCREEN_ALBUM_CLEAR, IDC_FULLSCREEN_ALBUM_CLEAR,
             WS_TABSTOP | BS_PUSHBUTTON, {233,174,267,188});
         add(WC_STATICW, IDS_FULLSCREEN_ALBUM_TRANSPARENCY, -1, 0, {13,195,55,208});
@@ -161,6 +163,7 @@ constexpr UINT kOptionsDspPollMilliseconds = 60;
 constexpr ULONGLONG kOptionsDspScanTimeoutMilliseconds = 120000;
 constexpr DWORD kOptionsDeviceProbeTimeoutMilliseconds = 4000;
 constexpr UINT_PTR kOptionsDevicePollTimer = 0x4455;
+constexpr UINT_PTR kOptionsOsuIdentityTimer = 0x4456;
 constexpr UINT kSwitchNestedOptionsPage = WM_APP + 0x311;
 constexpr UINT kExportSkinPreview = WM_APP + 0x312;
 constexpr UINT kInitializeRegistrationSheet = WM_APP + 0x313;
@@ -4155,6 +4158,7 @@ INT_PTR CALLBACK PlayerWindow::OptionsPageDialogProc(
         if (message == WM_NOTIFY) {
             const auto* header = reinterpret_cast<const NMHDR*>(lparam);
             if (header && header->code == PSN_SETACTIVE) {
+                self->RefreshOsuVisualAvailability();
                 self->options_page_index_ = kPageVisual;
                 if (self->options_navigation_)
                     SendMessageW(self->options_navigation_, LB_SETCURSEL,
@@ -4810,7 +4814,9 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             };
             const auto add = [&](LPCWSTR klass, LPCWSTR text, int id, DWORD style,
                                  RECT rect, HWND after) {
-                const HWND control = CreateWindowExW(0, klass, text, WS_CHILD | WS_VISIBLE | style,
+                const bool edit=_wcsicmp(klass,WC_EDITW)==0;
+                const HWND control = CreateWindowExW(edit?WS_EX_CLIENTEDGE:0, klass, text,
+                    WS_CHILD | WS_VISIBLE | (edit?(style&~WS_BORDER):style),
                     0, 0, 0, 0, dialog, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
                     instance_, nullptr);
                 SendMessageW(control, WM_SETFONT, SendMessageW(dialog, WM_GETFONT, 0, 0), FALSE);
@@ -5076,6 +5082,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
     }
     case 255: {
         RemovePropW(dialog,kPageReadyProperty);
+        ApplyOsuInstallationDefaults(settings_.osu_library);
         SetChecked(dialog, 2212, settings_.library.enabled);
         SetChecked(dialog, 2210, settings_.library.monitor_directories);
         const HWND list = GetDlgItem(dialog, 1038);
@@ -5109,6 +5116,10 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetDlgItemTextW(dialog,kLibraryOsuLazerExecutable,settings_.osu_library.lazer_executable.c_str());
         SetDlgItemTextW(dialog,kLibraryOsuStableSongs,settings_.osu_library.stable_songs.c_str());
         SetDlgItemTextW(dialog,kLibraryOsuLazerFiles,settings_.osu_library.lazer_files.c_str());
+        for(int id:{kLibraryOsuStableExecutableBrowse,kLibraryOsuLazerExecutableBrowse,
+                    kLibraryOsuStableSongsBrowse,kLibraryOsuLazerFilesBrowse})
+            InstallOptionsBitmapButton(dialog,id,resources,1023);
+        RefreshOsuVisualAvailability();
         break;
     }
     case 256: {
@@ -5384,13 +5395,15 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SendDlgItemMessageW(dialog, 2232, CB_ADDSTRING, 0,
                             reinterpret_cast<LPARAM>(album_label.c_str()));
         for (const UINT id : {IDS_VISUAL_PULSE, IDS_VISUAL_RIPPLE, IDS_VISUAL_OSU, IDS_VISUAL_OSU_LAZER}) {
-            if(id==IDS_VISUAL_OSU && !audio::HasOsuVisualSupport())continue;
-            if(id==IDS_VISUAL_OSU_LAZER && !audio::HasOsuLazerSupport())continue;
+            if(id==IDS_VISUAL_OSU && !OsuVisualAvailable())continue;
+            if(id==IDS_VISUAL_OSU_LAZER && !OsuLazerAvailable())continue;
             const auto label = AlbumOptionText(id);
             SendDlgItemMessageW(dialog, 2232, CB_ADDSTRING, 0,
                                 reinterpret_cast<LPARAM>(label.c_str()));
         }
         PopulateAlbumBackgroundOptions(dialog, instance_, settings_.fullscreen);
+        InstallOptionsBitmapButton(dialog,IDC_FULLSCREEN_ALBUM_BROWSE,resources,1023);
+        InstallOptionsBitmapButton(dialog,IDC_FULLSCREEN_ALBUM_CLEAR,resources,1039);
         DreamFullscreenOptions::Populate(dialog, instance_, settings_.fullscreen);
         int click_option_x = 13;
         for (const auto& option : {
@@ -5818,10 +5831,15 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
     case 255: {
         settings_.library.enabled = IsChecked(dialog, 2212);
         if(GetDlgItem(dialog,kLibraryOsuStableExecutable)) {
-            settings_.osu_library.stable_executable=GetText(dialog,kLibraryOsuStableExecutable);
-            settings_.osu_library.lazer_executable=GetText(dialog,kLibraryOsuLazerExecutable);
-            settings_.osu_library.stable_songs=GetText(dialog,kLibraryOsuStableSongs);
-            settings_.osu_library.lazer_files=GetText(dialog,kLibraryOsuLazerFiles);
+            const auto read=[&](int id,std::wstring& path,unsigned bit) {
+                const auto value=GetText(dialog,id);
+                if(value!=path)settings_.osu_library.explicit_paths|=bit;
+                path=value;
+            };
+            read(kLibraryOsuStableExecutable,settings_.osu_library.stable_executable,1);
+            read(kLibraryOsuLazerExecutable,settings_.osu_library.lazer_executable,2);
+            read(kLibraryOsuStableSongs,settings_.osu_library.stable_songs,4);
+            read(kLibraryOsuLazerFiles,settings_.osu_library.lazer_files,8);
         }
         settings_.library.monitor_directories = IsChecked(dialog, 2210);
         const HWND list = GetDlgItem(dialog, 1038);
@@ -6210,11 +6228,14 @@ bool PlayerWindow::CommitOptionsControl(
     }
     case 255:
         if(IsOsuLibraryPathControl(control) && !GetDlgItem(dialog,control))return false;
-        switch(control) {
-        case kLibraryOsuStableExecutable: settings_.osu_library.stable_executable=GetText(dialog,control);return true;
-        case kLibraryOsuLazerExecutable: settings_.osu_library.lazer_executable=GetText(dialog,control);return true;
-        case kLibraryOsuStableSongs: settings_.osu_library.stable_songs=GetText(dialog,control);return true;
-        case kLibraryOsuLazerFiles: settings_.osu_library.lazer_files=GetText(dialog,control);return true;
+        if(IsOsuLibraryPathControl(control)) {
+            auto& paths=settings_.osu_library;
+            std::wstring* fields[]{&paths.stable_executable,&paths.lazer_executable,
+                                   &paths.stable_songs,&paths.lazer_files};
+            const auto index=control-kLibraryOsuStableExecutable;
+            auto value=GetText(dialog,control);
+            if(value!=*fields[index])paths.explicit_paths|=1u<<index;
+            *fields[index]=std::move(value);return true;
         }
         if (control == 2212) {
             settings_.library.enabled = IsChecked(dialog, 2212);
@@ -6555,6 +6576,54 @@ void PlayerWindow::ApplyOptionsPageRuntime(UINT template_id) {
     ApplyOptionsRuntime(template_id);
 }
 
+void PlayerWindow::RefreshOsuVisualAvailability() {
+    ApplyOsuInstallationDefaults(settings_.osu_library);
+    const bool changed=RefreshOsuExecutableIdentity(settings_.osu_library);
+    if(const HWND library=options_pages_[kPageLibrary]) {
+        for(const bool lazer:{false,true}) {
+            const auto kind=OsuExecutableIdentity(lazer);
+            std::wstring status;
+            if(!audio::HasOsuInstallationSupport())
+                status=i18n::Text(L"请更新 ttp_osu.dll，以使用程序识别和路径发现功能。");
+            else if(kind==audio::OsuExecutableKind::none)
+                status=i18n::Text(L"未识别到 osu! 程序，请检查程序文件路径。");
+            else {
+                status=kind==audio::OsuExecutableKind::lazer?
+                    i18n::Text(L"已识别 osu!lazer。"):i18n::Text(L"已识别 osu!。");
+                if(OsuVisualAvailable() && OsuLazerAvailable())
+                    status+=i18n::Text(L"两种星环效果可在全屏中使用。");
+                else status+=i18n::Text(L"可用星环效果取决于 ttp_osu 插件版本。");
+            }
+            SetDlgItemTextW(library,lazer?kLibraryOsuLazerStatus:kLibraryOsuStableStatus,status.c_str());
+        }
+    }
+    if(!changed)return;
+    // An invalidated installation cannot leave a hidden renderer selected.
+    settings_.visual.type=AvailableVisualType(settings_.visual.type,fullscreen_mode_!=0);
+    settings_.fullscreen.visual_type=AvailableVisualType(settings_.fullscreen.visual_type,true);
+    if(const HWND visual=options_pages_[kPageVisual])
+        SendMessageW(visual,kVisualAvailabilityChanged,0,0);
+    if(const HWND fullscreen=options_pages_[kPageFullscreen]) {
+        const bool unified=IsChecked(fullscreen,2233);
+        const int selected=unified?-1:AvailableVisualType(
+            ComboSelection(fullscreen,2232,0)+1,true)-1;
+        PopulateResourceCombo(fullscreen,2232,ResourceModule(),3,-1);
+        for(const UINT id:{IDS_FULLSCREEN_ALBUM,IDS_VISUAL_PULSE,IDS_VISUAL_RIPPLE,
+                          IDS_VISUAL_OSU,IDS_VISUAL_OSU_LAZER}) {
+            if(id==IDS_VISUAL_OSU && !OsuVisualAvailable())continue;
+            if(id==IDS_VISUAL_OSU_LAZER && !OsuLazerAvailable())continue;
+            const auto label=AlbumOptionText(id);
+            SendDlgItemMessageW(fullscreen,2232,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));
+        }
+        SendDlgItemMessageW(fullscreen,2232,CB_SETCURSEL,selected,0);
+    }
+    if(window_) {
+        if(fullscreen_mode_)UpdateFullScreenLayout();
+        UpdateVisualWindowLayout();
+        UpdateVisualFrame();
+    }
+}
+
 void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
     const bool all = template_id == 0;
     if (all || template_id == 251 || template_id == 258 || template_id == 259 ||
@@ -6604,7 +6673,10 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
         UpdatePlaylistWindowSkin();
         RefreshPlaylist();
     }
-    if (all || template_id == 255) ApplyMediaLibraryConfiguration();
+    if (all || template_id == 255) {
+        RefreshOsuVisualAvailability();
+        ApplyMediaLibraryConfiguration();
+    }
     if ((all || template_id == 256 || template_id == 384 ||
          template_id == 385 || template_id == 263) && lyric_window_) {
         LayoutLyricControls();
@@ -7177,6 +7249,11 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         }
         return TRUE;
     case WM_TIMER:
+        if(template_id==255 && wparam==kOptionsOsuIdentityTimer) {
+            KillTimer(dialog,kOptionsOsuIdentityTimer);
+            RefreshOsuVisualAvailability();
+            return TRUE;
+        }
         if (template_id == 260 && wparam == kOptionsDevicePollTimer) {
             PollOptionsDeviceProbe(dialog);
             return TRUE;
@@ -7315,10 +7392,42 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
     case WM_COMMAND: {
         const UINT control = LOWORD(wparam);
         const UINT notification = HIWORD(wparam);
+        if(template_id==255 && IsOsuLibraryBrowseControl(control) && notification==BN_CLICKED) {
+            const UINT path_control=OsuLibraryPathControlForBrowse(control);
+            const bool executable=path_control==kLibraryOsuStableExecutable || path_control==kLibraryOsuLazerExecutable;
+            const auto initial=core::ExpandEnvironmentPath(GetText(dialog,path_control));
+            std::optional<std::filesystem::path> selected;
+            if(executable) {
+                ModernOpenFileOptions open;
+                open.owner=dialog;open.initial_path=initial;
+                open.title=i18n::Text(L"选择 osu! 或 osu!lazer 程序");
+                open.filters={{i18n::Text(L"可执行文件 (*.exe)"),L"*.exe"}};
+                selected=ModernOpenFile(open);
+            } else {
+                ModernFolderOptions folder;
+                folder.owner=dialog;folder.initial_path=initial;
+                folder.title=i18n::Text(L"选择歌曲目录");
+                if(const auto result=ModernPickFolder(folder))selected=result->path;
+            }
+            if(selected) {
+                SetDlgItemTextW(dialog,path_control,selected->c_str());
+                CommitOptionsControl(dialog,template_id,path_control);
+                KillTimer(dialog,kOptionsOsuIdentityTimer);
+                RefreshOsuVisualAvailability();
+                RefreshOsuLibraries(true);
+            }
+            return TRUE;
+        }
         if(template_id==255 && IsOsuLibraryPathControl(control) && GetPropW(dialog,kPageReadyProperty) &&
            (notification==EN_CHANGE || notification==EN_KILLFOCUS)) {
             CommitOptionsControl(dialog,template_id,control);
-            if(notification==EN_KILLFOCUS)RefreshOsuLibraries(true);
+            if(notification==EN_KILLFOCUS) {
+                KillTimer(dialog,kOptionsOsuIdentityTimer);
+                RefreshOsuVisualAvailability();
+                RefreshOsuLibraries(true);
+            } else if(control==kLibraryOsuStableExecutable || control==kLibraryOsuLazerExecutable) {
+                if(!SetTimer(dialog,kOptionsOsuIdentityTimer,350,nullptr))RefreshOsuVisualAvailability();
+            }
             return TRUE; // path edits do not restart ordinary library watchers
         }
         if (template_id == 256 && notification == STN_CLICKED) {
@@ -8281,6 +8390,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
             }
         }
         if (header->code == PSN_SETACTIVE) {
+            if(template_id==255 || template_id==263)RefreshOsuVisualAvailability();
             // The original removes configured global registrations while the
             // shortcut editor owns the two HOTKEY controls.  They are rebuilt
             // only when this page loses activation.
@@ -8306,6 +8416,10 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         }
         if (header->code == PSN_KILLACTIVE || header->code == PSN_APPLY ||
             header->code == PSN_RESET) {
+            if(template_id==255) {
+                KillTimer(dialog,kOptionsOsuIdentityTimer);
+                RefreshOsuVisualAvailability();
+            }
             if (header->code == PSN_KILLACTIVE && template_id == 252)
                 RegisterConfiguredHotKeys(true);
             if (header->code == PSN_APPLY) {
@@ -8331,6 +8445,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         break;
     }
     case WM_DESTROY: {
+        if(template_id==255)KillTimer(dialog,kOptionsOsuIdentityTimer);
         if (template_id == 260) CancelOptionsDeviceProbe();
         if (template_id == 381 || template_id == 382) {
             auto& child = options_network_pages_[template_id - 381];

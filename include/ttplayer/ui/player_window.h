@@ -549,6 +549,7 @@ private:
     void AppendOsuLibraryMenu(HMENU menu) const;
     void SetOsuLibraryVisible(unsigned source,bool visible,bool interactive=true);
     void RefreshOsuLibraries(bool interactive=false);
+    void RefreshOsuVisualAvailability();
     void ApplyOsuLibraryResults();
     void ShutdownOsuLibraries();
     std::shared_ptr<OsuLibraryState> osu_libraries_;
@@ -894,6 +895,7 @@ private:
     static void WINAPI BrowserStateCallback(void*, const ttp_browser_state*);
     static HRESULT WINAPI BrowserSetupCallback(void*, const wchar_t*, const wchar_t*, const wchar_t*);
     static HRESULT WINAPI BrowserAdjustWindowRectCallback(void*, HWND, uint32_t, RECT*);
+    static HRESULT WINAPI BrowserResolveAssociatedLyricCallback(void*, const wchar_t*, BSTR*);
     void MusicBrowserStateChanged(const ttp_browser_state&);
     std::optional<size_t> ChooseMusicBrowserPlaylist();
     std::unique_ptr<BrowserClient> browser_client_;

@@ -607,6 +607,10 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
     };
 
     switch (message) {
+    case kVisualAvailabilityChanged:
+        VisualOptionsTabs::RefreshAvailability(dialog);
+        SyncVisualPage(dialog,resources,settings_.visual,false);
+        return TRUE;
     case kVisualTabChanged: {
         SyncOptionsOsuLogo(dialog,settings_.visual);
         SyncVisualFrames(dialog,resources,settings_.visual);
@@ -624,6 +628,7 @@ INT_PTR PlayerWindow::HandleVisualOptionsDialog(
         SyncVisualPage(dialog, resources, settings_.visual, true);
         InstallOptionsBitmapButton(dialog, kVisualFont, resources, 0x161);
         InstallOptionsBitmapButton(dialog, kVisualProfile, resources, 0x160);
+        InstallOptionsBitmapButton(dialog, kVisualOsuLogoBrowse, resources, 1023);
         return TRUE;
     }
     case WM_HSCROLL:

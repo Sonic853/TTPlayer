@@ -1487,6 +1487,8 @@ bool RequestSystemPowerOff() {
 using namespace detail;
 
 PlayerWindow::PlayerWindow(settings::Settings settings) : settings_(std::move(settings)) {
+    ApplyOsuInstallationDefaults(settings_.osu_library);
+    RefreshOsuExecutableIdentity(settings_.osu_library);
     browser_client_ = std::make_unique<BrowserClient>();
     if (FAILED(EnsureWtlRuntime())) throw std::runtime_error("WTL initialization failed");
     if (!settings_.source_path.empty())

@@ -1,6 +1,7 @@
 #pragma once
 #include "lyric_upload_window.h"
 #include "audio_options.h"
+#include "osu_visual_availability.h"
 
 // Shared implementation details for the split PlayerWindow translation units.
 // These declarations do not alter the public PlayerWindow ABI.
@@ -21,8 +22,8 @@ namespace ttplayer::ui::detail {
 // Types 7 and 8 are optional fullscreen renderers. Ordinary skin/lyric canvases
 // retain types 0..6 even when the DLL is installed.
 inline int AvailableVisualMaximum(bool fullscreen=false) noexcept {
-    if(!fullscreen || !audio::HasOsuVisualSupport())return 6;
-    return audio::HasOsuLazerSupport()?8:7;
+    if(!fullscreen || !OsuVisualAvailable())return 6;
+    return OsuLazerAvailable()?8:7;
 }
 inline bool IsOsuVisualType(int type) noexcept {return type==7 || type==8;}
 inline unsigned VisualFrameIntervalNs(const settings::VisualSettings& visual,

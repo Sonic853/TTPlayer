@@ -38,6 +38,7 @@ private:
     static void WINAPI Changed(void*, const ttp_browser_state*);
     static HRESULT WINAPI Setup(void*, const wchar_t*, const wchar_t*, const wchar_t*);
     static HRESULT WINAPI AdjustWindowRect(void*, HWND, uint32_t, RECT*);
+    static HRESULT WINAPI ResolveAssociatedLyric(void*, const wchar_t*, BSTR*);
     bool UiCallbacksAllowed() const noexcept;
     void Snapshot(const audio::PlaybackOptions&);
 

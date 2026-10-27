@@ -1,6 +1,8 @@
 #include "ttplayer/audio/osz_archive.h"
 #include "ttplayer/audio/osu_library.h"
 #include <ttp_osu/library.h>
+#include "ttplayer/audio/osu_installation.h"
+#include <ttp_osu/installation.h>
 #include "ttplayer/audio/archive_member.h"
 #include <ttp_osu/abi.h>
 #include "osu_visual_query.h"
@@ -32,6 +34,20 @@ struct Plugin {
 };
 const Plugin& LoadedPlugin() {static const Plugin plugin;return plugin;}
 const TtpOsuApi& Api() {return LoadedPlugin().api;}
+const TtpOsuInstallationApi& InstallationApi() noexcept {
+    static const TtpOsuInstallationApi api=[]() noexcept {
+        try {
+            const auto query=reinterpret_cast<TtpOsuQueryInstallation>(
+                GetProcAddress(LoadedPlugin().module,TTP_OSU_INSTALLATION_ENTRY));
+            TtpOsuInstallationApi value{sizeof(value)};
+            if(query && SUCCEEDED(query(TTP_OSU_INSTALLATION_ABI,&value)) &&
+               value.size>=sizeof(value) && value.abi==TTP_OSU_INSTALLATION_ABI &&
+               value.identify && value.discover)return value;
+        }catch(...) {}
+        return TtpOsuInstallationApi{};
+    }();
+    return api;
+}
 struct Capabilities {bool archive{},visual{},logo{},transitions{},lazer{},intro_text{};};
 const Capabilities& AvailableCapabilities() noexcept {
     static const Capabilities result=[]() noexcept {
@@ -94,6 +110,38 @@ bool HasOsuLogoSupport() noexcept {return AvailableCapabilities().logo;}
 bool HasOsuTransitionSupport() noexcept {return AvailableCapabilities().transitions;}
 bool HasOsuLazerSupport() noexcept {return AvailableCapabilities().lazer;}
 bool HasOsuIntroTextSupport() noexcept {return AvailableCapabilities().intro_text;}
+bool HasOsuInstallationSupport() noexcept {return InstallationApi().discover!=nullptr;}
+OsuExecutableKind IdentifyOsuExecutable(std::wstring_view path) noexcept {
+    try {
+        const auto& api=InstallationApi();
+        if(!api.identify || path.size()>32767 || path.find(L'\0')!=path.npos)return OsuExecutableKind::none;
+        const std::wstring value(path);uint32_t kind{};
+        if(api.identify(value.c_str(),&kind)!=S_OK || kind>2)return OsuExecutableKind::none;
+        return static_cast<OsuExecutableKind>(kind);
+    }catch(...) {return OsuExecutableKind::none;}
+}
+HRESULT ReadOsuInstallation(unsigned source,const wchar_t* executable,
+    OsuInstallation& result,const wchar_t* roaming_root) noexcept {
+    result={};
+    const auto& api=InstallationApi();
+    if(!api.discover)return E_NOINTERFACE;
+    struct State {OsuInstallation value;unsigned source;bool received{};} state{{},source};
+    const TtpOsuInstallationRequest request{sizeof(request),source,executable,roaming_root,0};
+    const auto hr=api.discover(&request,[](void* opaque,const TtpOsuInstallation* value)->HRESULT {
+        return Callback([&] {
+            auto& state=*static_cast<State*>(opaque);
+            if(state.received || !value || value->size<sizeof(*value) || value->source!=state.source ||
+               value->executable_kind>2 || !value->executable || !value->library_directory ||
+               wcsnlen(value->executable,32768)==32768 || wcsnlen(value->library_directory,32768)==32768)
+                throw ArchiveError(E_INVALIDARG);
+            state.value={value->executable,value->library_directory,static_cast<OsuExecutableKind>(value->executable_kind)};
+            state.received=true;
+        });
+    },&state);
+    if(FAILED(hr))return hr;
+    if(!state.received)return E_FAIL;
+    result=std::move(state.value);return S_OK;
+}
 bool HasOsuLibrarySupport() noexcept {
     static const bool supported=[] {
         try {

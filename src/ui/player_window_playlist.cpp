@@ -415,6 +415,19 @@ FormattedPlaylistTitle FormatPlaylistTitle(
             settings.tag_title_format, unknown_format);
         if (formatted.valid) return formatted;
     }
+    if (IsOsuLibraryTrack(track)) {
+        // A game catalogue's title comes from its beatmap. Empty/invalid
+        // user formats (also found in legacy XML) must not fall through to
+        // stable's "audio.mp3" or lazer's content-addressed hash filename.
+        // Keep successful explicit tag formats above, and ordinary files'
+        // original DefTitleFormat/%F fallback below.
+        auto title = PlaylistUtf8Field(track.title);
+        auto artist = PlaylistUtf8Field(track.artist);
+        if (!title.empty() || !artist.empty()) {
+            auto text = artist.empty() ? title : title.empty() ? artist : artist + L" - " + title;
+            return {std::move(text), std::nullopt, true};
+        }
+    }
     auto formatted = FormatPlaylistPattern(track,
         settings.default_title_format, unknown_format);
     if (formatted.valid) return formatted;

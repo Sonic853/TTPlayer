@@ -83,6 +83,42 @@ HRESULT WINAPI PlayerWindow::BrowserAdjustWindowRectCallback(
     }
     return S_OK;
 }
+HRESULT WINAPI PlayerWindow::BrowserResolveAssociatedLyricCallback(
+    void* context, const wchar_t* media_path, BSTR* output) {
+    if (!output) return E_POINTER;
+    *output = nullptr;
+    if (!context || !media_path || !*media_path) return E_INVALIDARG;
+    auto& self = *static_cast<PlayerWindow*>(context);
+    if (self.browser_shutting_down_) return RPC_E_DISCONNECTED;
+    if (!self.window_ || GetWindowThreadProcessId(self.window_, nullptr) != GetCurrentThreadId())
+        return RPC_E_WRONG_THREAD;
+    try {
+        const DWORD media_attributes = GetFileAttributesW(media_path);
+        if (media_attributes == INVALID_FILE_ATTRIBUTES ||
+            (media_attributes & FILE_ATTRIBUTE_DIRECTORY)) return S_FALSE;
+        self.EnsureLyricAssociationsLoaded();
+        // Downloaded files identify the whole source (subtrack zero). Reuse
+        // the exact persisted association used by LoadCurrentLyrics, including
+        // the explicit NoLyric sentinel. Do not search by stem/title here.
+        const auto associated = self.lyric_associations_.Find({media_path, 0});
+        if (associated == std::filesystem::path(lyrics::kNoLyric)) return S_FALSE;
+        std::filesystem::path lyric = associated.value_or(std::filesystem::path{});
+        if (!associated) {
+            const auto* playing = self.PlaybackTrackForUi();
+            if (playing && !playing->subtrack && !_wcsicmp(playing->path.c_str(), media_path))
+                lyric = self.associated_lyric_path_;
+        }
+        if (lyric.empty()) return S_FALSE;
+        const DWORD attributes = GetFileAttributesW(lyric.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) return S_FALSE;
+        std::error_code error;
+        lyric = std::filesystem::absolute(lyric, error).lexically_normal();
+        if (error || !_wcsicmp(lyric.c_str(), media_path)) return S_FALSE;
+        *output = SysAllocString(lyric.c_str());
+        return *output ? S_OK : E_OUTOFMEMORY;
+    } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+    catch (...) { return E_FAIL; }
+}
 bool PlayerWindow::ConfigureMusicBrowser() {
     if (browser_shutting_down_ || close_after_skin_window_fade_ ||
         !BrowserAvailable() || !window_ || !IsWindow(window_)) return false;
@@ -120,6 +156,7 @@ bool PlayerWindow::ConfigureMusicBrowser() {
     host.state_changed = BrowserStateCallback;
     host.setup_pack = BrowserSetupCallback;
     host.adjust_window_rect = BrowserAdjustWindowRectCallback;
+    host.resolve_associated_lyric = BrowserResolveAssociatedLyricCallback;
     browser_state_applying_ = true;
     const HRESULT result = browser_client_->Create(host, config, options);
     browser_state_applying_ = false;
