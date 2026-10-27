@@ -4337,6 +4337,7 @@ void PlayerWindow::ShowFullScreenLyricContextMenu(POINT screen_point) {
     if (!menu) return;
     PrepareFullScreenLyricMenu(menu);
     PopulateFullScreenMonitorMenu(menu);
+    MoveMenuCommandToBottom(menu,kCmdFullscreenExit);
 
     // FUN_004427B1 deliberately bypasses TTPlayer's owner-drawn popup skin.
     // It activates the detached lyric surface, but sends the selected command

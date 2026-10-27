@@ -1,6 +1,7 @@
 #include "ttplayer/audio/osz_archive.h"
 #include "ttplayer/audio/osu_library.h"
 #include <ttp_osu/library.h>
+#include <ttp_osu/export.h>
 #include "ttplayer/audio/osu_installation.h"
 #include <ttp_osu/installation.h>
 #include "ttplayer/audio/archive_member.h"
@@ -34,6 +35,18 @@ struct Plugin {
 };
 const Plugin& LoadedPlugin() {static const Plugin plugin;return plugin;}
 const TtpOsuApi& Api() {return LoadedPlugin().api;}
+const TtpOsuExportApi& ExportApi() noexcept {
+    static const TtpOsuExportApi api=[]() noexcept {
+        try {
+            const auto query=reinterpret_cast<TtpOsuQueryExport>(GetProcAddress(LoadedPlugin().module,TTP_OSU_EXPORT_ENTRY));
+            TtpOsuExportApi value{sizeof(value)};
+            if(query && SUCCEEDED(query(TTP_OSU_EXPORT_ABI,&value)) && value.size>=sizeof(value) &&
+               value.abi==TTP_OSU_EXPORT_ABI && value.run)return value;
+        }catch(...) {}
+        return TtpOsuExportApi{};
+    }();
+    return api;
+}
 const TtpOsuInstallationApi& InstallationApi() noexcept {
     static const TtpOsuInstallationApi api=[]() noexcept {
         try {
@@ -152,6 +165,34 @@ bool HasOsuLibrarySupport() noexcept {
         }catch(...){return false;}
     }();
     return supported;
+}
+bool HasOsuExportSupport() noexcept {return ExportApi().run!=nullptr;}
+HRESULT ExportOsuLibrary(unsigned source,const std::filesystem::path& root,
+    const std::vector<std::wstring>& identities,const std::filesystem::path& destination,
+    bool single_file,bool replace,const std::function<bool()>& canceled,
+    const std::function<void(uint32_t,uint64_t,uint64_t,const wchar_t*)>& progress,
+    const std::function<void(const std::filesystem::path&)>& completed) noexcept {
+    return Callback([&] {
+        const auto& api=ExportApi();if(!api.run)throw ArchiveError(E_NOINTERFACE);
+        if(identities.size()>250000)throw ArchiveError(E_INVALIDARG);
+        std::vector<const wchar_t*> ids;ids.reserve(identities.size());
+        for(const auto& id:identities)ids.push_back(id.c_str());
+        struct State {
+            const std::function<bool()>& canceled;
+            const std::function<void(uint32_t,uint64_t,uint64_t,const wchar_t*)>& progress;
+            const std::function<void(const std::filesystem::path&)>& completed;
+        } state{canceled,progress,completed};
+        const TtpOsuLibraryHost host{sizeof(host),&state,[](void* data)->BOOL {
+            auto& s=*static_cast<State*>(data);try{return s.canceled&&s.canceled();}catch(...){return TRUE;}
+        },[](void* data,uint32_t phase,uint64_t done,uint64_t total,const wchar_t* path)->HRESULT {
+            return Callback([&]{auto& s=*static_cast<State*>(data);if(s.progress)s.progress(phase,done,total,path);});
+        }};
+        const TtpOsuExportRequest request{sizeof(request),source,root.c_str(),ids.data(),static_cast<uint32_t>(ids.size()),
+            (single_file?TTP_OSU_EXPORT_SINGLE_FILE:0u)|(replace?TTP_OSU_EXPORT_REPLACE:0u),destination.c_str()};
+        Check(api.run(&host,&request,[](void* data,const wchar_t* path)->HRESULT {
+            return Callback([&]{auto& s=*static_cast<State*>(data);if(s.completed)s.completed(path);});
+        },&state));
+    });
 }
 HRESULT ReadOsuLibrary(unsigned source,const std::filesystem::path& root,
     std::vector<OsuLibraryMedia>& result,const std::function<bool()>& canceled) noexcept {

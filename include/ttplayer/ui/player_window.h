@@ -144,6 +144,7 @@ private:
     bool HandleNativeLyricContentCommand(UINT command);
     HMENU CreateNativeLyricContentMenu() const;
     static void MoveContentOptionsToBottom(HMENU menu);
+    static void MoveMenuCommandToBottom(HMENU menu,UINT command);
     HWND plugin_content_drag_window_{};
     HWND plugin_content_window_{};
     HWND LyricEditorParent() const;
@@ -547,6 +548,9 @@ private:
     struct MediaLibraryState;
     struct OsuLibraryState;
     void AppendOsuLibraryMenu(HMENU menu) const;
+    void AppendOsuExportMenu(HMENU menu,bool has_row) const;
+    void ExportOsuSongs(bool all);
+    bool osu_exporting_{};
     void SetOsuLibraryVisible(unsigned source,bool visible,bool interactive=true);
     void RefreshOsuLibraries(bool interactive=false);
     void RefreshOsuVisualAvailability();

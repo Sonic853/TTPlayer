@@ -6,7 +6,7 @@ Source: https://github.com/TTPlayerRebuild/TTPlayerOSU
 `include/ttp_osu/visual.h` defines the independent visual ABI 5, exported as
 `ttp_osu_query_visual` at ordinal 2. OSZ ordinal 1 remains unchanged.
 `include/ttp_osu/library.h` defines library ABI 1, exported as
-`ttp_osu_library_query` at ordinal 3. Keep all three headers identical to the
+`ttp_osu_library_query` at ordinal 3. Keep all SDK headers identical to the
 plugin copies. The player dynamically loads
 `AddIn/ttp_osu.dll` and queries the versioned function table.
 ABI 2 appends the logo setter. ABI 1 queries still write only the old prefix;
@@ -81,3 +81,14 @@ whereas an empty executable preserves an explicitly cleared path. The player
 hides star effects until either configured executable is recognized, and asks
 to update an older DLL that lacks this interface. Unavailable defaults must not
 be serialized as deliberately empty user settings.
+
+Export ABI 1 (`export.h`, `ttp_osu_export_query`, ordinal 5) exports complete
+stable/lazer beatmap sets. Pass the library root and selected track identities;
+the DLL deduplicates sets, restores lazer's original filenames, and writes
+streaming ZIP/ZIP64 OSZ files. Single-file mode optionally replaces a destination
+after the host save dialog confirms; directory mode uses numbered collision
+names without overwriting. Progress/cancel and completed-path callbacks are
+synchronous and borrowed. Run on a worker thread. A failure/cancel leaves any
+already completed sets intact and removes the current temporary archive. Source
+directories and the Realm database stay read-only. Older DLLs retain their
+existing capabilities; the host hides only the new export menu entries.

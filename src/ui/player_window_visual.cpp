@@ -2772,6 +2772,7 @@ HMENU PlayerWindow::CreateVisualContextMenu(bool detached,int mode,int type) {
         if (last >= 0) DeleteMenu(popup, last, MF_BYPOSITION);
         AppendPlayerVisualMenuItems(popup,true);
         PopulateFullScreenMonitorMenu(popup);
+        MoveMenuCommandToBottom(popup,kCmdFullscreenToggle);
         CheckMenuItem(popup,
             static_cast<UINT>(kCmdVisualFirst + type),
             MF_BYCOMMAND | MF_CHECKED);

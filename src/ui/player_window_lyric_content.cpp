@@ -100,14 +100,23 @@ HMENU PlayerWindow::CreateNativeLyricContentMenu() const {
 void PlayerWindow::MoveContentOptionsToBottom(HMENU menu) {
     if(!menu)return;
     for(int i=0;i<GetMenuItemCount(menu);++i) {
+        const UINT command=GetMenuItemID(menu,i);
+        if(command==kCmdLyricOptions || command==kCmdVisualOptions) {
+            MoveMenuCommandToBottom(menu,command);return;
+        }
+    }
+}
+
+void PlayerWindow::MoveMenuCommandToBottom(HMENU menu,UINT command) {
+    if(!menu)return;
+    for(int i=0;i<GetMenuItemCount(menu);++i) {
         MENUITEMINFOW item{sizeof(item)};
         item.fMask=MIIM_ID|MIIM_FTYPE|MIIM_STATE|MIIM_DATA|MIIM_SUBMENU|MIIM_BITMAP|MIIM_CHECKMARKS|MIIM_STRING;
-        if(!GetMenuItemInfoW(menu,i,TRUE,&item) ||
-           (item.wID!=kCmdLyricOptions && item.wID!=kCmdVisualOptions))continue;
+        if(!GetMenuItemInfoW(menu,i,TRUE,&item) || item.wID!=command)continue;
         std::wstring text(item.cch+1,L'\0');item.dwTypeData=text.data();item.cch=static_cast<UINT>(text.size());
         if(!GetMenuItemInfoW(menu,i,TRUE,&item))return;
-        RemoveMenu(menu,i,MF_BYPOSITION);
-        // Moving the options section can expose consecutive/trailing separators.
+        if(!RemoveMenu(menu,i,MF_BYPOSITION))return;
+        // Moving a command can expose consecutive/trailing separators.
         bool separator=true;
         for(int position=0;position<GetMenuItemCount(menu);) {
             MENUITEMINFOW next{sizeof(next)};next.fMask=MIIM_FTYPE;

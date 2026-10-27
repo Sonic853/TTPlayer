@@ -4955,6 +4955,7 @@ HMENU PlayerWindow::CreatePlaylistFilesMenu(std::optional<size_t> row) const {
         HMENU menu = ConvertMenuBarToPopup(i18n::LoadMenu(ResourceModule(),
             MAKEINTRESOURCEW(kMenuPlaylistToolbar)));
         PopulatePlaylistSwitchMenu(menu);
+        AppendOsuExportMenu(menu,false);
         return menu;
     }
     const UINT resource = playlist_selected_rows_.size() > 1
@@ -4974,6 +4975,7 @@ HMENU PlayerWindow::CreatePlaylistFilesMenu(std::optional<size_t> row) const {
         DeleteMenu(menu, 11, MF_BYPOSITION);
         DeleteMenu(menu, 11, MF_BYPOSITION);
     }
+    AppendOsuExportMenu(menu,true);
     return menu;
 }
 
@@ -5942,6 +5944,9 @@ void PlayerWindow::ReorderSelectedPlaylistRows(size_t insertion,bool copy) {
 }
 
 bool PlayerWindow::HandlePlaylistCommand(UINT command) {
+    if(command==kPlaylistExportOsu || command==kPlaylistExportAllOsu) {
+        ExportOsuSongs(command==kPlaylistExportAllOsu);return true;
+    }
     if(command==kPlaylistShowOsu || command==kPlaylistShowOsuLazer) {
         const unsigned source=command==kPlaylistShowOsu?1:2;
         SetOsuLibraryVisible(source,!(source==1?settings_.osu_library.show_stable:settings_.osu_library.show_lazer));
