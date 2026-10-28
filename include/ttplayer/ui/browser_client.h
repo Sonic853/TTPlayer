@@ -41,6 +41,13 @@ private:
     static HRESULT WINAPI OpenStream(void*, const wchar_t*, HANDLE, IStream**, BOOL*);
     static void WINAPI Changed(void*, const ttp_browser_state*);
     static HRESULT WINAPI OpenMediaSettings(void*);
+    static HRESULT WINAPI SetWindowVisible(void*, HWND, BOOL);
+    static HRESULT WINAPI TrackPopupMenu(void*, HWND, HMENU, POINT, UINT*);
+    static HRESULT WINAPI OpenOptions(void*);
+    static HRESULT WINAPI GetDownloadPage(void*, BSTR*, BSTR*);
+    static HRESULT WINAPI RecognizePageDownload(void*, const wchar_t*, const wchar_t*, BSTR*);
+    static HRESULT WINAPI GetPageScript(void*, BSTR*);
+    static HRESULT WINAPI RecognizePageAudio(void*, const wchar_t*, const wchar_t*);
     static HRESULT WINAPI Setup(void*, const wchar_t*, const wchar_t*, const wchar_t*);
     static HRESULT WINAPI AdjustWindowRect(void*, HWND, uint32_t, RECT*);
     static HRESULT WINAPI ResolveAssociatedLyric(void*, const wchar_t*, BSTR*);

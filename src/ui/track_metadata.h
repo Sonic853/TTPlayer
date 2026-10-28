@@ -8,6 +8,21 @@ namespace ttplayer::ui::detail {
 
 enum class TrackInfoState { success, provisional, failed, unavailable };
 
+inline bool IsPersonalLibraryTrack(const playlist::Track& track) noexcept {
+    return track.path.native().starts_with(L"https://ttpbrowser.invalid/");
+}
+
+inline bool IsMusicBrowserTrack(const playlist::Track& track) noexcept {
+    if (IsPersonalLibraryTrack(track)) return true;
+    const auto& source = track.path.native();
+    if (!source.starts_with(L"https://") && !source.starts_with(L"http://")) return false;
+    // Provider pages such as Sayobot submit real audio URLs with a row ID.
+    // Ordinary pasted URLs and local files retain their existing formatting.
+    return std::any_of(track.metadata.begin(), track.metadata.end(), [](const auto& field) {
+        return field.first == "TTPlayer.Tid" && !field.second.empty();
+    });
+}
+
 inline bool IsOsuLibraryMetadata(
     const std::vector<std::pair<std::string, std::string>>& metadata) noexcept {
     return std::any_of(metadata.begin(), metadata.end(), [](const auto& field) {

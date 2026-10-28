@@ -219,6 +219,7 @@ constexpr UINT kCmdLibraryOptions = 0x7fef;
 constexpr UINT kCmdDesktopLyricOptions = 0x8046;
 constexpr UINT kCmdLibraryDownloadOptions = 0x0903;
 constexpr UINT kCmdMediaSourceOptions = 0x0904;
+constexpr UINT kCmdMusicBrowserOptions = 0x0905;
 // CPlayerWnd's private settings-change dispatcher.  Option pages send a
 // subsystem mask in wParam and the originating control (or a negative
 // lifecycle sentinel) in lParam.

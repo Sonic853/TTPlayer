@@ -2,6 +2,8 @@
 #include "ttplayer/audio/osu_library.h"
 #include <ttp_osu/library.h>
 #include <ttp_osu/export.h>
+#include <ttp_osu/download_page.h>
+#include "ttplayer/audio/osu_download_page.h"
 #include "ttplayer/audio/osu_installation.h"
 #include <ttp_osu/installation.h>
 #include "ttplayer/audio/archive_member.h"
@@ -35,6 +37,20 @@ struct Plugin {
 };
 const Plugin& LoadedPlugin() {static const Plugin plugin;return plugin;}
 const TtpOsuApi& Api() {return LoadedPlugin().api;}
+const TtpOsuDownloadPageApi& DownloadPageApi() noexcept {
+    static const TtpOsuDownloadPageApi api=[]() noexcept {
+        try {
+            const auto query=reinterpret_cast<TtpOsuQueryDownloadPage>(GetProcAddress(LoadedPlugin().module,TTP_OSU_DOWNLOAD_PAGE_ENTRY));
+            TtpOsuDownloadPageApi value{sizeof(value)};
+            if(query)for(const uint32_t version:{2u,1u}) {
+                value={sizeof(value)};
+                if(query(version,&value)==S_OK&&value.size>=(version==1?TTP_OSU_DOWNLOAD_PAGE_ABI1_SIZE:sizeof(value))&&
+                   value.abi==version&&value.page&&value.recognize)return value;
+            }
+        }catch(...){}
+        return TtpOsuDownloadPageApi{};
+    }();return api;
+}
 const TtpOsuExportApi& ExportApi() noexcept {
     static const TtpOsuExportApi api=[]() noexcept {
         try {
@@ -118,7 +134,37 @@ struct Context {
 void Check(HRESULT hr){if(FAILED(hr))throw ArchiveError(hr);}
 }
 bool HasOszSupport() noexcept {return AvailableCapabilities().archive;}
+HRESULT GetOsuDownloadPage(BSTR* name,BSTR* url) noexcept {
+    if(!name||!url)return E_POINTER;*name=nullptr;*url=nullptr;
+    try {
+        const auto& api=DownloadPageApi();if(!api.page)return S_FALSE;
+        TtpOsuDownloadPage page{sizeof(page)};const auto hr=api.page(&page);
+        if(hr!=S_OK)return hr;
+        if(!page.name||!*page.name||!page.url||!*page.url)return E_FAIL;
+        *name=SysAllocString(page.name);*url=SysAllocString(page.url);
+        if(!*name||!*url){SysFreeString(*name);SysFreeString(*url);*name=*url=nullptr;return E_OUTOFMEMORY;}
+        return S_OK;
+    }catch(...){return E_FAIL;}
+}
+HRESULT RecognizeOsuDownload(const wchar_t* page,const wchar_t* target,BSTR* filename) noexcept {
+    if(!filename)return E_POINTER;*filename=nullptr;
+    try {
+        const auto& api=DownloadPageApi();if(!api.recognize)return S_FALSE;
+        wchar_t value[260]{};const auto hr=api.recognize(page,target,value,260);
+        if(hr!=S_OK)return hr;
+        *filename=SysAllocString(value);return *filename?S_OK:E_OUTOFMEMORY;
+    }catch(...){return E_FAIL;}
+}
 bool HasOsuVisualSupport() noexcept {return AvailableCapabilities().visual;}
+HRESULT GetOsuPageScript(BSTR* script) noexcept {
+    if(!script)return E_POINTER;*script=nullptr;
+    try {const auto& api=DownloadPageApi();if(!api.script||!api.recognize_audio)return S_FALSE;
+        *script=SysAllocString(api.script());return *script?S_OK:E_OUTOFMEMORY;
+    }catch(...){return E_FAIL;}
+}
+HRESULT RecognizeOsuPageAudio(const wchar_t* page,const wchar_t* target) noexcept {
+    try {const auto& api=DownloadPageApi();return api.recognize_audio?api.recognize_audio(page,target):S_FALSE;}catch(...){return E_FAIL;}
+}
 bool HasOsuLogoSupport() noexcept {return AvailableCapabilities().logo;}
 bool HasOsuTransitionSupport() noexcept {return AvailableCapabilities().transitions;}
 bool HasOsuLazerSupport() noexcept {return AvailableCapabilities().lazer;}

@@ -6590,6 +6590,7 @@ void PlayerWindow::RefreshOsuVisualAvailability() {
         }
     }
     if(!changed)return;
+    if(browser_client_ && browser_client_->Created())ConfigureMusicBrowser();
     // An invalidated installation cannot leave a hidden renderer selected.
     settings_.visual.type=AvailableVisualType(settings_.visual.type,fullscreen_mode_!=0);
     settings_.fullscreen.visual_type=AvailableVisualType(settings_.fullscreen.visual_type,true);

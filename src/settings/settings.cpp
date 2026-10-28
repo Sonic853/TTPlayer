@@ -969,7 +969,7 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         s.player.browser_window=RectAttr(n,L"BrowserWnd");
         s.player.browser_window2=RectAttr(n,L"BrowserWnd2");
         s.player.browser_visible=IntAttr(n,L"BrowserVisible",0)!=0;
-        s.player.browser_auto_startup=IntAttr(n,L"BrowserAutoStartup",1)!=0;
+        s.player.browser_auto_startup=IntAttr(n,L"BrowserAutoStartup",0)!=0;
         s.player.browser_engine=std::clamp(IntAttr(n,L"BrowserEngine",0),0,2);
         const auto browser_home=StringAttr(n,L"BrowserHomeURL");
         if(!browser_home.empty()) s.player.browser_home_url=browser_home;

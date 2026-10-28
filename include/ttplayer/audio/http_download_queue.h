@@ -33,7 +33,7 @@ struct HttpDownload {
     DownloadState state{DownloadState::waiting};
     uint64_t received{}, total{};
     HRESULT result{S_OK};
-    bool prefetch{}, replace{};
+    bool prefetch{}, replace{}, response_filename{};
 };
 // Implemented only in ttpbrowser.dll. Playback uses the read-only helpers above.
 // The host's existing network producer returns a consumer stream; the callback
@@ -49,7 +49,7 @@ public:
     void Configure(int maximum, std::filesystem::path legacy_cache_folder = {});
     uint64_t Enqueue(std::wstring url, std::wstring title,
                      std::filesystem::path destination = {}, bool replace = false,
-                     std::wstring artist = {}, std::wstring tid = {});
+                     std::wstring artist = {}, std::wstring tid = {}, bool response_filename = false);
     void Cancel(uint64_t id);
     // Stop this consumer and persist a paused task. Retry starts it again;
     // any byte reuse belongs to the host producer's verified cache journal.

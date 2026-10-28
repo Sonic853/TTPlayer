@@ -1,5 +1,15 @@
 # TTPlayerOSU host ABI
 
+`include/ttp_osu/download_page.h` defines independent download-page ABI 2,
+exported as `ttp_osu_download_page_query` at ordinal 6. ABI 1 queries retain
+only the original page/OSZ recognizer prefix. ABI 2 appends a provider script
+and an exact-origin audio URL recognizer. The host tries 2 then 1, copies the
+script, and bounds-checks each optional browser callback. Only a configured
+osu!/lazer executable passing the plugin installation check enables the page.
+The script intercepts downloads and explicit detail playback; it does not
+expose the legacy player object or mute the browser. All messages are checked
+again against the active page and native recognizers before queue submission.
+
 Source: https://github.com/TTPlayerRebuild/TTPlayerOSU
 
 `include/ttp_osu/abi.h` is copied from the independent plugin's ABI 1 header.

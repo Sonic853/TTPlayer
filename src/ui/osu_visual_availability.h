@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ttplayer/audio/osu_installation.h"
+#include "ttplayer/audio/osu_download_page.h"
 #include "ttplayer/settings/settings.h"
 #include "ttplayer/audio/osz_archive.h"
 #include <atomic>
@@ -34,6 +35,17 @@ inline bool RefreshOsuExecutableIdentity(const settings::OsuLibrarySettings& pat
 inline audio::OsuExecutableKind OsuExecutableIdentity(bool lazer) noexcept {
     return static_cast<audio::OsuExecutableKind>(
         (osu_executable_kinds.load()>>(lazer?2:0))&3);
+}
+inline HRESULT AvailableOsuDownloadPage(BSTR* name,BSTR* url) noexcept {
+    if(name)*name=nullptr;
+    if(url)*url=nullptr;
+    if(!name||!url)return E_POINTER;
+    return osu_executable_kinds.load()?audio::GetOsuDownloadPage(name,url):S_FALSE;
+}
+inline HRESULT RecognizeAvailableOsuDownload(const wchar_t* page,const wchar_t* url,BSTR* filename) noexcept {
+    if(!filename)return E_POINTER;
+    *filename=nullptr;
+    return osu_executable_kinds.load()?audio::RecognizeOsuDownload(page,url,filename):S_FALSE;
 }
 inline bool OsuVisualAvailable() noexcept {
     return osu_executable_kinds.load()!=0 && audio::HasOsuVisualSupport();

@@ -1,5 +1,6 @@
 #include "ttplayer/audio/http_stream.h"
 #include "ttplayer/net/https_provider.h"
+#include "ttplayer/net/content_disposition.h"
 #include <shlwapi.h>
 #include <wincrypt.h>
 #include <algorithm>
@@ -196,9 +197,10 @@ public:
         if(!total_ || sequential_) return E_PENDING;
         out->type=STGTY_STREAM;out->cbSize.QuadPart=*total_;out->grfMode=STGM_READ;
         if(!(flags&STATFLAG_NONAME)) {
-            out->pwcsName=static_cast<wchar_t*>(CoTaskMemAlloc((url_.size()+1)*sizeof(wchar_t)));
+            const auto& name=response_filename_.empty()?url_:response_filename_;
+            out->pwcsName=static_cast<wchar_t*>(CoTaskMemAlloc((name.size()+1)*sizeof(wchar_t)));
             if(!out->pwcsName) return E_OUTOFMEMORY;
-            std::copy(url_.begin(),url_.end(),out->pwcsName);out->pwcsName[url_.size()]=0;
+            std::copy(name.begin(),name.end(),out->pwcsName);out->pwcsName[name.size()]=0;
         }
         return S_OK;
     }
@@ -351,6 +353,7 @@ private:
         const auto icy=Header("icy-metaint");
         if(!icy.empty()) {Require(!offset && Number(icy,n) && n && n<=64*1024*1024);icy_interval_=icy_audio_left_=n;}
         if(!opened_) {
+            response_filename_=net::HttpResponseFilename(Header("content-disposition"));
             sequential_=!total || icy_interval_;
             metadata_.title=Text(Header("icy-name"));
             const auto genre=Text(Header("icy-genre")), home=Text(Header("icy-url"));
@@ -510,7 +513,7 @@ private:
     std::vector<std::weak_ptr<Consumer>> clients_;std::weak_ptr<Consumer> live_client_;
     std::atomic<bool> ready_{},shareable_{};bool accepting_{true};
     std::thread worker_;std::atomic<bool> stopping_{},restart_{},sequential_{};
-    std::wstring url_;std::string validator_;PlaybackOptions options_;
+    std::wstring url_,response_filename_;std::string validator_;PlaybackOptions options_;
     net::HttpsProvider module_;const ttp_https_api_v7* api_{};ttp_https_stream* request_{};
     File cache_;std::array<unsigned char,16384> buffer_{};
     bool opened_{},ranged_{},worker_done_{},persisted_{};

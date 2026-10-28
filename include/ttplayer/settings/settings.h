@@ -83,7 +83,7 @@ struct PlayerSettings {
     bool equalizer_visible{};
     RECT browser_window{}, browser_window2{};
     bool browser_visible{};
-    bool browser_auto_startup{true};
+    bool browser_auto_startup{false};
     int browser_engine{}; // 0: WebView2 with IE fallback, 1: IE, 2: WebView2 only.
     std::wstring browser_home_url{L"http://mini.qianqian.com/index.html"};
     int playlist_scan_count{100};

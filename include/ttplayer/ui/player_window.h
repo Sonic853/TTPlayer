@@ -900,6 +900,7 @@ private:
     static HRESULT WINAPI BrowserSetupCallback(void*, const wchar_t*, const wchar_t*, const wchar_t*);
     static HRESULT WINAPI BrowserAdjustWindowRectCallback(void*, HWND, uint32_t, RECT*);
     static HRESULT WINAPI BrowserResolveAssociatedLyricCallback(void*, const wchar_t*, BSTR*);
+    static HRESULT WINAPI BrowserTrackPopupMenuCallback(void*, HWND, HMENU, POINT, UINT*);
     void MusicBrowserStateChanged(const ttp_browser_state&);
     std::optional<size_t> ChooseMusicBrowserPlaylist();
     std::unique_ptr<BrowserClient> browser_client_;

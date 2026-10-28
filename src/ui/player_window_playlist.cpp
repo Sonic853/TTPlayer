@@ -106,6 +106,14 @@ std::wstring PlaylistMetadataValue(const playlist::Track& track,
         track.metadata.end(), [name, &equals](const auto& entry) {
             return equals(entry.first, name);
         });
+    // Older music-window imports only populated the row fields. TTBL also
+    // stores Title separately, so keep tag formats useful after reloading.
+    if ((found == track.metadata.end() || found->second.empty()) &&
+        IsMusicBrowserTrack(track)) {
+        if (equals(name, "Title")) return PlaylistUtf8Field(track.title);
+        if (equals(name, "Artist")) return PlaylistUtf8Field(track.artist);
+        if (equals(name, "Album")) return PlaylistUtf8Field(track.album);
+    }
     return found == track.metadata.end() ? std::wstring{} :
         PlaylistUtf8Field(found->second);
 }
@@ -415,10 +423,10 @@ FormattedPlaylistTitle FormatPlaylistTitle(
             settings.tag_title_format, unknown_format);
         if (formatted.valid) return formatted;
     }
-    if (IsOsuLibraryTrack(track)) {
-        // A game catalogue's title comes from its beatmap. Empty/invalid
-        // user formats (also found in legacy XML) must not fall through to
-        // stable's "audio.mp3" or lazer's content-addressed hash filename.
+    if (IsOsuLibraryTrack(track) || IsMusicBrowserTrack(track)) {
+        // Catalogue titles come from the selected entry. Empty/invalid
+        // user formats (also found in legacy XML) must not expose an opaque
+        // media-library URL, "audio.mp3", or a content-addressed hash.
         // Keep successful explicit tag formats above, and ordinary files'
         // original DefTitleFormat/%F fallback below.
         auto title = PlaylistUtf8Field(track.title);

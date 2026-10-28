@@ -2,6 +2,8 @@
 #include "ttplayer/core/text.h"
 #include "ttplayer/ui/window_drag.h"
 #include "ttplayer/ui/player_runtime_policy.h"
+#include "ttplayer/ui/wtl_menu.h"
+#include "ttplayer/audio/osu_download_page.h"
 #include "player_window_internal.h"
 #include <algorithm>
 #include <cstdlib>
@@ -119,6 +121,27 @@ HRESULT WINAPI PlayerWindow::BrowserResolveAssociatedLyricCallback(
     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
     catch (...) { return E_FAIL; }
 }
+HRESULT WINAPI PlayerWindow::BrowserTrackPopupMenuCallback(
+    void* context, HWND owner, HMENU menu, POINT point, UINT* command) {
+    if (!context || !command) return E_POINTER;
+    *command = 0;
+    auto& self = *static_cast<PlayerWindow*>(context);
+    if (self.browser_shutting_down_ || self.close_after_skin_window_fade_ ||
+        owner != self.MusicBrowserWindow() || !IsWindow(owner) || !IsMenu(menu))
+        return RPC_E_DISCONNECTED;
+    if (self.context_menu_open_ || !IsWindowEnabled(self.window_)) return S_OK;
+    self.context_menu_open_ = true;
+    struct MenuScope {
+        PlayerWindow& player;
+        ~MenuScope() { player.EndPopupMenuStyle(); player.context_menu_open_ = false; }
+    } scope{self};
+    SetForegroundWindow(owner);
+    self.BeginPopupMenuStyle(menu, true);
+    *command = TrackPlayerPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD,
+        point.x, point.y, owner, nullptr);
+    PostMessageW(owner, WM_NULL, 0, 0);
+    return S_OK;
+}
 bool PlayerWindow::ConfigureMusicBrowser() {
     if (browser_shutting_down_ || close_after_skin_window_fade_ ||
         !BrowserAvailable() || !window_ || !IsWindow(window_)) return false;
@@ -126,6 +149,10 @@ bool PlayerWindow::ConfigureMusicBrowser() {
     const auto root = settings_.source_path.empty() ? PlayerRuntimeDirectory()
                                                    : settings_.source_path.parent_path();
     const auto state_file = (root / L"HttpDownloads" / L"cachelist.xml").wstring();
+    // Old profiles can explicitly save an empty DownloadFolder. Restore the
+    // existing native default before passing the directory to the DLL.
+    if(settings_.network.download_folder.empty())
+        settings_.network.download_folder=settings::NetworkSettings{}.download_folder;
     const auto downloads = settings_.network.download_folder.wstring();
     const auto cache = settings_.network.cache_folder.wstring();
     ttp_browser_config config{};
@@ -158,6 +185,23 @@ bool PlayerWindow::ConfigureMusicBrowser() {
     host.adjust_window_rect = BrowserAdjustWindowRectCallback;
     host.resolve_associated_lyric = BrowserResolveAssociatedLyricCallback;
     host.open_media_settings = [](void* context) -> HRESULT {auto* self=static_cast<PlayerWindow*>(context);return PostMessageW(self->window_,WM_COMMAND,kCmdMediaSourceOptions,0)?S_OK:E_FAIL;};
+    static_assert(TTP_BROWSER_MENU_OPTIONS == kCmdMusicBrowserOptions);
+    host.open_options = [](void* context) -> HRESULT {auto* self=static_cast<PlayerWindow*>(context);return PostMessageW(self->window_,WM_COMMAND,kCmdMusicBrowserOptions,0)?S_OK:E_FAIL;};
+    host.track_popup_menu = BrowserTrackPopupMenuCallback;
+    host.get_download_page=[](void*,BSTR* name,BSTR* url)->HRESULT{return AvailableOsuDownloadPage(name,url);};
+    host.recognize_page_download=[](void*,const wchar_t* page,const wchar_t* url,BSTR* filename)->HRESULT{return RecognizeAvailableOsuDownload(page,url,filename);};
+    host.get_page_script=[](void*,BSTR* script)->HRESULT{
+        if(!script)return E_POINTER;*script=nullptr;return osu_executable_kinds.load()?audio::GetOsuPageScript(script):S_FALSE;};
+    host.recognize_page_audio=[](void*,const wchar_t* page,const wchar_t* url)->HRESULT{
+        return osu_executable_kinds.load()?audio::RecognizeOsuPageAudio(page,url):S_FALSE;};
+    host.set_window_visible = [](void* context, HWND target, BOOL visible) -> HRESULT {
+        auto* self = static_cast<PlayerWindow*>(context);
+        if (target != self->MusicBrowserWindow() || !IsWindow(target) ||
+            self->browser_shutting_down_ || self->close_after_skin_window_fade_)
+            return RPC_E_DISCONNECTED;
+        self->SetSkinWindowVisible(target, visible != FALSE);
+        return S_OK;
+    };
     browser_state_applying_ = true;
     const HRESULT result = browser_client_->Create(host, config, options);
     browser_state_applying_ = false;
@@ -228,7 +272,9 @@ void PlayerWindow::ShowMusicBrowser(uint32_t view) {
     }
     CaptureMusicBrowserState();
     ApplySkinWindowTopMost();
-    ApplySkinWindowAlpha(MusicBrowserWindow(), EffectiveSkinWindowAlpha(window_));
+    if (!skin_window_fade_ || (!skin_window_fade_->group &&
+        skin_window_fade_->target != MusicBrowserWindow()))
+        ApplySkinWindowAlpha(MusicBrowserWindow(), EffectiveSkinWindowAlpha(window_));
     ApplyWindowShadow();
     if (window_) InvalidateRect(window_, nullptr, FALSE);
 }
@@ -288,6 +334,8 @@ HRESULT PlayerWindow::SubmitMusicBrowserTracks(const ttp_browser_track* items, u
         playlist::Track track; track.path = item.source;
         if (item.artist) track.artist = core::WideToUtf8(item.artist);
         if (item.title) track.title = core::WideToUtf8(item.title);
+        if (!track.artist.empty()) track.metadata.emplace_back("Artist", track.artist);
+        if (!track.title.empty()) track.metadata.emplace_back("Title", track.title);
         if (item.tid && *item.tid) track.metadata.emplace_back("TTPlayer.Tid", core::WideToUtf8(item.tid));
         tracks.push_back(std::move(track));
     }

@@ -1989,6 +1989,9 @@ void PlayerWindow::EnsurePopupMenuImages() {
     // original RT_TOOLBAR table. Reuse the native web-link and edit images.
     for (const auto& link : kProjectLinks)
         alias(link.image_command, link.command);
+    // Surface-specific Options uses the same settings glyph as the lyric,
+    // playlist and skin menus, rather than the main menu's application icon.
+    alias(kCmdLyricOptions, kCmdMusicBrowserOptions);
 }
 
 void PlayerWindow::BeginPopupMenuStyle(HMENU menu, bool hide_keyboard_cues) {
@@ -2803,7 +2806,10 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
     suppress_skin_window_activation_fade_ = skinned;
     ShowWindow(window_, SW_SHOW);
     UpdateWindow(window_);
-    if (ConfigureMusicBrowser() && !mini_mode_ && settings_.player.browser_auto_startup)
+    // Restore the normal-mode visibility saved at exit. The explicit startup
+    // option can also request an open window; a new profile defaults to closed.
+    if (ConfigureMusicBrowser() && !mini_mode_ &&
+        (settings_.player.browser_visible || settings_.player.browser_auto_startup))
         ShowMusicBrowser(TTP_BROWSER_VIEW_MUSIC);
     // Visibility commands for owned windows are posted during CPlayerWnd's
     // initialization and are dispatched by the two startup PeekMessage pumps
@@ -6367,6 +6373,9 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
         break;
     case kCmdMediaSourceOptions:
         PostMessageW(window_, kMsgShowOptionsControl, 383, 9);
+        break;
+    case kCmdMusicBrowserOptions:
+        PostMessageW(window_, kMsgShowOptionsControl, 381, 9);
         break;
     case kCmdLibraryDownloadOptions:
         // FUN_004251C0 is the media-library/download surface's settings
