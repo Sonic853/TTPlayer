@@ -1,13 +1,16 @@
 param(
     [Parameter(Mandatory)][string]$BuildDirectory,
     [Parameter(Mandatory)][string]$Destination,
-    [string]$TtpCommDirectory
+    [string]$TtpCommDirectory,
+    [ValidateSet('TTPlayerRebuild.exe', 'TTPlayer.exe')]
+    [string]$ExecutableName = 'TTPlayerRebuild.exe'
 )
 $ErrorActionPreference = 'Stop'
 $output = Join-Path $BuildDirectory 'Release'
-$executable = Join-Path $output 'TTPlayerRebuild.exe'
+$executable = Join-Path $output $ExecutableName
 $updater = Join-Path $output 'TTPUpdater.exe'
-$report = Join-Path $output 'legacy-imports.json'
+$reportName = if ($ExecutableName -ceq 'TTPlayerRebuild.exe') { 'legacy-imports.json' } else { 'named-player-imports.json' }
+$report = Join-Path $output $reportName
 if (-not (Test-Path -LiteralPath $executable) -or -not (Test-Path -LiteralPath $report)) {
     throw 'Build and audit the universal Release player before packaging.'
 }
@@ -21,6 +24,9 @@ if (@($audit.imports.'ttpcomm.dll').Count -ne 1 -or $audit.imports.'ttpcomm.dll'
 }
 $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($hash -cne $audit.sha256) { throw 'The EXE changed after the import audit; rebuild it.' }
+if ((Get-Item -LiteralPath $executable).VersionInfo.OriginalFilename -cne $ExecutableName) {
+    throw 'The EXE resource identity does not match the selected package.'
+}
 $package = Join-Path $BuildDirectory ('player-package-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $package | Out-Null
 Copy-Item -LiteralPath $executable -Destination $package
@@ -49,8 +55,8 @@ if ($component.repository -cne 'https://github.com/TTPlayerRebuild/TTPlayerHttps
 }
 New-Item -ItemType Directory -Path (Join-Path $package 'AddIn') | Out-Null
 Copy-Item -LiteralPath $https -Destination (Join-Path $package 'AddIn/ttp_https.dll')
-"$hash  TTPlayerRebuild.exe`n$updaterHash  TTPUpdater.exe`n$httpsHash  AddIn/ttp_https.dll" | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
-$entries = @('TTPlayerRebuild.exe', 'TTPUpdater.exe', 'AddIn/ttp_https.dll', 'SHA256SUMS.txt')
+"$hash  $ExecutableName`n$updaterHash  TTPUpdater.exe`n$httpsHash  AddIn/ttp_https.dll" | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding UTF8
+$entries = @($ExecutableName, 'TTPUpdater.exe', 'AddIn/ttp_https.dll', 'SHA256SUMS.txt')
 $resources = Join-Path $output 'ttpres.dll'
 # Re-audit the actual bytes, not just a previously generated sidecar.
 & python (Join-Path $PSScriptRoot '../third_party/ttpres-sdk/tools/audit.py') `

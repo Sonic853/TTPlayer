@@ -6,6 +6,12 @@
 #include <string>
 
 namespace ttplayer::ui {
+struct BrowserClient::ResolverState {
+    std::mutex mutex;
+    std::atomic<bool> stopping{};
+    void* instance{};
+    decltype(ttp_browser_api::resolve_source) resolve{};
+};
 namespace {
 constexpr HRESULT kUnavailable = HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
 std::filesystem::path BrowserModulePath() {
@@ -27,7 +33,7 @@ BrowserClient::BrowserClient() {
         const auto get = reinterpret_cast<ttp_browser_get_api_fn>(
             GetProcAddress(module_, "ttp_browser_get_api"));
         const auto* supplied = get ? get(TTP_BROWSER_ABI_VERSION) : nullptr;
-        if (!supplied || supplied->size < sizeof(ttp_browser_api) ||
+        if (!supplied || supplied->size < TTP_BROWSER_API_V1_SIZE ||
             supplied->version != TTP_BROWSER_ABI_VERSION || !supplied->create ||
             !supplied->destroy || !supplied->configure || !supplied->set_skin ||
             !supplied->show || !supplied->window || !supplied->translate_message ||
@@ -35,7 +41,13 @@ BrowserClient::BrowserClient() {
             !supplied->external_dispatch) {
             FreeLibrary(module_); module_ = nullptr; return;
         }
-        api_ = *supplied;
+        std::memcpy(&api_,supplied,TTP_BROWSER_API_V1_SIZE);
+        if(supplied->size>=offsetof(ttp_browser_api,resolve_source)+sizeof(supplied->resolve_source))
+            api_.resolve_source=supplied->resolve_source;
+        if(supplied->size>=offsetof(ttp_browser_api,create_settings_page)+sizeof(supplied->create_settings_page))
+            api_.create_settings_page=supplied->create_settings_page;
+        if(supplied->size>=offsetof(ttp_browser_api,commit_settings_page)+sizeof(supplied->commit_settings_page))
+            api_.commit_settings_page=supplied->commit_settings_page;
     } catch (...) {
         if (module_) FreeLibrary(module_);
         module_ = nullptr; api_ = {};
@@ -66,6 +78,9 @@ HRESULT BrowserClient::Create(const ttp_browser_host& host, const ttp_browser_co
         callbacks_.adjust_window_rect = host.adjust_window_rect;
     if (host.size >= offsetof(ttp_browser_host, resolve_associated_lyric) + sizeof(host.resolve_associated_lyric))
         callbacks_.resolve_associated_lyric = host.resolve_associated_lyric;
+    if(host.size>=offsetof(ttp_browser_host,open_media_settings)+sizeof(host.open_media_settings))
+        callbacks_.open_media_settings=host.open_media_settings;
+    callbacks_.media_source_version=api_.resolve_source?1:0;
     callbacks_.size = sizeof(callbacks_);
     ui_thread_ = GetCurrentThreadId(); ui_enabled_ = true;
     stopping_->store(false, std::memory_order_release);
@@ -75,11 +90,26 @@ HRESULT BrowserClient::Create(const ttp_browser_host& host, const ttp_browser_co
     bridge.open_stream = OpenStream; bridge.state_changed = Changed; bridge.setup_pack = Setup;
     bridge.adjust_window_rect = callbacks_.adjust_window_rect ? AdjustWindowRect : nullptr;
     bridge.resolve_associated_lyric = callbacks_.resolve_associated_lyric ? ResolveAssociatedLyric : nullptr;
+    bridge.open_media_settings=callbacks_.open_media_settings?OpenMediaSettings:nullptr;
     const HRESULT result = api_.create(&bridge, &config, &instance_);
     if (FAILED(result)) {
         ui_enabled_ = false;
         if (instance_) api_.destroy(instance_);
         instance_ = nullptr; callbacks_ = {};
+    } else if(api_.resolve_source) {
+        resolver_=std::make_shared<ResolverState>();resolver_->instance=instance_;resolver_->resolve=api_.resolve_source;
+        audio::SetPersonalMediaResolver([state=resolver_](const std::wstring& source,
+            const std::function<bool()>& canceled,std::wstring& resolved) -> HRESULT {
+            if(state->stopping)return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+            std::lock_guard lock(state->mutex);
+            if(state->stopping||!state->instance)return RPC_E_DISCONNECTED;
+            struct Cancellation {ResolverState* state;const std::function<bool()>* callback;
+                static BOOL WINAPI Check(void* p) {const auto& c=*static_cast<Cancellation*>(p);
+                    return c.state->stopping || (*c.callback && (*c.callback)());}
+            } cancellation{state.get(),&canceled};
+            BSTR result{};const auto hr=state->resolve(state->instance,source.c_str(),Cancellation::Check,&cancellation,&result);
+            if(SUCCEEDED(hr)&&result)resolved=result;SysFreeString(result);return hr;
+        });
     }
     return result;
 }
@@ -107,12 +137,21 @@ HRESULT BrowserClient::Enqueue(const ttp_browser_track& track, uint64_t* task_id
 HRESULT BrowserClient::Prefetch(const wchar_t* url) {
     return instance_ ? api_.prefetch(instance_, url ? url : L"") : kUnavailable;
 }
+HRESULT BrowserClient::CreateSettingsPage(HWND parent,HWND* page){if(page)*page=nullptr;return instance_&&api_.create_settings_page?api_.create_settings_page(instance_,parent,page):E_NOTIMPL;}
+HRESULT BrowserClient::CommitSettingsPage(){return instance_&&api_.commit_settings_page?api_.commit_settings_page(instance_):S_OK;}
+HRESULT WINAPI BrowserClient::OpenMediaSettings(void* p){auto& self=*static_cast<BrowserClient*>(p);if(!self.UiCallbacksAllowed()||!self.callbacks_.open_media_settings)return RPC_E_DISCONNECTED;try{return self.callbacks_.open_media_settings(self.callbacks_.context);}catch(...){return E_FAIL;}}
 void BrowserClient::Shutdown() noexcept {
     // UI closures must stop before destroy can pump messages or join workers.
     DisableUiCallbacks();
     stopping_->store(true, std::memory_order_release);
+    if(resolver_) {
+        resolver_->stopping=true;audio::SetPersonalMediaResolver({});
+        // Wait for the bounded resolver request before freeing its DLL instance.
+        std::lock_guard lock(resolver_->mutex);resolver_->instance=nullptr;
+    }
     if (instance_) api_.destroy(instance_);
     instance_ = nullptr;
+    resolver_.reset();
 }
 void BrowserClient::DisableUiCallbacks() noexcept {
     ui_enabled_ = false; callbacks_ = {};

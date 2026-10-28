@@ -119,7 +119,10 @@ configuration. See [BUILDING.md](docs/BUILDING.md) for inputs, artifacts and cle
 checkout builds.
 
 One universal x86 Release build supports Windows XP SP3 / Windows 7 / Windows 10 / Windows 11.
-Download `TTPlayerRebuild-<version>.zip`. All builds use VC-LTL 5.3.1 and YY-Thunks 1.2.2;
+The existing `TTPlayerRebuild-<version>.zip` / `TTPlayerRebuild.exe` remain available.
+An additional `TTPlayer-<version>.zip` contains `TTPlayer.exe`; choose either package.
+Both keep `TTPUpdater.exe`, `TTPlayerRebuild.xml` and `TTPlayerRebuild.rll`.
+The updater retains the initiating executable name. All builds use VC-LTL 5.3.1 and YY-Thunks 1.2.2;
 features are selected at runtime. The player EXE does not require the modern VC++ redistributable;
 original add-ins can still require their own VC++ 2012 x86 runtime.
 See [unified build changes and system feature matrix](docs/UNIFIED_WINDOWS_BUILD.md).

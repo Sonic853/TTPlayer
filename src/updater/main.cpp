@@ -16,7 +16,7 @@ using namespace ttplayer;
 struct State {
     HWND window{},player{};
     HANDLE instance_mutex{};
-    std::filesystem::path directory,session;
+    std::filesystem::path directory,session,player_executable;
     settings::Settings settings;
     update::Version current;
     std::optional<update::Release> latest;
@@ -43,19 +43,22 @@ struct State {
             try {
                 update::Http http(directory,settings.network);
                 if(update::IsXp() && !http.HasProvider()) error=update::kMissingHttps;
-                else latest=update::Check(http,settings.general.update_source==1 ? update::Source::github : update::Source::gitee,[this]{return cancel.load();});
+                else latest=update::Check(http,settings.general.update_source==1 ? update::Source::github : update::Source::gitee,[this]{return cancel.load();},update::PlayerNameForPath(player_executable));
             } catch(const std::exception& e){error=update::ErrorText(e);}
             if(SUCCEEDED(initialized)) CoUninitialize();done.store(true,std::memory_order_release);
         });
     }
-    HANDLE PlayerHandle(HWND candidate) {
+    HANDLE PlayerHandle(HWND candidate,std::filesystem::path* executable=nullptr) {
         if(!candidate || !IsWindow(candidate)) return nullptr;
         DWORD pid{};GetWindowThreadProcessId(candidate,&pid);
         HANDLE handle=OpenProcess(SYNCHRONIZE|PROCESS_QUERY_INFORMATION|PROCESS_VM_READ,FALSE,pid);
         if(!handle) throw std::runtime_error("Cannot wait for the player process");
         wchar_t path[32768]{};
         if(!GetModuleFileNameExW(handle,nullptr,path,static_cast<DWORD>(std::size(path))) ||
-            _wcsicmp(path,(directory/L"TTPlayerRebuild.exe").c_str())!=0) {CloseHandle(handle);return nullptr;}
+            (_wcsicmp(path,(directory/update::kPlayerFileName).c_str())!=0 &&
+             _wcsicmp(path,(directory/update::kRebuildPlayerFileName).c_str())!=0) ||
+            !update::IsPlayerExecutable(path)) {CloseHandle(handle);return nullptr;}
+        if(executable) *executable=path;
         return handle;
     }
     void Install() {
@@ -77,6 +80,8 @@ struct State {
                     if(update::IsXp() && !http.HasProvider()) throw std::runtime_error(coreMessage());
                     prepared=update::PreparePackage(http,*latest,stage,[this]{return cancel.load();},[this](uint64_t n,uint64_t all){received=n;total=all;});
                 } // Release the installed HTTPS DLL before replacing package files.
+                if(_wcsicmp(prepared.filename().c_str(),player_executable.filename().c_str())!=0)
+                    throw std::runtime_error("The update package targets a different player executable");
                 if(cancel) throw std::runtime_error("Canceled");
                 // Probe write access before asking the user to stop playback.
                 wchar_t probe[MAX_PATH]{};
@@ -108,7 +113,7 @@ struct State {
                 update::PackageInstall installation(directory,prepared.parent_path(),latest->version);
                 installation.Apply();
                 try {
-                    const auto exe=directory/L"TTPlayerRebuild.exe";std::wstring command=L"\""+exe.wstring()+L"\"";
+                    const auto exe=directory/prepared.filename();std::wstring command=L"\""+exe.wstring()+L"\"";
                     STARTUPINFOW si{sizeof(si)};PROCESS_INFORMATION pi{};
                     if(!CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,FALSE,0,nullptr,directory.c_str(),&si,&pi)) {
                         throw std::runtime_error("新版启动失败。");
@@ -147,7 +152,7 @@ struct State {
             SetDlgItemTextW(window,1002,latest ? latest->version.Text().c_str() : L"无可用发行包");
             Status(latest && latest->version>current ? L"发现新版本，可以立即更新。" : L"当前没有可安装的新版本。");
         }
-        if(success) {current=update::FileVersion(directory/L"TTPlayerRebuild.exe");SetDlgItemTextW(window,1001,current.Text().c_str());SendDlgItemMessageW(window,1007,PBM_SETPOS,100,0);}
+        if(success) {current=update::FileVersion(player_executable);SetDlgItemTextW(window,1001,current.Text().c_str());SendDlgItemMessageW(window,1007,PBM_SETPOS,100,0);}
         SetDlgItemTextW(window,1008,latest && latest->version>current ? L"立即更新" : L"重新检查");
         EnableWindow(GetDlgItem(window,1008),TRUE);
     }
@@ -189,19 +194,29 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
         int count{};auto args=CommandLineToArgvW(GetCommandLineW(),&count);
         struct Args{LPWSTR* p;~Args(){LocalFree(p);}}guard{args};
         bool temporary=false;
+        std::wstring player_name;
         for(int i=1;i<count;++i) {
             const std::wstring arg=args[i];
             if(arg==L"--directory" && i+1<count) {state.directory=std::filesystem::absolute(args[++i]);temporary=true;}
             else if(arg==L"--player-window" && i+1<count) state.player=reinterpret_cast<HWND>(static_cast<uintptr_t>(_wcstoui64(args[++i],nullptr,10)));
+            else if(arg==L"--player-name" && i+1<count) player_name=args[++i];
         }
-        state.current=update::FileVersion(state.directory/L"TTPlayerRebuild.exe");
+        // Older players pass only their window. Resolve that process before
+        // moving the updater to its temporary session, then retain the name.
+        if(player_name.empty() && state.player) {
+            if(const auto process=state.PlayerHandle(state.player,&state.player_executable)) CloseHandle(process);
+            if(!state.player_executable.empty()) player_name=state.player_executable.filename().wstring();
+        }
+        state.player_executable=update::InstalledPlayerPath(state.directory,player_name);
+        state.current=update::FileVersion(state.player_executable);
         if(!temporary) {
             wchar_t folder[MAX_PATH]{};if(!GetTempPathW(MAX_PATH,folder)) throw std::runtime_error("Cannot locate temporary directory");
             GUID guid{};CoCreateGuid(&guid);wchar_t unique[40]{};StringFromGUID2(guid,unique,40);
             const auto session=std::filesystem::path(folder)/(L"TTPUpdater-"+std::wstring(unique));std::filesystem::create_directory(session);
             const auto exe=session/L"TTPUpdater.exe";
             if(!CopyFileW(update::ExecutablePath().c_str(),exe.c_str(),TRUE)) throw std::runtime_error("Cannot prepare updater");
-            std::wstring cmd=L"\""+exe.wstring()+L"\" --directory \""+state.directory.wstring()+L"\" --player-window "+std::to_wstring(reinterpret_cast<uintptr_t>(state.player));
+            std::wstring cmd=L"\""+exe.wstring()+L"\" --directory \""+state.directory.wstring()+L"\" --player-window "+std::to_wstring(reinterpret_cast<uintptr_t>(state.player))+
+                L" --player-name \""+state.player_executable.filename().wstring()+L"\"";
             STARTUPINFOW si{sizeof(si)};PROCESS_INFORMATION pi{};
             if(!CreateProcessW(exe.c_str(),cmd.data(),nullptr,nullptr,FALSE,0,nullptr,state.directory.c_str(),&si,&pi)) throw std::runtime_error("Cannot start temporary updater");
             CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CoUninitialize();return 0;

@@ -157,6 +157,7 @@ bool PlayerWindow::ConfigureMusicBrowser() {
     host.setup_pack = BrowserSetupCallback;
     host.adjust_window_rect = BrowserAdjustWindowRectCallback;
     host.resolve_associated_lyric = BrowserResolveAssociatedLyricCallback;
+    host.open_media_settings = [](void* context) -> HRESULT {auto* self=static_cast<PlayerWindow*>(context);return PostMessageW(self->window_,WM_COMMAND,kCmdMediaSourceOptions,0)?S_OK:E_FAIL;};
     browser_state_applying_ = true;
     const HRESULT result = browser_client_->Create(host, config, options);
     browser_state_applying_ = false;

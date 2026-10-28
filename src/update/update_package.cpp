@@ -89,6 +89,10 @@ void ValidateExe(const std::filesystem::path& file,const Version& expected,bool 
         throw std::runtime_error("Package is not an x86 executable");
     if(IsXp() && (u16(pe+24+48)>5 || (u16(pe+24+48)==5 && u16(pe+24+50)>1)))
         throw std::runtime_error("Package does not support Windows XP");
+    if(player) {
+        if(!IsPlayerExecutable(file)) throw std::runtime_error("Unexpected player product identity");
+        return;
+    }
     DWORD ignored{};std::vector<unsigned char> version(GetFileVersionInfoSizeW(file.c_str(),&ignored));
     if(version.empty() || !GetFileVersionInfoW(file.c_str(),0,static_cast<DWORD>(version.size()),version.data())) throw std::runtime_error("Missing product identity");
     // Both shipping resources use the same Chinese Unicode translation.
@@ -98,7 +102,13 @@ void ValidateExe(const std::filesystem::path& file,const Version& expected,bool 
     wchar_t query[128]{};swprintf_s(query,L"\\StringFileInfo\\%04x%04x\\OriginalFilename",translations[0].language,translations[0].codepage);
     wchar_t* name{};
     if(!VerQueryValueW(version.data(),query,reinterpret_cast<void**>(&name),&count) || !name ||
-        _wcsicmp(name,player ? L"TTPlayerRebuild.exe" : L"TTPUpdater.exe")!=0) throw std::runtime_error("Unexpected executable identity");
+        _wcsicmp(name,L"TTPUpdater.exe")!=0) throw std::runtime_error("Unexpected executable identity");
+}
+std::filesystem::path PackagePlayerPath(const std::filesystem::path& payload) {
+    const bool current=std::filesystem::is_regular_file(payload/kPlayerFileName);
+    const bool legacy=std::filesystem::is_regular_file(payload/kRebuildPlayerFileName);
+    if(current==legacy) throw std::runtime_error("Update package must contain exactly one player executable");
+    return payload/(current?kPlayerFileName:kRebuildPlayerFileName);
 }
 }
 void ExtractPackage(const std::filesystem::path& zip,const std::filesystem::path& staging) {
@@ -153,7 +163,7 @@ void ExtractPackage(const std::filesystem::path& zip,const std::filesystem::path
         if(folder) folders.push_back(path);else files.emplace(name,std::move(content));
         cursor+=entry->record_size;
     }
-    if(cursor!=end || !files.contains("TTPlayerRebuild.exe") || !files.contains("SHA256SUMS.txt")) throw std::runtime_error("Incomplete update package");
+    if(cursor!=end || files.contains("TTPlayer.exe")==files.contains("TTPlayerRebuild.exe") || !files.contains("SHA256SUMS.txt")) throw std::runtime_error("Incomplete or ambiguous update package");
     const auto& raw=files.at("SHA256SUMS.txt");const std::string sums(raw.begin(),raw.end());
     for(const auto& [name,folder]:paths) {
         for(size_t p=name.find(L'/');p!=name.npos;p=name.find(L'/',p+1)) {
@@ -182,7 +192,9 @@ std::filesystem::path PreparePackage(Http& http,const Release& release,const std
     if(cancel && cancel()) throw std::runtime_error("Canceled");
     if(Sha256(zip)!=expected) throw std::runtime_error("Downloaded ZIP checksum mismatch");
     ExtractPackage(zip,staging/L"payload");
-    const auto exe=staging/L"payload"/L"TTPlayerRebuild.exe";ValidateExe(exe,release.version,true);
+    const auto exe=PackagePlayerPath(staging/L"payload");ValidateExe(exe,release.version,true);
+    const auto expected_asset=std::string(PlayerNameForPath(exe)==PlayerName::ttplayer ? "TTPlayer-" : "TTPlayerRebuild-")+release.tag+".zip";
+    if(release.asset_name!=expected_asset) throw std::runtime_error("Package player name does not match the selected release asset");
     const auto updater=staging/L"payload"/L"TTPUpdater.exe";
     if(std::filesystem::exists(updater)) ValidateExe(updater,release.version,false);
     return exe;
@@ -253,8 +265,10 @@ PackageInstall::PackageInstall(const std::filesystem::path& directory,const std:
     :impl_(std::make_unique<Impl>()) {
     auto& state=*impl_;state.root=std::filesystem::absolute(directory).lexically_normal();
     CheckPath(state.root,true);CheckPath(payload,true);
-    ValidateExe(payload/L"TTPlayerRebuild.exe",expected,true);
-    if(FileVersion(state.root/L"TTPlayerRebuild.exe")>=expected) throw std::runtime_error("The installed player is already this version or newer");
+    const auto player=PackagePlayerPath(payload);
+    ValidateExe(player,expected,true);
+    const auto installed=InstalledPlayerPath(state.root,player.filename().wstring());
+    if(FileVersion(installed)>=expected) throw std::runtime_error("The installed player is already this version or newer");
     if(std::filesystem::exists(payload/L"TTPUpdater.exe")) ValidateExe(payload/L"TTPUpdater.exe",expected,false);
     // Enumerate without following directory reparse points. The payload is private
     // verified staging, but check it again before copying anything to the install.
@@ -336,7 +350,7 @@ void PackageInstall::Commit() noexcept {
 std::filesystem::path PackageInstall::BackupDirectory() const {return impl_->transaction;}
 namespace {
 void ReplaceExecutable(const std::filesystem::path& directory,const std::filesystem::path& prepared,const Version& expected,bool player) {
-    const auto target=directory/(player ? L"TTPlayerRebuild.exe" : L"TTPUpdater.exe");
+    const auto target=player ? InstalledPlayerPath(directory) : directory/L"TTPUpdater.exe";
     const auto backup=std::filesystem::path(target.wstring()+L".bak");
     ValidateExe(prepared,expected,player);
     if(FileVersion(target)>=expected) {
@@ -355,12 +369,12 @@ void ReplaceExecutable(const std::filesystem::path& directory,const std::filesys
         // backup name. Restore that state without overwriting a concurrent file.
         if(error==ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 && GetFileAttributesW(target.c_str())==INVALID_FILE_ATTRIBUTES &&
             !MoveFileExW(backup.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH))
-            throw std::runtime_error("Update failed; restore TTPlayerRebuild.exe.bak manually");
+            throw std::runtime_error("Update failed; restore the executable from its .bak file manually");
         throw std::runtime_error("Cannot replace player; close other instances and check directory permissions ("+std::to_string(error)+")");
     }
     try {ValidateExe(target,expected,player);} catch(...) {
         if(!MoveFileExW(backup.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
-            throw std::runtime_error("Update verification failed; restore TTPlayerRebuild.exe.bak manually");
+            throw std::runtime_error("Update verification failed; restore the executable from its .bak file manually");
         throw;
     }
 }

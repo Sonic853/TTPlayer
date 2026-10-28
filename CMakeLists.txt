@@ -218,7 +218,7 @@ add_library(ttpcomm_api STATIC third_party/ttpcomm-sdk/src/ttpcomm_api.c)
 target_include_directories(ttpcomm_api PUBLIC include third_party/ttpcomm-sdk/include)
 target_compile_definitions(ttpcomm_api PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 
-add_executable(ttplayer_rebuild WIN32
+set(ttplayer_app_sources
   src/app/application.cpp
   src/app/exports.cpp
   src/app/main.cpp
@@ -228,12 +228,22 @@ add_executable(ttplayer_rebuild WIN32
   src/app/ttplayer.manifest
   "${TTPLAYER_GENERATED_INCLUDE_DIR}/version.rc"
 )
-add_dependencies(ttplayer_rebuild ttplayer_file_version)
-set_target_properties(ttplayer_rebuild PROPERTIES
-  OUTPUT_NAME "TTPlayerRebuild" PDB_NAME "TTPlayerRebuild")
-target_compile_definitions(ttplayer_rebuild PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_compile_options(ttplayer_rebuild PRIVATE /W4 /permissive- /EHsc /utf-8)
-target_link_libraries(ttplayer_rebuild PRIVATE ttplayer_core ttpcomm_api comctl32 comdlg32 shell32)
+set(ttplayer_app_targets ttplayer_rebuild ttplayer_named)
+foreach(target IN LISTS ttplayer_app_targets)
+  add_executable(${target} WIN32 ${ttplayer_app_sources})
+  add_dependencies(${target} ttplayer_file_version)
+  target_compile_definitions(${target} PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(${target} PRIVATE /W4 /permissive- /EHsc /utf-8)
+  target_link_libraries(${target} PRIVATE ttplayer_core ttpcomm_api comctl32 comdlg32 shell32)
+endforeach()
+set_target_properties(ttplayer_rebuild PROPERTIES OUTPUT_NAME "TTPlayerRebuild" PDB_NAME "TTPlayerRebuild")
+# An additional distribution name, with the same core and runtime files.
+set_target_properties(ttplayer_named PROPERTIES OUTPUT_NAME "TTPlayer"
+  PDB_NAME "TTPlayerRebuild" ARCHIVE_OUTPUT_NAME "TTPlayerRebuild"
+  PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/named-player-symbols"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/named-player-symbols")
+target_compile_definitions(ttplayer_named PRIVATE TTPLAYER_ALTERNATE_EXE)
+add_dependencies(ttplayer_rebuild ttplayer_named)
 
 # Optional runtime component: the EXE deliberately has no import-library link
 # to ttpbrowser. Removing the DLL removes music-window and download entry points.
@@ -312,22 +322,40 @@ include(cmake/size_optimization.cmake)
 # (ttp_ape!60101C36, also ttp_enc). /NXCOMPAT opts out of Windows' ATL
 # emulation, faulting before WM_INITDIALOG finishes. wWinMain instead
 # enables DEP explicitly, with the system's legacy ATL compatibility.
-target_link_options(ttplayer_rebuild PRIVATE /NXCOMPAT:NO)
+foreach(target IN LISTS ttplayer_app_targets)
+  target_link_options(${target} PRIVATE /NXCOMPAT:NO)
+endforeach()
 if(TTPLAYER_XP_RUNTIME_CONFIGURED)
   include(cmake/legacy_ttpcomm.cmake)
-  target_link_options(ttplayer_rebuild PRIVATE /SUBSYSTEM:WINDOWS,5.01 /OSVERSION:5.1)
+  # GUI integration probes must use the same XP TLS startup dependency as
+  # the shipped EXE; a later LoadLibrary of ttpcomm corrupts its CRT TLS slot.
+  foreach(browser_probe ttpbrowser_host_tests ttpbrowser_media_host_tests)
+    if(TARGET ${browser_probe})
+      add_dependencies(${browser_probe} ttplayer_legacy_ttpcomm_import)
+      target_link_libraries(${browser_probe} PRIVATE "${ttpcomm_import_library}")
+      target_link_options(${browser_probe} PRIVATE /INCLUDE:__imp__srand48)
+    endif()
+  endforeach()
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  add_custom_command(TARGET ttplayer_rebuild POST_BUILD
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_legacy_imports.py"
-      "$<TARGET_FILE:ttplayer_rebuild>"
-      --exports "${ttplayer_yy_thunks_SOURCE_DIR}/Config/x86/5.1.2600.txt"
-      --exports "${ttplayer_yy_thunks_SOURCE_DIR}/Config/x86/6.1.7600.txt"
-      --require-ttpcomm-tls
-      --report "$<TARGET_FILE_DIR:ttplayer_rebuild>/legacy-imports.json"
-    COMMENT "Checking every static import against XP and Windows 7"
-    VERBATIM)
-  set_property(TARGET ttplayer_rebuild APPEND PROPERTY LINK_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_legacy_imports.py")
+  foreach(target IN LISTS ttplayer_app_targets)
+    target_link_options(${target} PRIVATE /SUBSYSTEM:WINDOWS,5.01 /OSVERSION:5.1)
+    if(target STREQUAL "ttplayer_rebuild")
+      set(player_import_report "legacy-imports.json")
+    else()
+      set(player_import_report "named-player-imports.json")
+    endif()
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_legacy_imports.py"
+        "$<TARGET_FILE:${target}>"
+        --exports "${ttplayer_yy_thunks_SOURCE_DIR}/Config/x86/5.1.2600.txt"
+        --exports "${ttplayer_yy_thunks_SOURCE_DIR}/Config/x86/6.1.7600.txt"
+        --require-ttpcomm-tls
+        --report "$<TARGET_FILE_DIR:${target}>/${player_import_report}"
+      COMMENT "Checking every static import against XP and Windows 7"
+      VERBATIM)
+    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_legacy_imports.py")
+  endforeach()
 endif()
 
 include(cmake/updater.cmake)

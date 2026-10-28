@@ -118,7 +118,7 @@ flowchart LR
 3. 选择分支，配置固定为 `Release`（VC-LTL 发布运行库）。
 4. 构建完成后，从该次运行的 **Artifacts** 下载
    `TTPlayer-Windows-x86-配置-运行编号`，产物保留 14 天。
-   其中包含通用包 `TTPlayerRebuild-版本号.zip`，日期取构建开始时的北京时间；
+   其中包含通用包 `TTPlayerRebuild-版本号.zip` 和新增的 `TTPlayer-版本号.zip`，日期取构建开始时的北京时间；
    勾选发布时，名称包含最终分配的 `pN` 补丁号。
 
 如需发布，选择 `Release` 配置并勾选对应平台，不需要输入版本号。
@@ -131,8 +131,8 @@ flowchart LR
 GitHub tag/Release；勾选 Gitee 时还会分页读取 Gitee tag/Release，把两边已有
 版本一起计入占用范围。两个平台同时发布时使用同一个新版本号和相同附件。
 新标签始终指向本次构建提交，不移动旧标签、不覆盖已有 Release。
-通用构建只生成 Release。Release 附件为 `TTPlayerRebuild-版本号.zip`、
-`CodecAddIn-Rebuild-版本号.zip`、`ExtraAddIn-版本号.zip`，以及记录三个 ZIP
+通用构建只生成 Release。Release 附件为 `TTPlayerRebuild-版本号.zip`、`TTPlayer-版本号.zip`、
+`CodecAddIn-Rebuild-版本号.zip`、`ExtraAddIn-版本号.zip`，以及记录四个 ZIP
 校验值的 `SHA256SUMS.txt`，不再额外构建或分发 XP-Win7 专用包。
 两组插件包仅在勾选 GitHub 或 Gitee 发布时生成；从各插件仓库最新正式 Release 下载，
 校验包内外 SHA-256、x86 架构与 XP／Win7 导入后打包。I18n 的翻译资源随 ExtraAddIn 分发。
@@ -140,7 +140,7 @@ GitHub tag/Release；勾选 Gitee 时还会分页读取 Gitee tag/Release，把�
 其上游地址取自各独立项目的 Git origin，运行包与源码包按精确文件名区分。
 具体仓库、文件布局、来源记录和本地命令见 [Release 插件包](ADDIN_RELEASE_BUNDLES.md)。
 例如 `2026.09.05p1` 对应 `TTPlayerRebuild-2026.09.05p1.zip`。EXE 文件版本、产品版本、
-ZIP 名称、校验清单及正文说明保持一致；包内程序名仍为 `TTPlayerRebuild.exe`。
+ZIP 名称、校验清单及正文说明保持一致；两种主包分别包含 `TTPlayerRebuild.exe` 和 `TTPlayer.exe`。
 **XP SP3／Win7／Win10／Win11 使用同一份 EXE**，由实际系统版本与组件可用性选择功能。
 Win10／11 上保留 [SMTC 系统媒体控件](SMTC.md)，XP／Win7 在进入 WinRT 前跳过该模块。
 构建与功能矩阵见 [通用构建调整记录](UNIFIED_WINDOWS_BUILD.md)。
@@ -154,7 +154,7 @@ Win10／11 上保留 [SMTC 系统媒体控件](SMTC.md)，XP／Win7 在进入 Wi
 
 ### EXE 文件属性
 
-通用版 `TTPlayerRebuild.exe` 包含 Windows `VERSIONINFO` 资源：
+通用版 `TTPlayerRebuild.exe` 与 `TTPlayer.exe` 均包含 Windows `VERSIONINFO` 资源：
 
 | 字段 | 内容 |
 | --- | --- |
@@ -164,7 +164,7 @@ Win10／11 上保留 [SMTC 系统媒体控件](SMTC.md)，XP／Win7 在进入 Wi
 | 文件说明 | `千千静听 社区版` |
 | 文件版本、产品版本 | Actions 最终版本，例如 `2026.09.23p12` |
 | 产品名称、内部名称 | `TTPlayerRebuild` |
-| 原始文件名 | `TTPlayerRebuild.exe` |
+| 原始文件名 | 对应实际主程序：`TTPlayerRebuild.exe` 或 `TTPlayer.exe` |
 
 资源管理器对 EXE 通常显示公司、备注等标准版本字段，未必显示自定义作者字段。
 固定数值版本使用四个 16 位无符号整数：上述例子对应 `2026.9.23.12`；
@@ -264,11 +264,12 @@ VS 2026 生成器要求 CMake 4.2 或更新版本，Runner 已提供相应工具
 修改工作流后，请提交并在 **Run workflow** 中选择含修复的分支发起新运行；
 直接 **Re-run jobs** 重跑旧失败记录仍使用旧提交中的工作流。
 
-通用 ZIP 只包含 `TTPlayerRebuild.exe` 与 `SHA256SUMS.txt`，
-包内校验文件记录该 EXE 的 SHA-256。Actions 产物还包含该 ZIP 的外层校验文件，
+每个主 ZIP 包含对应的一份主程序、`TTPUpdater.exe`、`ttpcomm.dll`、`ttpres.dll`、
+`AddIn/ttp_https.dll`、`AddIn/ttp_lrcsh.dll` 与 `SHA256SUMS.txt`。
+包内校验文件记录各运行文件的 SHA-256。Actions 产物还包含 ZIP 的外层校验文件，
 以及供发布步骤核对的构建信息；PDB 保留在构建目录。
-**这不是包含原版运行依赖的安装包**：请把 `TTPlayerRebuild.exe` 放入已有
-TTPlayer 目录，与其 `ttpcomm.dll`、`ttpres.dll`、`AddIn`、`Skin` 等一起使用。
+退出播放器并备份目录后，解压所选的完整主包并合并 `AddIn`。新增包的 `TTPlayer.exe` 与原版同名，
+使用这一包会替换目录中同名的 EXE。原有包继续使用 `TTPlayerRebuild.exe`。
 不会上传原版 DLL、编码器、歌曲、播放列表或 `TTPlayerRebuild.xml` 等个人配置。
 主 EXE 使用系统 `msvcrt.dll`，无需另外安装现代 VC++ 运行库；原版插件仍可能需要 VC++ 2012 x86。
 
@@ -363,7 +364,7 @@ cmake --build out/ci --config Release --target ttplayer_rebuild --parallel 4
 ```
 
 使用独立输出目录，不覆盖已有播放器运行目录。
-构建目标名仍为 `ttplayer_rebuild`，生成文件改为 `Release/TTPlayerRebuild.exe`
+构建目标 `ttplayer_rebuild` 同时生成 `Release/TTPlayerRebuild.exe` 与 `Release/TTPlayer.exe`
 （以及有调试信息时的 `TTPlayerRebuild.pdb`）。本地运行文件复制只在目标
 `TTPlayerRebuild.xml` 不存在时初始化它，增量构建不会覆盖该配置。
 本地同样需要 VS 2026 的 C++ 工具和 CMake 4.2+。如果某个构建目录曾用
@@ -438,3 +439,35 @@ XP／Win7 始终单份随机索引循环，以及跨轮回退、
 2026-09-21 的 XP/Win7 回归、旧系统修复、已知验证边界及两份带版本号的 ZIP
 见 [XP / Win7 虚拟机验证记录](XP_WIN7_VM_VALIDATION.md)。测试仍保留在本地 `tests/`，
 不随发行包上传，Actions 不运行测试。
+
+
+## 2026-10-27：新增同名发行包
+
+保留原有命名并增加一套可选发行包，两种程序使用相同的核心代码和 Action 日期版本。
+
+| 发行包 | 包内主程序 |
+| --- | --- |
+| `TTPlayerRebuild-yyyy.MM.dd[pN].zip`（保留） | `TTPlayerRebuild.exe` |
+| `TTPlayer-yyyy.MM.dd[pN].zip`（新增） | `TTPlayer.exe` |
+
+- Action 构建、SHA256 校验及 GitHub/Gitee 发布同时包含两个主包，另两个可选插件包名称不变。
+- 每个主包只含对应的一份主程序；其余六个文件的名称和布局一致，其中五个运行文件内容相同，校验清单分别记录各自主程序。`OriginalFilename` 与各自主程序名一致。
+- 默认 CMake 目标仍为 `ttplayer_rebuild`，并构建新增的 `ttplayer_named` 目标。原有 PDB、导入库不改名；新增目标的同名调试产物隔离在 `build/named-player-symbols`。
+- `TTPUpdater.exe` 根据发起更新的 EXE 选择同名 ZIP，不在缺包时换用另一种。老播放器只传窗口句柄时，通过对应进程路径确定名称；临时更新器继承该名称。
+- 两个 EXE 同目录时只更新和重启本次选定的 EXE。共享 DLL 更新前等待同目录的重建版进程退出；失败恢复本次改动，另一 EXE 保持不变。
+- 单独打开更新器时优先原有 `TTPlayerRebuild.exe`，仅安装新增版本时选择 `TTPlayer.exe`。通过版本资源确认重建版身份，避免把原版播放器当作待更新对象。
+- `TTPlayerRebuild.xml`、`TTPlayerRebuild.rll`、播放列表、`TTPUpdater.exe`、DLL 和插件包名均保持不变。新增 EXE 不使用原版 `TTPlayer.xml` / `TTPlayer.rll`。
+- 撤回上一轮误解为改名所添加的自动文件关联迁移和快捷方式改指向。原命名包仍然发布，原有安装和更新通道继续保留，无需为了本次新增名称手动迁移。
+
+### 本次验证
+
+- 本地 Release 构建和两份主 ZIP 打包通过；两个 EXE 的日期版本均为 `2026.10.27`，原始文件名分别正确。
+- 每个 ZIP 均为七个文件，五个共享运行文件内容相同，内外 SHA256 已核对。
+- 两个实际发行 EXE 各在隔离目录启动两次，保留 `TTPlayerRebuild.xml` 的既有音量、未知字段，未更改 `TTPlayer.xml`；工作目录不影响配置定位。歌词关联共享文件另有回归用例验证。
+- 更新器合同回归通过：分别选择两个名称、缺包不切换、重复附件拒绝、两个 EXE 共存时只替换选定项、完整备份与回滚、路径/CRC/SHA 校验、保留另一名称的快捷方式。
+- 真实 `TTPUpdater.exe` 四条隔离流程通过：两种名称各自安装/重启及启动失败全文件回滚。原有名称使用仅传播放器窗口的兼容入口，新增名称显式传名；两者均验证同目录另一 EXE 未改变。
+- 构建期访问探测 17 项回归通过；10 段工作流 PowerShell 与两个打包/版本脚本解析通过。
+- 两份播放器及更新器的 XP／Win7 静态导入审计通过。本次未运行 XP／Win7 虚拟机或远程 Action。
+- 较早的 `runtime_paths_tests` 综合用例仍有皮肤字体/歌词默认值断言问题，本次未计为通过；双名称实际启动和配置保留由独立用例验证。
+
+产物位于 `build/Release/TTPlayerRebuild-2026.10.27.zip` 和 `build/Release/TTPlayer-2026.10.27.zip`。

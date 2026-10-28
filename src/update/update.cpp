@@ -42,6 +42,34 @@ Version FileVersion(const std::filesystem::path& file) {
     if(!ParseVersion(core::WideToUtf8(v.Text()))) throw std::runtime_error("Executable does not use a release date version");
     return v;
 }
+bool IsPlayerExecutable(const std::filesystem::path& file) {
+    DWORD ignored{};const auto size=GetFileVersionInfoSizeW(file.c_str(),&ignored);
+    if(!size || size>1024*1024) return false;
+    std::vector<unsigned char> data(size);
+    if(!GetFileVersionInfoW(file.c_str(),0,size,data.data())) return false;
+    struct Translation {WORD language,codepage;};Translation* translations{};UINT count{};
+    if(!VerQueryValueW(data.data(),L"\\VarFileInfo\\Translation",reinterpret_cast<void**>(&translations),&count) || count<sizeof(Translation)) return false;
+    const auto matches=[&](const wchar_t* key,const wchar_t* expected) {
+        wchar_t query[128]{};swprintf_s(query,L"\\StringFileInfo\\%04x%04x\\%s",translations[0].language,translations[0].codepage,key);
+        wchar_t* value{};UINT length{};
+        return VerQueryValueW(data.data(),query,reinterpret_cast<void**>(&value),&length) && value &&
+            length && value[length-1]==L'\0' && _wcsicmp(value,expected)==0;
+    };
+    return matches(L"ProductName",L"TTPlayerRebuild") &&
+        (matches(L"OriginalFilename",kPlayerFileName) || matches(L"OriginalFilename",kRebuildPlayerFileName));
+}
+PlayerName PlayerNameForPath(const std::filesystem::path& file) {
+    return _wcsicmp(file.filename().c_str(),kPlayerFileName)==0 ? PlayerName::ttplayer : PlayerName::rebuild;
+}
+std::filesystem::path InstalledPlayerPath(const std::filesystem::path& directory,std::wstring_view preferred) {
+    // A caller-selected name never falls back to the other installed variant.
+    for(const auto* name:{kRebuildPlayerFileName,kPlayerFileName}) {
+        if(!preferred.empty() && _wcsicmp(std::wstring(preferred).c_str(),name)!=0) continue;
+        const auto path=directory/name;
+        if(IsPlayerExecutable(path)) return path;
+    }
+    throw std::runtime_error("Cannot locate the rebuilt player; extract the complete release ZIP");
+}
 std::filesystem::path ExecutablePath() {
     wchar_t path[32768]{};const DWORD size=GetModuleFileNameW(nullptr,path,static_cast<DWORD>(std::size(path)));
     if(!size || size>=std::size(path)) throw std::runtime_error("Cannot locate executable");
@@ -56,14 +84,15 @@ bool AssetUrl(std::string_view url,Source source) {
     return url.starts_with(prefix) && url.find_first_of("\r\n\\") == url.npos;
 }
 }
-std::vector<Release> ParseReleases(std::string_view json,Source source) {
+std::vector<Release> ParseReleases(std::string_view json,Source source,PlayerName player) {
     const auto root=core::JsonReader(json).Read();
     if(root.kind!=core::Json::array) throw std::runtime_error("Release API did not return a list");
     std::vector<Release> result;
     for(const auto& row:root.items) {
         const auto tag=row["tag_name"].String();const auto version=ParseVersion(tag);
         if(!version || row["draft"].True() || row["prerelease"].True()) continue;
-        Release r;r.version=*version;r.tag=tag;r.asset_name="TTPlayerRebuild-"+tag+".zip";
+        Release r;r.version=*version;r.tag=tag;
+        r.asset_name=std::string(player==PlayerName::ttplayer ? "TTPlayer-" : "TTPlayerRebuild-")+tag+".zip";
         r.page=std::wstring(source==Source::gitee ? kGiteePage : kGitHubPage)+L"/tag/"+core::Utf8ToWide(tag);
         unsigned zip_count=0,sums_count=0;
         for(const auto& asset:row["assets"].items) {
@@ -76,7 +105,7 @@ std::vector<Release> ParseReleases(std::string_view json,Source source) {
     }
     return result;
 }
-std::optional<Release> Check(Http& http,Source source,const Cancel& cancel) {
+std::optional<Release> Check(Http& http,Source source,const Cancel& cancel,PlayerName player) {
     std::optional<Release> best;std::set<std::string> seen;
     for(unsigned page=1;page<=20;++page) {
         if(cancel && cancel()) throw std::runtime_error("Canceled");
@@ -87,7 +116,7 @@ std::optional<Release> Check(Http& http,Source source,const Cancel& cancel) {
         const auto root=core::JsonReader(text).Read();
         if(root.kind!=core::Json::array) throw std::runtime_error("Invalid release list");
         if(!seen.insert(text).second && !root.items.empty()) throw std::runtime_error("Release pagination repeated a page");
-        for(auto& release:ParseReleases(text,source)) if(!best || release.version>best->version) best=std::move(release);
+        for(auto& release:ParseReleases(text,source,player)) if(!best || release.version>best->version) best=std::move(release);
         if(root.items.size()<20) return best;
     }
     throw std::runtime_error("Release list exceeds the check limit; open the release page");

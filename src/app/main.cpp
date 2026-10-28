@@ -45,7 +45,7 @@ int ImportPluginRegistration(const ttplayer::app::ParsedCommandLine& command_lin
     namespace i18n = ttplayer::i18n;
     const auto title = i18n::Literal(L"导入音效插件配置");
     if (command_line.file_count != 1 || !command_line.switches.empty() || command_line.smoke_test) {
-        MessageBoxW(nullptr, i18n::Literal(L"请每次将一个 REG 文件拖到 TTPlayerRebuild.exe 图标上。"),
+        MessageBoxW(nullptr, i18n::Literal(L"请每次将一个 REG 文件拖到播放器 EXE 图标上。"),
                     title, MB_OK | MB_ICONWARNING);
         return 1;
     }
@@ -95,7 +95,7 @@ int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     // Require the rebuilt runtime ABI/capabilities, not an exact release date.
     ttplayer::app::TtpCommRuntime ttpcomm;
     if (!ttpcomm.Initialize()) {
-        MessageBoxW(nullptr, i18n::Literal(L"ttpcomm.dll 缺少此版本播放器需要的运行时接口。\n\n请退出播放器，将完整发行包手动解压并替换到同一目录，包括 TTPlayerRebuild.exe 和 ttpcomm.dll。请勿混用原版或旧版核心 DLL。"),
+        MessageBoxW(nullptr, i18n::Literal(L"ttpcomm.dll 缺少此版本播放器需要的运行时接口。\n\n请退出播放器，将完整发行包手动解压并替换到同一目录，包括主程序 EXE 和 ttpcomm.dll。请勿混用原版或旧版核心 DLL。"),
                     i18n::Literal(L"TTPlayer"), MB_OK | MB_ICONERROR);
         return -1;
     }
@@ -142,7 +142,7 @@ int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     if (!resources.Initialize()) {
         if (SUCCEEDED(ole_result)) OleUninitialize();
         if (tls_index != TLS_OUT_OF_INDEXES) TlsFree(tls_index);
-        MessageBoxW(nullptr, i18n::Literal(L"ttpres.dll 缺失、无法加载或缺少此版本播放器需要的界面资源。\n\n请退出播放器，将完整发行包解压并替换到同一目录，包括 TTPlayerRebuild.exe 和 ttpres.dll。"),
+        MessageBoxW(nullptr, i18n::Literal(L"ttpres.dll 缺失、无法加载或缺少此版本播放器需要的界面资源。\n\n请退出播放器，将完整发行包解压并替换到同一目录，包括主程序 EXE 和 ttpres.dll。"),
                     i18n::Literal(L"TTPlayer"), MB_OK | MB_ICONERROR);
         return -1;
     }

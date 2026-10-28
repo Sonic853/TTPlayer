@@ -6365,6 +6365,9 @@ bool PlayerWindow::HandleContextCommand(UINT command, HWND fullscreen_origin) {
         // selects nested template 385.
         PostMessageW(window_, kMsgShowOptionsControl, 385, 7);
         break;
+    case kCmdMediaSourceOptions:
+        PostMessageW(window_, kMsgShowOptionsControl, 383, 9);
+        break;
     case kCmdLibraryDownloadOptions:
         // FUN_004251C0 is the media-library/download surface's settings
         // button.  It enters the network page through the private 0x7F4

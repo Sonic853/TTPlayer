@@ -8,21 +8,22 @@
 **Publish Release to Gitee** 时，播放器构建成功后会下载下面 18 个仓库的最新正式版，
 分成两组插件包。两端发布同一组文件；同时选中两个平台时，插件只下载和打包一次。
 
-最终 Release 有四个附件：
+最终 Release 有五个附件：
 
 ```text
 TTPlayerRebuild-yyyy.MM.dd[pN].zip
+TTPlayer-yyyy.MM.dd[pN].zip
 CodecAddIn-Rebuild-yyyy.MM.dd[pN].zip
 ExtraAddIn-yyyy.MM.dd[pN].zip
 SHA256SUMS.txt
 ```
 
 两个插件包的文件名使用播放器最终发行版本，包括同日 `pN`。
-DLL 保留各自上游版本和原始字节。仅构建、不发布的运行仍只生成原有播放器包。
+DLL 保留各自上游版本和原始字节。仅构建、不发布的运行生成两种命名的播放器包。
 
-退出播放器后解压所需插件包到 `TTPlayerRebuild.exe` 所在目录，合并 `AddIn`。
+退出播放器后解压所需插件包到所选播放器 EXE 所在目录，合并 `AddIn`。
 ExtraAddIn 的 `i18n` 目录也放在 EXE 旁，用于多语言插件读取翻译。
-播放器自动更新器继续只更新播放器／更新器，插件包由用户单独下载安装。
+播放器自动更新器按发起程序名称选择对应主包，更新包内全部运行文件；两个可选插件包由用户单独下载安装。
 
 ## CodecAddIn-Rebuild
 

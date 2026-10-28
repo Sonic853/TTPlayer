@@ -181,7 +181,11 @@ def probe(client):
         assets = release.get('assets', [])
         if not isinstance(assets, list) or any(not isinstance(asset, dict) for asset in assets):
             raise ProbeFailure('release-api', 'invalid-asset-list')
-        name = f'TTPlayerRebuild-{tag}.zip'
+        name = f'TTPlayer-{tag}.zip'
+        # Access probes accept either distribution. Runtime updates select the
+        # caller executable's exact package name, without switching variants.
+        if not any(asset.get('name') == name for asset in assets):
+            name = f'TTPlayerRebuild-{tag}.zip'
         selected = {}
         for asset in assets:
             key = asset.get('name')

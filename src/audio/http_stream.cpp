@@ -13,6 +13,14 @@
 
 namespace ttplayer::audio {
 namespace {
+std::mutex personal_media_mutex;
+PersonalMediaResolver personal_media_resolver;
+bool PersonalSource(const std::wstring& url) { return url.starts_with(L"https://ttpbrowser.invalid/"); }
+HRESULT ResolvePersonalSource(const std::wstring& source,const std::function<bool()>& canceled,std::wstring& output) {
+    PersonalMediaResolver resolver;
+    { std::lock_guard lock(personal_media_mutex);resolver=personal_media_resolver; }
+    return resolver ? resolver(source,canceled,output) : HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
+}
 struct Failure { HRESULT result; };
 void Check(BOOL ok) { if (!ok) throw Failure{HRESULT_FROM_WIN32(GetLastError())}; }
 void Require(bool ok) { if (!ok) throw Failure{HRESULT_FROM_WIN32(ERROR_INVALID_DATA)}; }
@@ -53,7 +61,11 @@ struct Consumer {
 };
 class CacheTask final {
 public:
-    CacheTask(std::wstring url, PlaybackOptions options):url_(std::move(url)),options_(std::move(options)){options_.network_canceled={};}
+    CacheTask(std::wstring url, PlaybackOptions options):url_(std::move(url)),options_(std::move(options)){
+        options_.network_canceled={};
+        // Account changes must not revive an old authenticated cache entry.
+        if(PersonalSource(url_))options_.network_cache_enabled=false;
+    }
     ~CacheTask() {
         stopping_=true;changed_.notify_all();
         if(worker_.joinable()) worker_.join();
@@ -284,6 +296,12 @@ private:
         // Without an entity validator keep the original response sequential.
         // A second range could silently splice a different same-length resource.
         Require(!offset || !validator_.empty());std::wstring target=url_;
+        if(PersonalSource(url_)) {
+            const auto hr=ResolvePersonalSource(url_,[this]{return Canceled(this)!=0;},target);
+            if(FAILED(hr))throw Failure{hr};
+            Require(!PersonalSource(target) &&
+                (target.starts_with(L"https://")||target.starts_with(L"http://")));
+        }
         uint32_t status{};
         for(unsigned redirects=0;;++redirects) {
             ttp_https_stream_request req{};req.size=sizeof(req);req.request.size=sizeof(req.request);
@@ -580,6 +598,9 @@ private:
     std::shared_ptr<Consumer> client_;
     std::shared_ptr<CacheTask> task_;
 };
+}
+void SetPersonalMediaResolver(PersonalMediaResolver resolver) {
+    std::lock_guard lock(personal_media_mutex);personal_media_resolver=std::move(resolver);
 }
 HRESULT OpenHttpAudioStream(const std::wstring& url,const PlaybackOptions& options,HttpAudioStream** stream,HttpStreamUse use) noexcept {
     if(!stream) return E_POINTER;*stream=nullptr;

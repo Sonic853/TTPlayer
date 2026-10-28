@@ -8,6 +8,9 @@
 
 namespace ttplayer::lyrics {
 
+// Both distribution names share the rebuild's saved lyric associations.
+std::filesystem::path AssociationStorePath(std::filesystem::path executable);
+
 // 00411C72/0041B553: a CPlayItem identity, not its title or server result ID.
 struct SongKey {
     std::filesystem::path path;

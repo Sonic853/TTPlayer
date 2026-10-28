@@ -993,7 +993,7 @@ private:
     HWND options_lyric_child_{};
     std::array<HWND, 2> options_lyric_pages_{};
     HWND options_network_child_{};
-    std::array<HWND, 2> options_network_pages_{};
+    std::array<HWND, 3> options_network_pages_{};
     int options_page_index_{};
     bool options_registration_mode_{};
     UINT options_focus_control_{};

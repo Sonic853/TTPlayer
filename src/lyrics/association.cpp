@@ -5,6 +5,13 @@
 #include <windows.h>
 
 namespace ttplayer::lyrics {
+std::filesystem::path AssociationStorePath(std::filesystem::path executable) {
+    // 00401829 derives .rll from the EXE basename. Both rebuilt distribution
+    // names retain their existing file instead of the original TTPlayer.rll.
+    if (_wcsicmp(executable.filename().c_str(), L"TTPlayer.exe") == 0)
+        return executable.parent_path() / L"TTPlayerRebuild.rll";
+    return executable.replace_extension(L".rll");
+}
 bool SongKeyLess::operator()(const SongKey& a, const SongKey& b) const noexcept {
     const int comparison = _wcsicmp(a.path.c_str(), b.path.c_str());
     return comparison < 0 || (comparison == 0 && a.subtrack < b.subtrack);

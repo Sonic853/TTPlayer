@@ -10,6 +10,7 @@
 #include "player_window_internal.h"
 #include "options_buttons.h"
 #include "options_general_tabs.h"
+#include "options_network_tabs.h"
 #include "options_library_tabs.h"
 #include "../core/environment_path.h"
 #include "options_visual_tabs.h"
@@ -4679,11 +4680,12 @@ void PlayerWindow::SelectOptionsPage(int page, UINT focus_control) {
             }
         }
         target = options_lyric_child_;
-    } else if (focus_control == 381 || focus_control == 382) {
+    } else if (focus_control >= 381 && focus_control <= 383) {
         if (current) {
             const HWND tab = GetDlgItem(current, 1181);
             if (tab) {
-                TabCtrl_SetCurSel(tab, focus_control == 382 ? 1 : 0);
+                TabCtrl_SetCurSel(tab, static_cast<int>(focus_control - 381));
+                NetworkOptionsTabs::SelectMusic(current);
                 const UINT current_child = static_cast<UINT>(
                     reinterpret_cast<ULONG_PTR>(GetPropW(
                         options_network_child_, kPageTemplateProperty)));
@@ -4731,21 +4733,15 @@ void PlayerWindow::SelectOptionsLyricMode(HWND dialog, UINT template_id) {
 }
 
 void PlayerWindow::SelectOptionsNetworkMode(HWND dialog, UINT template_id) {
-    if (template_id == 382 && !BrowserAvailable()) template_id = 381;
-    const bool download = template_id == 382;
-    const HWND next = options_network_pages_[download ? 1 : 0];
-    if (!next || !IsWindow(next)) return;
-    if (options_network_child_ && options_network_child_ != next) {
-        const UINT previous = options_network_child_ == options_network_pages_[1] ? 382 : 381;
-        CommitOptionsPage(options_network_child_, previous);
-        FlushDeferredOptionsRuntime(previous);
+    if(template_id<381||template_id>383)return;
+    const auto index=template_id-381;const HWND next=options_network_pages_[index];
+    if(!next||!IsWindow(next))return;
+    if(options_network_child_&&options_network_child_!=next){
+        if(options_network_child_==options_network_pages_[2]){if(browser_client_&&FAILED(browser_client_->CommitSettingsPage())){TabCtrl_SetCurSel(GetDlgItem(dialog,1181),2);return;}}
+        else {const UINT previous=options_network_child_==options_network_pages_[1]?382:381;CommitOptionsPage(options_network_child_,previous);FlushDeferredOptionsRuntime(previous);}
     }
-    // 0049885A creates both resource-sized pages; 00498BD1 only shows/hides them.
-    const HWND previous = options_network_pages_[download ? 0 : 1];
-    if (previous) ShowWindow(previous, SW_HIDE);
-    options_network_child_ = next;
-    ShowWindow(next, SW_SHOW);
-    TabCtrl_SetCurSel(GetDlgItem(dialog, 1181), download ? 1 : 0);
+    for(const HWND child:options_network_pages_)if(child)ShowWindow(child,child==next?SW_SHOW:SW_HIDE);
+    options_network_child_=next;TabCtrl_SetCurSel(GetDlgItem(dialog,1181),static_cast<int>(index));NetworkOptionsTabs::SelectMusic(dialog);
 }
 
 void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
@@ -5197,25 +5193,18 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         break;
     }
     case 258: {
-        const HWND tab = GetDlgItem(dialog, 1181);
-        if (tab) {
-            for (int index = 0; index < (BrowserAvailable() ? 2 : 1); ++index) {
-                auto title = ResourceText(33262 + index);
-                TCITEMW item{};
-                item.mask = TCIF_TEXT;
-                item.pszText = title.data();
-                TabCtrl_InsertItem(tab, index, &item);
+        if(const HWND tab=GetDlgItem(dialog,1181)){
+            for(int index=0;index<(BrowserAvailable()?2:1);++index){auto title=ResourceText(33262+index);TCITEMW item{};item.mask=TCIF_TEXT;item.pszText=title.data();TabCtrl_InsertItem(tab,index,&item);}
+            for(const UINT identifier:{381U,382U}){
+                if(identifier==382&&!BrowserAvailable())continue;
+                OptionsChildInit init{this,identifier};auto& child=options_network_pages_[identifier-381];
+                child=CreateWtlDialog(resources,MAKEINTRESOURCEW(identifier),dialog,OptionsChildDialogProc,reinterpret_cast<LPARAM>(&init));PositionNestedDialog(dialog,tab,child,SWP_NOSIZE);
             }
-            const UINT child_id = BrowserAvailable() && options_focus_control_ == 382 ? 382 : 381;
-            for (const UINT identifier : {381U, 382U}) {
-                if (identifier == 382 && !BrowserAvailable()) continue;
-                OptionsChildInit init{this, identifier};
-                auto& child = options_network_pages_[identifier - 381];
-                child = CreateWtlDialog(resources, MAKEINTRESOURCEW(identifier), dialog,
-                    OptionsChildDialogProc, reinterpret_cast<LPARAM>(&init));
-                PositionNestedDialog(dialog, tab, child, SWP_NOSIZE);
+            if(BrowserAvailable()){
+                if(!browser_client_->Created())ConfigureMusicBrowser();
+                if(SUCCEEDED(browser_client_->CreateSettingsPage(dialog,&options_network_pages_[2]))){TCITEMW item{};item.mask=TCIF_TEXT;item.pszText=const_cast<LPWSTR>(L"媒体来源");TabCtrl_InsertItem(tab,2,&item);}
             }
-            SelectOptionsNetworkMode(dialog, child_id);
+            SelectOptionsNetworkMode(dialog,381);
         }
         CheckRadioButton(dialog, 2190, 2192,
                          2190 + std::clamp(settings_.network.proxy_type, 0, 2));
@@ -5259,6 +5248,8 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         const bool custom_proxy = settings_.network.proxy_type == 2;
         for (const int control : {2143,2144,2184,2185})
             EnableWindow(GetDlgItem(dialog, control), custom_proxy);
+        NetworkOptionsTabs::Attach(dialog,options_network_pages_,BrowserAvailable(),[this]{return browser_client_?browser_client_->CommitSettingsPage():S_OK;});
+        if(options_focus_control_>=381&&options_focus_control_<=383)SelectOptionsNetworkMode(dialog,options_focus_control_);
         break;
     }
     case 259: {
@@ -5927,7 +5918,8 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
                 settings_.network.server_list.push_back(std::move(server));
             }
         }
-        for (size_t index = 0; index < options_network_pages_.size(); ++index)
+        if(browser_client_)browser_client_->CommitSettingsPage();
+        for (size_t index = 0; index < 2; ++index)
             if (const HWND child = options_network_pages_[index]; child && IsWindow(child))
                 CommitOptionsPage(child, static_cast<UINT>(381 + index));
         break;
@@ -7206,8 +7198,8 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         } else if (template_id == 258) {
             const HWND tab = GetDlgItem(dialog, 1181);
             UINT child_id = requested;
-            if (child_id != 381 && child_id != 382)
-                child_id = TabCtrl_GetCurSel(tab) == 1 ? 382 : 381;
+            if (child_id < 381 || child_id > 383)
+                child_id = 381 + static_cast<UINT>(std::clamp(TabCtrl_GetCurSel(tab),0,2));
             SelectOptionsNetworkMode(dialog, child_id);
         }
     };
@@ -8416,6 +8408,9 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         }
         if (header->code == PSN_KILLACTIVE || header->code == PSN_APPLY ||
             header->code == PSN_RESET) {
+            if(template_id==258&&header->code!=PSN_RESET&&browser_client_&&FAILED(browser_client_->CommitSettingsPage())){
+                SelectOptionsNetworkMode(dialog,383);SetWindowLongPtrW(dialog,DWLP_MSGRESULT,header->code==PSN_KILLACTIVE?TRUE:PSNRET_INVALID_NOCHANGEPAGE);return TRUE;
+            }
             if(template_id==255) {
                 KillTimer(dialog,kOptionsOsuIdentityTimer);
                 RefreshOsuVisualAvailability();
@@ -8445,6 +8440,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
         break;
     }
     case WM_DESTROY: {
+        if(template_id==258)options_network_pages_[2]=nullptr;
         if(template_id==255)KillTimer(dialog,kOptionsOsuIdentityTimer);
         if (template_id == 260) CancelOptionsDeviceProbe();
         if (template_id == 381 || template_id == 382) {

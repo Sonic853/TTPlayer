@@ -13,6 +13,8 @@ add_custom_command(OUTPUT "${ttpcomm_import_library}"
   COMMENT "Generating the XP startup import for ttpcomm TLS"
   VERBATIM)
 add_custom_target(ttplayer_legacy_ttpcomm_import DEPENDS "${ttpcomm_import_library}")
-add_dependencies(ttplayer_rebuild ttplayer_legacy_ttpcomm_import)
-target_link_libraries(ttplayer_rebuild PRIVATE "${ttpcomm_import_library}")
-target_link_options(ttplayer_rebuild PRIVATE /INCLUDE:__imp__srand48)
+foreach(target IN LISTS ttplayer_app_targets)
+  add_dependencies(${target} ttplayer_legacy_ttpcomm_import)
+  target_link_libraries(${target} PRIVATE "${ttpcomm_import_library}")
+  target_link_options(${target} PRIVATE /INCLUDE:__imp__srand48)
+endforeach()

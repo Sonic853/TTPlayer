@@ -25,13 +25,20 @@ struct Version {
 };
 std::optional<Version> ParseVersion(std::string_view text);
 Version FileVersion(const std::filesystem::path& file);
+inline constexpr wchar_t kPlayerFileName[] = L"TTPlayer.exe";
+inline constexpr wchar_t kRebuildPlayerFileName[] = L"TTPlayerRebuild.exe";
+enum class PlayerName { rebuild, ttplayer };
+PlayerName PlayerNameForPath(const std::filesystem::path& file);
+// Product identity distinguishes the rebuild from the original TTPlayer.exe.
+bool IsPlayerExecutable(const std::filesystem::path& file);
+std::filesystem::path InstalledPlayerPath(const std::filesystem::path& directory, std::wstring_view preferred = {});
 struct Release {
     Version version;
     std::string tag, asset_name;
     std::wstring page, zip_url, sums_url;
     uint64_t size{};
 };
-std::vector<Release> ParseReleases(std::string_view json, Source source);
+std::vector<Release> ParseReleases(std::string_view json, Source source, PlayerName player = PlayerName::rebuild);
 std::string ExpectedHash(std::string_view sums, std::string_view name);
 std::string Sha256(const std::filesystem::path& file);
 using Cancel = std::function<bool()>;
@@ -50,7 +57,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
-std::optional<Release> Check(Http& http, Source source, const Cancel& canceled = {});
+std::optional<Release> Check(Http& http, Source source, const Cancel& canceled = {}, PlayerName player = PlayerName::rebuild);
 // Verify and stage every payload file, excluding the root checksum manifest.
 std::filesystem::path PreparePackage(Http& http, const Release& release,
     const std::filesystem::path& staging, const Cancel& canceled, const Progress& progress);

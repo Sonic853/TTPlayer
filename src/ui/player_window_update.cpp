@@ -36,12 +36,13 @@ void PlayerWindow::CheckForUpdates(bool manual) {
     auto state=std::make_shared<UpdateCheckState>();state->source=settings_.general.update_source;state->manual=manual;
     update_check_=state;
     const auto runtime=update::ExecutablePath().parent_path();const auto network=settings_.network;
+    const auto player_name=update::PlayerNameForPath(update::ExecutablePath());
     if(options_pages_.size()>1 && options_pages_[1]) SetDlgItemTextW(options_pages_[1],detail::kUpdateStatus,L"正在检查新版本…");
-    try { std::thread([state,runtime,network] {
+    try { std::thread([state,runtime,network,player_name] {
         try {
             update::Http http(runtime,network);
             if(update::IsXp() && !http.HasProvider()) state->error=update::kMissingHttps;
-            else state->release=update::Check(http,state->source==1 ? update::Source::github : update::Source::gitee,[&]{return state->canceled.load();});
+            else state->release=update::Check(http,state->source==1 ? update::Source::github : update::Source::gitee,[&]{return state->canceled.load();},player_name);
         } catch(const std::exception& error){state->error=update::ErrorText(error);}
         state->done.store(true,std::memory_order_release);
     }).detach(); } catch(const std::exception& error) {
@@ -90,7 +91,8 @@ void PlayerWindow::OpenUpdater() {
         SaveSettingsWithFeedback();
         const auto runtime=update::ExecutablePath().parent_path(),file=runtime/L"TTPUpdater.exe";
         if(!std::filesystem::is_regular_file(file)) throw std::runtime_error("TTPUpdater.exe is missing; extract the complete release ZIP");
-        std::wstring command=L"\""+file.wstring()+L"\" --player-window "+std::to_wstring(reinterpret_cast<uintptr_t>(window_));
+        std::wstring command=L"\""+file.wstring()+L"\" --player-window "+std::to_wstring(reinterpret_cast<uintptr_t>(window_))+
+            L" --player-name \""+update::ExecutablePath().filename().wstring()+L"\"";
         STARTUPINFOW si{sizeof(si)};PROCESS_INFORMATION pi{};
         if(!CreateProcessW(file.c_str(),command.data(),nullptr,nullptr,FALSE,0,nullptr,runtime.c_str(),&si,&pi))
             throw std::runtime_error("Cannot start TTPUpdater.exe ("+std::to_string(GetLastError())+")");

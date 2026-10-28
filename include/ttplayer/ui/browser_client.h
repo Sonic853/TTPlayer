@@ -28,14 +28,19 @@ public:
     [[nodiscard]] bool State(ttp_browser_state&) const noexcept;
     HRESULT Enqueue(const ttp_browser_track&, uint64_t* task_id = nullptr);
     HRESULT Prefetch(const wchar_t* url);
+    HRESULT CreateSettingsPage(HWND parent, HWND* page);
+    HRESULT CommitSettingsPage();
     void DisableUiCallbacks() noexcept;
     void Shutdown() noexcept;
 
 private:
+    struct ResolverState;
+    std::shared_ptr<ResolverState> resolver_;
     static HRESULT WINAPI Submit(void*, const ttp_browser_track*, uint32_t, int, int, int);
     static HRESULT WINAPI Query(void*, uint32_t, uint32_t, BSTR*);
     static HRESULT WINAPI OpenStream(void*, const wchar_t*, HANDLE, IStream**, BOOL*);
     static void WINAPI Changed(void*, const ttp_browser_state*);
+    static HRESULT WINAPI OpenMediaSettings(void*);
     static HRESULT WINAPI Setup(void*, const wchar_t*, const wchar_t*, const wchar_t*);
     static HRESULT WINAPI AdjustWindowRect(void*, HWND, uint32_t, RECT*);
     static HRESULT WINAPI ResolveAssociatedLyric(void*, const wchar_t*, BSTR*);

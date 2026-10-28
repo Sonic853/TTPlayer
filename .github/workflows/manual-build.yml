@@ -190,17 +190,21 @@ jobs:
           }
           . ./cmake/version.ps1
           $output = Join-Path 'build' $env:BUILD_CONFIGURATION
-          $executable = Join-Path $output 'TTPlayerRebuild.exe'
-          if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-            throw 'The player executable was not produced.'
-          }
-          Assert-PlayerFileVersion $executable $env:PACKAGE_VERSION
           New-Item -ItemType Directory -Path artifact | Out-Null
-          $packageName = "TTPlayerRebuild-$env:PACKAGE_VERSION.zip"
-          $packageArchive = Join-Path artifact $packageName
-          ./cmake/package_player.ps1 -BuildDirectory build -Destination $packageArchive
-          $hash = (Get-FileHash -LiteralPath $packageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $packageName" | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
+          $sums = foreach ($baseName in @('TTPlayerRebuild', 'TTPlayer')) {
+            $executableName = "$baseName.exe"
+            $executable = Join-Path $output $executableName
+            if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+              throw "The player executable was not produced: $executableName"
+            }
+            Assert-PlayerFileVersion $executable $env:PACKAGE_VERSION
+            $packageName = "$baseName-$env:PACKAGE_VERSION.zip"
+            $packageArchive = Join-Path artifact $packageName
+            ./cmake/package_player.ps1 -BuildDirectory build -Destination $packageArchive -ExecutableName $executableName | Write-Host
+            $hash = (Get-FileHash -LiteralPath $packageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $packageName"
+          }
+          $sums | Set-Content -LiteralPath artifact/SHA256SUMS.txt -Encoding utf8
           if ($env:PUBLISH_GITEE -eq 'true') {
             New-Item -ItemType Directory -Path artifact/cli -Force | Out-Null
             Copy-Item -LiteralPath $env:GITEE_RELEASE_CLI -Destination artifact/cli/gitee-release-rs.exe
@@ -239,7 +243,7 @@ jobs:
             --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/5.1.2600.txt `
             --exports build/_deps/ttplayer_yy_thunks-src/Config/x86/6.1.7600.txt
           if ($LASTEXITCODE -ne 0) { throw 'Add-in download, verification or packaging failed.' }
-          $packages = @("TTPlayerRebuild-$env:PACKAGE_VERSION.zip",
+          $packages = @("TTPlayerRebuild-$env:PACKAGE_VERSION.zip", "TTPlayer-$env:PACKAGE_VERSION.zip",
             "CodecAddIn-Rebuild-$env:PACKAGE_VERSION.zip", "ExtraAddIn-$env:PACKAGE_VERSION.zip")
           $sums = foreach ($name in $packages) {
             $hash = (Get-FileHash -LiteralPath (Join-Path artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -298,19 +302,20 @@ jobs:
           PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
           RELEASE_INSTALL_NOTES: |
             使用该程序前确保本地已安装有 [5.7.9](https://github.com/user-attachments/files/33088775/TTPlayer579.2.zip) 版本的千千静听（没装有？[点这里](https://github.com/user-attachments/files/33088775/TTPlayer579.2.zip)），请按照以下步骤安装重建版：
-            1. 下载并解压 TTPlayerRebuild-{version}.zip。
+            1. 下载并解压 TTPlayerRebuild-{version}.zip（原有命名）或 TTPlayer-{version}.zip（新增命名），任选一种。
             2. 打开开始菜单。
             3. 打开所有程序——千千静听——右键千千静听程序图标。
             4. 在菜单选择“打开文件位置”
-            5. 复制 TTPlayerRebuild.exe、TTPUpdater.exe、ttpcomm.dll、ttpres.dll 和 AddIn 文件夹到与 TTPlayer.exe 同一路径，合并 AddIn 文件夹。
-            6. 启动 TTPlayerRebuild.exe
+            5. 退出播放器并备份原安装目录，将所选包内的主程序、TTPUpdater.exe、ttpcomm.dll、ttpres.dll 和 AddIn 文件夹复制到安装目录，替换同名文件并合并 AddIn 文件夹。
+            6. 启动所选包对应的 TTPlayerRebuild.exe 或 TTPlayer.exe；原有命名和快捷方式继续可用。
             7. 享受重建版千千静听。
 
             可选插件包（独立下载，退出播放器后解压到同一安装目录）：
             - CodecAddIn-Rebuild-{version}.zip：共 15 个编解码插件，包含 WebM、APE、FLAC/TTA、MP3/WMA 编码、OGG/Opus、AAC、MPC、AC3/DTS、MOD、命令行编码器、ASF/WMA、TAK、RM/RA、VQF、DSD（DSF／DSDIFF），合并 AddIn 文件夹。
             - ExtraAddIn-{version}.zip：Winamp 皮肤、MAKI 虚拟机、多语言插件，合并 AddIn 和 i18n 文件夹；i18n 放在播放器旁。
             - 插件来自各自仓库本次构建解析到的最新正式 Release；插件自身版本独立于播放器，具体版本见下表。
-            - SHA256SUMS.txt 可校验上述三个 ZIP；插件包内另有各运行文件的校验清单。新版更新器更新播放器包中除根目录 SHA256SUMS.txt 外的全部文件，并保留子目录；不删除包外文件。
+            - SHA256SUMS.txt 可校验上述四个 ZIP；插件包内另有各运行文件的校验清单。新版更新器更新播放器包中除根目录 SHA256SUMS.txt 外的全部文件，并保留子目录；不删除包外文件。
+            - 保留 TTPlayerRebuild.exe / TTPlayerRebuild-{version}.zip，新增 TTPlayer.exe / TTPlayer-{version}.zip。TTPUpdater 按发起更新的程序名称选择对应包；不强制切换名称。TTPUpdater.exe、TTPlayerRebuild.xml、TTPlayerRebuild.rll、播放列表及其它文件命名保持不变。
             - 从仅更新 EXE 的旧更新器过渡时，首次请手动解压本版播放器包，确保核心 DLL 和 HTTPS 组件同步更新。
             - 本版要求重建 ttpcomm.dll 的运行接口；请退出播放器后整包替换，不要仅替换 EXE 或混用原版、旧版核心。
             - 在线歌词搜索由 AddIn/ttp_lrcsh.dll 统一提供，发行包包含 TTPlayerLrcsh 最新稳定版。
@@ -331,7 +336,7 @@ jobs:
               $info.unified -ne $true -or $info.package_version -cne $env:RELEASE_VERSION) {
             throw 'The downloaded artifact does not match this Release build.'
           }
-          $packages = @("TTPlayerRebuild-$env:RELEASE_VERSION.zip",
+          $packages = @("TTPlayerRebuild-$env:RELEASE_VERSION.zip", "TTPlayer-$env:RELEASE_VERSION.zip",
             "CodecAddIn-Rebuild-$env:RELEASE_VERSION.zip", "ExtraAddIn-$env:RELEASE_VERSION.zip")
           $actualHashes = foreach ($name in $packages) {
             $hash = (Get-FileHash -LiteralPath (Join-Path artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -344,7 +349,7 @@ jobs:
             throw 'Missing or mismatched add-in release metadata.'
           }
           foreach ($bundle in $bundles.bundles) {
-            if ($bundle.archive -cnotin $packages[1..2] -or
+            if ($bundle.archive -cnotin $packages[2..3] -or
                 $bundle.sha256 -cne (Get-FileHash -LiteralPath (Join-Path artifact $bundle.archive) -Algorithm SHA256).Hash.ToLowerInvariant()) {
               throw 'Add-in source metadata does not match the package.'
             }
@@ -417,7 +422,7 @@ jobs:
               $release.configuration -cne 'Release') {
             throw 'Prepared release does not match this build and version.'
           }
-          $packages = @("TTPlayerRebuild-$version.zip", "CodecAddIn-Rebuild-$version.zip", "ExtraAddIn-$version.zip")
+          $packages = @("TTPlayerRebuild-$version.zip", "TTPlayer-$version.zip", "CodecAddIn-Rebuild-$version.zip", "ExtraAddIn-$version.zip")
           $actualHashes = foreach ($name in $packages) {
             $hash = (Get-FileHash -LiteralPath (Join-Path artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $name"
@@ -466,7 +471,7 @@ jobs:
               $release.configuration -cne 'Release') {
             throw 'Prepared release does not match this build and version.'
           }
-          $packages = @("TTPlayerRebuild-$version.zip", "CodecAddIn-Rebuild-$version.zip", "ExtraAddIn-$version.zip")
+          $packages = @("TTPlayerRebuild-$version.zip", "TTPlayer-$version.zip", "CodecAddIn-Rebuild-$version.zip", "ExtraAddIn-$version.zip")
           $actualHashes = foreach ($name in $packages) {
             $hash = (Get-FileHash -LiteralPath (Join-Path artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $name"
@@ -497,8 +502,8 @@ jobs:
               $releaseId -le 0 -or $created.tag_name -cne $version) {
             throw 'Gitee returned an invalid release ID or tag; no attachments were uploaded.'
           }
-          Write-Output "Created Gitee release $version (ID $releaseId). Uploading four attachments."
+          Write-Output "Created Gitee release $version (ID $releaseId). Uploading five attachments."
           foreach ($asset in $attachments) {
             $null = Invoke-GiteeCli -Arguments @('asset', 'upload', '--id', [string]$releaseId, $asset, '--timeout', '600')
           }
-          Write-Output "Gitee release $version (ID $releaseId) and all four attachments published."
+          Write-Output "Gitee release $version (ID $releaseId) and all five attachments published."

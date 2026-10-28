@@ -17,6 +17,11 @@ struct HttpAudioStream : IStream {
     virtual HRESULT BufferToEnd(uint64_t limit) noexcept = 0;
 };
 enum class HttpStreamUse { playback, background };
+// Optional music-window resolver. Called on the HTTP producer worker, never
+// while holding a registry/cache lock. Reserved sources must not reach DNS.
+using PersonalMediaResolver = std::function<HRESULT(const std::wstring&,
+    const std::function<bool()>&, std::wstring&)>;
+void SetPersonalMediaResolver(PersonalMediaResolver resolver);
 // Matching live finite-file requests share a producer, cache and entity snapshot.
 // Each returned stream has its own cursor/cancellation. Releasing one consumer
 // never cancels another. Unknown-length/ICY streams remain private.

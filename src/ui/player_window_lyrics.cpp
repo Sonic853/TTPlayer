@@ -5036,8 +5036,7 @@ void PlayerWindow::EnsureLyricAssociationsLoaded() {
     if (lyric_associations_.Loaded()) return;
     wchar_t executable[32768]{};
     if (!GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)))) return;
-    auto path = std::filesystem::path(executable);
-    path.replace_extension(L".rll"); // 00401829: EXE basename, not TTPlayer.xml.
+    const auto path = lyrics::AssociationStorePath(executable);
     static_cast<void>(lyric_associations_.Load(path));
 }
 

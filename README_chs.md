@@ -31,7 +31,7 @@
 ## 构建
 
 **当前 Release 为统一 x86 构建，支持 Windows XP SP3、Windows 7 至 Windows 11。**
-Actions 输出 `TTPlayerRebuild-版本号.zip`，不再拆分现代版与旧系统版。兼容构建与功能范围见
+Actions 保留 `TTPlayerRebuild-版本号.zip`，新增 `TTPlayer-版本号.zip`，分别包含同名 EXE；任选一种。不再拆分现代版与旧系统版。兼容构建与功能范围见
 [XP / Win7 兼容说明](docs/LEGACY_WINDOWS.md)。
 
 Actions 会从 [TTPlayerHttps 最新正式版](https://github.com/TTPlayerRebuild/TTPlayerHttps/releases/latest) 下载 HTTPS 组件，校验 ZIP、DLL 的 SHA-256 和 XP / Win7 导入兼容性，随包提供 `AddIn/ttp_https.dll`。手动安装时合并 `AddIn` 文件夹；自动更新器保留本机已有 HTTPS 组件。
@@ -54,6 +54,7 @@ cmake --build build --config Release --target ttplayer_rebuild --parallel 4
 
 ```
 build/Release/TTPlayerRebuild.exe
+build/Release/TTPlayer.exe
 build/Release/TTPUpdater.exe
 ```
 
@@ -66,3 +67,5 @@ build/Release/TTPUpdater.exe
 - [x] 鼠标在控件上的样式
 - [ ] 音乐窗（非优先计划，目前需要先完善本地功能）
 - [ ] 高 DPI 支持（目前受限于图片皮肤）
+
+两种 EXE 使用相同代码与日期版本。`TTPUpdater.exe`、`TTPlayerRebuild.xml`、`TTPlayerRebuild.rll` 和其它文件名不变；更新器按发起程序名称选择对应 ZIP，不自动改名或迁移文件关联、快捷方式。详见 [构建说明](docs/BUILDING.md#2026-10-27新增同名发行包)。

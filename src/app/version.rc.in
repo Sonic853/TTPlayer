@@ -24,7 +24,11 @@ BEGIN
       VALUE "FileDescription", "千千静听 社区版\0"
       VALUE "FileVersion", "@PLAYER_BUILD_VERSION@\0"
       VALUE "InternalName", "TTPlayerRebuild\0"
+#ifdef TTPLAYER_ALTERNATE_EXE
+      VALUE "OriginalFilename", "TTPlayer.exe\0"
+#else
       VALUE "OriginalFilename", "TTPlayerRebuild.exe\0"
+#endif
       VALUE "ProductName", "TTPlayerRebuild\0"
       VALUE "ProductVersion", "@PLAYER_BUILD_VERSION@\0"
     END

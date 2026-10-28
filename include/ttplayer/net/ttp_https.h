@@ -188,6 +188,33 @@ typedef struct ttp_https_api_v7 {
     void (__cdecl *stream_close)(ttp_https_stream *);
 } ttp_https_api_v7;
 
+/* ABI 8: single HTTP/HTTPS GET or POST, with explicit origin headers.
+   Unlike ABI 7, this does not send Range or ICY headers. No redirects, cookies,
+   decompression or origin authentication retries. POST bodies are <= 1 MiB;
+   the body is sent synchronously during open and may be released on return.
+   Optional headers are printable ASCII; Authorization <= 16384 bytes, the
+   others <= 512. NULL method means GET; GET must have no body. Read/header/close
+   use the ABI 7 functions. Response limits belong to the caller.
+   USE_WINHTTP is only returned before sending an origin request, when native
+   proxy handling is required. TLS/HTTP/read failures never request fallback. */
+#define TTP_HTTPS_REQUEST_ABI_VERSION 8u
+typedef struct ttp_https_stream_request_ex {
+    uint32_t size;
+    ttp_https_stream_request stream;
+    const char *method;
+    const char *user_agent;
+    const char *accept;
+    const char *content_type;
+    const char *authorization;
+    const unsigned char *body;
+    uint32_t body_size;
+} ttp_https_stream_request_ex;
+typedef struct ttp_https_api_v8 {
+    ttp_https_api_v7 base;
+    int (__cdecl *stream_open_ex)(const ttp_https_stream_request_ex *, ttp_https_stream **,
+        uint32_t *http_status, char *error, size_t error_size);
+} ttp_https_api_v8;
+
 /* All pointers in the response remain valid until release(). No C++ objects,
    exceptions or CRT ownership cross the ABI. Independent calls may run in
    parallel. Keep the DLL loaded until every call and response is finished. */
