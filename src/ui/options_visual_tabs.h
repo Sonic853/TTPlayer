@@ -35,8 +35,8 @@ class VisualOptionsTabs {
 
     void Layout() {
         RECT bounds{7, 68, 273, 169}, client{}, margin{0, 0, 7, 4};
-        MapDialogRect(page_, &bounds);
-        MapDialogRect(page_, &margin);
+        i18n::MapDialogRect(page_, &bounds);
+        i18n::MapDialogRect(page_, &margin);
         GetClientRect(page_, &client);
         bounds.right = client.right - margin.right;
         SetWindowPos(tab_, HWND_BOTTOM, bounds.left, bounds.top,
@@ -47,10 +47,10 @@ class VisualOptionsTabs {
         MapWindowPoints(tab_, page_, reinterpret_cast<POINT*>(&content), 2);
         for (const auto& control : controls_) {
             RECT origin{13, control.group == 1 ? 130 : 80, 0, 0};
-            MapDialogRect(page_, &origin);
+            i18n::MapDialogRect(page_, &origin);
             const auto& r = control.bounds;
             const int x = r.left + content.left + margin.bottom - origin.left;
-            RECT browse_offset{0,0,0,18};MapDialogRect(page_,&browse_offset);
+            RECT browse_offset{0,0,0,18};i18n::MapDialogRect(page_,&browse_offset);
             const int dy=GetDlgCtrlID(control.window)==kVisualOsuLogoBrowse &&
                 TabCtrl_GetCurSel(tab_)==5?browse_offset.bottom:0;
             SetWindowPos(control.window, nullptr, x,
@@ -114,8 +114,8 @@ public:
         SendMessageW(self->tab_, WM_SETFONT, font, FALSE);
         auto& captions=self->captions_;
         RECT groups{0, 68, 0, 118}, bottom{0, 169, 0, 0};
-        MapDialogRect(page, &groups);
-        MapDialogRect(page, &bottom);
+        i18n::MapDialogRect(page, &groups);
+        i18n::MapDialogRect(page, &bottom);
         for (HWND control = GetWindow(page, GW_CHILD); control; control = GetWindow(control, GW_HWNDNEXT)) {
             if (control == self->tab_) continue;
             RECT r{};
@@ -146,7 +146,7 @@ public:
                 const bool follow = field == 0;
                 RECT r = follow ? RECT{13, 80, 260, 94} : field == 1
                     ? RECT{13, 102, 88, 116} : RECT{96, 102, 171, 116};
-                MapDialogRect(page, &r);
+                i18n::MapDialogRect(page, &r);
                 const int id = group == 2
                     ? (follow ? IDC_VISUAL_PULSE_FOLLOW : field == 1 ? IDC_VISUAL_PULSE_COLOR : IDC_VISUAL_PULSE_BACKGROUND)
                     : (follow ? IDC_VISUAL_RIPPLE_FOLLOW : field == 1 ? IDC_VISUAL_RIPPLE_COLOR : IDC_VISUAL_RIPPLE_BACKGROUND);
@@ -167,7 +167,7 @@ public:
         captions[4] = i18n::ResourceText(GetModuleHandleW(nullptr), IDS_VISUAL_OSU);
         const auto add_osu_control = [&](UINT id, UINT text_id, const wchar_t* klass,
                                           DWORD style, RECT r) {
-            MapDialogRect(page, &r);
+            i18n::MapDialogRect(page, &r);
             const auto caption = text_id ? i18n::ResourceText(GetModuleHandleW(nullptr), text_id)
                                         : std::wstring{};
             const bool edit=_wcsicmp(klass,WC_EDITW)==0;
@@ -220,7 +220,7 @@ public:
         }
         if(audio::HasOsuIntroTextSupport()) {
             const auto add_text=[&](int id, const wchar_t* klass, const wchar_t* caption, DWORD style, RECT r) {
-                MapDialogRect(page,&r);
+                i18n::MapDialogRect(page,&r);
                 const bool edit=_wcsicmp(klass,WC_EDITW)==0;
                 HWND child=CreateWindowExW(edit?WS_EX_CLIENTEDGE:0,klass,caption,
                     WS_CHILD|WS_TABSTOP|(edit?(style&~WS_BORDER):style),

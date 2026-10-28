@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/lyrics/online_search.h"
 #include "ttplayer/core/text.h"
 
@@ -214,7 +215,7 @@ OnlineSearch::OnlineSearch(LyricService service, size_t index, settings::Network
             std::lock_guard lock(state->mutex);
             if (!state->canceled) {
                 state->snapshot.phase = Phase::failed;
-                state->snapshot.error = L"歌词搜索组件缺失或版本过旧，请更新 AddIn\\ttp_lrcsh.dll";
+                state->snapshot.error = i18n::Literal(L"歌词搜索组件缺失或版本过旧，请更新 AddIn\\ttp_lrcsh.dll");
                 ++state->snapshot.revision;
             }
         } catch (const std::exception& e) {

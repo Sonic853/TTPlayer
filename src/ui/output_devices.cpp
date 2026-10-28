@@ -952,11 +952,11 @@ std::vector<LegacyOutputDevice> EnumerateLegacyOutputDevices() {
             entry.backend = exclusive ? 5 : 4;
             entry.key = std::wstring(exclusive ? L"wasapi:exclusive:" : L"wasapi:shared:") +
                 (endpoint.id.empty() ? L"default" : endpoint.id);
-            entry.name = std::wstring(exclusive ? L"WASAPI (独占) - " : L"WASAPI (共享) - ") + endpoint.name;
+            entry.name = std::wstring(exclusive ? i18n::Literal(L"WASAPI (独占) - ") : i18n::Literal(L"WASAPI (共享) - ")) + endpoint.name;
             entry.module = endpoint.id;
-            entry.details = {exclusive ? L"独占" : L"共享", endpoint.mix_format,
-                endpoint.id.empty() ? L"系统默认多媒体设备" : L"固定设备",
-                L"Windows 7 或更高版本"};
+            entry.details = {exclusive ? i18n::Literal(L"独占") : i18n::Literal(L"共享"), endpoint.mix_format,
+                endpoint.id.empty() ? i18n::Literal(L"系统默认多媒体设备") : i18n::Literal(L"固定设备"),
+                i18n::Literal(L"Windows 7 或更高版本")};
             result.push_back(std::move(entry));
         }
     }

@@ -168,6 +168,7 @@ bool PlayerWindow::ConfigureMusicBrowser() {
     config.opacity = EffectiveSkinWindowAlpha(window_);
     config.cache_directory = cache.c_str();
     config.engine = static_cast<uint32_t>(std::clamp(settings_.player.browser_engine, 0, 2));
+    config.disable_gpu = settings_.player.browser_disable_gpu;
     config.accept_recommendations = settings_.network.accept_recommendation_list;
     config.initial_state.size = sizeof(config.initial_state);
     config.initial_state.bounds = settings_.player.browser_window;
@@ -346,6 +347,54 @@ HRESULT PlayerWindow::SubmitMusicBrowserTracks(const ttp_browser_track* items, u
         target = *selected;
     }
     if (target >= playlists_.Size()) return E_UNEXPECTED;
+    if (playlists_.IsExternal(target)) return E_FAIL;
+    // A single Play is an activation, whereas Add and album/batch submissions
+    // retain their insertion semantics. Match the complete source (including
+    // account/query and case), never a display title or service-local tid.
+    if (mode2 && tracks.size() == 1) {
+        const auto& requested = tracks.front();
+        const auto same_source = [&](const playlist::Track& track) {
+            return track.path.native() == requested.path.native() &&
+                track.subtrack == requested.subtrack;
+        };
+        const auto& destination = playlists_.At(target).Tracks();
+        const bool current_matches = !media_library_playback_active_ &&
+            playing_playlist_index_ == target && current_ &&
+            *current_ < destination.size() && same_source(destination[*current_]);
+        const auto found = std::find_if(destination.begin(), destination.end(), same_source);
+        if (current_matches || found != destination.end()) {
+            const size_t row = current_matches ? *current_ :
+                static_cast<size_t>(found - destination.begin());
+            if (lyric_save_in_progress_ || file_info_write_in_progress_)
+                return HRESULT_FROM_WIN32(ERROR_BUSY);
+            // Preserve the decoder, lyrics and position when this very item is
+            // already opening/playing, or waiting for the outgoing wave fade.
+            // Stop clears playback_source_open_ before its fade completes.
+            const bool pending = current_matches && pending_wave_track_change_ &&
+                same_source(*pending_wave_track_change_);
+            const bool opened = current_matches && opened_track_ &&
+                same_source(*opened_track_) &&
+                (network_open_pending_ || playback_source_open_);
+            const auto state = audio_->State();
+            if (pending || (opened && (state == audio::PlaybackState::opening ||
+                state == audio::PlaybackState::playing || state == audio::PlaybackState::paused))) {
+                if (target == playlists_.ActiveIndex()) {
+                    playlist_selection_ = playlist_selection_anchor_ = row;
+                    playlist_selected_rows_.clear();
+                    playlist_selected_rows_.insert(row);
+                    RememberPlaylistRow(target, row);
+                    EnsurePlaylistSelectionVisible();
+                    RefreshPlaylist();
+                }
+                if (!pending && state == audio::PlaybackState::paused) audio_->Resume();
+                RefreshPlaybackUi();
+                return S_OK;
+            }
+            SelectTrackFrom(target, row, false);
+            PlayCurrent();
+            return S_OK;
+        }
+    }
     // mode1 zero supplies the current insertion context; nonzero supplies
     // the native null context, which appends to the destination list.
     size_t insertion = playlists_.At(target).Tracks().size();

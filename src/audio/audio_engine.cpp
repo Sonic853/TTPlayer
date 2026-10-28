@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include <ttpcomm/client.h>
 #include <ttpcomm/runtime_pcm.h>
 #include "ttplayer/platform/optional_windows_api.h"
@@ -2670,7 +2671,7 @@ void AudioEngine::PlaybackWorker(std::filesystem::path path, int subtrack,
     const HRESULT com_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (IsMidiPath(path)) {
         if (active_pcm_mode_.load()!=PcmPlaybackMode::compatible)
-            SetError(L"MIDI 合成播放请使用原版兼容模式；高精度／原样输出仅适用于解码后的 PCM。");
+            SetError(i18n::Literal(L"MIDI 合成播放请使用原版兼容模式；高精度／原样输出仅适用于解码后的 PCM。"));
         else if (FAILED(com_result)) SetError(L"MIDI COM initialization failed", com_result);
         else MidiWorker(path);
     } else {
@@ -2734,12 +2735,12 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         output.requested_backend!=LegacyOutputBackend::wasapi_exclusive &&
         output.requested_backend!=LegacyOutputBackend::asio &&
         output.requested_backend!=LegacyOutputBackend::kernel_streaming) {
-        SetError(L"高精度／原样输出需要选择 WASAPI、ASIO 或 Kernel Streaming；"
-                 L"WaveOut 和 DirectSound 请使用原版兼容模式。");
+        SetError(i18n::Literal(L"高精度／原样输出需要选择 WASAPI、ASIO 或 Kernel Streaming；"
+                 L"WaveOut 和 DirectSound 请使用原版兼容模式。"));
         return;
     }
     if (unaltered && output.requested_backend==LegacyOutputBackend::wasapi_shared) {
-        SetError(L"原样输出需要 WASAPI 独占、ASIO 或 Kernel Streaming；共享模式经过系统混音器。");
+        SetError(i18n::Literal(L"原样输出需要 WASAPI 独占、ASIO 或 Kernel Streaming；共享模式经过系统混音器。"));
         return;
     }
     if (!source->Open(path, options)) {
@@ -3088,7 +3089,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             std::scoped_lock lock(mutex_);
             direct_sound_buffer_ = sound_buffer.Get();
             backend_ = Backend::direct_sound;
-            signal_path_=L"原版兼容 → DirectSound "+
+            signal_path_=i18n::Literal(L"原版兼容 → DirectSound ")+
                 std::to_wstring(wave_format.nSamplesPerSec)+L" Hz / "+
                 std::to_wstring(wave_format.wBitsPerSample)+L" bit / "+
                 std::to_wstring(wave_format.nChannels)+L" ch";
@@ -3385,15 +3386,15 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     {
         const auto describe=[](const WAVEFORMATEX& f) {
             TtpCommPcmFormat info{};
-            if (!DescribeHiresPcm(f,info)) return std::wstring(L"未知格式");
+            if (!DescribeHiresPcm(f,info)) return std::wstring(i18n::Literal(L"未知格式"));
             return std::to_wstring(info.sample_rate)+L" Hz / "+
                 std::to_wstring(info.valid_bits)+L" bit "+
                 (info.floating_point ? L"float" : L"PCM")+
                 L" / "+std::to_wstring(info.channels)+L" ch";
         };
         std::wstring signal=describe(source_format);
-        signal+=precise ? L" → float64 处理（Winamp 旁路） → " :
-                unaltered ? L" → 原样（处理／音量旁路） → " : L" → 原版兼容 → ";
+        signal+=precise ? i18n::Literal(L" → float64 处理（Winamp 旁路） → ") :
+                unaltered ? i18n::Literal(L" → 原样（处理／音量旁路） → ") : i18n::Literal(L" → 原版兼容 → ");
         signal+=BackendName(output.requested_backend)+L" ";
         if (wasapi_sink) signal+=describe(wasapi_sink->DeviceFormat());
         else if (ks_sink) signal+=describe(ks_sink->DeviceFormat());
@@ -3406,7 +3407,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                     (layout.floating_point?L"float":L"PCM");
         } else signal+=describe(wave_format);
         if (output.requested_backend==LegacyOutputBackend::wasapi_shared)
-            signal+=L"（系统共享混音）";
+            signal+=i18n::Literal(L"（系统共享混音）");
         std::scoped_lock lock(mutex_);
         signal_path_=std::move(signal);
     }

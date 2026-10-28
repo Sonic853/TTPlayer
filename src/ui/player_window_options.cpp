@@ -118,7 +118,7 @@ void PopulateAlbumBackgroundOptions(HWND dialog, HINSTANCE instance,
         // two groups (including the shared lyric background colour) intact.
         const auto add = [&](LPCWSTR window_class, UINT label, int id,
                              DWORD style, RECT rect, DWORD exstyle = 0) {
-            MapDialogRect(dialog, &rect);
+            i18n::MapDialogRect(dialog, &rect);
             const auto caption = label ? AlbumOptionText(label) : std::wstring{};
             const HWND control = CreateWindowExW(exstyle, window_class, caption.c_str(),
                 WS_CHILD | WS_VISIBLE | style, rect.left, rect.top,
@@ -1133,7 +1133,7 @@ void DrawOptionsHeaderContent(const DRAWITEMSTRUCT& item) {
     // supply Microsoft YaHei UI, whose 14px cell leaves only a 9px em.
     // Pin the banner to XP's face so its text keeps the same size on every OS.
     font.lfHeight = 14;
-    wcscpy_s(font.lfFaceName, L"SimSun");
+    wcscpy_s(font.lfFaceName, i18n::EnglishLayout() ? L"Tahoma" : L"SimSun");
     const auto created = CreateFontIndirectW(&font);
     if (created) SelectObject(item.hDC,created);
     wchar_t caption[1024]{}; GetWindowTextW(item.hwndItem,caption,1024);
@@ -2033,7 +2033,7 @@ void DrawLyricColorSample(const DRAWITEMSTRUCT& item, HMODULE resources,
     FillRect(item.hDC, &item.rcItem,
              reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
     auto text = i18n::ResourceText(resources, 0x86);
-    if (text.empty()) text = L"尽听精彩";
+    if (text.empty()) text = i18n::Literal(L"尽听精彩");
     LOGFONTW descriptor{};
     descriptor.lfHeight = -144;
     descriptor.lfWeight = FW_BOLD;
@@ -3318,7 +3318,7 @@ void PlayerWindow::PollOptionsDspScan(HWND dialog) {
         SetListItemData(list, static_cast<int>(index),
                         static_cast<LPARAM>(index));
         auto description = result.description.empty()
-            ? std::wstring(L"（无法读取插件信息）") : result.description;
+            ? std::wstring(i18n::Literal(L"（无法读取插件信息）")) : result.description;
         ListView_SetItemText(list, static_cast<int>(index), 1,
                              description.data());
         ListView_SetItemText(list, static_cast<int>(index), 2,
@@ -3691,7 +3691,7 @@ void PlayerWindow::InitializeOptionsAssociationActions(HWND dialog) {
         SetWindowPos(control, nullptr, rect.left, rect.top, rect.right-rect.left, rect.bottom-rect.top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     };
-    RECT units{0,0,14,12}; MapDialogRect(dialog, &units);
+    RECT units{0,0,14,12}; i18n::MapDialogRect(dialog, &units);
     const auto tree_bounds = bounds(tree);
     const auto label_bounds = bounds(GetDlgItem(dialog,2282));
     const int row = units.bottom + 2;
@@ -4461,7 +4461,7 @@ void PlayerWindow::InitializeOptionsShell() {
     RECT page = tab_bounds;
     TabCtrl_AdjustRect(tab, FALSE, &page);
     const int dy = (page.bottom - page.top) - (tab_bounds.bottom - tab_bounds.top) + 50;
-    constexpr int dx = 110;
+    const int dx = i18n::EnglishLayout() ? 150 : 110;
     OffsetRect(&page, dx, dy);
     options_page_bounds_ = page;
     EnableWindow(tab, FALSE);
@@ -4804,7 +4804,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         if (!GetDlgItem(dialog, kOptionsDiscordLyrics)) {
             const bool language_available = !FindRuntimePath(L"AddIn/ttp_i18n.dll").empty();
             const auto place = [dialog](HWND control, RECT rect, HWND after) {
-                MapDialogRect(dialog, &rect);
+                i18n::MapDialogRect(dialog, &rect);
                 SetWindowPos(control, after, rect.left, rect.top,
                              rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE);
             };
@@ -4919,7 +4919,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             value.check_update_days <= 7 ? 2 : 3);
         if (!GetDlgItem(dialog, kUpdateSource)) {
             auto add_update = [&](const wchar_t* klass, const wchar_t* text, int id, DWORD style, RECT rect) {
-                MapDialogRect(dialog, &rect);
+                i18n::MapDialogRect(dialog, &rect);
                 const auto control = CreateWindowExW(0, klass, text, WS_CHILD | WS_VISIBLE | style,
                     rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, dialog,
                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
@@ -4927,8 +4927,8 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             };
             add_update(WC_STATICW, i18n::Literal(L"更新源"), kUpdateSourceLabel, 0, {13,216,75,228});
             add_update(WC_COMBOBOXW, L"", kUpdateSource, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, {85,212,197,272});
-            add_update(WC_STATICW, L"GitHub 发布页", kUpdateGitHub, SS_NOTIFY | WS_TABSTOP, {13,240,100,254});
-            add_update(WC_STATICW, L"Gitee 发布页", kUpdateGitee, SS_NOTIFY | WS_TABSTOP, {115,240,200,254});
+            add_update(WC_STATICW, i18n::Literal(L"GitHub 发布页"), kUpdateGitHub, SS_NOTIFY | WS_TABSTOP, {13,240,100,254});
+            add_update(WC_STATICW, i18n::Literal(L"Gitee 发布页"), kUpdateGitee, SS_NOTIFY | WS_TABSTOP, {115,240,200,254});
             PlainBlueLink::Attach(GetDlgItem(dialog,kUpdateGitHub),L"https://github.com/Sonic853/TTPlayer/releases");
             PlainBlueLink::Attach(GetDlgItem(dialog,kUpdateGitee),L"https://gitee.com/Sonic853/TTPlayer/releases");
             add_update(WC_BUTTONW, i18n::Literal(L"打开更新器"), kUpdateOpen, BS_PUSHBUTTON | WS_TABSTOP, {212,189,266,203});
@@ -4940,7 +4940,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             GetWindowRect(check_button,&check);MapWindowPoints(nullptr,dialog,reinterpret_cast<POINT*>(&check),2);
             GetWindowRect(period_combo,&period);MapWindowPoints(nullptr,dialog,reinterpret_cast<POINT*>(&period),2);
             RECT check_x{152,0,206,0},open_x{212,0,266,0},period_x{92,0,142,0};
-            MapDialogRect(dialog,&check_x);MapDialogRect(dialog,&open_x);MapDialogRect(dialog,&period_x);
+            i18n::MapDialogRect(dialog,&check_x);i18n::MapDialogRect(dialog,&open_x);i18n::MapDialogRect(dialog,&period_x);
             const int button_width=check_x.right-check_x.left,button_height=check.bottom-check.top;
             SetWindowPos(check_button,nullptr,check_x.left,check.top,button_width,button_height,SWP_NOZORDER|SWP_NOACTIVATE);
             SetWindowPos(GetDlgItem(dialog,kUpdateOpen),nullptr,open_x.left,check.top,button_width,button_height,SWP_NOZORDER|SWP_NOACTIVATE);
@@ -5202,7 +5202,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             }
             if(BrowserAvailable()){
                 if(!browser_client_->Created())ConfigureMusicBrowser();
-                if(SUCCEEDED(browser_client_->CreateSettingsPage(dialog,&options_network_pages_[2]))){TCITEMW item{};item.mask=TCIF_TEXT;item.pszText=const_cast<LPWSTR>(L"媒体来源");TabCtrl_InsertItem(tab,2,&item);}
+                if(SUCCEEDED(browser_client_->CreateSettingsPage(dialog,&options_network_pages_[2]))){TCITEMW item{};item.mask=TCIF_TEXT;item.pszText=const_cast<LPWSTR>(i18n::Literal(L"媒体来源"));TabCtrl_InsertItem(tab,2,&item);}
             }
             SelectOptionsNetworkMode(dialog,381);
         }
@@ -5219,15 +5219,15 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             wchar_t type[32]{}, text[256]{};
             GetClassNameW(child, type, 32); GetWindowTextW(child, text, 256);
             if (!_wcsicmp(type, L"Button") && wcsstr(text, L"freedb.org"))
-                SetWindowTextW(child, L"MusicBrainz（获取 CD 的专辑和音轨信息）");
+                SetWindowTextW(child, i18n::Literal(L"MusicBrainz（获取 CD 的专辑和音轨信息）"));
             if (!_wcsicmp(type, L"Static") && wcsstr(text, L"freedb"))
-                SetWindowTextW(child, L"MusicBrainz 服务器:");
+                SetWindowTextW(child, i18n::Literal(L"MusicBrainz 服务器:"));
             return TRUE;
         }, 0);
-        SetDlgItemTextW(dialog, 2173, L"播放缺少信息的 CD 音轨时自动查询");
+        SetDlgItemTextW(dialog, 2173, i18n::Literal(L"播放缺少信息的 CD 音轨时自动查询"));
         SetChecked(dialog, 2173, settings_.network.freedb_auto_query);
         SetChecked(dialog, 2176, settings_.network.show_info_when_fail);
-        SetDlgItemTextW(dialog, 2176, L"自动查询失败时显示错误信息");
+        SetDlgItemTextW(dialog, 2176, i18n::Literal(L"自动查询失败时显示错误信息"));
         const HWND freedb = GetDlgItem(dialog, 2177);
         if (freedb) {
             for (const auto& server : settings_.network.server_list) {
@@ -5249,6 +5249,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         for (const int control : {2143,2144,2184,2185})
             EnableWindow(GetDlgItem(dialog, control), custom_proxy);
         NetworkOptionsTabs::Attach(dialog,options_network_pages_,BrowserAvailable(),[this]{return browser_client_?browser_client_->CommitSettingsPage():S_OK;});
+        SetChecked(dialog,NetworkOptionsTabs::DisableGpuId,settings_.player.browser_disable_gpu);
         if(options_focus_control_>=381&&options_focus_control_<=383)SelectOptionsNetworkMode(dialog,options_focus_control_);
         break;
     }
@@ -5298,7 +5299,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             // Use the resource font/DLUs, including on XP and high-DPI hosts.
             const auto add = [&](LPCWSTR klass, LPCWSTR text, int id,
                                  DWORD style, RECT rect, HWND after) {
-                MapDialogRect(dialog, &rect);
+                i18n::MapDialogRect(dialog, &rect);
                 const HWND control = CreateWindowExW(0, klass, text,
                     WS_CHILD | WS_VISIBLE | style,
                     rect.left, rect.top, rect.right - rect.left,
@@ -5312,11 +5313,11 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                 return control;
             };
             const HWND label = add(WC_STATICW, i18n::Literal(L"处理模式:"),
-                kOptionsPcmModeLabel, 0, {134,28,170,40},
+                kOptionsPcmModeLabel, 0, {134,28,i18n::EnglishLayout()?176L:170L,40},
                 GetDlgItem(dialog, 1072));
             add(WC_COMBOBOXW, L"", kOptionsPcmMode,
                 WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
-                {170,26,273,90}, label);
+                {i18n::EnglishLayout()?178L:170L,26,273,90}, label);
         }
         PopulateTextCombo(dialog, kOptionsPcmMode,
             {i18n::Text(L"原版兼容"), i18n::Text(L"高精度处理"),
@@ -5404,7 +5405,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
                 // The tab adapter maps this original album-group coordinate
                 // space into the visual-fullscreen tab, below Dream options.
                 RECT bounds{click_option_x, 289, click_option_x + 122, 301};
-                MapDialogRect(dialog, &bounds);
+                i18n::MapDialogRect(dialog, &bounds);
                 const auto label = AlbumOptionText(option.second);
                 const HWND checkbox = CreateWindowExW(0, WC_BUTTONW, label.c_str(),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
@@ -5443,7 +5444,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
             // Resource 263: the spare cell beside the font picker remains
             // inside "lyrics fullscreen", above the album-background group.
             RECT bounds{213, 139, 271, 149};
-            MapDialogRect(dialog, &bounds);
+            i18n::MapDialogRect(dialog, &bounds);
             const auto label = AlbumOptionText(IDS_FULLSCREEN_LYRIC_DRAG);
             const HWND checkbox = CreateWindowExW(0, WC_BUTTONW, label.c_str(),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
@@ -5892,6 +5893,7 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         break;
     }
     case 258:
+        if(GetDlgItem(dialog,NetworkOptionsTabs::DisableGpuId))settings_.player.browser_disable_gpu=IsChecked(dialog,NetworkOptionsTabs::DisableGpuId);
         if (IsChecked(dialog, 2192)) settings_.network.proxy_type = 2;
         else if (IsChecked(dialog, 2191)) settings_.network.proxy_type = 1;
         else settings_.network.proxy_type = 0;
@@ -6279,6 +6281,9 @@ bool PlayerWindow::CommitOptionsControl(
         return true;
     case 258:
         switch (control) {
+        case NetworkOptionsTabs::DisableGpuId:
+            settings_.player.browser_disable_gpu=IsChecked(dialog,control);
+            break;
         case 2190: case 2191: case 2192:
             settings_.network.proxy_type = static_cast<int>(control - 2190);
             break;
@@ -6846,10 +6851,10 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
         labels[index + 1] = ResourceListItem(
             ResourceModule(), detail_resource, index);
     if (entry.backend >= 4) {
-        labels[1] = L"输出模式";
-        labels[2] = L"系统混音格式";
-        labels[3] = L"设备选择";
-        labels[4] = L"系统要求";
+        labels[1] = i18n::Literal(L"输出模式");
+        labels[2] = i18n::Literal(L"系统混音格式");
+        labels[3] = i18n::Literal(L"设备选择");
+        labels[4] = i18n::Literal(L"系统要求");
     }
     std::vector<std::wstring> values(5);
     values[0] = entry.backend == 0 ? L"WaveOut"
@@ -6934,8 +6939,15 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
         image_item.iImage = -1;
         ListView_SetItem(details, &image_item);
     }
-    // Keep the original 100/200-pixel columns. LVS_EX_LABELTIP exposes a
-    // clipped negotiated-path value on hover without changing this layout.
+    // English property names are longer than the original 100-pixel column.
+    if(i18n::EnglishLayout()) {
+        RECT client{};GetClientRect(details,&client);
+        int width=100;
+        for(const auto& label:labels) width=std::max(width,ListView_GetStringWidth(details,label.c_str())+28);
+        width=std::min(width,static_cast<int>(client.right/2));
+        ListView_SetColumnWidth(details,0,width);
+        ListView_SetColumnWidth(details,1,std::max(100,static_cast<int>(client.right)-width-GetSystemMetrics(SM_CXVSCROLL)-4));
+    }
     if (options_device_images_) {
         LVITEMW item{};
         item.mask = LVIF_IMAGE;

@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "disc_lookup_dialog.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/core/text.h"
@@ -21,27 +22,27 @@ template<class Work> void Start(HWND dialog,State& s,int operation,Work work) {
     if(s.worker.valid())return;
     s.operation=operation;s.error.clear();s.cancel=false;
     EnableWindow(GetDlgItem(dialog,IDOK),FALSE);EnableWindow(GetDlgItem(dialog,kCandidates),FALSE);
-    Status(dialog,operation==1?L"正在读取光盘布局并查询 MusicBrainz…":operation==2?L"正在读取所选发行版的曲目…":L"正在保存曲目信息…");
+    Status(dialog,operation==1?i18n::Literal(L"正在读取光盘布局并查询 MusicBrainz…"):operation==2?i18n::Literal(L"正在读取所选发行版的曲目…"):i18n::Literal(L"正在保存曲目信息…"));
     try {
         s.worker=std::async(std::launch::async,[&s,work]{
             const auto hr=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
-            try {work();}catch(const std::exception& e){try{s.error=core::Utf8ToWide(e.what());}catch(...){s.error=L"操作失败";}}
-            catch(...){s.error=L"操作失败";}
+            try {work();}catch(const std::exception& e){try{s.error=core::Utf8ToWide(e.what());}catch(...){s.error=i18n::Literal(L"操作失败");}}
+            catch(...){s.error=i18n::Literal(L"操作失败");}
             if(SUCCEEDED(hr))CoUninitialize();
         });
         SetTimer(dialog,1,50,nullptr);
-    }catch(...){Status(dialog,L"无法启动查询线程");}
+    }catch(...){Status(dialog,i18n::Literal(L"无法启动查询线程"));}
 }
 void Select(HWND dialog,State& s) {
     const auto index=SendDlgItemMessageW(dialog,kCandidates,CB_GETCURSEL,0,0);
     if(index<0 || static_cast<size_t>(index)>=s.candidates.size())return;
     s.selected.reset();ListView_DeleteAllItems(GetDlgItem(dialog,kTracks));
     const auto candidate=s.candidates[index];
-    SetDlgItemTextW(dialog,kMatch,candidate.exact?L"Disc ID 匹配。请核对发行版与曲目信息。":L"近似匹配：请核对整张光盘和每首曲目后再保存。");
+    SetDlgItemTextW(dialog,kMatch,candidate.exact?i18n::Literal(L"Disc ID 匹配。请核对发行版与曲目信息。"):i18n::Literal(L"近似匹配：请核对整张光盘和每首曲目后再保存。"));
     Start(dialog,s,2,[&s,candidate]{s.selected=audio::ReadMusicBrainzRelease(candidate,s.source.layout,s.network,[&s]{return s.cancel.load();});});
 }
 void Close(HWND dialog,State& s) {
-    if(s.worker.valid()) {s.closing=true;s.cancel=true;EnableWindow(GetDlgItem(dialog,IDCANCEL),FALSE);Status(dialog,L"正在取消，请稍候…");}
+    if(s.worker.valid()) {s.closing=true;s.cancel=true;EnableWindow(GetDlgItem(dialog,IDCANCEL),FALSE);Status(dialog,i18n::Literal(L"正在取消，请稍候…"));}
     else EndDialog(dialog,s.saved?IDOK:IDCANCEL);
 }
 INT_PTR CALLBACK Proc(HWND dialog,UINT message,WPARAM wparam,LPARAM lparam) {
@@ -50,7 +51,7 @@ INT_PTR CALLBACK Proc(HWND dialog,UINT message,WPARAM wparam,LPARAM lparam) {
         state=reinterpret_cast<State*>(lparam);SetWindowLongPtrW(dialog,DWLP_USER,lparam);
         const auto list=GetDlgItem(dialog,kTracks);ListView_SetExtendedListViewStyle(list,LVS_EX_FULLROWSELECT|LVS_EX_DOUBLEBUFFER);
         RECT rect{};GetClientRect(list,&rect);
-        const wchar_t* names[]={L"音轨",L"标题",L"艺术家"};
+        const wchar_t* names[]={i18n::Literal(L"音轨"),i18n::Literal(L"标题"),i18n::Literal(L"艺术家")};
         for(int i=0;i<3;++i){LVCOLUMNW column{LVCF_TEXT|LVCF_WIDTH};column.pszText=const_cast<wchar_t*>(names[i]);column.cx=i==0?48:(rect.right-52)/2;ListView_InsertColumn(list,i,&column);}
         RECT owner{},window{};GetWindowRect(GetParent(dialog),&owner);GetWindowRect(dialog,&window);
         SetWindowPos(dialog,nullptr,owner.left+(owner.right-owner.left-window.right+window.left)/2,
@@ -71,10 +72,10 @@ INT_PTR CALLBACK Proc(HWND dialog,UINT message,WPARAM wparam,LPARAM lparam) {
         }
         if(s.operation==1) {
             for(const auto& item:s.candidates) {
-                const auto title=item.album+L" — "+item.artist+L" ["+item.date+L" "+item.country+L"] 第 "+std::to_wstring(item.medium)+L" 碟 "+item.label;
+                const auto title=item.album+L" — "+item.artist+L" ["+item.date+L" "+item.country+i18n::Literal(L"] 第 ")+std::to_wstring(item.medium)+i18n::Literal(L" 碟 ")+item.label;
                 SendDlgItemMessageW(dialog,kCandidates,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(title.c_str()));
             }
-            if(s.candidates.empty())Status(dialog,L"没有找到匹配的发行版。未修改曲目信息。");
+            if(s.candidates.empty())Status(dialog,i18n::Literal(L"没有找到匹配的发行版。未修改曲目信息。"));
             else {SendDlgItemMessageW(dialog,kCandidates,CB_SETCURSEL,0,0);Select(dialog,s);}
         } else if(s.operation==2 && s.selected) {
             const auto list=GetDlgItem(dialog,kTracks);int row{};
@@ -83,7 +84,7 @@ INT_PTR CALLBACK Proc(HWND dialog,UINT message,WPARAM wparam,LPARAM lparam) {
                 LVITEMW item{};item.mask=LVIF_TEXT;item.iItem=row;item.pszText=n.data();ListView_InsertItem(list,&item);
                 ListView_SetItemText(list,row,1,title.data());ListView_SetItemText(list,row,2,artist.data());++row;
             }
-            Status(dialog,L"保存将更新所示歌曲信息，服务未返回的字段保留原值。");EnableWindow(GetDlgItem(dialog,IDOK),TRUE);
+            Status(dialog,i18n::Literal(L"保存将更新所示歌曲信息，服务未返回的字段保留原值。"));EnableWindow(GetDlgItem(dialog,IDOK),TRUE);
         } else if(s.operation==3)EndDialog(dialog,IDOK);
         return TRUE;
     }

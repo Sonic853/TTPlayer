@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/player_window.h"
 #include "ttplayer/update/update.h"
 #include "ttplayer/core/text.h"
@@ -37,11 +38,11 @@ void PlayerWindow::CheckForUpdates(bool manual) {
     update_check_=state;
     const auto runtime=update::ExecutablePath().parent_path();const auto network=settings_.network;
     const auto player_name=update::PlayerNameForPath(update::ExecutablePath());
-    if(options_pages_.size()>1 && options_pages_[1]) SetDlgItemTextW(options_pages_[1],detail::kUpdateStatus,L"正在检查新版本…");
+    if(options_pages_.size()>1 && options_pages_[1]) SetDlgItemTextW(options_pages_[1],detail::kUpdateStatus,i18n::Literal(L"正在检查新版本…"));
     try { std::thread([state,runtime,network,player_name] {
         try {
             update::Http http(runtime,network);
-            if(update::IsXp() && !http.HasProvider()) state->error=update::kMissingHttps;
+            if(update::IsXp() && !http.HasProvider()) state->error=i18n::Text(update::kMissingHttps);
             else state->release=update::Check(http,state->source==1 ? update::Source::github : update::Source::gitee,[&]{return state->canceled.load();},player_name);
         } catch(const std::exception& error){state->error=update::ErrorText(error);}
         state->done.store(true,std::memory_order_release);
@@ -56,14 +57,14 @@ void PlayerWindow::PollUpdateCheck() {
     if(state->canceled || state->source!=settings_.general.update_source || close_after_skin_window_fade_) return;
     std::wstring status;
     if(!state->error.empty()) {
-        status=state->error==update::kMissingHttps ? state->error : L"检查更新失败："+state->error;
-        if(state->manual) MessageBoxW(options_window_ ? options_window_ : window_,status.c_str(),L"软件更新",MB_OK|MB_ICONINFORMATION);
+        status=state->error==i18n::Text(update::kMissingHttps) ? state->error : i18n::Literal(L"检查更新失败：")+state->error;
+        if(state->manual) MessageBoxW(options_window_ ? options_window_ : window_,status.c_str(),i18n::Literal(L"软件更新"),MB_OK|MB_ICONINFORMATION);
     } else {
         settings_.general.last_checked_day=Today();
         try {
             const auto local=update::FileVersion(update::ExecutablePath());
             if(state->release && state->release->version>local) {
-                status=L"发现新版本："+state->release->version.Text();
+                status=i18n::Literal(L"发现新版本：")+state->release->version.Text();
                 const auto identity=std::to_wstring(state->source)+L":"+state->release->version.Text();
                 if(state->manual || settings_.general.last_notified_update!=identity) {
                     if(update_notice_ && IsWindow(update_notice_)) DestroyWindow(update_notice_);
@@ -71,11 +72,11 @@ void PlayerWindow::PollUpdateCheck() {
                     if(update_notice_) settings_.general.last_notified_update=identity;
                 }
             } else {
-                status=state->release ? L"当前已是最新版本。" : L"尚无可用的完整发行包，请前往发布页查看。";
-                if(state->manual) MessageBoxW(options_window_ ? options_window_ : window_,status.c_str(),L"软件更新",MB_OK|MB_ICONINFORMATION);
+                status=state->release ? i18n::Literal(L"当前已是最新版本。") : i18n::Literal(L"尚无可用的完整发行包，请前往发布页查看。");
+                if(state->manual) MessageBoxW(options_window_ ? options_window_ : window_,status.c_str(),i18n::Literal(L"软件更新"),MB_OK|MB_ICONINFORMATION);
             }
             SaveSettingsWithFeedback();
-        } catch(const std::exception& error) {status=L"检查更新失败："+update::ErrorText(error);}
+        } catch(const std::exception& error) {status=i18n::Literal(L"检查更新失败：")+update::ErrorText(error);}
     }
     if(options_pages_.size()>1 && options_pages_[1]) SetDlgItemTextW(options_pages_[1],detail::kUpdateStatus,status.c_str());
 }
@@ -97,6 +98,6 @@ void PlayerWindow::OpenUpdater() {
         if(!CreateProcessW(file.c_str(),command.data(),nullptr,nullptr,FALSE,0,nullptr,runtime.c_str(),&si,&pi))
             throw std::runtime_error("Cannot start TTPUpdater.exe ("+std::to_string(GetLastError())+")");
         CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
-    } catch(const std::exception& error) {MessageBoxW(options_window_ ? options_window_ : window_,update::ErrorText(error).c_str(),L"软件更新",MB_OK|MB_ICONERROR);}
+    } catch(const std::exception& error) {MessageBoxW(options_window_ ? options_window_ : window_,update::ErrorText(error).c_str(),i18n::Literal(L"软件更新"),MB_OK|MB_ICONERROR);}
 }
 }

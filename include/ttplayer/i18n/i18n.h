@@ -13,6 +13,11 @@ namespace ttplayer::i18n {
 bool Initialize(const std::filesystem::path& runtime, std::wstring_view language) noexcept;
 void Shutdown() noexcept;
 bool Available() noexcept;
+bool EnglishLayout() noexcept;
+// Map dynamic controls using the same horizontal expansion as translated templates.
+BOOL MapDialogRect(HWND dialog, RECT* bounds) noexcept;
+// Mark constant-array messages for extraction; translate when displaying them.
+constexpr const wchar_t* Mark(const wchar_t* source) noexcept { return source; }
 std::vector<std::wstring> Languages(const std::filesystem::path& runtime);
 std::wstring Text(std::wstring_view source, const char* context = "app");
 const wchar_t* Literal(const wchar_t* source);

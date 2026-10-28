@@ -118,8 +118,8 @@ int TTPlayer_wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
             command_line.file.native(), command_line.FileMode());
         single_instance.Shutdown();
         if (!forwarded)
-            MessageBoxW(nullptr, L"正在运行的播放器未及时确认请求，可能仍在处理。请先检查播放列表，再决定是否重试。",
-                        L"千千静听", MB_OK | MB_ICONEXCLAMATION);
+            MessageBoxW(nullptr, i18n::Literal(L"正在运行的播放器未及时确认请求，可能仍在处理。请先检查播放列表，再决定是否重试。"),
+                        i18n::Literal(L"千千静听"), MB_OK | MB_ICONEXCLAMATION);
         return 1;
     }
     single_instance.PublishProcess();

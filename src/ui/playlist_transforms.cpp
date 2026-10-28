@@ -447,7 +447,7 @@ void RunScan(ScanDialogLifetime lifetime, std::stop_token stop) {
 void AddScanConcurrencyControl(HWND dialog, ScanDialogState& state) {
     RECT list{}; GetWindowRect(GetDlgItem(dialog, kScanList), &list);
     MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&list), 2);
-    RECT units{0, 0, 160, 18}; MapDialogRect(dialog, &units);
+    RECT units{0, 0, 160, 18}; i18n::MapDialogRect(dialog, &units);
     const int row_height = units.bottom;
     for (HWND child = GetWindow(dialog, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
         RECT rect{}; GetWindowRect(child, &rect);

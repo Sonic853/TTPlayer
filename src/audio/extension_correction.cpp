@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/audio/extension_correction.h"
 #include <ttpcomm/audio_format_probe_impl.h>
 #include "ttplayer/audio/file_mutation.h"
@@ -155,11 +156,11 @@ std::optional<ExtensionCorrection> FindExtensionCorrection(const std::filesystem
         if (archive==ttpcomm::archive_format::Kind::zip && IsOszArchive(path)) return {};
         using K=ttpcomm::archive_format::Kind;const wchar_t* suffix=nullptr;const wchar_t* name=nullptr;
         switch(archive){
-        case K::zip:suffix=L".zip";name=L"ZIP 压缩包";break;
-        case K::rar:suffix=L".rar";name=L"RAR 压缩包";break;
-        case K::seven:suffix=L".7z";name=L"7z 压缩包";break;
-        case K::tar:suffix=L".tar";name=L"TAR 归档";break;
-        case K::gzip:suffix=L".gz";name=L"gzip 压缩包";break;
+        case K::zip:suffix=L".zip";name=i18n::Literal(L"ZIP 压缩包");break;
+        case K::rar:suffix=L".rar";name=i18n::Literal(L"RAR 压缩包");break;
+        case K::seven:suffix=L".7z";name=i18n::Literal(L"7z 压缩包");break;
+        case K::tar:suffix=L".tar";name=i18n::Literal(L"TAR 归档");break;
+        case K::gzip:suffix=L".gz";name=i18n::Literal(L"gzip 压缩包");break;
         default:break;
         }
         if(!suffix)return {};

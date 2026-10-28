@@ -14,6 +14,7 @@ namespace ttplayer::settings {
 inline constexpr wchar_t kSettingsFileName[] = L"TTPlayerRebuild.xml";
 inline constexpr int kMaximumVisualType = 8;
 inline constexpr int kVisualTypeCount = kMaximumVisualType + 1;
+bool DefaultBrowserDisableGpu();
 struct GeneralSettings {
     // auto: Windows UI language; source: unchanged resource/code text.
     std::wstring language{L"auto"};
@@ -85,6 +86,7 @@ struct PlayerSettings {
     bool browser_visible{};
     bool browser_auto_startup{false};
     int browser_engine{}; // 0: WebView2 with IE fallback, 1: IE, 2: WebView2 only.
+    bool browser_disable_gpu{DefaultBrowserDisableGpu()};
     std::wstring browser_home_url{L"http://mini.qianqian.com/index.html"};
     int playlist_scan_count{100};
     int active_playlist{};

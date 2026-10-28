@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "plugin_registry.h"
 #include "dfx_registry_helper.h"
 #include "dsp_imports.h"
@@ -1429,12 +1430,12 @@ FARPROC WINAPI Resolve(HMODULE module,LPCSTR name) noexcept {
         if(known==SystemImports().end())return function;
         if(const auto replacement=ScopedReplacement(context,known->second,context->module))return replacement;
         if(RegistryApi(known->second)){
-            ImportDiagnostic(context,L"不支持的动态注册表接口："+core::Utf8ToWide(known->second)+L"；"+context->plugin.wstring());
+            ImportDiagnostic(context,i18n::Literal(L"不支持的动态注册表接口：")+core::Utf8ToWide(known->second)+L"；"+context->plugin.wstring());
             SetLastError(ERROR_PROC_NOT_FOUND);return nullptr;
         }
         return function;
     }catch(const std::exception& error){
-        try {if(context)ImportDiagnostic(context,L"动态依赖注册表接入失败："+core::Utf8ToWide(error.what()));}catch(...){}
+        try {if(context)ImportDiagnostic(context,i18n::Literal(L"动态依赖注册表接入失败：")+core::Utf8ToWide(error.what()));}catch(...){}
         SetLastError(ERROR_PROC_NOT_FOUND);return nullptr;
     }
 }
@@ -1442,7 +1443,7 @@ HMODULE FinishLibrary(const Context& context,HMODULE module,DWORD flags) noexcep
     if(!module)return nullptr;
     try {AdaptLoaded(context,module,flags);return module;}
     catch(const std::exception& error){
-        try {if(context)ImportDiagnostic(context,L"插件依赖的注册表接入失败："+core::Utf8ToWide(error.what())+L"；"+context->plugin.wstring());}catch(...){}
+        try {if(context)ImportDiagnostic(context,i18n::Literal(L"插件依赖的注册表接入失败：")+core::Utf8ToWide(error.what())+L"；"+context->plugin.wstring());}catch(...){}
         FreeLibrary(module);SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;
     }
 }
@@ -1581,8 +1582,8 @@ std::vector<std::wstring> PluginRegistry::Diagnostics() {
 std::wstring PluginRegistry::StorageDescription() const {
     {std::lock_guard lock(impl_->diagnostics_mutex);if(!impl_->import_error.empty())return impl_->import_error;}
     if(impl_->registry->SaveStatus()!=ERROR_SUCCESS)
-        return L"registry.json 保存失败，请检查文件权限或磁盘空间";
-    return L"注册表：共享 registry.json（缺失时读取系统）";
+        return i18n::Literal(L"registry.json 保存失败，请检查文件权限或磁盘空间");
+    return i18n::Literal(L"注册表：共享 registry.json（缺失时读取系统）");
 }
 std::vector<std::wstring> PluginRegistry::HelperTrace() {
     auto result=impl_->helper_trace;

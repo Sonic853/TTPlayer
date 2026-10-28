@@ -1,3 +1,6 @@
+#include "ttplayer/i18n/i18n.h"
+#include "ttplayer/core/text.h"
+#include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/update/update.h"
 #include "ttplayer/ui/plain_blue_link.h"
 #include <windows.h>
@@ -36,13 +39,13 @@ struct State {
     void Check() {
         if(busy) return;
         busy=true;installing=false;success=false;cancel=false;done=false;error.clear();latest.reset();
-        SetDlgItemTextW(window,1002,L"正在检查…");Status(L"正在检查新版本…");
+        SetDlgItemTextW(window,1002,i18n::Literal(L"正在检查…"));Status(i18n::Literal(L"正在检查新版本…"));
         EnableWindow(GetDlgItem(window,1008),FALSE);EnableWindow(GetDlgItem(window,1003),FALSE);
         StartWorker([this] {
             const auto initialized=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
             try {
                 update::Http http(directory,settings.network);
-                if(update::IsXp() && !http.HasProvider()) error=update::kMissingHttps;
+                if(update::IsXp() && !http.HasProvider()) error=i18n::Text(update::kMissingHttps);
                 else latest=update::Check(http,settings.general.update_source==1 ? update::Source::github : update::Source::gitee,[this]{return cancel.load();},update::PlayerNameForPath(player_executable));
             } catch(const std::exception& e){error=update::ErrorText(e);}
             if(SUCCEEDED(initialized)) CoUninitialize();done.store(true,std::memory_order_release);
@@ -65,7 +68,7 @@ struct State {
         if(busy) return;
         if(!latest || latest->version<=current) {Check();return;}
         busy=true;installing=true;cancel=false;done=false;applying=false;success=false;error.clear();backup_directory.clear();received=0;total=0;
-        Status(L"正在下载更新…");EnableWindow(GetDlgItem(window,1008),FALSE);EnableWindow(GetDlgItem(window,1003),FALSE);
+        Status(i18n::Literal(L"正在下载更新…"));EnableWindow(GetDlgItem(window,1008),FALSE);EnableWindow(GetDlgItem(window,1003),FALSE);
         StartWorker([this] {
             struct Processes {std::vector<HANDLE> handles;~Processes(){for(auto handle:handles) CloseHandle(handle);}} processes;
             try {
@@ -85,7 +88,7 @@ struct State {
                 if(cancel) throw std::runtime_error("Canceled");
                 // Probe write access before asking the user to stop playback.
                 wchar_t probe[MAX_PATH]{};
-                if(!GetTempFileNameW(directory.c_str(),L"ttu",0,probe)) throw std::runtime_error("播放器目录不可写，请以具有该目录写入权限的用户运行更新器。");
+                if(!GetTempFileNameW(directory.c_str(),L"ttu",0,probe)) throw std::runtime_error(core::WideToUtf8(i18n::Text(L"播放器目录不可写，请以具有该目录写入权限的用户运行更新器。")));
                 DeleteFileW(probe);
                 std::vector<HWND> candidates;
                 EnumWindows([](HWND candidate,LPARAM data)->BOOL {
@@ -98,14 +101,14 @@ struct State {
                     processes.handles.push_back(process);
                     DWORD_PTR accepted{};
                     if(!SendMessageTimeoutW(candidate,update::kPrepareInstallMessage,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,5000,&accepted) || !accepted)
-                        throw std::runtime_error("播放器暂时无法退出，请保存正在编辑的内容后重试。");
+                        throw std::runtime_error(core::WideToUtf8(i18n::Text(L"播放器暂时无法退出，请保存正在编辑的内容后重试。")));
                     const auto deadline=GetTickCount64()+120000;
                     for(;;) {
                         const auto wait=WaitForSingleObject(process,100);
                         if(wait==WAIT_OBJECT_0) break;
                         if(wait!=WAIT_TIMEOUT) throw std::runtime_error("Cannot wait for the player to exit");
                         if(cancel) throw std::runtime_error("Canceled");
-                        if(GetTickCount64()>deadline) throw std::runtime_error("播放器尚未退出，请关闭播放器后重试。");
+                        if(GetTickCount64()>deadline) throw std::runtime_error(core::WideToUtf8(i18n::Text(L"播放器尚未退出，请关闭播放器后重试。")));
                     }
                 }
                 if(cancel) throw std::runtime_error("Canceled");
@@ -116,49 +119,49 @@ struct State {
                     const auto exe=directory/prepared.filename();std::wstring command=L"\""+exe.wstring()+L"\"";
                     STARTUPINFOW si{sizeof(si)};PROCESS_INFORMATION pi{};
                     if(!CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,FALSE,0,nullptr,directory.c_str(),&si,&pi)) {
-                        throw std::runtime_error("新版启动失败。");
+                        throw std::runtime_error(core::WideToUtf8(i18n::Text(L"新版启动失败。")));
                     }
                     CloseHandle(pi.hThread);
                     const auto input=WaitForInputIdle(pi.hProcess,15000);
                     DWORD code=STILL_ACTIVE;GetExitCodeProcess(pi.hProcess,&code);
                     CloseHandle(pi.hProcess);
-                    if(code!=STILL_ACTIVE && code!=0) throw std::runtime_error("新版启动后异常退出。");
+                    if(code!=STILL_ACTIVE && code!=0) throw std::runtime_error(core::WideToUtf8(i18n::Text(L"新版启动后异常退出。")));
                     backup_directory=installation.BackupDirectory();
                     installation.Commit();
-                    if(input==WAIT_TIMEOUT) error=L"文件已更新，程序启动较慢。旧文件备份：\n"+backup_directory.wstring();
+                    if(input==WAIT_TIMEOUT) error=i18n::Literal(L"文件已更新，程序启动较慢。旧文件备份：\n")+backup_directory.wstring();
                     success=true;
                 } catch(const std::exception& reason) {
                     installation.Rollback();
-                    throw std::runtime_error(std::string(reason.what())+" 已恢复更新前的全部文件。");
+                    throw std::runtime_error(std::string(reason.what())+core::WideToUtf8(i18n::Text(L" 已恢复更新前的全部文件。")));
                 }
             } catch(const std::exception& e){error=update::ErrorText(e);}
             done.store(true,std::memory_order_release);
         });
     }
-    static std::string coreMessage(){return "缺少 HTTPS 组件，请前往发布页手动下载更新";}
+    static std::string coreMessage(){return core::WideToUtf8(i18n::Text(L"缺少 HTTPS 组件，请前往发布页手动下载更新"));}
     void Poll() {
         if(!busy) return;
         const uint64_t all=total,n=received;
         SendDlgItemMessageW(window,1007,PBM_SETPOS,all ? static_cast<WPARAM>(std::min<uint64_t>(99,n*100/all)) : 0,0);
-        if(applying) {EnableWindow(GetDlgItem(window,IDCANCEL),FALSE);Status(L"正在替换文件并启动播放器…");}
+        if(applying) {EnableWindow(GetDlgItem(window,IDCANCEL),FALSE);Status(i18n::Literal(L"正在替换文件并启动播放器…"));}
         if(!done.load(std::memory_order_acquire)) return;
         FinishWorker();applying=false;EnableWindow(GetDlgItem(window,IDCANCEL),TRUE);EnableWindow(GetDlgItem(window,1003),TRUE);
         if(closing) {DestroyWindow(window);return;}
         if(!error.empty()) {
-            Status(error);MessageBoxW(window,error.c_str(),L"软件更新",MB_OK|(success?MB_ICONINFORMATION:MB_ICONEXCLAMATION));
-            if(!installing) SetDlgItemTextW(window,1002,L"检查失败");
-        } else if(installing) Status(L"更新完成。旧文件备份："+backup_directory.wstring());
+            Status(error);MessageBoxW(window,error.c_str(),i18n::Literal(L"软件更新"),MB_OK|(success?MB_ICONINFORMATION:MB_ICONEXCLAMATION));
+            if(!installing) SetDlgItemTextW(window,1002,i18n::Literal(L"检查失败"));
+        } else if(installing) Status(i18n::Literal(L"更新完成。旧文件备份：")+backup_directory.wstring());
         else {
-            SetDlgItemTextW(window,1002,latest ? latest->version.Text().c_str() : L"无可用发行包");
-            Status(latest && latest->version>current ? L"发现新版本，可以立即更新。" : L"当前没有可安装的新版本。");
+            SetDlgItemTextW(window,1002,latest ? latest->version.Text().c_str() : i18n::Literal(L"无可用发行包"));
+            Status(latest && latest->version>current ? i18n::Literal(L"发现新版本，可以立即更新。") : i18n::Literal(L"当前没有可安装的新版本。"));
         }
         if(success) {current=update::FileVersion(player_executable);SetDlgItemTextW(window,1001,current.Text().c_str());SendDlgItemMessageW(window,1007,PBM_SETPOS,100,0);}
-        SetDlgItemTextW(window,1008,latest && latest->version>current ? L"立即更新" : L"重新检查");
+        SetDlgItemTextW(window,1008,latest && latest->version>current ? i18n::Literal(L"立即更新") : i18n::Literal(L"重新检查"));
         EnableWindow(GetDlgItem(window,1008),TRUE);
     }
     void Close() {
         if(applying) return;
-        if(busy) {closing=true;cancel=true;Status(L"正在取消，请稍候…");return;}
+        if(busy) {closing=true;cancel=true;Status(i18n::Literal(L"正在取消，请稍候…"));return;}
         DestroyWindow(window);
     }
     static INT_PTR CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
@@ -180,7 +183,7 @@ struct State {
             if(msg==WM_COMMAND && LOWORD(wp)==1003 && HIWORD(wp)==CBN_SELCHANGE) {
                 s->settings.general.update_source=SendDlgItemMessageW(hwnd,1003,CB_GETCURSEL,0,0)==1 ? 1 : 0;s->Check();return TRUE;}
             if(msg==WM_DESTROY) {PostQuitMessage(0);return TRUE;}
-        } catch(const std::exception& e){MessageBoxW(hwnd,update::ErrorText(e).c_str(),L"软件更新",MB_OK|MB_ICONERROR);}
+        } catch(const std::exception& e){MessageBoxW(hwnd,update::ErrorText(e).c_str(),i18n::Literal(L"软件更新"),MB_OK|MB_ICONERROR);}
         return FALSE;
     }
 };
@@ -208,6 +211,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
             if(!state.player_executable.empty()) player_name=state.player_executable.filename().wstring();
         }
         state.player_executable=update::InstalledPlayerPath(state.directory,player_name);
+        state.settings=settings::LoadRuntimeSettings(state.directory);
+        i18n::Initialize(state.directory,state.settings.general.language);
         state.current=update::FileVersion(state.player_executable);
         if(!temporary) {
             wchar_t folder[MAX_PATH]{};if(!GetTempPathW(MAX_PATH,folder)) throw std::runtime_error("Cannot locate temporary directory");
@@ -227,9 +232,9 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
         state.instance_mutex=CreateMutexW(nullptr,FALSE,(L"Local\\TTPlayerUpdater-"+std::to_wstring(hash)).c_str());
         if(!state.instance_mutex) throw std::runtime_error("Cannot create updater instance lock");
         if(GetLastError()==ERROR_ALREADY_EXISTS) {
-            MessageBoxW(nullptr,L"此目录的更新器已经打开。",L"软件更新",MB_OK|MB_ICONINFORMATION);CoUninitialize();return 0;
+            MessageBoxW(nullptr,i18n::Literal(L"此目录的更新器已经打开。"),i18n::Literal(L"软件更新"),MB_OK|MB_ICONINFORMATION);CoUninitialize();return 0;
         }
-        const auto window=CreateDialogParamW(instance,MAKEINTRESOURCEW(101),nullptr,State::Proc,LPARAM(&state));
+        const auto window=ui::CreateWtlDialog(instance,MAKEINTRESOURCEW(101),nullptr,State::Proc,LPARAM(&state));
         if(!window) throw std::runtime_error("Cannot create updater dialog");
         ShowWindow(window,show);MSG message{};
         while(GetMessageW(&message,nullptr,0,0)>0) if(!IsDialogMessageW(window,&message)){TranslateMessage(&message);DispatchMessageW(&message);}

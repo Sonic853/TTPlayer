@@ -1,4 +1,4 @@
-﻿#include "ttplayer/audio/disc_media.h"
+#include "ttplayer/audio/disc_media.h"
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "ttplayer/ui/player_window.h"
@@ -972,8 +972,8 @@ struct ImportScan {
             std::wstring path,phase;uint64_t n{},total{};size_t count{};
             {std::lock_guard lock(s->mutex);path=s->current;phase=s->phase;n=s->completed;total=s->total;count=s->found;}
             SetDlgItemTextW(window,IDC_FILE_IMPORT_PATH,path.c_str());
-            SetDlgItemTextW(window,IDC_FILE_IMPORT_PHASE,s->canceled?L"正在取消，请稍候…":phase.c_str());
-            const auto text=L"已找到 "+std::to_wstring(count)+L" 首曲目";
+            SetDlgItemTextW(window,IDC_FILE_IMPORT_PHASE,s->canceled?i18n::Literal(L"正在取消，请稍候…"):phase.c_str());
+            const auto text=i18n::Literal(L"已找到 ")+std::to_wstring(count)+i18n::Literal(L" 首曲目");
             SetDlgItemTextW(window,IDC_FILE_IMPORT_COUNTS,text.c_str());
             // Indeterminate activity works with XP common controls too. Known
             // percentages describe this scan stage, not an invented overall ETA.
@@ -996,7 +996,7 @@ struct ImportScan {
 bool ImportScan::Collect(const std::filesystem::path& input, bool directory_member,
                          std::vector<std::wstring>* directory_ancestry) {
     if (input.empty() || IsCanceled()) return false;
-    Report(input, L"正在检查文件…");
+    Report(input, i18n::Literal(L"正在检查文件…"));
     auto path = input;
     if (IsUrl(path.native())) {
         identities.Insert(path); tracks.push_back({path, {}, {}, -2});
@@ -1092,14 +1092,14 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
             const size_t before = tracks.size();
             std::wstring cue_read_error;
             bool complete = true;
-            Report(path, L"正在读取压缩包目录并校验…", true);
+            Report(path, i18n::Literal(L"正在读取压缩包目录并校验…"), true);
             const auto stop = [&] { return IsCanceled(); };
             if (audio::IsOszArchive(path)) {
-                Report(path,L"正在解析 OSZ 压缩包…",true);
+                Report(path,i18n::Literal(L"正在解析 OSZ 压缩包…"),true);
                 const auto media = audio::ResolveOszMedia(path,module,stop,
                     [&](uint64_t n,uint64_t total){Progress(n,total);});
                 if (media.empty()) {
-                    Error(path.filename().wstring()+L"\n\nOSZ 中没有有效的 .osu 音频引用，或引用的音乐文件不存在。");
+                    Error(path.filename().wstring()+i18n::Literal(L"\n\nOSZ 中没有有效的 .osu 音频引用，或引用的音乐文件不存在。"));
                     return false;
                 }
                 // ResolveOszMedia validates the reference; retain the actual
@@ -1125,7 +1125,7 @@ bool ImportScan::Collect(const std::filesystem::path& input, bool directory_memb
                         audio::ArchiveMemberPath archive_member;
                         if (!audio::ParseArchiveMemberPath(
                                 logical.native(), archive_member)) continue;
-                        Report(logical, L"正在读取包内 CUE 并校验…", true);
+                        Report(logical, i18n::Literal(L"正在读取包内 CUE 并校验…"), true);
                         const auto sheet = audio::CueSheet::LoadFromMemory(
                             audio::ReadArchiveMember(archive_member,
                                                      module, stop),
@@ -1260,11 +1260,11 @@ bool PlayerWindow::CollectImportedFiles(const std::vector<std::filesystem::path>
     file_import_cancelled_=scan.canceled;
     if(file_import_cancelled_)scan.tracks.resize(before);
     tracks=std::move(scan.tracks);
-    if(scan.failed && IsWindow(window_))MessageBoxW(window_,L"导入未能完成，播放列表保持不变。",L"导入歌曲",MB_OK|MB_ICONERROR);
+    if(scan.failed && IsWindow(window_))MessageBoxW(window_,i18n::Literal(L"导入未能完成，播放列表保持不变。"),i18n::Literal(L"导入歌曲"),MB_OK|MB_ICONERROR);
     else if(!scan.errors.empty() && IsWindow(window_)) {
         std::wstring message;for(const auto& error:scan.errors){if(!message.empty())message+=L"\n\n";message+=error;}
-        if(scan.suppressed_errors)message+=L"\n\n另有 "+std::to_wstring(scan.suppressed_errors)+L" 项错误未展开。";
-        MessageBoxW(window_,message.c_str(),L"导入歌曲",MB_OK|MB_ICONERROR);
+        if(scan.suppressed_errors)message+=i18n::Literal(L"\n\n另有 ")+std::to_wstring(scan.suppressed_errors)+i18n::Literal(L" 项错误未展开。");
+        MessageBoxW(window_,message.c_str(),i18n::Literal(L"导入歌曲"),MB_OK|MB_ICONERROR);
     }
     return tracks.size()!=before;
 }

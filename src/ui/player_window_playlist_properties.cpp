@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/cover_image.h"
 #include "ttplayer/ui/wtl_dialogs.h"
 #include "player_window_internal.h"
@@ -629,7 +630,7 @@ HWND CreateFileInfoToolbar(HWND page, HMODULE resources, const RECT& bounds,
         if (command == 0x86c || command == 0x86b) button.fsStyle |= BTNS_WHOLEDROPDOWN;
         if (command == 0x875) {
             button.fsStyle |= BTNS_CHECK | BTNS_SHOWTEXT | BTNS_AUTOSIZE;
-            auto text = FileInfoResource(resources, command, L"高级");
+            auto text = FileInfoResource(resources, command, i18n::Literal(L"高级"));
             const auto last = text.find_last_of(L'\n');
             if (last != text.npos) text.erase(0, last + 1);
             text.push_back(L'\0');
@@ -1910,7 +1911,7 @@ INT_PTR CALLBACK FileInfoCoverPageProc(HWND dialog, UINT message,
             if (!selected) return TRUE;
             auto bytes = ReadCoverBytes(*selected);
             if (!bytes) {
-                MessageBoxW(dialog, L"无法读取专辑封面：图片格式无效或超过允许的大小。",
+                MessageBoxW(dialog, i18n::Literal(L"无法读取专辑封面：图片格式无效或超过允许的大小。"),
                             nullptr, MB_OK | MB_ICONERROR);
                 return TRUE;
             }

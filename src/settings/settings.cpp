@@ -22,6 +22,12 @@
 #include <wrl/client.h>
 
 namespace ttplayer::settings {
+bool DefaultBrowserDisableGpu() {
+    OSVERSIONINFOEXW version{sizeof(version)};
+    version.dwMajorVersion=6;version.dwMinorVersion=1;
+    const auto mask=VerSetConditionMask(VerSetConditionMask(0,VER_MAJORVERSION,VER_EQUAL),VER_MINORVERSION,VER_EQUAL);
+    return VerifyVersionInfoW(&version,VER_MAJORVERSION|VER_MINORVERSION,mask)!=FALSE;
+}
 namespace {
 using Microsoft::WRL::ComPtr;
 
@@ -971,6 +977,7 @@ Settings LoadLegacyXml(const std::filesystem::path& path) {
         s.player.browser_visible=IntAttr(n,L"BrowserVisible",0)!=0;
         s.player.browser_auto_startup=IntAttr(n,L"BrowserAutoStartup",0)!=0;
         s.player.browser_engine=std::clamp(IntAttr(n,L"BrowserEngine",0),0,2);
+        s.player.browser_disable_gpu=IntAttr(n,L"BrowserDisableGpu",s.player.browser_disable_gpu?1:0)!=0;
         const auto browser_home=StringAttr(n,L"BrowserHomeURL");
         if(!browser_home.empty()) s.player.browser_home_url=browser_home;
         s.player.playlist_scan_count=IntAttr(n,L"PlayLists",100);
@@ -1835,6 +1842,7 @@ SaveResult SaveWindowState(const std::filesystem::path& path,
         SetAttribute(element,L"BrowserVisible",player.browser_visible ? 1 : 0);
         SetAttribute(element,L"BrowserAutoStartup",player.browser_auto_startup ? 1 : 0);
         SetAttribute(element,L"BrowserEngine",std::clamp(player.browser_engine,0,2));
+        SetAttribute(element,L"BrowserDisableGpu",player.browser_disable_gpu);
         SetAttribute(element,L"BrowserHomeURL",player.browser_home_url);
         SetAttribute(element,L"MiniMode",player.mini_mode ? 1 : 0);
         SetAttribute(element,L"TopMost",player.top_most ? 1 : 0);

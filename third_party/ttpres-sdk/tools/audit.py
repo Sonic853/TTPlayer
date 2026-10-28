@@ -3,7 +3,7 @@ import argparse
 import json
 import struct
 from pathlib import Path
-from resource_model import decode_dialog, decode_strings, legacy_checksum, load_json, pe, resources, save_json, sha256, version_company_name
+from resource_model import decode_dialog, decode_strings, legacy_checksum, load_json, pe, resources, save_json, sha256, version_company_name, corrected_tooltip
 
 
 def audit(path, manifest):
@@ -23,6 +23,7 @@ def audit(path, manifest):
     if len(actual) != len(leaves):
         raise ValueError('Duplicate resource leaves')
     company_name_overrides = 0
+    tooltip_overrides = 0
     for entry in manifest['resources']:
         key = (entry['type'], entry['name'], entry['language'])
         raw = actual.get(key, b'')
@@ -31,6 +32,9 @@ def audit(path, manifest):
             # Reversing it must reproduce the entire original VERSION resource.
             raw = version_company_name(raw, original=True)
             company_name_overrides += 1
+        if key == (6, 32904 // 16 + 1, 2052) and sha256(raw) != entry['original_sha256']:
+            raw = corrected_tooltip(raw, original=True)
+            tooltip_overrides += 1
         if len(raw) != entry['original_size'] or sha256(raw) != entry['original_sha256']:
             raise ValueError(f'Original resource differs: {key}')
     if actual.get((10, 'TTPLAYER_RES_ABI', 2052)) != b'TTPRES1\0\1\0\0\0\1\0\0\0':
@@ -42,6 +46,25 @@ def audit(path, manifest):
     expected = {(5, n, 2052) for n in (4090,4200,4210,4220,4230,5800,5810,5820,5901)}
     expected |= {(6, n, 2052) for n in range(256,262)}
     expected |= {(10, n, 2052) for n in ('TTPLAYER_RES_ABI','TTPLAYER_RES_BUILD')}
+    if (10, 'TTPLAYER_RES_MESSAGES', 2052) in actual:
+        expected.add((10, 'TTPLAYER_RES_MESSAGES', 2052))
+        messages = json.loads(actual[(10, 'TTPLAYER_RES_MESSAGES', 2052)].decode('utf-8'))
+        if messages['schema'] != 1 or len(messages['messages']) != metadata.get('interface_messages'):
+            raise ValueError('Invalid interface message index')
+        keys, ids = set(), set()
+        for item in messages['messages']:
+            key = (item['context'], item['source'])
+            if key in keys or not all(key):
+                raise ValueError('Duplicate or empty interface message')
+            keys.add(key)
+            for field, id_field in [('source', 'id'), ('plural', 'plural_id')]:
+                if not item.get(field): continue
+                ident = item[id_field]
+                if ident in ids or not 48000 <= ident < 60000:
+                    raise ValueError('Invalid interface message ID')
+                ids.add(ident)
+                if decode_strings(actual[(6, ident // 16 + 1, 2052)])['strings'][ident % 16] != item[field]:
+                    raise ValueError('Interface message index/string table mismatch')
     baseline = {(e['type'], e['name'], e['language']) for e in manifest['resources']}
     if not (baseline | expected) <= set(actual) or baseline & expected:
         raise ValueError('Missing or overlapping ABI 1 extension resources')
@@ -64,8 +87,9 @@ def audit(path, manifest):
                 (kind in (2,3,4,5,12,14,241) and 60000 <= name <= 65535))):
             raise ValueError('Unexpected future extension resource namespace')
     return dict(**metadata, sha256=sha256(data), bytes=len(data), resources=len(actual),
-                original_verified=192 - company_name_overrides,
+                original_verified=192 - company_name_overrides - tooltip_overrides,
                 company_name_overrides=company_name_overrides,
+                tooltip_overrides=tooltip_overrides,
                 architecture='x86', minimum_subsystem='5.01',
                 imports={}, exports=[], entry_point=0, legacy_checksum=f'{checksum:08X}')
 
@@ -88,6 +112,7 @@ def main():
     save_json(args.output, report)
     print(f"Resource audit: {report['original_verified']}/192 identical; "
           f"{report['company_name_overrides']} CompanyName overrides; "
+          f"{report['tooltip_overrides']} tooltip corrections; "
           f"{report['resources'] - 192} extensions; no code/CRT; XP subsystem")
 
 

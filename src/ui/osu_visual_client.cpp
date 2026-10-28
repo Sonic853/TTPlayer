@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "osu_visual_client.h"
 #include "ttplayer/settings/settings.h"
 #include "ttplayer/audio/archive_member.h"
@@ -343,7 +344,7 @@ void OsuVisualClient::Paint(HDC dc,const RECT& bounds,bool gpu) {
         const int saved=SaveDC(dc);
         SetDCBrushColor(dc,RGB(24,20,32));FillRect(dc,&bounds,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
         SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(230,230,230));
-        RECT text=bounds;DrawTextW(dc,L"请更新 AddIn\\ttp_osu.dll 以使用节拍星环",-1,&text,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+        RECT text=bounds;DrawTextW(dc,i18n::Literal(L"请更新 AddIn\\ttp_osu.dll 以使用节拍星环"),-1,&text,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
         if(saved)RestoreDC(dc,saved);return;
     }
     if(gpu) {

@@ -1,6 +1,7 @@
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/i18n/api.h"
 #include "ttplayer/core/text.h"
+#include "ttplayer/core/json.h"
 #include <ttpres/resource_extensions.h>
 #include <algorithm>
 #include <cstring>
@@ -16,6 +17,7 @@ struct State {
     HMODULE module{};
     const TtpI18nApi* api{};
     void* catalog{};
+    bool english{};
     std::mutex mutex;
     std::map<std::wstring, std::wstring, std::less<>> literals;
     ~State() { if (catalog) api->close(catalog); if (module) FreeLibrary(module); }
@@ -27,10 +29,61 @@ std::shared_ptr<State> Current() {
     return state;
 }
 const char* Domain(HMODULE module) {
-    return module == GetModuleHandleW(nullptr) ? "exe" : "ttpres";
+    if (module != GetModuleHandleW(nullptr)) return "ttpres";
+    wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);
+    return _wcsicmp(std::filesystem::path(executable).filename().c_str(),L"TTPUpdater.exe")==0 ? "updater" : "exe";
 }
 std::string ResourceKey(HMODULE module, const char* kind, UINT id) {
     return std::string(Domain(module)) + '/' + kind + '/' + std::to_string(id);
+}
+bool CompatibleTranslation(std::string_view context, std::wstring_view source, std::wstring_view translated) {
+    // This static label documents syntax; %(field name) is an example, never
+    // passed to the title formatter. Actual format strings remain strict.
+    if (context == "ttpres/dialog/254/control/4294967295/4") {
+        const auto normalize = [](std::wstring_view value) {
+            std::wstring text(value);
+            const auto begin = text.find(L"%(");
+            const auto end = begin == text.npos ? text.npos : text.find(L')', begin);
+            if (end != text.npos) text.replace(begin, end - begin + 1, L"%(Field)");
+            return text;
+        };
+        return CompatibleText(normalize(source), normalize(translated));
+    }
+    return CompatibleText(source, translated);
+}
+std::wstring OriginalMessage(const char* context, std::wstring_view source) {
+    // Text lives in the resource DLL; C++ literals remain stable gettext keys.
+    // Early startup errors must still work before the resource DLL is loaded.
+    static std::mutex mutex;
+    static HMODULE indexed{};
+    static std::map<std::pair<std::string, std::wstring>, UINT> index;
+    const std::lock_guard lock(mutex);
+    const auto module = GetModuleHandleW(L"ttpres.dll");
+    if (!module) return std::wstring(source);
+    if (indexed != module) {
+        index.clear();indexed = module;
+        try {
+            const auto resource = FindResourceW(module, L"TTPLAYER_RES_MESSAGES", RT_RCDATA);
+            const auto size = resource ? SizeofResource(module, resource) : 0;
+            const auto* data = resource ? static_cast<const char*>(LockResource(LoadResource(module, resource))) : nullptr;
+            if (data && size && size <= 4 * 1024 * 1024) {
+                const auto root = core::JsonReader(std::string_view(data, size)).Read();
+                for (const auto& item : root["messages"].items) {
+                    const auto key = item["context"].String();
+                    index.emplace(std::pair{key, core::Utf8ToWide(item["source"].String())}, static_cast<UINT>(item["id"].Integer()));
+                    if (!item["plural"].String().empty())
+                        index.emplace(std::pair{key, core::Utf8ToWide(item["plural"].String())}, static_cast<UINT>(item["plural_id"].Integer()));
+                }
+            }
+        } catch (...) { index.clear(); }
+    }
+    const auto found = index.find({context ? context : "app", std::wstring(source)});
+    if (found != index.end()) {
+        const wchar_t* text{};
+        const auto size = ::LoadStringW(module, found->second, reinterpret_cast<LPWSTR>(&text), 0);
+        if (size > 0 && text) return std::wstring(text, size);
+    }
+    return std::wstring(source);
 }
 std::optional<std::wstring> Lookup(const std::shared_ptr<State>& current,
     const char* context, std::wstring_view source, std::wstring_view plural = {}, uint64_t count = 1) {
@@ -44,7 +97,7 @@ std::optional<std::wstring> Lookup(const std::shared_ptr<State>& current,
                                 translated.data(), size) != size || translated.back() != 0) return {};
         translated.pop_back();
         if (translated.empty() || translated.find(L'\0') != translated.npos ||
-            !CompatibleText(count == 1 || plural.empty() ? source : plural, translated)) return {};
+            !CompatibleTranslation(context ? context : "", count == 1 || plural.empty() ? source : plural, translated)) return {};
         return translated;
     } catch (...) { return {}; }
 }
@@ -88,8 +141,9 @@ std::wstring SystemLanguage() {
 }
 
 // Read and rebuild standard/extended resource templates with explicit bounds.
-// Only captions change. Resource ordinals, styles, fonts and creation data stay
-// intact, and translated buffers belong to the dialog/page adapter.
+// Resource ordinals, styles and creation data stay intact. English templates
+// get wider columns and a Latin UI font; Chinese geometry is unchanged.
+// Translated buffers belong to the dialog/page adapter.
 class Template {
     const std::byte* bytes_{};
     size_t size_{}, at_{};
@@ -112,7 +166,17 @@ class Template {
         Check(next - at_); at_ = next;
         while (output_.size() % 4) output_.push_back(std::byte{});
     }
-    std::wstring Field(const std::string& context = {}) {
+    void ExpandHorizontal(size_t begin, size_t x, size_t width) {
+        if (!EnglishLayout()) return;
+        for (const auto offset : {x, width}) {
+            int16_t value{};
+            std::memcpy(&value, output_.data() + begin + offset, 2);
+            value = static_cast<int16_t>(value * 3 / 2);
+            std::memcpy(output_.data() + begin + offset, &value, 2);
+        }
+        changed_ = true;
+    }
+    std::wstring Field(const std::string& context = {}, std::wstring_view replacement = {}) {
         const size_t begin = at_;
         if (WordAt(at_) == 0xffff) { Copy(4); return {}; }
         while (WordAt(at_) != 0) at_ += 2;
@@ -121,6 +185,7 @@ class Template {
         std::wstring source(length, L'\0');
         if (length) std::memcpy(source.data(), bytes_ + begin, length * 2);
         auto translated = context.empty() || source.empty() ? source : ResourceTranslation(context, source);
+        if (!replacement.empty()) translated = replacement;
         changed_ |= translated != source;
         const auto* data = reinterpret_cast<const std::byte*>(translated.c_str());
         output_.insert(output_.end(), data, data + (translated.size() + 1) * 2);
@@ -135,10 +200,11 @@ public:
         const DWORD style = DwordAt(extended ? 12 : 0);
         const WORD count = WordAt(extended ? 16 : 8);
         Copy(extended ? 26 : 18);
+        ExpandHorizontal(0, extended ? 18 : 10, extended ? 22 : 14);
         Field(); Field();
         const auto key = ResourceKey(module_, "dialog", id_);
         caption = Field(key + "/title");
-        if (style & DS_SETFONT) { Copy(extended ? 6 : 2); Field(); }
+        if (style & DS_SETFONT) { Copy(extended ? 6 : 2); Field({}, EnglishLayout() ? L"Tahoma" : L""); }
         std::map<UINT, unsigned> occurrences;
         for (unsigned i = 0; i < count; ++i) {
             Align();
@@ -146,7 +212,29 @@ public:
             UINT control = extended ? DwordAt(at_ + 20) : WordAt(at_ + 16);
             if (control == 0xffff) control = 0xffffffff;
             const auto occurrence = occurrences[control]++;
+            const auto output_begin = output_.size();
             Copy(extended ? 24 : 18);
+            // The original Chinese "when" occupies only nine DLUs. Reserve a
+            // full word in English while preserving the three-part sentence.
+            if (EnglishLayout() && extended) {
+                const auto geometry = [&](short x, short width) {
+                    std::memcpy(output_.data()+output_begin+12,&x,2);
+                    std::memcpy(output_.data()+output_begin+16,&width,2);
+                };
+                if(id_==254) {
+                    if(control==2009) geometry(164,46);
+                    if(control==0xffffffff && occurrence==7) geometry(212,60);
+                    if(control==0xffffffff && occurrence==8) geometry(146,16);
+                }
+                // "Transparent" needs more room at each slider's right end.
+                if(id_==385) {
+                    if(control==2262) geometry(50,51);
+                    if(control==2263) geometry(181,46);
+                    if(control==0xffffffff && occurrence==7) geometry(104,26);
+                    if(control==0xffffffff && occurrence==9) geometry(230,26);
+                }
+            }
+            ExpandHorizontal(output_begin, extended ? 12 : 8, extended ? 16 : 12);
             const auto ordinal = WordAt(at_) == 0xffff ? WordAt(at_ + 2) : 0;
             const auto klass = Field();
             const bool label = ordinal == 0x80 ||
@@ -209,12 +297,19 @@ bool Initialize(const std::filesystem::path& runtime, std::wstring_view language
             !loaded->api->close || !loaded->api->lookup) return false;
         loaded->catalog = loaded->api->open((runtime / L"i18n").c_str(), selected.c_str());
         if (!loaded->catalog) return false;
+        loaded->english = selected.size() >= 2 && _wcsnicmp(selected.c_str(), L"en", 2) == 0;
         const std::lock_guard lock(state_mutex);
         state = std::move(loaded); return true;
     } catch (...) { return false; }
 }
 void Shutdown() noexcept { const std::lock_guard lock(state_mutex); state.reset(); }
 bool Available() noexcept { return !!Current(); }
+BOOL MapDialogRect(HWND dialog, RECT* bounds) noexcept {
+    if (!bounds) return FALSE;
+    if (EnglishLayout()) { bounds->left=bounds->left*3/2;bounds->right=bounds->right*3/2; }
+    return ::MapDialogRect(dialog,bounds);
+}
+bool EnglishLayout() noexcept { const auto current = Current(); return current && current->english; }
 std::vector<std::wstring> Languages(const std::filesystem::path& runtime) {
     std::vector<std::wstring> result;
     std::error_code error;
@@ -232,7 +327,7 @@ std::vector<std::wstring> Languages(const std::filesystem::path& runtime) {
 }
 std::wstring Text(std::wstring_view source, const char* context) {
     auto translated = Lookup(Current(), context, source);
-    return translated ? std::move(*translated) : std::wstring(source);
+    return translated ? std::move(*translated) : OriginalMessage(context, source);
 }
 const wchar_t* Literal(const wchar_t* source) {
     if (!source) return nullptr;
@@ -242,11 +337,11 @@ const wchar_t* Literal(const wchar_t* source) {
     const auto found = current->literals.find(source);
     if (found != current->literals.end()) return found->second.c_str();
     auto translated = Lookup(current, "app", source);
-    return current->literals.emplace(source, translated ? *translated : source).first->second.c_str();
+    return current->literals.emplace(source, translated ? *translated : OriginalMessage("app", source)).first->second.c_str();
 }
 std::wstring Plural(const char* context, std::wstring_view singular, std::wstring_view plural, uint64_t count) {
     auto translated = Lookup(Current(), context, singular, plural, count);
-    return translated ? std::move(*translated) : std::wstring(count == 1 ? singular : plural);
+    return translated ? std::move(*translated) : OriginalMessage(context, count == 1 ? singular : plural);
 }
 std::wstring ResourceText(HMODULE module, UINT id) {
     const auto source = ttpres::Resolve(module, RT_STRING, id);
@@ -294,6 +389,13 @@ bool CompatibleText(std::wstring_view source, std::wstring_view translated) {
             const auto start = i;
             if (++i == text.size()) { printf_tokens.emplace_back(L"%"); break; }
             if (text[i] == L'%') { printf_tokens.emplace_back(L"%%"); continue; }
+            // Environment variables in path help are one named token. The
+            // closing '%' must not consume punctuation in the surrounding text.
+            if (const auto end = text.find(L'%', i); end != text.npos && end > i+1 &&
+                ((text[i]>=L'A' && text[i]<=L'Z') || text[i]==L'_') &&
+                text.substr(i, end-i).find_first_not_of(L"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") == text.npos) {
+                named.emplace_back(text.substr(start, end-start+1)); i=end; continue;
+            }
             if (text[i] == L'(') {
                 const auto end = text.find(L')', i);
                 if (end != text.npos) { named.emplace_back(text.substr(start, end - start + 1)); i = end; continue; }

@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/update/update.h"
 #include "ttplayer/net/https_provider.h"
 #include "ttplayer/core/text.h"
@@ -222,7 +223,7 @@ void Http::Download(const std::wstring& url,const std::filesystem::path& file,ui
             const auto body=Get(address,canceled);sink(reinterpret_cast<const unsigned char*>(body.data()),body.size(),body.size(),body.size());complete=true;
         }
         if(!complete) {
-            if(impl_->api && !impl_->streaming && IsXp()) throw std::runtime_error("HTTPS 组件版本过旧，请从发布页更新 ttp_https.dll。");
+            if(impl_->api && !impl_->streaming && IsXp()) throw std::runtime_error(core::WideToUtf8(i18n::Text(L"HTTPS 组件版本过旧，请从发布页更新 ttp_https.dll。")));
             impl_->Native(address,expected ? expected : 64ULL*1024*1024,canceled,sink);
         }
         if(!written || (expected && written!=expected)) throw std::runtime_error("Package download length mismatch");

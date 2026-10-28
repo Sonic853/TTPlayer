@@ -1,5 +1,6 @@
 #pragma once
 #include "ttplayer/settings/settings.h"
+#include "ttplayer/i18n/i18n.h"
 #include <array>
 #include <compare>
 #include <exception>
@@ -14,7 +15,7 @@
 
 namespace ttplayer::update {
 enum class Source { gitee = 0, github = 1 };
-inline constexpr wchar_t kMissingHttps[] = L"缺少 HTTPS 组件，请前往发布页手动下载更新";
+inline constexpr const wchar_t* kMissingHttps = i18n::Mark(L"缺少 HTTPS 组件，请前往发布页手动下载更新");
 inline constexpr wchar_t kGitHubPage[] = L"https://github.com/Sonic853/TTPlayer/releases";
 inline constexpr wchar_t kGiteePage[] = L"https://gitee.com/Sonic853/TTPlayer/releases";
 inline constexpr UINT kPrepareInstallMessage = WM_APP + 0x351;

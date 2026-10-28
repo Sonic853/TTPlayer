@@ -52,7 +52,7 @@ class LibraryOptionsTabs {
     void Layout() {
         if(laying_out_)return;
         laying_out_=true;
-        RECT client{},inset{0,0,4,4};GetClientRect(page_,&client);MapDialogRect(page_,&inset);
+        RECT client{},inset{0,0,4,4};GetClientRect(page_,&client);i18n::MapDialogRect(page_,&inset);
         SetWindowPos(tab_,HWND_BOTTOM,0,0,client.right,client.bottom,SWP_NOACTIVATE);
         RECT content{};GetClientRect(tab_,&content);TabCtrl_AdjustRect(tab_,FALSE,&content);
         MapWindowPoints(tab_,page_,reinterpret_cast<POINT*>(&content),2);
@@ -104,7 +104,7 @@ public:
         if(!osu_enabled)return;
         DWORD_PTR existing{};if(GetWindowSubclass(page,PageProc,kSubclass,&existing))return;
         auto* self=new LibraryOptionsTabs;self->page_=page;self->osu_enabled_=osu_enabled;
-        RECT origin{7,7,0,0},compact{0,48,0,97};MapDialogRect(page,&origin);MapDialogRect(page,&compact);
+        RECT origin{7,7,0,0},compact{0,48,0,97};i18n::MapDialogRect(page,&origin);i18n::MapDialogRect(page,&compact);
         for(HWND control=GetWindow(page,GW_CHILD);control;control=GetWindow(control,GW_HWNDNEXT)) {
             RECT r{};GetWindowRect(control,&r);MapWindowPoints(nullptr,page,reinterpret_cast<POINT*>(&r),2);
             wchar_t klass[32]{};GetClassNameW(control,klass,32);
@@ -126,12 +126,12 @@ public:
             if(self->tab_)DestroyWindow(self->tab_);delete self;return;
         }
         const auto font=SendMessageW(page,WM_GETFONT,0,0);SendMessageW(self->tab_,WM_SETFONT,font,FALSE);
-        const wchar_t* tabs[]{L"媒体库",L"osu!lazer",L"osu!"};
+        const wchar_t* tabs[]{i18n::Literal(L"媒体库"),L"osu!lazer",L"osu!"};
         for(int i=0;i<3;++i) {
             auto text=i18n::Text(tabs[i]);TCITEMW item{};item.mask=TCIF_TEXT;item.pszText=text.data();
             TabCtrl_InsertItem(self->tab_,i,&item);
         }
-        RECT reference{0,0,259,0};MapDialogRect(page,&reference);
+        RECT reference{0,0,259,0};i18n::MapDialogRect(page,&reference);
         self->reference_width_=reference.right;
         const auto add=[&](LPCWSTR klass,LPCWSTR text,int id,DWORD style,RECT r,
                           int group,Anchor anchor=Anchor::Fixed,DWORD ex=0) {
@@ -139,7 +139,7 @@ public:
             HWND control=CreateWindowExW(ex,klass,caption.c_str(),WS_CHILD|style,0,0,0,0,page,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),instance,nullptr);
             if(!control)return;
-            SendMessageW(control,WM_SETFONT,font,FALSE);MapDialogRect(page,&r);
+            SendMessageW(control,WM_SETFONT,font,FALSE);i18n::MapDialogRect(page,&r);
             self->controls_.push_back({control,r,group,true,anchor});
             if(IsOsuLibraryPathControl(id))SendMessageW(control,EM_SETLIMITTEXT,32767,0);
         };
@@ -154,7 +154,7 @@ public:
             for(int row=0;row<2;++row) {
                 const LONG y=3+row*23;
                 const auto& ids=rows[page_index][row];
-                add(WC_STATICW,row?L"歌曲目录：":L"程序文件：",ids.label,SS_LEFT,
+                add(WC_STATICW,row?i18n::Literal(L"歌曲目录："):i18n::Literal(L"程序文件："),ids.label,SS_LEFT,
                     {3,y+2,60,y+14},group);
                 add(WC_EDITW,L"",ids.edit,WS_TABSTOP|ES_AUTOHSCROLL,
                     {62,y,237,y+14},group,Anchor::Stretch,WS_EX_CLIENTEDGE);
@@ -164,8 +164,8 @@ public:
             add(WC_STATICW,L"",page_index?kLibraryOsuStableStatus:kLibraryOsuLazerStatus,
                 SS_LEFT,{3,52,259,78},group,Anchor::Stretch);
             add(WC_STATICW,page_index?
-                L"歌曲目录通常为 osu! 程序目录下的 Songs 文件夹。\r\n路径可使用 %USERPROFILE% 等环境变量。":
-                L"歌曲目录为 lazer 存储位置下的 files 文件夹。\r\n路径可使用 %USERPROFILE% 等环境变量。",
+                i18n::Literal(L"歌曲目录通常为 osu! 程序目录下的 Songs 文件夹。\r\n路径可使用 %USERPROFILE% 等环境变量。"):
+                i18n::Literal(L"歌曲目录为 lazer 存储位置下的 files 文件夹。\r\n路径可使用 %USERPROFILE% 等环境变量。"),
                 page_index?kLibraryOsuNotice:kLibraryOsuLazerNotice,
                 SS_LEFT,{3,86,259,128},group,Anchor::Stretch);
         }

@@ -43,7 +43,7 @@ public:
     static void Populate(HWND page, HINSTANCE instance, const settings::FullScreenSettings& value) {
         if(!GetDlgItem(page,IDC_FULLSCREEN_DREAM_RESOLUTION)) {
             const auto add=[&](LPCWSTR klass, UINT label, int id, DWORD style, RECT bounds, DWORD ex=0) {
-                MapDialogRect(page,&bounds);
+                i18n::MapDialogRect(page,&bounds);
                 const auto text=label?i18n::ResourceText(GetModuleHandleW(nullptr),label):std::wstring{};
                 const HWND control=CreateWindowExW(ex,klass,text.c_str(),WS_CHILD|WS_VISIBLE|style,
                     bounds.left,bounds.top,bounds.right-bounds.left,bounds.bottom-bounds.top,page,

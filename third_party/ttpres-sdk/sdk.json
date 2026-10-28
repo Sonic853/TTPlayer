@@ -6,7 +6,7 @@
     "include/ttpres/resource_extensions.h": "463ddb63a5b491bf3dfeb4beac94f314796a632f93ecc811020f6c4dbb797473",
     "include/ttpres/resource_ids.h": "bb3c74020ea0aec37be1b9a56d15f91ac5c94aed4cdf4064a47503752e00d6e0",
     "baseline.json": "f210a59109f09b7e6d77146e04fbfe102d1b0c552dc038b5110db37f6c026d87",
-    "tools/resource_model.py": "9d7d853327391cc2d25b9843f3d4c574610431a503ab69416f1daca42b72b405",
-    "tools/audit.py": "be9d0731497de7d90322c8f7f0dc9f8167498170d9d2250cc1f7cd3c7748c7f7"
+    "tools/resource_model.py": "6bb58ac46789bc8756e31ffbd12cc601e6587b1157f6071b696764ed4bc7304a",
+    "tools/audit.py": "1d6a7a41c6ef8eb724924db53d9ec50a60f0a5904a45e4586e542f379dee73c2"
   }
 }

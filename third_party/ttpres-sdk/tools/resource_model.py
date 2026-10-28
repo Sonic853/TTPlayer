@@ -190,6 +190,18 @@ def encode_strings(value):
     return result + bytes.fromhex(value['tail'])
 
 
+def corrected_tooltip(data, original=False):
+    """32904 is the oscilloscope tooltip; 32587 alone means Play next."""
+    value = decode_strings(data)
+    before, after = '将选中歌曲作为下一个播放对象', '显示示波器效果'
+    if original:
+        before, after = after, before
+    if value['strings'][32904 % 16] != before:
+        raise ValueError('Unexpected oscilloscope tooltip source')
+    value['strings'][32904 % 16] = after
+    return encode_strings(value)
+
+
 def decode_toolbar(data):
     r = Reader(data)
     version, width, height, count = r.unpack('HHHH')

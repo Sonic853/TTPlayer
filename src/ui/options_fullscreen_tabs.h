@@ -23,7 +23,7 @@ class FullscreenOptionsTabs {
         laying_out_ = true;
         RECT client{}, inset{0, 0, 4, 4};
         GetClientRect(page_, &client);
-        MapDialogRect(page_, &inset);
+        i18n::MapDialogRect(page_, &inset);
         SetWindowPos(tab_, HWND_BOTTOM, 0, 0, client.right, client.bottom, SWP_NOACTIVATE);
         RECT content{};
         GetClientRect(tab_, &content);
@@ -32,7 +32,7 @@ class FullscreenOptionsTabs {
         constexpr std::array<int, 3> origins{162, 7, 63};
         for (const auto& control : controls_) {
             RECT origin{7, origins[control.group], 0, 0};
-            MapDialogRect(page_, &origin);
+            i18n::MapDialogRect(page_, &origin);
             const auto& r = control.bounds;
             const int x = content.left + inset.right + r.left - origin.left;
             SetWindowPos(control.window, nullptr, x,
@@ -94,7 +94,7 @@ public:
         }
         SendMessageW(self->tab_, WM_SETFONT, SendMessageW(page, WM_GETFONT, 0, 0), FALSE);
         RECT boundaries{0, 63, 0, 162};
-        MapDialogRect(page, &boundaries);
+        i18n::MapDialogRect(page, &boundaries);
         std::vector<HWND> group_boxes;
         for (HWND control = GetWindow(page, GW_CHILD); control; control = GetWindow(control, GW_HWNDNEXT)) {
             if (control == self->tab_) continue;

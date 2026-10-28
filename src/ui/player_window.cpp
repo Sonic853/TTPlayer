@@ -6602,9 +6602,12 @@ void PlayerWindow::ApplySkinWindowAlpha(HWND target, BYTE alpha) {
     COLORREF color_key{};
     DWORD flags = LWA_ALPHA;
     if (target == MusicBrowserWindow()) {
-        BYTE previous_alpha{}; DWORD previous_flags{};
-        if (GetLayeredWindowAttributes(target, &color_key, &previous_alpha, &previous_flags))
-            flags |= previous_flags & LWA_COLORKEY;
+        // XP can stop reporting layered attributes after resize. The browser
+        // skin is authoritative; querying the HWND here can lose its color key
+        // during a fade even while native alpha rendering still works.
+        color_key = skin_ && skin_->Browser().valid
+            ? skin_->Browser().transparent_color : RGB(255, 0, 255);
+        flags |= LWA_COLORKEY;
     }
     if (target == lyric_window_ && settings_.lyric.transparent &&
         !NativeLyricContentActive() &&

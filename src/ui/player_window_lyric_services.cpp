@@ -38,7 +38,7 @@ void PlayerWindow::InstallLyricServiceEditorButton(HWND dialog) {
     const auto font = SendMessageW(previous, WM_GETFONT, 0, 0);
     const HWND after = GetWindow(previous, GW_HWNDPREV);
     DestroyWindow(previous);
-    RECT minimum{0,0,42,14}; MapDialogRect(dialog, &minimum);
+    RECT minimum{0,0,42,14}; i18n::MapDialogRect(dialog, &minimum);
     const LONG width = std::max(rect.right - rect.left, minimum.right);
     rect.left = rect.right - width; // retain the resource's right margin
     const HWND combo = GetDlgItem(dialog, 2090);

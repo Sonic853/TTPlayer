@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/audio/precise_seek_source.h"
 
 #include <algorithm>
@@ -81,7 +82,7 @@ public:
     AudioFormat DisplayFormat() const override { return source_->DisplayFormat(); }
     std::chrono::milliseconds Duration() const override { return source_->Duration(); }
     std::wstring Error() const override {
-        return FAILED(error_) ? L"解码器定位后返回了无效的 PCM 格式或数据。" : source_->Error();
+        return FAILED(error_) ? i18n::Literal(L"解码器定位后返回了无效的 PCM 格式或数据。") : source_->Error();
     }
     HRESULT ErrorResult() const override {
         return FAILED(error_) ? error_ : source_->ErrorResult();

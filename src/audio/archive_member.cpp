@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/audio/archive_member.h"
 #include "ttplayer/audio/archive_password.h"
 #include "ttplayer/audio/osz_archive.h"
@@ -359,20 +360,20 @@ ArchiveError::ArchiveError(HRESULT result)
     : std::runtime_error("Archive operation failed: " + std::to_string(static_cast<unsigned long>(result))),result_(result) {}
 
 std::wstring ArchiveError::Message() const {
-    if(result_==kOszPluginMissing) return L"未安装可用的 OSZ 插件。请将可选插件 ttp_osu.dll 放入 AddIn 目录后重新启动播放器。";
-    if(result_==kOszPluginIncompatible) return L"AddIn\\ttp_osu.dll 版本或接口不兼容。请更新 OSZ 插件后重新启动播放器。";
-    if(result_==TTPCOMM_ARCHIVE_PASSWORD) return L"压缩包需要密码。请播放或重新添加该压缩包以输入密码。";
-    if(result_==TTPCOMM_ARCHIVE_BAD_PASSWORD) return L"压缩包密码不正确，或加密数据已损坏。";
-    if(result_==TTPCOMM_ARCHIVE_MISSING_VOLUME) return L"压缩包缺少分卷。请重新导入并选择所需分卷，或将全部分卷放在同一目录。";
-    if(result_==TTPCOMM_ARCHIVE_DICTIONARY_LIMIT) return L"压缩包所需的解压字典超过播放器的内存限制。";
-    if(result_==TTPCOMM_ARCHIVE_UNSUPPORTED) return L"不支持此压缩方式或成员类型。";
-    if(result_==HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH)) return L"ttpcomm.dll 缺少归档接口，请手动替换完整发行包。";
-    if(result_==HRESULT_FROM_WIN32(ERROR_CRC) || result_==HRESULT_FROM_WIN32(ERROR_INVALID_DATA)) return L"压缩包数据损坏或校验失败。";
-    if(result_==HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE)) return L"压缩包成员超过允许的大小。";
-    if(result_==HRESULT_FROM_WIN32(ERROR_CANCELLED)) return L"已取消读取压缩包。";
-    if(result_==E_OUTOFMEMORY) return L"读取压缩包时内存不足。";
-    if(result_==HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) return L"压缩包内找不到此文件。";
-    return L"无法读取压缩包，请检查文件是否完整且可访问。";
+    if(result_==kOszPluginMissing) return i18n::Literal(L"未安装可用的 OSZ 插件。请将可选插件 ttp_osu.dll 放入 AddIn 目录后重新启动播放器。");
+    if(result_==kOszPluginIncompatible) return i18n::Literal(L"AddIn\\ttp_osu.dll 版本或接口不兼容。请更新 OSZ 插件后重新启动播放器。");
+    if(result_==TTPCOMM_ARCHIVE_PASSWORD) return i18n::Literal(L"压缩包需要密码。请播放或重新添加该压缩包以输入密码。");
+    if(result_==TTPCOMM_ARCHIVE_BAD_PASSWORD) return i18n::Literal(L"压缩包密码不正确，或加密数据已损坏。");
+    if(result_==TTPCOMM_ARCHIVE_MISSING_VOLUME) return i18n::Literal(L"压缩包缺少分卷。请重新导入并选择所需分卷，或将全部分卷放在同一目录。");
+    if(result_==TTPCOMM_ARCHIVE_DICTIONARY_LIMIT) return i18n::Literal(L"压缩包所需的解压字典超过播放器的内存限制。");
+    if(result_==TTPCOMM_ARCHIVE_UNSUPPORTED) return i18n::Literal(L"不支持此压缩方式或成员类型。");
+    if(result_==HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH)) return i18n::Literal(L"ttpcomm.dll 缺少归档接口，请手动替换完整发行包。");
+    if(result_==HRESULT_FROM_WIN32(ERROR_CRC) || result_==HRESULT_FROM_WIN32(ERROR_INVALID_DATA)) return i18n::Literal(L"压缩包数据损坏或校验失败。");
+    if(result_==HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE)) return i18n::Literal(L"压缩包成员超过允许的大小。");
+    if(result_==HRESULT_FROM_WIN32(ERROR_CANCELLED)) return i18n::Literal(L"已取消读取压缩包。");
+    if(result_==E_OUTOFMEMORY) return i18n::Literal(L"读取压缩包时内存不足。");
+    if(result_==HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) return i18n::Literal(L"压缩包内找不到此文件。");
+    return i18n::Literal(L"无法读取压缩包，请检查文件是否完整且可访问。");
 }
 
 bool ParseZipMemberPath(std::wstring_view logical_path,

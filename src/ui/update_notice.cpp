@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "update_notice.h"
 #include "ttplayer/ui/wtl_runtime.h"
 #include "ttplayer/platform/windows_features.h"
@@ -20,12 +21,12 @@ struct Notice {
         if(native) {
             NOTIFYICONDATAW info{};info.cbSize=sizeof(info);info.hWnd=window;info.uID=1;
             info.uFlags=NIF_ICON|NIF_MESSAGE|NIF_TIP;info.hIcon=LoadIconW(nullptr,IDI_INFORMATION);info.uCallbackMessage=kCallback;
-            wcscpy_s(info.szTip,L"千千静听 - 软件更新");
+            wcscpy_s(info.szTip,i18n::Literal(L"千千静听 - 软件更新"));
             icon=Shell_NotifyIconW(NIM_ADD,&info)!=FALSE;
             if(icon) {
                 info.uFlags=NIF_INFO;info.dwInfoFlags=NIIF_INFO;
-                wcscpy_s(info.szInfoTitle,L"千千静听 - 最新版本");
-                wcscpy_s(info.szInfo,L"发现新版本，请点击通知前往选项更新。");
+                wcscpy_s(info.szInfoTitle,i18n::Literal(L"千千静听 - 最新版本"));
+                wcscpy_s(info.szInfo,i18n::Literal(L"发现新版本，请点击通知前往选项更新。"));
                 if(Shell_NotifyIconW(NIM_MODIFY,&info)) {SetTimer(window,1,60000,nullptr);return;}
                 Shell_NotifyIconW(NIM_DELETE,&info);icon=false;
             }
@@ -39,7 +40,7 @@ struct Notice {
         RECT work{};SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);
         const int w=MulDiv(384,dpi,96),h=MulDiv(260,dpi,96),bar=MulDiv(30,dpi,96);
         SetWindowPos(window,HWND_TOPMOST,work.right-w-8,work.bottom-h,w,h,SWP_NOACTIVATE);
-        auto options=CreateWindowW(L"STATIC",L"选项",WS_CHILD|WS_VISIBLE|SS_NOTIFY,w-MulDiv(58,dpi,96),MulDiv(9,dpi,96),MulDiv(28,dpi,96),MulDiv(18,dpi,96),window,HMENU(123),GetModuleHandleW(nullptr),nullptr);
+        auto options=CreateWindowW(L"STATIC",i18n::Literal(L"选项"),WS_CHILD|WS_VISIBLE|SS_NOTIFY,w-MulDiv(58,dpi,96),MulDiv(9,dpi,96),MulDiv(28,dpi,96),MulDiv(18,dpi,96),window,HMENU(123),GetModuleHandleW(nullptr),nullptr);
         auto close=CreateWindowW(L"BUTTON",L"×",WS_CHILD|WS_VISIBLE|BS_FLAT,w-MulDiv(24,dpi,96),MulDiv(8,dpi,96),MulDiv(16,dpi,96),MulDiv(16,dpi,96),window,HMENU(IDCANCEL),GetModuleHandleW(nullptr),nullptr);
         SendMessageW(options,WM_SETFONT,WPARAM(font),0);SendMessageW(close,WM_SETFONT,WPARAM(font),0);
         bool rendered=false;
@@ -51,7 +52,7 @@ struct Notice {
                 // XP and modern systems without an ACP/UTF-8 mismatch.
                 rendered=SUCCEEDED(html.CreateControl(L"MSHTML:<html><body style='margin:12px;background:white;font:12px SimSun'>&#35831;&#28857;&#20987;&#36873;&#39033;&#21069;&#24448;&#26356;&#26032;</body></html>"));
         }
-        if(!rendered) CreateWindowW(L"STATIC",L"请点击选项前往更新",WS_CHILD|WS_VISIBLE,12,bar+12,w-24,h-bar-24,window,nullptr,GetModuleHandleW(nullptr),nullptr);
+        if(!rendered) CreateWindowW(L"STATIC",i18n::Literal(L"请点击选项前往更新"),WS_CHILD|WS_VISIBLE,12,bar+12,w-24,h-bar-24,window,nullptr,GetModuleHandleW(nullptr),nullptr);
         // Original HTML notices use an effectively indefinite lifetime
         // (00462D2A passes 0x7fffffff), closed by the options/close controls.
         ShowWindow(window,SW_SHOWNOACTIVATE);
@@ -78,7 +79,7 @@ struct Notice {
                 const int dpi=GetDeviceCaps(dc,LOGPIXELSY),unit=MulDiv(16,dpi,96);
                 DrawIconEx(dc,MulDiv(12,dpi,96),MulDiv(8,dpi,96),LoadIconW(nullptr,IDI_INFORMATION),unit,unit,0,nullptr,DI_NORMAL);
                 RECT title{MulDiv(38,dpi,96),0,r.right-MulDiv(62,dpi,96),MulDiv(30,dpi,96)};
-                DrawTextW(dc,L"千千静听 - 最新版本",-1,&title,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS);
+                DrawTextW(dc,i18n::Literal(L"千千静听 - 最新版本"),-1,&title,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS);
                 SelectObject(dc,old);EndPaint(hwnd,&paint);return 0;
             }
             if(msg==WM_DESTROY) {
@@ -95,7 +96,7 @@ HWND ShowUpdateNotice(HWND owner) {
     WNDCLASSW wc{};wc.hInstance=GetModuleHandleW(nullptr);wc.lpfnWndProc=Notice::Proc;
     wc.lpszClassName=L"TTPlayerUpdateNotice";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&wc);
     auto state=std::make_unique<Notice>();state->owner=owner;state->native=platform::CurrentWindowsFeatures().version.AtLeast(6,2);
-    const auto window=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,wc.lpszClassName,L"千千静听 - 最新版本",
+    const auto window=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,wc.lpszClassName,i18n::Literal(L"千千静听 - 最新版本"),
         WS_POPUP|WS_CLIPCHILDREN|WS_CLIPSIBLINGS,0,0,0,0,owner,nullptr,wc.hInstance,state.get());
     if(window) {state->owned=true;state.release();}return window;
 }

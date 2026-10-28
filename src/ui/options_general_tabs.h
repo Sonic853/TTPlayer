@@ -34,7 +34,7 @@ class GeneralOptionsTabs {
         // including its top/left origin, without a second outer gutter.
         RECT client{}, inset{0, 0, 4, 4};
         GetClientRect(page_, &client);
-        MapDialogRect(page_, &inset);
+        i18n::MapDialogRect(page_, &inset);
         SetWindowPos(tab_, HWND_BOTTOM, client.left, client.top,
                      client.right - client.left, client.bottom - client.top,
                      SWP_NOACTIVATE);
@@ -45,7 +45,7 @@ class GeneralOptionsTabs {
         constexpr std::array<int, 4> first_row{18, 18, 143, 189};
         for (const auto& control : controls_) {
             RECT origin{0, first_row[control.group], 0, 0};
-            MapDialogRect(page_, &origin);
+            i18n::MapDialogRect(page_, &origin);
             const auto& rect = control.bounds;
             const int right = std::min<int>(rect.right, content.right - inset.right);
             SetWindowPos(control.window, nullptr, rect.left,
@@ -98,7 +98,7 @@ public:
         auto* self = new GeneralOptionsTabs;
         self->page_ = page;
         RECT groups{0, 130, 0, 179};
-        MapDialogRect(page, &groups);
+        i18n::MapDialogRect(page, &groups);
         std::array<std::wstring, 4> captions;
         captions[1] = i18n::Text(L"个性化");
         for (HWND control = GetWindow(page, GW_CHILD); control;

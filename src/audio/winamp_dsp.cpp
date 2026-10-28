@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "ttplayer/audio/winamp_dsp.h"
 #include "dsp_dispatcher.h"
 #include "plugin_registry.h"
@@ -740,7 +741,7 @@ private:
         std::unique_ptr<detail::PluginRegistry> registry;
         try { registry = detail::PluginRegistry::Attach(library, path, storage_directory); }
         catch (const std::exception& error) {
-            const auto message=L"注册表配置接入失败："+core::Utf8ToWide(error.what());
+            const auto message=i18n::Literal(L"注册表配置接入失败：")+core::Utf8ToWide(error.what());
             AddDiagnostic(message+L"；"+path.wstring());
             FreeLibrary(library);
             return;

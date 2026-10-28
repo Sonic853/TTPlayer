@@ -442,7 +442,7 @@ void SyncVisualPage(HWND dialog, HMODULE resources,
             RECT bounds{}, width{0, 0, 15, 0};
             GetWindowRect(label, &bounds);
             MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&bounds), 2);
-            MapDialogRect(dialog, &width);
+            i18n::MapDialogRect(dialog, &width);
             SetWindowLongPtrW(label,GWLP_ID,kVisualFramesMaximum);
             SetWindowPos(label, nullptr, bounds.right - width.right, bounds.top,
                 width.right, bounds.bottom - bounds.top, SWP_NOZORDER | SWP_NOACTIVATE);

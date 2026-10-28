@@ -39,7 +39,7 @@ INT_PTR CALLBACK OsuExportProgressProc(HWND window,UINT message,WPARAM wparam,LP
         state=reinterpret_cast<OsuExportProgress*>(lparam);SetWindowLongPtrW(window,DWLP_USER,lparam);
         SetWindowTextW(window,i18n::Literal(L"导出osz文件"));
         const auto add=[&](const wchar_t* type,const wchar_t* text,DWORD style,int id,RECT rect) {
-            MapDialogRect(window,&rect);
+            i18n::MapDialogRect(window,&rect);
             const HWND child=CreateWindowExW(0,type,text,WS_CHILD|WS_VISIBLE|style,rect.left,rect.top,
                 rect.right-rect.left,rect.bottom-rect.top,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
             SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);return child;
@@ -91,7 +91,7 @@ void PlayerWindow::AppendOsuExportMenu(HMENU menu,bool has_row) const {
     if(position>0 && !(GetMenuState(menu,position-1,MF_BYPOSITION)&MF_SEPARATOR))
         InsertMenuW(menu,position++,MF_BYPOSITION|MF_SEPARATOR,0,nullptr);
     if(has_row)InsertMenuW(menu,position++,MF_BYPOSITION|MF_STRING|disabled|(playlist_selected_rows_.empty()?MF_GRAYED:0),kPlaylistExportOsu,
-        i18n::Literal(playlist_selected_rows_.size()>1?L"导出已选歌曲":L"导出osz文件"));
+        i18n::Literal(playlist_selected_rows_.size()>1?i18n::Literal(L"导出已选歌曲"):i18n::Literal(L"导出osz文件")));
     InsertMenuW(menu,position++,MF_BYPOSITION|MF_STRING|disabled|(VisiblePlaylistTrackCount()?0:MF_GRAYED),kPlaylistExportAllOsu,i18n::Literal(L"导出全部歌曲"));
     if(before_options)InsertMenuW(menu,position,MF_BYPOSITION|MF_SEPARATOR,0,nullptr);
 }
@@ -130,12 +130,12 @@ void PlayerWindow::ExportOsuSongs(bool all) {
             if(suggested.empty())suggested=L"beatmap";
             if(suggested.size()>160)suggested.resize(160);
             ModernSaveFileOptions dialog;dialog.owner=owner;dialog.title=i18n::Text(L"导出osz文件");
-            dialog.filters={{L"osu! 谱面包 (*.osz)",L"*.osz"}};dialog.default_extension=L"osz";
+            dialog.filters={{i18n::Literal(L"osu! 谱面包 (*.osz)"),L"*.osz"}};dialog.default_extension=L"osz";
             dialog.initial_path=initial/(suggested+L".osz");
             const auto selected=ModernSaveFile(dialog);if(!selected)return;destination=*selected;
         }else {
             ModernFolderOptions dialog;dialog.owner=owner;dialog.initial_path=initial;
-            dialog.title=i18n::Text(all?L"导出全部歌曲 — 选择保存文件夹":L"导出已选歌曲 — 选择保存文件夹");
+            dialog.title=i18n::Text(all?i18n::Literal(L"导出全部歌曲 — 选择保存文件夹"):i18n::Literal(L"导出已选歌曲 — 选择保存文件夹"));
             const auto selected=ModernPickFolder(dialog);if(!selected)return;destination=selected->path;
         }
         OsuExportProgress progress;
@@ -156,7 +156,7 @@ void PlayerWindow::ExportOsuSongs(bool all) {
         if(result==-1)progress.canceled=true;
         worker.join();
         const bool canceled=progress.status==HRESULT_FROM_WIN32(ERROR_CANCELLED);
-        auto message=i18n::Text(SUCCEEDED(progress.status)?L"导出完成。":canceled?L"已取消导出。":L"导出失败。")+
+        auto message=i18n::Text(SUCCEEDED(progress.status)?i18n::Literal(L"导出完成。"):canceled?i18n::Literal(L"已取消导出。"):i18n::Literal(L"导出失败。"))+
             L"\r\n"+i18n::Text(L"已导出谱面包：")+std::to_wstring(progress.completed)+L"\r\n"+destination.native();
         if(FAILED(progress.status)&&!canceled) {
             wchar_t code[32]{};swprintf_s(code,L"\r\n0x%08X",static_cast<unsigned>(progress.status));message+=code;
@@ -220,7 +220,7 @@ void PlayerWindow::RefreshOsuLibraries(bool interactive) {
         if(job)job->canceled=true;
         const auto index=playlists_.EnsureExternalList(source,source==1?L"osu!":L"osu!lazer");
         if(index==playlist::PlaylistStore::npos)continue;
-        playlists_.At(index).SetTitle(source==1?L"osu!（读取中）":L"osu!lazer（读取中）");
+        playlists_.At(index).SetTitle(source==1?i18n::Literal(L"osu!（读取中）"):i18n::Literal(L"osu!lazer（读取中）"));
         job=std::make_shared<OsuLibraryState::Job>();job->path=path;job->interactive=interactive;
         const auto receiver=window_;
         try {
@@ -280,12 +280,12 @@ void PlayerWindow::ApplyOsuLibraryResults() {
                 RestorePlaylistRowSelection();
             }
         } else {
-            list.SetTitle(source==1?L"osu!（读取失败）":L"osu!lazer（读取失败）");
+            list.SetTitle(source==1?i18n::Literal(L"osu!（读取失败）"):i18n::Literal(L"osu!lazer（读取失败）"));
             if(job->interactive && status!=HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
                 wchar_t code[24]{};swprintf_s(code,L"0x%08X",static_cast<unsigned>(status));
                 auto message=i18n::Text(L"无法读取歌曲列表，请检查媒体库 → osu! 中的路径。")+L"\r\n\r\n"+job->path.native()+L"\r\n"+code;
                 if(source==2)message+=L"\r\n"+i18n::Text(L"如果 osu!lazer 正在运行，请关闭后取消勾选并重新显示列表。");
-                MessageBoxW(playlist_window_?playlist_window_:window_,message.c_str(),L"千千静听",MB_OK|MB_ICONWARNING);
+                MessageBoxW(playlist_window_?playlist_window_:window_,message.c_str(),i18n::Literal(L"千千静听"),MB_OK|MB_ICONWARNING);
             }
         }
     }

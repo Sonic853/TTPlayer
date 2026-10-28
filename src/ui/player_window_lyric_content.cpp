@@ -80,7 +80,7 @@ bool PlayerWindow::HandleNativeLyricContentCommand(UINT command) {
 HMENU PlayerWindow::CreateNativeLyricContentMenu() const {
     HMENU menu=CreatePopupMenu(),effects=CreatePopupMenu();
     if(!menu || !effects) {if(menu)DestroyMenu(menu);if(effects)DestroyMenu(effects);return nullptr;}
-    const wchar_t* modes[]={L"歌词",L"视觉效果",L"歌词与视觉同屏"};
+    const wchar_t* modes[]={i18n::Literal(L"歌词"),i18n::Literal(L"视觉效果"),i18n::Literal(L"歌词与视觉同屏")};
     for(UINT i=0;i<3;++i)
         AppendMenuW(menu,MF_STRING|(settings_.lyric.window_content_mode==int(i)+1?MF_CHECKED:0),
             kCmdLyricContentFirst+i,i18n::Literal(modes[i]));

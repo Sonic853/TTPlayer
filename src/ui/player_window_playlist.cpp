@@ -1511,28 +1511,28 @@ void PlayerWindow::PollPlaylistMetadataRemoval() {
     }
     if ((result->failed.empty() && SUCCEEDED(result->worker_result)) ||
         !IsWindow(window_)) return;
-    std::wstring message = L"删除增益信息已完成。成功 " +
-        std::to_wstring(result->succeeded.size()) + L" 首，失败 " +
-        std::to_wstring(result->failed.size()) + L" 首。\r\n";
+    std::wstring message = i18n::Literal(L"删除增益信息已完成。成功 ") +
+        std::to_wstring(result->succeeded.size()) + i18n::Literal(L" 首，失败 ") +
+        std::to_wstring(result->failed.size()) + i18n::Literal(L" 首。\r\n");
     if (FAILED(result->worker_result)) {
         wchar_t code[24]{};
         swprintf_s(code, L"0x%08lX", static_cast<unsigned long>(result->worker_result));
-        message += L"后台任务未能完成（" + std::wstring(code) + L"）。\r\n";
+        message += i18n::Literal(L"后台任务未能完成（") + std::wstring(code) + L"）。\r\n";
     }
-    message += L"以下项目未确认删除成功，原有列表信息已保留：\r\n";
+    message += i18n::Literal(L"以下项目未确认删除成功，原有列表信息已保留：\r\n");
     const size_t count = std::min<size_t>(result->failed.size(), 8);
     for (size_t index = 0; index < count; ++index) {
         const auto& failure = result->failed[index];
         message += L"\r\n" + failure.track.path.native();
         if (failure.track.subtrack > 0)
-            message += L"（子轨 " + std::to_wstring(failure.track.subtrack) + L"）";
+            message += i18n::Literal(L"（子轨 ") + std::to_wstring(failure.track.subtrack) + L"）";
         wchar_t code[24]{};
         swprintf_s(code, L"0x%08lX", static_cast<unsigned long>(failure.result));
         message += L"\r\n" + std::wstring(code) + L"\r\n";
     }
     if (count < result->failed.size())
-        message += L"\r\n另有 " + std::to_wstring(result->failed.size() - count) + L" 项失败。";
-    MessageBoxW(window_, message.c_str(), L"删除增益信息", MB_OK | MB_ICONWARNING);
+        message += i18n::Literal(L"\r\n另有 ") + std::to_wstring(result->failed.size() - count) + i18n::Literal(L" 项失败。");
+    MessageBoxW(window_, message.c_str(), i18n::Literal(L"删除增益信息"), MB_OK | MB_ICONWARNING);
 }
 
 std::wstring PlayerWindow::PlaylistDisplayText(
@@ -4791,7 +4791,7 @@ void PlayerWindow::PreparePlaylistMenu(HMENU menu) const {
          !playlist_metadata_working_->load(std::memory_order_acquire)));
     MENUITEMINFOW disc_query_label{sizeof(disc_query_label)};
     disc_query_label.fMask = MIIM_STRING;
-    disc_query_label.dwTypeData = const_cast<wchar_t*>(L"查询曲目信息 (MusicBrainz)...");
+    disc_query_label.dwTypeData = const_cast<wchar_t*>(i18n::Literal(L"查询曲目信息 (MusicBrainz)..."));
     SetMenuItemInfoW(menu, kPlaylistFreeDb, FALSE, &disc_query_label);
     EnableCommand(menu, kPlaylistFreeDb,
         has_selection && focused_track &&
@@ -6467,7 +6467,7 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
             } catch (const std::filesystem::filesystem_error& error) {
                 auto message = ResourceText(0x828e);
                 if (error.code().value() == ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 && !error.path2().empty())
-                    message += L"\r\n原文件的备份已保留在：\r\n" + error.path2().native();
+                    message += i18n::Literal(L"\r\n原文件的备份已保留在：\r\n") + error.path2().native();
                 MessageBoxW(playlist_window_, message.c_str(),
                             ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
             } catch (const std::exception&) {
@@ -6516,7 +6516,7 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
         }
         if (failed) {
             auto message = ResourceText(0x828e);
-            if (!retained_backups.empty()) message += L"\r\n原文件的备份已保留在：" + retained_backups;
+            if (!retained_backups.empty()) message += i18n::Literal(L"\r\n原文件的备份已保留在：") + retained_backups;
             MessageBoxW(playlist_window_, message.c_str(),
                         ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
         }

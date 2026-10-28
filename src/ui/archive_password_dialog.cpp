@@ -1,3 +1,4 @@
+#include "ttplayer/i18n/i18n.h"
 #include "archive_password_dialog.h"
 #include "modern_file_dialog.h"
 #include "ttplayer/audio/archive_password.h"
@@ -32,10 +33,10 @@ INT_PTR CALLBACK Dialog(HWND dialog,UINT message,WPARAM wp,LPARAM lp){
     if(message==WM_INITDIALOG){
         r=reinterpret_cast<Request*>(lp);SetWindowLongPtrW(dialog,DWLP_USER,lp);active_dialog=dialog;
         SetDlgItemTextW(dialog,IDC_ARCHIVE_PASSWORD_NAME,r->path.filename().c_str());
-        SetDlgItemTextW(dialog,IDC_ARCHIVE_PASSWORD_STATUS,r->retry?L"密码未通过校验，请重试。加密数据损坏也可能导致校验失败。":L"请输入此压缩包的密码：");
+        SetDlgItemTextW(dialog,IDC_ARCHIVE_PASSWORD_STATUS,r->retry?i18n::Literal(L"密码未通过校验，请重试。加密数据损坏也可能导致校验失败。"):i18n::Literal(L"请输入此压缩包的密码："));
         SendDlgItemMessageW(dialog,IDC_ARCHIVE_PASSWORD_EDIT,EM_LIMITTEXT,1024,0);
         if(r->volume){
-            SetDlgItemTextW(dialog,IDC_ARCHIVE_PASSWORD_STATUS,(L"找不到所需分卷：\r\n"+r->expected.native()).c_str());
+            SetDlgItemTextW(dialog,IDC_ARCHIVE_PASSWORD_STATUS,(i18n::Literal(L"找不到所需分卷：\r\n")+r->expected.native()).c_str());
             SendDlgItemMessageW(dialog,IDC_ARCHIVE_PASSWORD_EDIT,EM_LIMITTEXT,32767,0);
             SetDlgItemTextW(dialog,IDC_ARCHIVE_PASSWORD_EDIT,r->expected.c_str());
         }
@@ -52,7 +53,7 @@ INT_PTR CALLBACK Dialog(HWND dialog,UINT message,WPARAM wp,LPARAM lp){
     }
     if(message==WM_COMMAND && LOWORD(wp)==IDC_ARCHIVE_PASSWORD_REMEMBER && r && r->volume){
         detail::ModernOpenFileOptions options;options.owner=dialog;options.initial_path=r->expected;
-        options.title=L"选择分卷："+r->expected.filename().native();options.filters={{L"所有文件",L"*.*"}};
+        options.title=i18n::Literal(L"选择分卷：")+r->expected.filename().native();options.filters={{i18n::Literal(L"所有文件"),L"*.*"}};
         r->browsing=true;auto selected=detail::ModernOpenFile(options);r->browsing=false;
         if(selected && !r->abandoned)SetDlgItemTextW(dialog,IDC_ARCHIVE_PASSWORD_EDIT,selected->c_str());return TRUE;
     }
@@ -61,7 +62,7 @@ INT_PTR CALLBACK Dialog(HWND dialog,UINT message,WPARAM wp,LPARAM lp){
             std::vector<wchar_t> text(32768);GetDlgItemTextW(dialog,IDC_ARCHIVE_PASSWORD_EDIT,text.data(),static_cast<int>(text.size()));
             const auto a=GetFileAttributesW(text.data());
             if(a==INVALID_FILE_ATTRIBUTES || (a&FILE_ATTRIBUTE_DIRECTORY)){
-                SetDlgItemTextW(dialog,IDC_ARCHIVE_PASSWORD_STATUS,L"所选文件不存在或无法访问，请重新选择。\r\n取消不会修改压缩包。");return TRUE;
+                SetDlgItemTextW(dialog,IDC_ARCHIVE_PASSWORD_STATUS,i18n::Literal(L"所选文件不存在或无法访问，请重新选择。\r\n取消不会修改压缩包。"));return TRUE;
             }
             r->volume_answer=std::filesystem::absolute(text.data());EndDialog(dialog,IDOK);return TRUE;
         }
@@ -125,8 +126,8 @@ void InstallArchivePasswordDialog(HWND window,const std::filesystem::path& store
 void ReportArchivePasswordStorageFailure(HRESULT error){
     if(const auto window=owner.load()){
         wchar_t code[16]{};swprintf_s(code,L"%08X",static_cast<unsigned>(error));
-        const auto text=std::wstring(L"密码已验证，但未能保存记住的密码。请检查播放器目录是否可写。\r\n错误代码：0x")+code;
-        MessageBoxW(window,text.c_str(),L"压缩包密码",MB_OK|MB_ICONWARNING);
+        const auto text=std::wstring(i18n::Literal(L"密码已验证，但未能保存记住的密码。请检查播放器目录是否可写。\r\n错误代码：0x"))+code;
+        MessageBoxW(window,text.c_str(),i18n::Literal(L"压缩包密码"),MB_OK|MB_ICONWARNING);
     }
 }
 void DispatchArchivePasswordDialog(){

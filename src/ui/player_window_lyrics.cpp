@@ -3219,7 +3219,7 @@ bool PlayerWindow::SaveLyricEditor(bool save_as, bool automatic) {
     const bool archived = audio::ParseArchiveMemberPath(target.native(),member);
     if (archived && !save_as) {
         MessageBoxW(lyric_window_ ? lyric_window_ : window_,
-            L"压缩包内歌词为只读，请使用“另存为”保存到普通文件。",L"保存歌词",MB_OK|MB_ICONINFORMATION);
+            i18n::Literal(L"压缩包内歌词为只读，请使用“另存为”保存到普通文件。"),i18n::Literal(L"保存歌词"),MB_OK|MB_ICONINFORMATION);
         return false;
     }
     // 0044A6E6 sends the lyric HWND as lParam to 0044D824: policy saves
@@ -3242,7 +3242,7 @@ bool PlayerWindow::SaveLyricEditor(bool save_as, bool automatic) {
     if (game_source) {
         if (IsOsuLibrarySourcePath(*source, settings_, target)) {
             MessageBoxW(lyric_window_ ? lyric_window_ : window_,
-                L"游戏歌曲目录为只读，请选择其它文件夹保存歌词。", L"保存歌词", MB_OK | MB_ICONINFORMATION);
+                i18n::Literal(L"游戏歌曲目录为只读，请选择其它文件夹保存歌词。"), i18n::Literal(L"保存歌词"), MB_OK | MB_ICONINFORMATION);
             return false;
         }
         const auto cache = OsuLibraryLyricDirectory(*source, settings_, PlayerRuntimeDirectory());
@@ -4240,7 +4240,7 @@ void PlayerWindow::PollLyricSaveFailures() {
         auto message = ResourceText(0x8180) + L"\r\n\r\n" + failure.path.native() +
             L"\r\n" + code;
         if (!failure.recovery_path.empty())
-            message += L"\r\n\r\n歌词恢复文件：\r\n" + failure.recovery_path.native();
+            message += i18n::Literal(L"\r\n\r\n歌词恢复文件：\r\n") + failure.recovery_path.native();
         wchar_t caption[128]{};
         GetWindowTextW(window_, caption, static_cast<int>(std::size(caption)));
         MessageBoxW(window_, message.c_str(), caption, MB_OK | MB_ICONERROR);
