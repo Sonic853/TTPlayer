@@ -1,5 +1,7 @@
 # UMX、Cook、DNET、SIPR 后续修复与验收
 
+最新进展（2026.10.29p1）：[Cook／SIPR 后续修复及 XM 因果验证](AUDIO_PLUGIN_FOLLOWUP_20261029P1.md)。以下保留本轮历史记录。
+
 日期及构建版本：2026.10.29。接续 [2026-10-25 报告](AUDIO_PLUGIN_FOLLOWUP_20261025.md)，本轮修改 `ttp_mod`、`ttp_rm`，依据原 DLL 伪代码、原始指令、独立函数执行和完整 PCM 对照修正差异。保留当前固定的 FFmpeg 9.0.2；没有回退依赖版本或修改原版 EXE。
 
 ## 真实 UMX 的末端插值

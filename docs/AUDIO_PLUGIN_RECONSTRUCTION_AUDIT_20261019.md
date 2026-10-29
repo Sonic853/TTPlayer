@@ -1,6 +1,6 @@
 # AddIn 音频插件重建审计与后续方案
 
-最新进展见 [2026.10.29 后续修复与验收](AUDIO_PLUGIN_FOLLOWUP_20261029.md)：真实 UMX、Cook／DNET 补噪、SIPR 16k 与缓存回放错误恢复，已完成 XP／Win7／Win11 验收。前一轮结果见 [2026.10.25](AUDIO_PLUGIN_FOLLOWUP_20261025.md)。以下保留当时版本的记录与摘要。
+最新进展见 [2026.10.29p2 后续修复与验收](AUDIO_PLUGIN_FOLLOWUP_20261029P2.md)：AAC 部分读取取消与 MP4 零提示修复、UMX 范围检查、VQF 预热和错误恢复，三个系统各 377 组及 24 次宿主播放通过。RM 数值恢复与 XM 差异结论见 [2026.10.29p1](AUDIO_PLUGIN_FOLLOWUP_20261029P1.md)。以下保留当时版本的记录与摘要。
 
 后续补全与新增边界见 [2026-10-24 报告](AUDIO_PLUGIN_COMPLETION_20261024.md)。以下保留当时的审计／验收记录。
 
