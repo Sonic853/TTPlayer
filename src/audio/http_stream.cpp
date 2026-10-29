@@ -3,6 +3,7 @@
 #include "ttplayer/net/content_disposition.h"
 #include <shlwapi.h>
 #include <wincrypt.h>
+#include <wininet.h>
 #include <algorithm>
 #include <array>
 #include <condition_variable>
@@ -15,10 +16,10 @@
 namespace ttplayer::audio {
 namespace {
 std::mutex personal_media_mutex;
-PersonalMediaResolver personal_media_resolver;
+PersonalMediaResolverEx personal_media_resolver;
 bool PersonalSource(const std::wstring& url) { return url.starts_with(L"https://ttpbrowser.invalid/"); }
-HRESULT ResolvePersonalSource(const std::wstring& source,const std::function<bool()>& canceled,std::wstring& output) {
-    PersonalMediaResolver resolver;
+HRESULT ResolvePersonalSource(const std::wstring& source,const std::function<bool()>& canceled,ResolvedMediaSource& output) {
+    PersonalMediaResolverEx resolver;
     { std::lock_guard lock(personal_media_mutex);resolver=personal_media_resolver; }
     return resolver ? resolver(source,canceled,output) : HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
 }
@@ -43,6 +44,7 @@ std::wstring Text(std::string_view bytes) {
     if(n) MultiByteToWideChar(code,flags,bytes.data(),static_cast<int>(bytes.size()),result.data(),n);
     return result;
 }
+#include "http_stream_native.inl"
 struct File {
     HANDLE value{INVALID_HANDLE_VALUE};
     void Close(){if(value!=INVALID_HANDLE_VALUE) CloseHandle(value);value=INVALID_HANDLE_VALUE;}
@@ -122,12 +124,14 @@ private:
     void Open() {
         Guard();
         if(const auto hash=url_.find(L'#');hash!=url_.npos) url_.resize(hash);
-        if(!module_.Load()) throw Failure{HRESULT_FROM_WIN32(module_.Error())};
-        const auto* base=module_.Api(TTP_HTTPS_STREAM_ABI_VERSION);
-        if(!base || base->abi_version!=TTP_HTTPS_STREAM_ABI_VERSION || base->size<sizeof(ttp_https_api_v7))
-            throw Failure{E_NOINTERFACE};
-        api_=reinterpret_cast<const ttp_https_api_v7*>(base);
-        Require(api_->stream_open && api_->stream_read && api_->stream_close && api_->stream_header);
+        const bool loaded=module_.Load();
+        const auto* base=loaded?module_.Api(TTP_HTTPS_STREAM_ABI_VERSION):nullptr;
+        if(base&&base->abi_version==TTP_HTTPS_STREAM_ABI_VERSION&&base->size>=sizeof(ttp_https_api_v7)) {
+            api_=reinterpret_cast<const ttp_https_api_v7*>(base);
+            Require(api_->stream_open&&api_->stream_read&&api_->stream_close&&api_->stream_header);
+        }else if(!PersonalSource(url_))throw Failure{loaded?E_NOINTERFACE:HRESULT_FROM_WIN32(module_.Error())};
+        const auto* extended=loaded?module_.Api(TTP_HTTPS_WEBDAV_ABI_VERSION):nullptr;
+        if(api_&&extended&&extended->abi_version==TTP_HTTPS_WEBDAV_ABI_VERSION&&extended->size>=sizeof(ttp_https_api_v9))api9_=reinterpret_cast<const ttp_https_api_v9*>(extended);
         wchar_t folder[MAX_PATH],file[MAX_PATH];const auto length=GetTempPathW(MAX_PATH,folder);
         Require(length && length<MAX_PATH);Check(GetTempFileNameW(folder,L"ttp",0,file)!=0);
         cache_.value=CreateFileW(file,GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,
@@ -291,16 +295,17 @@ private:
             value==TTP_HTTPS_TIMEOUT?HRESULT_FROM_WIN32(ERROR_TIMEOUT):
             value==TTP_HTTPS_TRUNCATED?HRESULT_FROM_WIN32(ERROR_HANDLE_EOF):HRESULT_FROM_WIN32(ERROR_INVALID_DATA)};
     }
-    void CloseRequest() noexcept {if(request_){api_->stream_close(request_);request_=nullptr;}}
-    std::string Header(const char* name) const {return api_->stream_header(request_,name);}
+    bool HasRequest() const {return request_||native_;}
+    void CloseRequest() noexcept {if(request_){api_->stream_close(request_);request_=nullptr;}native_.reset();}
+    std::string Header(const char* name) const {return native_?native_->Header(name):api_->stream_header(request_,name);}
     void Start(uint64_t offset) {
         CloseRequest();Guard();
         // Without an entity validator keep the original response sequential.
         // A second range could silently splice a different same-length resource.
-        Require(!offset || !validator_.empty());std::wstring target=url_;
+        Require(!offset || !validator_.empty());std::wstring target=url_;ResolvedMediaSource resolved;
         if(PersonalSource(url_)) {
-            const auto hr=ResolvePersonalSource(url_,[this]{return Canceled(this)!=0;},target);
-            if(FAILED(hr))throw Failure{hr};
+            const auto hr=ResolvePersonalSource(url_,[this]{return Canceled(this)!=0;},resolved);
+            if(FAILED(hr))throw Failure{hr};target=resolved.url;
             Require(!PersonalSource(target) &&
                 (target.starts_with(L"https://")||target.starts_with(L"http://")));
         }
@@ -317,7 +322,17 @@ private:
             req.timeout_ms=static_cast<uint32_t>(std::clamp(options_.network_timeout_ms,100,60000));
             req.auto_config_url=options_.network_pac_url.empty()?nullptr:options_.network_pac_url.c_str();
             req.auto_detect=options_.network_auto_detect;
-            TransportResult(api_->stream_open(&req,&request_,&status,nullptr,0));
+            int result=TTP_HTTPS_USE_WINHTTP;
+            if(!resolved.authorization.empty()) {
+                Require(resolved.authorization.size()<=16384&&std::all_of(resolved.authorization.begin(),resolved.authorization.end(),[](wchar_t c){return c>=32&&c<=126;}));
+                if(api9_&&api9_->stream_open_ex2){std::string auth(resolved.authorization.begin(),resolved.authorization.end());
+                    ttp_https_stream_request_ex2 ex{};ex.size=sizeof(ex);ex.request.size=sizeof(ex.request);ex.request.stream=req;ex.request.stream.icy_metadata=0;ex.request.method="GET";ex.request.authorization=auth.c_str();ex.flags=TTP_HTTPS_REQUEST_RANGE;
+                    result=api9_->stream_open_ex2(&ex,&request_,&status,nullptr,0);SecureZeroMemory(auth.data(),auth.size());}
+            }else if(api_)result=api_->stream_open(&req,&request_,&status,nullptr,0);
+            if(result==TTP_HTTPS_USE_WINHTTP&&!request_&&PersonalSource(url_)) {
+                native_=std::make_unique<NativeMediaRequest>();status=native_->Open(target,resolved.authorization,options_,offset,validator_);result=TTP_HTTPS_OK;
+            }
+            TransportResult(result);
             if(status!=301 && status!=302 && status!=303 && status!=307 && status!=308) break;
             Require(redirects<8);const auto location=Text(Header("location"));Require(!location.empty());
             wchar_t combined[8192];DWORD size=8192;
@@ -325,9 +340,12 @@ private:
             const std::wstring next=combined;
             Require(_wcsnicmp(next.c_str(),L"https://",8)==0 || _wcsnicmp(next.c_str(),L"http://",7)==0);
             Require(_wcsnicmp(target.c_str(),L"https://",8)!=0 || _wcsnicmp(next.c_str(),L"https://",8)==0);
+            if(!resolved.authorization.empty())Require(NativeMediaRequest::Origin(next)==NativeMediaRequest::Origin(target));
             target=next;CloseRequest();Guard();
         }
         Require(status==200 || status==206);
+        const auto encoding=Header("content-encoding");
+        Require(encoding.empty() || _stricmp(encoding.c_str(),"identity")==0);
         // Only the producer touches the transport. Never hold the cache lock
         // across DNS, TLS, headers or a body read: cached reads and UI metadata
         // must remain available while the server stalls.
@@ -406,8 +424,8 @@ private:
         icy_text_.clear();
     }
     void Pump() {
-        Guard();Require(request_!=nullptr);uint32_t got{};
-        const auto result=api_->stream_read(request_,buffer_.data(),static_cast<uint32_t>(buffer_.size()),&got,nullptr,0);
+        Guard();Require(HasRequest());uint32_t got{};
+        const auto result=native_?native_->Read(buffer_.data(),static_cast<uint32_t>(buffer_.size()),&got):api_->stream_read(request_,buffer_.data(),static_cast<uint32_t>(buffer_.size()),&got,nullptr,0);
         // Resume once only when a validated range response identifies the same
         // finite resource. Live/no-range streams cannot be spliced safely.
         if((result==TTP_HTTPS_TRUNCATED || result==TTP_HTTPS_TIMEOUT) && ranged_ &&
@@ -470,14 +488,14 @@ private:
                     const auto missing=AfterCovered(0);
                     if(missing==*total_) break;
                     if(demand && AfterCovered(*demand)==*demand && *demand<*total_ &&
-                       (!request_ || (ranged_ && (*demand<response_position_ ||
+                       (!HasRequest() || (ranged_ && (*demand<response_position_ ||
                                                 *demand>response_position_+buffer_.size())))) start=*demand;
-                    else if(!request_ || restart_) start=missing;
+                    else if(!HasRequest() || restart_) start=missing;
                     else if(ranged_) {
                         const auto next=AfterCovered(response_position_);
                         if(next!=response_position_) start=next==*total_?missing:next;
                     }
-                } else if(!request_) break;
+                } else if(!HasRequest()) break;
                 if(start) {
                     restart_=false;response_position_=*start;
                     lock.unlock();Start(*start);
@@ -514,7 +532,7 @@ private:
     std::atomic<bool> ready_{},shareable_{};bool accepting_{true};
     std::thread worker_;std::atomic<bool> stopping_{},restart_{},sequential_{};
     std::wstring url_,response_filename_;std::string validator_;PlaybackOptions options_;
-    net::HttpsProvider module_;const ttp_https_api_v7* api_{};ttp_https_stream* request_{};
+    net::HttpsProvider module_;const ttp_https_api_v7* api_{};const ttp_https_api_v9* api9_{};ttp_https_stream* request_{};std::unique_ptr<NativeMediaRequest> native_;
     File cache_;std::array<unsigned char,16384> buffer_{};
     bool opened_{},ranged_{},worker_done_{},persisted_{};
     unsigned retries_{};
@@ -603,6 +621,9 @@ private:
 };
 }
 void SetPersonalMediaResolver(PersonalMediaResolver resolver) {
+    SetPersonalMediaResolverEx(resolver?PersonalMediaResolverEx([fn=std::move(resolver)](const std::wstring& source,const std::function<bool()>& canceled,ResolvedMediaSource& result){return fn(source,canceled,result.url);}):PersonalMediaResolverEx{});
+}
+void SetPersonalMediaResolverEx(PersonalMediaResolverEx resolver) {
     std::lock_guard lock(personal_media_mutex);personal_media_resolver=std::move(resolver);
 }
 HRESULT OpenHttpAudioStream(const std::wstring& url,const PlaybackOptions& options,HttpAudioStream** stream,HttpStreamUse use) noexcept {

@@ -215,6 +215,22 @@ typedef struct ttp_https_api_v8 {
         uint32_t *http_status, char *error, size_t error_size);
 } ttp_https_api_v8;
 
+/* ABI 9 adds PROPFIND with Depth 0/1 and authenticated ranged GET.
+   ABI 7/8 contracts are unchanged. No automatic redirects or origin retries. */
+#define TTP_HTTPS_WEBDAV_ABI_VERSION 9u
+#define TTP_HTTPS_REQUEST_RANGE 1u
+typedef struct ttp_https_stream_request_ex2 {
+    uint32_t size;
+    ttp_https_stream_request_ex request;
+    const char *depth;
+    uint32_t flags;
+} ttp_https_stream_request_ex2;
+typedef struct ttp_https_api_v9 {
+    ttp_https_api_v8 base;
+    int (__cdecl *stream_open_ex2)(const ttp_https_stream_request_ex2 *, ttp_https_stream **,
+        uint32_t *http_status, char *error, size_t error_size);
+} ttp_https_api_v9;
+
 /* All pointers in the response remain valid until release(). No C++ objects,
    exceptions or CRT ownership cross the ABI. Independent calls may run in
    parallel. Keep the DLL loaded until every call and response is finished. */

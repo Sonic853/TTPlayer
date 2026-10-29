@@ -11,6 +11,7 @@ struct BrowserClient::ResolverState {
     std::atomic<bool> stopping{};
     void* instance{};
     decltype(ttp_browser_api::resolve_source) resolve{};
+    decltype(ttp_browser_api::resolve_source_ex) resolve_ex{};
 };
 namespace {
 constexpr HRESULT kUnavailable = HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
@@ -44,6 +45,8 @@ BrowserClient::BrowserClient() {
         std::memcpy(&api_,supplied,TTP_BROWSER_API_V1_SIZE);
         if(supplied->size>=offsetof(ttp_browser_api,resolve_source)+sizeof(supplied->resolve_source))
             api_.resolve_source=supplied->resolve_source;
+        if(supplied->size>=offsetof(ttp_browser_api,resolve_source_ex)+sizeof(supplied->resolve_source_ex))
+            api_.resolve_source_ex=supplied->resolve_source_ex;
         if(supplied->size>=offsetof(ttp_browser_api,create_settings_page)+sizeof(supplied->create_settings_page))
             api_.create_settings_page=supplied->create_settings_page;
         if(supplied->size>=offsetof(ttp_browser_api,commit_settings_page)+sizeof(supplied->commit_settings_page))
@@ -90,7 +93,7 @@ HRESULT BrowserClient::Create(const ttp_browser_host& host, const ttp_browser_co
         callbacks_.get_download_page=host.get_download_page;
     if(host.size>=offsetof(ttp_browser_host,recognize_page_download)+sizeof(host.recognize_page_download))
         callbacks_.recognize_page_download=host.recognize_page_download;
-    callbacks_.media_source_version=api_.resolve_source?1:0;
+    callbacks_.media_source_version=api_.resolve_source_ex?2:api_.resolve_source?1:0;
     if(host.size>=offsetof(ttp_browser_host,get_page_script)+sizeof(host.get_page_script))callbacks_.get_page_script=host.get_page_script;
     if(host.size>=offsetof(ttp_browser_host,recognize_page_audio)+sizeof(host.recognize_page_audio))callbacks_.recognize_page_audio=host.recognize_page_audio;
     callbacks_.size = sizeof(callbacks_);
@@ -116,9 +119,9 @@ HRESULT BrowserClient::Create(const ttp_browser_host& host, const ttp_browser_co
         if (instance_) api_.destroy(instance_);
         instance_ = nullptr; callbacks_ = {};
     } else if(api_.resolve_source) {
-        resolver_=std::make_shared<ResolverState>();resolver_->instance=instance_;resolver_->resolve=api_.resolve_source;
-        audio::SetPersonalMediaResolver([state=resolver_](const std::wstring& source,
-            const std::function<bool()>& canceled,std::wstring& resolved) -> HRESULT {
+        resolver_=std::make_shared<ResolverState>();resolver_->instance=instance_;resolver_->resolve=api_.resolve_source;resolver_->resolve_ex=api_.resolve_source_ex;
+        audio::SetPersonalMediaResolverEx([state=resolver_](const std::wstring& source,
+            const std::function<bool()>& canceled,audio::ResolvedMediaSource& resolved) -> HRESULT {
             if(state->stopping)return HRESULT_FROM_WIN32(ERROR_CANCELLED);
             std::lock_guard lock(state->mutex);
             if(state->stopping||!state->instance)return RPC_E_DISCONNECTED;
@@ -126,8 +129,8 @@ HRESULT BrowserClient::Create(const ttp_browser_host& host, const ttp_browser_co
                 static BOOL WINAPI Check(void* p) {const auto& c=*static_cast<Cancellation*>(p);
                     return c.state->stopping || (*c.callback && (*c.callback)());}
             } cancellation{state.get(),&canceled};
-            BSTR result{};const auto hr=state->resolve(state->instance,source.c_str(),Cancellation::Check,&cancellation,&result);
-            if(SUCCEEDED(hr)&&result)resolved=result;SysFreeString(result);return hr;
+            BSTR result{},auth{};const auto hr=state->resolve_ex?state->resolve_ex(state->instance,source.c_str(),Cancellation::Check,&cancellation,&result,&auth):state->resolve(state->instance,source.c_str(),Cancellation::Check,&cancellation,&result);
+            if(SUCCEEDED(hr)&&result){resolved.url=result;resolved.authorization=auth?auth:L"";}SysFreeString(result);SysFreeString(auth);return hr;
         });
     }
     return result;

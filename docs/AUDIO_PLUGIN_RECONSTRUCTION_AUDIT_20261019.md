@@ -1,6 +1,6 @@
 # AddIn 音频插件重建审计与后续方案
 
-最新进展见 [2026.10.25 后续修复与验收](AUDIO_PLUGIN_FOLLOWUP_20261025.md)：AAC 呈现时间与分片编辑、RM ATRAC3、MOD 混音兼容，以及 OGG 真实 HTTP 验收。前一轮结果见 [2026.10.24p1](AUDIO_PLUGIN_FOLLOWUP_20261024.md)。以下保留当时版本的记录与摘要。
+最新进展见 [2026.10.29 后续修复与验收](AUDIO_PLUGIN_FOLLOWUP_20261029.md)：真实 UMX、Cook／DNET 补噪、SIPR 16k 与缓存回放错误恢复，已完成 XP／Win7／Win11 验收。前一轮结果见 [2026.10.25](AUDIO_PLUGIN_FOLLOWUP_20261025.md)。以下保留当时版本的记录与摘要。
 
 后续补全与新增边界见 [2026-10-24 报告](AUDIO_PLUGIN_COMPLETION_20261024.md)。以下保留当时的审计／验收记录。
 

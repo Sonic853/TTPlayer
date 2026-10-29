@@ -22,6 +22,10 @@ enum class HttpStreamUse { playback, background };
 using PersonalMediaResolver = std::function<HRESULT(const std::wstring&,
     const std::function<bool()>&, std::wstring&)>;
 void SetPersonalMediaResolver(PersonalMediaResolver resolver);
+struct ResolvedMediaSource { std::wstring url, authorization; };
+using PersonalMediaResolverEx = std::function<HRESULT(const std::wstring&,
+    const std::function<bool()>&, ResolvedMediaSource&)>;
+void SetPersonalMediaResolverEx(PersonalMediaResolverEx resolver);
 // Matching live finite-file requests share a producer, cache and entity snapshot.
 // Each returned stream has its own cursor/cancellation. Releasing one consumer
 // never cancels another. Unknown-length/ICY streams remain private.
