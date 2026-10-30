@@ -207,7 +207,7 @@ void PlayerWindow::SetOsuLibraryVisible(unsigned source,bool visible,bool intera
     RefreshOsuLibraries(interactive);
 }
 
-void PlayerWindow::RefreshOsuLibraries(bool interactive) {
+void PlayerWindow::RefreshOsuLibraries(bool interactive,unsigned force_source) {
     if(!window_ || !IsWindow(window_) || close_after_skin_window_fade_ ||
        !audio::HasOsuLibrarySupport())return;
     if(!osu_libraries_)osu_libraries_=std::make_shared<OsuLibraryState>();
@@ -216,7 +216,7 @@ void PlayerWindow::RefreshOsuLibraries(bool interactive) {
         const auto raw=source==1?settings_.osu_library.stable_songs:settings_.osu_library.lazer_files;
         const auto path=std::filesystem::path(core::ExpandEnvironmentPath(raw));
         auto& job=osu_libraries_->jobs[source-1];
-        if(job && job->path==path)continue;
+        if(job && job->path==path && force_source!=source)continue;
         if(job)job->canceled=true;
         const auto index=playlists_.EnsureExternalList(source,source==1?L"osu!":L"osu!lazer");
         if(index==playlist::PlaylistStore::npos)continue;

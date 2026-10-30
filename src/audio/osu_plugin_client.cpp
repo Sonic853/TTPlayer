@@ -2,6 +2,8 @@
 #include "ttplayer/audio/osu_library.h"
 #include <ttp_osu/library.h>
 #include <ttp_osu/export.h>
+#include <ttp_osu/import.h>
+#include "ttplayer/audio/osu_import.h"
 #include <ttp_osu/download_page.h>
 #include "ttplayer/audio/osu_download_page.h"
 #include "ttplayer/audio/osu_installation.h"
@@ -76,6 +78,17 @@ const TtpOsuInstallationApi& InstallationApi() noexcept {
         return TtpOsuInstallationApi{};
     }();
     return api;
+}
+const TtpOsuImportApi& ImportApi() noexcept {
+    static const TtpOsuImportApi api=[]() noexcept {
+        try {
+            const auto query=reinterpret_cast<TtpOsuQueryImport>(GetProcAddress(LoadedPlugin().module,TTP_OSU_IMPORT_ENTRY));
+            TtpOsuImportApi value{sizeof(value)};
+            if(query&&query(TTP_OSU_IMPORT_ABI,&value)==S_OK&&value.size>=sizeof(value)&&
+                value.abi==TTP_OSU_IMPORT_ABI&&value.run)return value;
+        }catch(...){}
+        return TtpOsuImportApi{};
+    }();return api;
 }
 struct Capabilities {bool archive{},visual{},logo{},transitions{},lazer{},intro_text{};};
 const Capabilities& AvailableCapabilities() noexcept {
@@ -213,6 +226,44 @@ bool HasOsuLibrarySupport() noexcept {
     return supported;
 }
 bool HasOsuExportSupport() noexcept {return ExportApi().run!=nullptr;}
+bool HasOsuImportSupport() noexcept {return ImportApi().run!=nullptr;}
+HRESULT ImportOsuPackage(unsigned source,const std::filesystem::path& executable,
+    const std::filesystem::path& archive,bool keep,bool referenced,HMODULE ttpcomm,
+    const std::function<bool()>& canceled,
+    const std::function<void(unsigned,uint64_t,uint64_t,const wchar_t*)>& progress,
+    OsuImportResult& result) noexcept {
+    result={};return Callback([&] {
+        const auto& api=ImportApi();if(!api.run)throw ArchiveError(E_NOINTERFACE);
+        struct State {
+            HMODULE module;const std::function<bool()>& canceled;
+            const std::function<void(unsigned,uint64_t,uint64_t,const wchar_t*)>& progress;
+            OsuImportResult& result;bool received{};
+        } state{ttpcomm,canceled,progress,result};
+        const TtpOsuImportHost host{sizeof(host),&state,
+            [](void* p)->BOOL {auto& s=*static_cast<State*>(p);try{return s.canceled&&s.canceled();}catch(...){return TRUE;}},
+            [](void* p,uint32_t phase,uint64_t done,uint64_t total,const wchar_t* path)->HRESULT {
+                return Callback([&]{auto& s=*static_cast<State*>(p);if(s.progress)s.progress(phase,done,total,path);});
+            },[](void* p,const wchar_t* path,TtpOsuVisitName visit,void* data)->HRESULT {
+                return Callback([&]{auto& s=*static_cast<State*>(p);
+                    for(const auto& name:ListArchiveMembers(path,s.module,s.canceled))Check(visit(data,name.c_str()));});
+            },[](void* p,const wchar_t* path,const wchar_t* member,IStream** stream)->HRESULT {
+                if(!stream)return E_POINTER;*stream=nullptr;
+                return Callback([&]{auto& s=*static_cast<State*>(p);*stream=OpenArchiveMemberStream({path,member,ArchiveKind::zip},s.module,s.canceled);
+                    if(!*stream)throw ArchiveError(E_FAIL);});
+            }};
+        const TtpOsuImportRequest request{sizeof(request),source,executable.c_str(),archive.c_str(),
+            (keep?TTP_OSU_IMPORT_KEEP_SOURCE:0u)|(referenced?TTP_OSU_IMPORT_SOURCE_REFERENCED:0u),30000};
+        Check(api.run(&host,&request,[](void* p,const TtpOsuImportResult* value)->HRESULT {
+            return Callback([&]{auto& s=*static_cast<State*>(p);
+                if(s.received||!value||value->size<sizeof(*value)||value->state<1||value->state>2||
+                    value->retention<1||value->retention>4||!value->task_directory||wcsnlen(value->task_directory,32768)==32768)
+                    throw ArchiveError(E_INVALIDARG);
+                s.result={value->state,value->retention,value->already_present!=FALSE,value->detail,value->task_directory};s.received=true;
+            });
+        },&state));
+        if(!state.received)throw ArchiveError(E_FAIL);
+    });
+}
 HRESULT ExportOsuLibrary(unsigned source,const std::filesystem::path& root,
     const std::vector<std::wstring>& identities,const std::filesystem::path& destination,
     bool single_file,bool replace,const std::function<bool()>& canceled,

@@ -1,5 +1,23 @@
 # TTPlayerOSU host ABI
 
+`include/ttp_osu/import.h` defines independent import ABI 1, exported as
+`ttp_osu_import_query` at ordinal 7. Run it on a worker and provide generic,
+read-only archive member streams with EOF/CRC validation. The DLL validates the
+configured game, copies and hashes the physical OSZ, invokes the explicit EXE,
+and verifies stable's index/files or lazer's Realm/files. A successful call may
+still report PENDING; process creation and consumption of the copy are not proof
+of import completion. All callback strings are borrowed. KEEP_SOURCE defaults
+on in the host confirmation dialog. SOURCE_REFERENCED must be set while any
+playlist/current track uses the package; the current playlist entry point always
+sets it and does not migrate references. Missing ordinal 7 hides only import
+commands. Ordinals 1 through 6 retain their existing ABI.
+
+Pending task records and work copies remain under Local AppData/TTPlayer/OsuImports.
+Cancellation after submission stops waiting, not the game. Repeating the same
+request resumes verification without submitting the pending package twice.
+See the plugin's `docs/OSZ_IMPORT_IMPLEMENTATION_20261030.md` for verification
+boundaries and cleanup behavior.
+
 `include/ttp_osu/download_page.h` defines independent download-page ABI 2,
 exported as `ttp_osu_download_page_query` at ordinal 6. ABI 1 queries retain
 only the original page/OSZ recognizer prefix. ABI 2 appends a provider script

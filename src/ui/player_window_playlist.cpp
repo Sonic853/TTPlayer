@@ -4984,6 +4984,7 @@ HMENU PlayerWindow::CreatePlaylistFilesMenu(std::optional<size_t> row) const {
         DeleteMenu(menu, 11, MF_BYPOSITION);
     }
     AppendOsuExportMenu(menu,true);
+    AppendOsuImportMenu(menu);
     return menu;
 }
 
@@ -5952,6 +5953,9 @@ void PlayerWindow::ReorderSelectedPlaylistRows(size_t insertion,bool copy) {
 }
 
 bool PlayerWindow::HandlePlaylistCommand(UINT command) {
+    if(command==kPlaylistImportOsu || command==kPlaylistImportOsuLazer) {
+        ImportOsuSongs(command==kPlaylistImportOsu?1:2);return true;
+    }
     if(command==kPlaylistExportOsu || command==kPlaylistExportAllOsu) {
         ExportOsuSongs(command==kPlaylistExportAllOsu);return true;
     }

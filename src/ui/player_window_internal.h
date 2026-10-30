@@ -374,6 +374,8 @@ constexpr UINT kPlaylistShowOsu = 0xb701;
 constexpr UINT kPlaylistShowOsuLazer = 0xb702;
 constexpr UINT kPlaylistExportOsu = 0xb703;
 constexpr UINT kPlaylistExportAllOsu = 0xb704;
+constexpr UINT kPlaylistImportOsu = 0xb705;
+constexpr UINT kPlaylistImportOsuLazer = 0xb706;
 // Stable numbered playlist slots, separate from track/skin/provider commands.
 constexpr UINT kPlaylistSwitchFirst = 0xc000;
 constexpr UINT kPlaylistSwitchLast = 0xdfff;

@@ -551,8 +551,12 @@ private:
     void AppendOsuExportMenu(HMENU menu,bool has_row) const;
     void ExportOsuSongs(bool all);
     bool osu_exporting_{};
+    std::vector<std::filesystem::path> SelectedOsuPackages() const;
+    void AppendOsuImportMenu(HMENU menu) const;
+    void ImportOsuSongs(unsigned source);
+    bool osu_importing_{};
     void SetOsuLibraryVisible(unsigned source,bool visible,bool interactive=true);
-    void RefreshOsuLibraries(bool interactive=false);
+    void RefreshOsuLibraries(bool interactive=false,unsigned force_source=0);
     void RefreshOsuVisualAvailability();
     void ApplyOsuLibraryResults();
     void ShutdownOsuLibraries();

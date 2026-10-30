@@ -201,6 +201,10 @@ def audit_component(files, metadata, inventories, directory):
             expected[4] = 'ttp_osu_installation_query'
         if 5 in exported:
             expected[5] = 'ttp_osu_export_query'
+        if 6 in exported:
+            expected[6] = 'ttp_osu_download_page_query'
+        if 7 in exported:
+            expected[7] = 'ttp_osu_import_query'
         if set(exported) != set(expected) or any(
                 exported[ordinal]['name'] != name or exported[ordinal].get('forwarder')
                 for ordinal, name in expected.items()):
