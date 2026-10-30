@@ -632,10 +632,41 @@ SaveResult CommitSettingsDocument(IXMLDOMDocument* document,
                          MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
             return SaveResult::Win32Failure(backup);
     }
-    const bool replaced = attributes != INVALID_FILE_ATTRIBUTES
-        ? ReplaceFileW(path.c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr) != FALSE
-        : MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE;
-    if (!replaced) return SaveResult::Win32Failure(path);
+    // Verification is complete. Release its DOM before renaming any of the
+    // files it loaded; no validation object needs to survive the commit.
+    check.Reset();
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        const DWORD started = GetTickCount();
+        for (;;) {
+            // The persistent .bak above is already durable. This additional,
+            // call-owned backup protects the live file from ReplaceFile's
+            // partial 1176/1177 failures; never fall back to truncating it.
+            if (ReplaceFileW(path.c_str(), temporary.c_str(),
+                             backup_temporary.c_str(), 0, nullptr, nullptr)) break;
+            const DWORD failure = GetLastError();
+            if (failure == ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) {
+                // 1177 moved the old root to our backup. Restore only into an
+                // absent name, preserving any concurrently created document.
+                if (!MoveFileExW(backup_temporary.c_str(), path.c_str(),
+                                 MOVEFILE_WRITE_THROUGH)) {
+                    const DWORD restore_failure = GetLastError();
+                    cleanup.backup.clear(); // Keep the recovery copy on disk.
+                    return SaveResult::Win32Failure(backup_temporary, restore_failure);
+                }
+            }
+            // 1175 and sharing/lock errors leave both names intact. A short
+            // reader (indexer, scanner, etc.) must not turn into a save dialog
+            // immediately, but a persistent lock must still be reported.
+            const DWORD elapsed = GetTickCount() - started;
+            if ((failure != ERROR_UNABLE_TO_REMOVE_REPLACED &&
+                 failure != ERROR_SHARING_VIOLATION &&
+                 failure != ERROR_LOCK_VIOLATION) || elapsed >= 500)
+                return SaveResult::Win32Failure(path, failure);
+            Sleep(std::min<DWORD>(25, 500 - elapsed));
+        }
+    } else if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        return SaveResult::Win32Failure(path);
+    }
     return {};
 }
 

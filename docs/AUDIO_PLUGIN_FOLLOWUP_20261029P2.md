@@ -1,5 +1,7 @@
 # AAC、MOD、VQF 后续修复与三系统验收
 
+后续 AAC 的 ADIF、LD、显式频率／高采样率 SBR 与分片标签修复见 [2026.10.29p3](AUDIO_PLUGIN_FOLLOWUP_20261029P3.md)。下文保留 p2 历史结果和当时边界。
+
 构建：`2026.10.29p2`。接续 [2026.10.29p1](AUDIO_PLUGIN_FOLLOWUP_20261029P1.md)，本轮更新 `ttp_aac`、`ttp_mod`、`ttp_vqf`。RM 沿用已经验收的 p1 DLL，OGG 及其它插件不在本轮修改范围。
 
 ## 本轮修正
