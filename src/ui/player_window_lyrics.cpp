@@ -1428,7 +1428,7 @@ void PlayerWindow::CreateLyricControls() {
     UpdateLyricToolRects();
 }
 
-void PlayerWindow::RebuildLyricFont(bool repaint) {
+void PlayerWindow::RebuildLyricFont(bool repaint, bool adjust_window_width) {
     lyric_line_layouts_.clear();lyric_layout_font_=nullptr;
     if (!skin_ || !skin_->Lyric().valid) return;
 
@@ -1520,7 +1520,7 @@ void PlayerWindow::RebuildLyricFont(bool repaint) {
         SendMessageW(lyric_control_, WM_SETFONT,
                      reinterpret_cast<WPARAM>(lyric_font_), FALSE);
     if (previous) DeleteObject(previous);
-    ApplyAutoLyricWidth();
+    if (adjust_window_width) ApplyAutoLyricWidth();
     if (repaint && lyric_control_)
         InvalidateRect(lyric_control_, nullptr, FALSE);
 }

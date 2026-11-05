@@ -1643,7 +1643,10 @@ bool PlayerWindow::MinimizeToTray() {
     }
     // Minimize first so Windows preserves/restores the visible owned windows.
     // Hiding afterwards removes the main window's taskbar button.
-    if (!IsIconic(window_)) ShowWindow(window_, SW_MINIMIZE);
+    if (!IsIconic(window_)) {
+        CaptureWindowState();
+        ShowWindow(window_, SW_MINIMIZE);
+    }
     ShowWindow(window_, SW_HIDE);
     return true;
 }
@@ -2375,8 +2378,13 @@ bool PlayerWindow::LoadStartupSkin(HMODULE module) {
     // Use the successfully loaded selector, after validation but before any
     // HWND/font/brush is created. Missing/partial profiles overlay only their
     // actual fields on the package baseline; no configuration is written here.
+    // 0045D5FA's first successful package bind keeps the layout already read
+    // from the main XML. A sidecar may be older (or belong to a previous skin
+    // visit); its rectangles must only win for a genuine switch/fallback.
+    auto profile_player = settings_.player;
     static_cast<void>(settings::LoadSkinVisualProfile(CurrentSkinProfilePath(),
-        settings_.player, settings_.playlist, settings_.lyric, settings_.visual));
+        fallback ? settings_.player : profile_player,
+        settings_.playlist, settings_.lyric, settings_.visual));
     if (!fallback) {
         // Preserve the established normal-startup contract: main XML visual
         // globals remain active (e.g. LX-iPlay's restored #194d5c spectrum).
@@ -2719,6 +2727,7 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
     // and default procedure; a plain painted HWND loses unhandled LVM_* APIs.
     if (!RegisterPlaylistListClass(instance)) return false;
 
+    RecoverSavedWindowLayout();
     const bool skinned = skin_ && skin_->Valid();
     mini_mode_ = skinned && settings_.player.mini_mode &&
                  skin_->SupportsMiniMode();
@@ -3103,6 +3112,11 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         HandleTrayCallback(wparam, lparam);
         return 0;
     case WM_SYSCOMMAND:
+        // 004615A6 snapshots the live layout before DefWindowProc minimizes
+        // the owner and hides its popups. Closing while iconic deliberately
+        // skips that capture, so this is the last normal rectangle/visibility.
+        if ((wparam & 0xfff0U) == SC_MINIMIZE && fullscreen_mode_ == 0)
+            CaptureWindowState();
         // Fullscreen entry minimizes its owner after publishing the new mode.
         // Sending that internal transition through MinimizeToTray would call
         // LeaveFullScreen and cancel entry before the surfaces are detached.
@@ -4051,16 +4065,37 @@ void PlayerWindow::CreateControls() {
 }
 
 void PlayerWindow::CaptureWindowState() {
-    // FUN_004616BD tests IsIconic before invoking FUN_004684D6, and
-    // FUN_004684D6 repeats the same guard around the complete four-window
-    // snapshot.  In particular, do not persist the minimized popup's iconic
-    // rectangle or visibility changes caused only by owner minimization.
-    if (window_ && !ShouldCaptureWindowGeometry(IsIconic(window_) != FALSE))
-        return;
-    CaptureMusicBrowserState();
+    // Desktop lyrics remain independently movable while the owner is iconic.
+    // Their live rectangle is never the owner's minimized placeholder.
+    desktop_lyrics_.CaptureBounds();
+    // 004616BD/004684D6 never use an iconic rectangle or the owned windows'
+    // temporarily hidden visibility. SC_MINIMIZE already captured both.
+    // A direct ShowWindow can bypass that command; recover its normal bounds
+    // from User32 while keeping the saved visibility intent in that case.
+    const bool iconic = window_ &&
+        !ShouldCaptureWindowGeometry(IsIconic(window_) != FALSE);
+    if (!iconic) CaptureMusicBrowserState();
 
     RECT current{};
-    if (window_ && GetWindowRect(window_, &current)) {
+    bool have_current = false;
+    if (iconic) {
+        WINDOWPLACEMENT placement{sizeof(placement)};
+        if (GetWindowPlacement(window_, &placement)) {
+            current = placement.rcNormalPosition;
+            // Ordinary top-level WINDOWPLACEMENT is in workspace coordinates;
+            // mini TOOLWINDOW placement is already in screen coordinates.
+            if (!(GetWindowLongPtrW(window_, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) {
+                MONITORINFO monitor{sizeof(monitor)};
+                if (GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor))
+                    OffsetRect(&current, monitor.rcWork.left - monitor.rcMonitor.left,
+                               monitor.rcWork.top - monitor.rcMonitor.top);
+            }
+            have_current = !IsRectEmpty(&current);
+        }
+    } else if (window_) {
+        have_current = GetWindowRect(window_, &current) != FALSE;
+    }
+    if (have_current) {
         if (mini_mode_) {
             mini_window_bounds_ = current;
             have_mini_window_bounds_ = true;
@@ -4074,20 +4109,20 @@ void PlayerWindow::CaptureWindowState() {
     // Desktop mode keeps window-lyric visibility separate from its hidden
     // HWND. Explicit moves/rebinds update that mode's rectangle themselves.
     if (desktop_lyric_mode_) ActiveLyricVisible() = desktop_lyric_visible;
-    else CaptureActiveLyricWindowState();
-    desktop_lyrics_.CaptureBounds();
+    else if (!iconic) CaptureActiveLyricWindowState();
+    else if (lyric_window_) GetWindowRect(lyric_window_, &ActiveLyricWindowBounds());
     RECT playlist_bounds = settings_.player.playlist_window;
     bool playlist_visible = settings_.player.playlist_visible;
     if (playlist_window_) {
         GetWindowRect(playlist_window_, &playlist_bounds);
-        if (!mini_mode_)
+        if (!mini_mode_ && !iconic)
             playlist_visible = IsWindowVisible(playlist_window_) != FALSE;
     }
     RECT equalizer_bounds = settings_.player.equalizer_window;
     bool equalizer_visible = settings_.player.equalizer_visible;
     if (equalizer_window_) {
         GetWindowRect(equalizer_window_, &equalizer_bounds);
-        if (!mini_mode_)
+        if (!mini_mode_ && !iconic)
             equalizer_visible = IsWindowVisible(equalizer_window_) != FALSE;
     }
     settings_.player.player_window = normal_window_bounds_;
@@ -4163,12 +4198,10 @@ SaveResult PlayerWindow::PersistWindowState() {
     settings_.player.playing_time = position < 0 ? 0 :
         (position > INT_MAX ? INT_MAX : static_cast<int>(position));
 
-    // Startup applies the active package sidecar after TTPlayerRebuild.xml. Writing
-    // only the root document made that stale sidecar replace the just-saved
-    // PlayerWnd/LyricWnd/PlayListWnd/EqualizerWnd rectangles and visibility
-    // flags on the next launch.  FUN_0045D5FA uses this same per-skin branch
-    // when leaving a package; commit the active package snapshot at shutdown
-    // as well, before the root state that owns mini visibility/top-most data.
+    // Keep the active package snapshot current for a later runtime skin
+    // switch (0045D5FA's per-package branch). Ordinary startup takes window
+    // geometry from the main XML, so an older sidecar cannot undo this save.
+    // The root also owns mini visibility/top-most and desktop lyric state.
     const auto profile = SaveCurrentSkinProfile();
     auto snapshot=settings_;snapshot.visual.type=WindowedVisualType();
     const auto root = settings::SaveWindowState(settings_.source_path, snapshot);
@@ -6887,8 +6920,31 @@ void PlayerWindow::CompleteSkinWindowFadeForReplacement() {
     }
 }
 
+void PlayerWindow::RecoverSavedWindowLayout() {
+    // 00402D9E validates PlayerWnd against the primary display only, clearing
+    // valid left-monitor coordinates. Keep 0045C840's independent mode layouts,
+    // but recover against all currently connected work areas before any HWND
+    // consumes them. Do not use the virtual-screen bounding box: it has gaps.
+    const auto work = WindowWorkAreas();
+    auto& player = settings_.player;
+    RECT normal[]{player.player_window, player.lyric_window,
+                  player.playlist_window, player.equalizer_window, player.browser_window};
+    RECT mini[]{player.mini_player_window, player.mini_lyric_window};
+    RecoverWindowLayout(normal, work);
+    RecoverWindowLayout(mini, work);
+    player.player_window = normal[0]; player.lyric_window = normal[1];
+    player.playlist_window = normal[2]; player.equalizer_window = normal[3];
+    player.browser_window = normal[4];
+    player.mini_player_window = mini[0]; player.mini_lyric_window = mini[1];
+    // The browser's alternate rectangle is a separate state, not an attached
+    // second window. Desktop lyrics keep their own persisted location as well.
+    for (RECT* rect : {&player.browser_window2, &player.desktop_lyric_window})
+        RecoverWindowLayout({rect, 1}, work);
+}
+
 void PlayerWindow::ApplySkinProfileWindowState() {
     if (!skin_ || !window_) return;
+    RecoverSavedWindowLayout();
     // FUN_0045D5FA loads the target sidecar into the same global rectangles
     // consumed later by FUN_00464B6C. Keep the cached toggle rectangles in
     // lockstep; otherwise the main mini window comes from the previous skin

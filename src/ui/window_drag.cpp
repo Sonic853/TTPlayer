@@ -43,6 +43,87 @@ RECT DragWorkAreaForRect(const RECT& proposed) noexcept {
     return work;
 }
 
+std::vector<RECT> WindowWorkAreas() {
+    std::vector<RECT> result;
+    EnumDisplayMonitors(nullptr, nullptr,
+        [](HMONITOR monitor, HDC, LPRECT, LPARAM context) -> BOOL {
+            MONITORINFO info{sizeof(info)};
+            if (GetMonitorInfoW(monitor, &info) && !IsRectEmpty(&info.rcWork))
+                reinterpret_cast<std::vector<RECT>*>(context)->push_back(info.rcWork);
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&result));
+    if (result.empty()) {
+        const RECT work = DragWorkAreaForRect({});
+        if (!IsRectEmpty(&work)) result.push_back(work);
+    }
+    return result;
+}
+
+void RecoverWindowLayout(std::span<RECT> windows, std::span<const RECT> work_areas) {
+    if (work_areas.empty()) return;
+    const auto reachable = [&](const RECT& rect) {
+        // A visible sliver of the body does not make an off-screen title bar
+        // draggable. Permit deliberate partial placement and monitor spanning.
+        const LONG width = std::min(32L, rect.right - rect.left);
+        const LONG height = std::min(16L, rect.bottom - rect.top);
+        for (const RECT& work : work_areas)
+            if (rect.top >= work.top && rect.top + height <= work.bottom &&
+                std::min(rect.right, work.right) - std::max(rect.left, work.left) >= width)
+                return true;
+        return false;
+    };
+    const auto nearest = [&](const RECT& rect) -> const RECT& {
+        size_t best = 0;
+        double distance = (std::numeric_limits<double>::max)();
+        for (size_t i = 0; i < work_areas.size(); ++i) {
+            const auto& work = work_areas[i];
+            const double dx = std::max({0.0, static_cast<double>(work.left) - rect.right,
+                static_cast<double>(rect.left) - work.right});
+            const double dy = std::max({0.0, static_cast<double>(work.top) - rect.bottom,
+                static_cast<double>(rect.top) - work.bottom});
+            const double squared = dx * dx + dy * dy;
+            if (squared < distance) { best = i; distance = squared; }
+        }
+        return work_areas[best];
+    };
+    const auto correction = [](const RECT& rect, const RECT& work) -> POINT {
+        // Keep saved dimensions, including a playlist larger than the new
+        // display. Its title and upper-left resize corner remain accessible.
+        return {std::clamp(rect.left, work.left, std::max(work.left, work.right - (rect.right - rect.left))) - rect.left,
+                std::clamp(rect.top, work.top, std::max(work.top, work.bottom - (rect.bottom - rect.top))) - rect.top};
+    };
+    std::vector<bool> visited(windows.size());
+    for (size_t first = 0; first < windows.size(); ++first) {
+        if (visited[first] || IsRectEmpty(&windows[first])) continue;
+        std::vector<size_t> group{first};
+        visited[first] = true;
+        for (size_t cursor = 0; cursor < group.size(); ++cursor)
+            for (size_t i = 0; i < windows.size(); ++i)
+                if (!visited[i] && !IsRectEmpty(&windows[i]) &&
+                    AreDragWindowsAttached(windows[group[cursor]], windows[i])) {
+                    visited[i] = true;
+                    group.push_back(i);
+                }
+        bool any_reachable = false;
+        RECT combined = windows[first];
+        for (const size_t i : group) {
+            any_reachable |= reachable(windows[i]);
+            UnionRect(&combined, &combined, &windows[i]);
+        }
+        if (!any_reachable) {
+            const RECT& work = nearest(windows[first]);
+            const bool fits = combined.right - combined.left <= work.right - work.left &&
+                              combined.bottom - combined.top <= work.bottom - work.top;
+            const POINT delta = correction(fits ? combined : windows[first], work);
+            for (const size_t i : group) OffsetRect(&windows[i], delta.x, delta.y);
+        }
+        for (const size_t i : group) if (!reachable(windows[i])) {
+            const POINT delta = correction(windows[i], nearest(windows[i]));
+            OffsetRect(&windows[i], delta.x, delta.y);
+        }
+    }
+}
+
 bool AreDragWindowsAttached(const RECT& first, const RECT& second) noexcept {
     const bool vertical_overlap = IntervalsOverlapInclusive(
         first.top, first.bottom, second.top, second.bottom);

@@ -6560,17 +6560,17 @@ void PlayerWindow::FlushDeferredOptionsRuntime(UINT template_id) {
     }
 }
 
-void PlayerWindow::ApplyOptionsPageRuntime(UINT template_id) {
+void PlayerWindow::ApplyOptionsPageRuntime(UINT template_id, LPARAM source_control) {
     const UINT change_mask = OptionsPageRuntimeChangeMask(template_id);
     if (change_mask != 0) {
         // FUN_0046228D records Device's 0x400 transition, then the next
         // FUN_0045BF4B transaction issues player command 0x7EB. Keeping the
         // routing here also prevents ApplyOptionsRuntime(260) from running
         // twice for one page notification.
-        ApplyOptionsChangeMask(change_mask, 0);
+        ApplyOptionsChangeMask(change_mask, source_control);
         return;
     }
-    ApplyOptionsRuntime(template_id);
+    ApplyOptionsRuntime(template_id, source_control);
 }
 
 void PlayerWindow::RefreshOsuVisualAvailability() {
@@ -6622,7 +6622,7 @@ void PlayerWindow::RefreshOsuVisualAvailability() {
     }
 }
 
-void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
+void PlayerWindow::ApplyOptionsRuntime(UINT template_id, LPARAM source_control) {
     const bool all = template_id == 0;
     if (all || template_id == 251 || template_id == 258 || template_id == 259 ||
         template_id == 260 || template_id == 381 || template_id == 382)
@@ -6677,10 +6677,18 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
         RefreshOsuVisualAvailability();
         ApplyMediaLibraryConfiguration();
     }
-    if ((all || template_id == 256 || template_id == 384 ||
-         template_id == 385 || template_id == 263) && lyric_window_) {
+    if ((all || template_id == 384 ||
+         (template_id == 263 && fullscreen_lyric_detached_)) && lyric_window_) {
         LayoutLyricControls();
-        RebuildLyricFont(false);
+        // 0044B4A1 routes normal/desktop/fullscreen changes independently.
+        // Only font (0x40C), AutoWidth (0x7E6/0x7E7) and profile load
+        // (0x7D14) enter 00449A8F. Colours, spacing and deferred page commits
+        // must not undo a manual resize, even while AutoWidth is enabled.
+        const bool adjust_width = all || (template_id == 384 &&
+            (source_control == 1036 ||
+             source_control == 2022 || source_control == 2023 ||
+             source_control == 0x7d14));
+        RebuildLyricFont(false, adjust_width);
         UpdateLyricEditorStyle();
         UpdateLyricScrollTimer();
         ApplyFullScreenLyricTransparency();
@@ -6696,8 +6704,11 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
             const bool associated = !associated_lyric_path_.empty() &&
                 _wcsicmp(lyric_path_.c_str(), associated_lyric_path_.c_str()) == 0;
             LoadLyricsFrom(lyric_path_, associated);
-        } else if (!draft && lyrics_.lines.empty() &&
+        } else if (all && !draft && lyrics_.lines.empty() &&
                    settings_.lyric.auto_load_lyric) {
+            // 00490276 only writes the page-256 policy flags. Reloading an
+            // empty document for every checkbox also clears its state and
+            // invokes AutoWidth through ClearLyrics.
             LoadCurrentLyrics();
         } else {
             ApplyAutoLyricVisibility();
@@ -6790,7 +6801,7 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
     }
     if ((mask & 0x0004U) != 0) ApplyOptionsRuntime(251);
     if ((mask & 0x0008U) != 0) ApplyOptionsRuntime(252);
-    if ((mask & 0x0010U) != 0) ApplyOptionsRuntime(384);
+    if ((mask & 0x0010U) != 0) ApplyOptionsRuntime(384, source_control);
     if ((mask & 0x0040U) != 0) ApplyOptionsRuntime(254);
     if ((mask & 0x0080U) != 0) ApplyOptionsRuntime(255);
     if ((mask & 0x0100U) != 0) ApplyOptionsRuntime(258);
@@ -7387,13 +7398,13 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 static_cast<int>(SendMessageW(source, TBM_GETPOS, 0, 0)), 0, 100);
             SetDlgItemTextW(dialog, IDC_FULLSCREEN_ALBUM_PERCENT,
                 (std::to_wstring(settings_.fullscreen.album_transparency_percent) + L"%").c_str());
-            ApplyOptionsPageRuntime(template_id);
+            ApplyOptionsPageRuntime(template_id, control);
             return TRUE;
         }
         if (!control || !CommitOptionsControl(dialog, template_id, control))
             CommitOptionsPage(dialog, template_id);
         options_deferred_apply_mask_ &= ~DeferredOptionsBit(template_id);
-        ApplyOptionsPageRuntime(template_id);
+        ApplyOptionsPageRuntime(template_id, control);
         return TRUE;
     }
     case WM_COMMAND: {
@@ -7545,7 +7556,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                                                nullptr, TRUE);
                             }
                         }
-                        ApplyOptionsPageRuntime(template_id);
+                        ApplyOptionsPageRuntime(template_id, command);
                     }
                 }
             } else if (command == 0x7d15) {
@@ -7583,7 +7594,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 desktop.current.name.clear();
                 InvalidateRect(GetDlgItem(dialog, 1155), nullptr, TRUE);
                 InvalidateRect(GetDlgItem(dialog, 1156), nullptr, TRUE);
-                ApplyOptionsPageRuntime(template_id);
+                ApplyOptionsPageRuntime(template_id, control);
             } else if (command >= 0x80ac && command <= 0x80ae) {
                 const size_t index = static_cast<size_t>(command - 0x80ac);
                 settings::DesktopLyricSettings original_defaults;
@@ -7595,7 +7606,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                     if (desktop.profile == static_cast<int>(index)) {
                         desktop.current = desktop.profiles[index];
                         desktop.current.name.clear();
-                        ApplyOptionsPageRuntime(template_id);
+                        ApplyOptionsPageRuntime(template_id, control);
                     }
                     InvalidateRect(GetDlgItem(dialog, 1155), nullptr, TRUE);
                     InvalidateRect(GetDlgItem(dialog, 1156), nullptr, TRUE);
@@ -7666,7 +7677,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                     InvalidateRect(GetDlgItem(dialog,
                                              static_cast<int>(control)),
                                    nullptr, TRUE);
-                    ApplyOptionsPageRuntime(template_id);
+                    ApplyOptionsPageRuntime(template_id, control);
                 }
                 return TRUE;
             }
@@ -7768,7 +7779,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                     target < ListView_GetItemCount(list)) {
                     SwapListRows(list, row, target, 3);
                     CommitOptionsPage(dialog, template_id);
-                    ApplyOptionsPageRuntime(template_id);
+                    ApplyOptionsPageRuntime(template_id, control);
                 }
                 UpdateDspButtons(dialog, audio_.get(), options_dsp_paths_);
                 return TRUE;
@@ -7947,13 +7958,13 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 settings_.fullscreen.dream_resolution=std::clamp(ComboSelection(dialog,control),0,2);
                 DreamFullscreenOptions::EnableCustom(dialog,settings_.fullscreen.dream_resolution==2);
                 window_state_saved_=false;
-                if(fullscreen_visual_detached_ && settings_.visual.type==1)ApplyOptionsPageRuntime(template_id);
+                if(fullscreen_visual_detached_ && settings_.visual.type==1)ApplyOptionsPageRuntime(template_id, control);
                 return TRUE;
             }
             if(control==IDC_FULLSCREEN_DREAM_STRETCH && notification==BN_CLICKED) {
                 settings_.fullscreen.dream_stretch=IsChecked(dialog,control);
                 window_state_saved_=false;
-                if(fullscreen_visual_detached_ && settings_.visual.type==1)ApplyOptionsPageRuntime(template_id);
+                if(fullscreen_visual_detached_ && settings_.visual.type==1)ApplyOptionsPageRuntime(template_id, control);
                 return TRUE;
             }
             if((control==IDC_FULLSCREEN_DREAM_WIDTH || control==IDC_FULLSCREEN_DREAM_HEIGHT ||
@@ -7966,7 +7977,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                             visual_interval_ns_.store(interval,std::memory_order_relaxed);
                             visual_high_resolution_.store(interval<20000000,std::memory_order_relaxed);
                             visual_worker_condition_.notify_all();
-                        } else if(settings_.fullscreen.dream_resolution==2)ApplyOptionsPageRuntime(template_id);
+                        } else if(settings_.fullscreen.dream_resolution==2)ApplyOptionsPageRuntime(template_id, control);
                     }
                 }
                 return TRUE;
@@ -8003,7 +8014,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 }
                 SetDlgItemTextW(dialog, IDC_FULLSCREEN_ALBUM_PATH,
                                settings_.fullscreen.album_fallback_image.c_str());
-                ApplyOptionsPageRuntime(template_id);
+                ApplyOptionsPageRuntime(template_id, control);
                 return TRUE;
             }
             const auto selection = [dialog](UINT id) {
@@ -8180,7 +8191,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 *target = selected;
                 InvalidateRect(GetDlgItem(dialog, static_cast<int>(control)),
                                nullptr, TRUE);
-                ApplyOptionsPageRuntime(template_id);
+                ApplyOptionsPageRuntime(template_id, control);
             });
             return TRUE;
         }
@@ -8231,7 +8242,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                     settings_.lyric.fullscreen_font = font;
                 }
                 if (valid) *valid = true;
-                ApplyOptionsPageRuntime(template_id);
+                ApplyOptionsPageRuntime(template_id, control);
             }
             return TRUE;
         }
@@ -8264,7 +8275,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 if (template_id == 250 && control == 2189)
                     ApplyOptionsChangeMask(0x0002U, control);
                 else
-                    ApplyOptionsPageRuntime(template_id);
+                    ApplyOptionsPageRuntime(template_id, control);
             }
             if (template_id == 260 && !edit_change)
                 UpdateOptionsDeviceDetails(dialog);
@@ -8293,7 +8304,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 settings_.general.shutdown_time = {
                     changed->st.wHour, changed->st.wMinute,
                     changed->st.wSecond};
-                ApplyOptionsPageRuntime(template_id);
+                ApplyOptionsPageRuntime(template_id, 2183);
             }
             return TRUE;
         }
@@ -8363,7 +8374,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                 if ((changed->uChanged & LVIF_STATE) != 0 &&
                     old_check != new_check) {
                     CommitOptionsPage(dialog, template_id);
-                    ApplyOptionsPageRuntime(template_id);
+                    ApplyOptionsPageRuntime(template_id, header->idFrom);
                 }
                 UpdateDspButtons(dialog, audio_.get(), options_dsp_paths_);
                 return TRUE;
@@ -8383,7 +8394,7 @@ INT_PTR PlayerWindow::HandleOptionsPageDialog(
                     changed->iSubItem < ListView_GetItemCount(list)) {
                     SwapListRows(list, changed->iItem, changed->iSubItem, 3);
                     CommitOptionsPage(dialog, template_id);
-                    ApplyOptionsPageRuntime(template_id);
+                    ApplyOptionsPageRuntime(template_id, header->idFrom);
                 }
                 UpdateDspButtons(dialog, audio_.get(), options_dsp_paths_);
                 return TRUE;

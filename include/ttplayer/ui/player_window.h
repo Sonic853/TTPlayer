@@ -354,8 +354,8 @@ private:
     void CommitOptionsPage(HWND dialog, UINT template_id);
     bool CommitOptionsControl(HWND dialog, UINT template_id, UINT control);
     void FlushDeferredOptionsRuntime(UINT template_id = 0);
-    void ApplyOptionsPageRuntime(UINT template_id);
-    void ApplyOptionsRuntime(UINT template_id = 0);
+    void ApplyOptionsPageRuntime(UINT template_id, LPARAM source_control = 0);
+    void ApplyOptionsRuntime(UINT template_id = 0, LPARAM source_control = 0);
     void ApplyOptionsChangeMask(UINT mask, LPARAM source_control);
     void ReloadApplicationIcons();
     void ApplyApplicationIcons();
@@ -470,6 +470,7 @@ private:
     [[nodiscard]] std::wstring ResourceText(UINT identifier) const;
     bool ApplyLoadedSkin(bool apply_visual_settings = true, bool saved_bounds = false);
     void ApplySkinProfileWindowState();
+    void RecoverSavedWindowLayout();
     void ApplySkinWindowTopMost();
     static void RaiseSkinOwnerOnActivation(HWND target, WPARAM activation, LPARAM previous);
     void ApplySkinWindowAlpha(BYTE alpha);
@@ -647,7 +648,7 @@ private:
     void EnterDesktopLyricMode();
     void LeaveDesktopLyricMode();
     void UpdateLyricWindowSkin(bool saved_bounds = false);
-    void RebuildLyricFont(bool repaint = true);
+    void RebuildLyricFont(bool repaint = true, bool adjust_window_width = true);
     void ApplyAutoLyricWidth();
     void ApplyFullScreenLyricTransparency();
     void UpdateFullScreenLyricInput();

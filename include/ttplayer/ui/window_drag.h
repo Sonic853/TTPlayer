@@ -1,6 +1,7 @@
 #pragma once
 
 #include <span>
+#include <vector>
 #include <windows.h>
 
 namespace ttplayer::ui {
@@ -8,6 +9,11 @@ namespace ttplayer::ui {
 // Resolve from the proposed screen-space rectangle, not the old HWND position
 // or the primary display. The group follows the actively dragged window.
 [[nodiscard]] RECT DragWorkAreaForRect(const RECT& proposed) noexcept;
+
+// Saved rectangles are signed screen coordinates. Only recover windows whose
+// top strip is unreachable; an attached group moves together when it fits.
+[[nodiscard]] std::vector<RECT> WindowWorkAreas();
+void RecoverWindowLayout(std::span<RECT> windows, std::span<const RECT> work_areas);
 
 // Pure geometry recovered from FUN_0040BFD7, FUN_0041094D and
 // FUN_0044F804. Keeping it independent from HWND mutation makes the exact
