@@ -1,5 +1,6 @@
 #include "ttplayer/playlist/playlist.h"
 #include "ttplayer/audio/cue_sheet.h"
+#include "ttplayer/audio/archive_member.h"
 #include "ttplayer/core/text.h"
 #include "ttplayer/core/build_version.h"
 
@@ -374,8 +375,16 @@ bool IsUrl(std::wstring_view value) noexcept {
 bool KeepImportedPath(const std::filesystem::path& path,
                       const LoadOptions& options) {
     if (!options.ignore_bad_files || IsUrl(path.native())) return true;
-    std::error_code error;
-    return std::filesystem::exists(path, error) && !error;
+    const auto exists = [](const std::filesystem::path& candidate) {
+        const DWORD attributes = GetFileAttributesW(candidate.c_str());
+        return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+    };
+    if (exists(path)) return true;
+    // 00477787 / 00408B6B check the outer ZIP/RAR, not the logical member
+    // name as a physical file. Apply the same rule to rebuilt archive kinds.
+    // Loading a list must not decode media, open archives or prompt passwords.
+    audio::ArchiveMemberPath member;
+    return audio::ParseArchiveMemberPath(path.native(), member) && exists(member.archive);
 }
 
 std::string ReadBinaryText(const std::filesystem::path& path) {
@@ -1020,7 +1029,8 @@ void Playlist::SaveM3u8(const std::filesystem::path& path,
     core::WriteFileAtomically(path, output);
 }
 
-void Playlist::LoadTtbl(const std::filesystem::path& path) {
+size_t Playlist::LoadTtbl(const std::filesystem::path& path,
+                          const LoadOptions& options) {
     std::ifstream input(path, std::ios::binary);
     if (!input) throw std::runtime_error("cannot open TTBL");
     std::array<char, 4> magic{};
@@ -1132,14 +1142,26 @@ void Playlist::LoadTtbl(const std::filesystem::path& path) {
         copy_audio_info(loaded.back());
     }
     MigrateLegacyCueNumbers(loaded);
+    // Consume every complete record before filtering, including cached tags
+    // and audio info. Keep the playing identity when preceding rows disappear;
+    // do not let a removed playing row silently point at its replacement.
+    std::optional<size_t> retained_playing_row;
+    size_t retained = 0;
+    for (size_t row = 0; row < loaded.size(); ++row) {
+        if (!KeepImportedPath(loaded[row].path, options)) continue;
+        if (loaded_playing_row >= 0 && row == static_cast<size_t>(loaded_playing_row))
+            retained_playing_row = retained;
+        if (retained != row) loaded[retained] = std::move(loaded[row]);
+        ++retained;
+    }
+    const size_t ignored_records = loaded.size() - retained;
+    loaded.resize(retained);
     tracks_ = std::move(loaded);
     order_revision_ = NextPlaybackOrderRevision();
     title_ = std::move(loaded_title);
-    playing_row_ = loaded_playing_row >= 0 &&
-        static_cast<size_t>(loaded_playing_row) < tracks_.size()
-        ? std::optional<size_t>{static_cast<size_t>(loaded_playing_row)}
-        : std::nullopt;
+    playing_row_ = retained_playing_row;
     current_row_.reset();
+    return ignored_records;
 }
 
 void Playlist::SaveTtbl(const std::filesystem::path& path) const {
@@ -1438,7 +1460,7 @@ void Playlist::SaveXml(const std::filesystem::path& path,
 void Playlist::LoadFromFile(const std::filesystem::path& path,
                             const LoadOptions& options) {
     const auto extension = LowerExtension(path);
-    if (extension == L".ttbl") LoadTtbl(path);
+    if (extension == L".ttbl") LoadTtbl(path, options);
     else if (extension == L".m3u" || extension == L".m3u8")
         LoadM3u8(path, options);
     else LoadXml(path, options);

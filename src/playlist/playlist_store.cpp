@@ -123,7 +123,8 @@ std::filesystem::path PlaylistStore::SlotPath(size_t slot, int digits) const {
 }
 
 void PlaylistStore::Load(const std::filesystem::path& directory, int scan_hint,
-                         int active_slot, bool legacy_generation) {
+                         int active_slot, bool legacy_generation,
+                         const LoadOptions& options) {
     directory_ = directory;
     entries_.clear();
     active_index_ = 0;
@@ -156,8 +157,11 @@ void PlaylistStore::Load(const std::filesystem::path& directory, int scan_hint,
         try {
             Entry entry;
             entry.slot = static_cast<size_t>(slot);
-            entry.playlist.LoadTtbl(path);
-            if (loaded_legacy) {
+            const auto ignored_records = entry.playlist.LoadTtbl(path, options);
+            // Native shutdown saves every fully loaded list (004786E7).
+            // This store saves dirty lists only, so retain filtered results
+            // through the existing atomic save path, without writing here.
+            if (loaded_legacy || ignored_records != 0) {
                 entry.dirty_edits = 1;
                 entry.dirty_since = TickCount();
             }

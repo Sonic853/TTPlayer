@@ -7056,7 +7056,8 @@ void PlayerWindow::LoadStoredPlaylist() {
     }
     playlists_.Load(directory, settings_.player.playlist_scan_count,
                     settings_.player.active_playlist,
-                    settings_.playlist.legacy_playlist_generation);
+                    settings_.playlist.legacy_playlist_generation,
+                    {settings_.playlist.ignore_bad_files});
     const auto default_title = ResourceText(0x813a);
     for (size_t index = 0; index < playlists_.Size(); ++index) {
         if (playlists_.At(index).Title().empty())

@@ -6668,7 +6668,9 @@ void PlayerWindow::ApplyOptionsRuntime(UINT template_id) {
     }
     if (all || template_id == 252) RegisterConfiguredHotKeys();
     if ((all || template_id == 254) && playlist_window_) {
-        UpdatePlaylistWindowSkin();
+        // 0048301E refreshes fonts, colours and item text in place. The skin
+        // rebind path also reapplies the skin's default popup rectangle and
+        // must not run when changing playlist preferences.
         RefreshPlaylist();
     }
     if (all || template_id == 255) {

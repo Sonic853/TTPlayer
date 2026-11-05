@@ -30,7 +30,7 @@ public:
     };
 
     void Load(const std::filesystem::path& directory, int scan_hint, int active_slot,
-              bool legacy_generation);
+              bool legacy_generation, const LoadOptions& options = {});
     [[nodiscard]] bool Empty() const noexcept { return entries_.empty(); }
     [[nodiscard]] size_t Size() const noexcept { return entries_.size(); }
     [[nodiscard]] size_t ActiveIndex() const noexcept { return active_index_; }
