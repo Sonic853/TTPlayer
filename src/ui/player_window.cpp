@@ -7079,6 +7079,7 @@ void PlayerWindow::RefreshPlaylist() {
 }
 
 void PlayerWindow::RefreshPlaybackUi() {
+    UpdateLyricEditorToolbar();
     const auto marker = VisiblePlaylistPlayingRow();
     if (playlist_playback_marker_ != marker) {
         playlist_playback_marker_ = marker;

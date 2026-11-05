@@ -717,6 +717,7 @@ private:
     void LeaveLyricEditor(bool prompt_to_save);
     void DestroyLyricEditor();
     void LayoutLyricEditor(const RECT* content_bounds=nullptr);
+    void UpdateLyricEditorToolbar();
     [[nodiscard]] std::filesystem::path DefaultLyricEditorPath() const;
     [[nodiscard]] std::wstring LyricEditorText() const;
     void SetLyricEditorText(std::wstring_view text, bool modified);
@@ -739,7 +740,8 @@ private:
                                  std::wstring_view replacement,
                                  bool can_undo = true,
                                  bool reformat = true);
-    bool SaveLyricEditor(bool save_as, bool automatic = false);
+    bool OpenLyricEditorFile();
+    bool SaveLyricEditor(bool choose_file, bool automatic = false);
     bool SaveModifiedLyrics();
     void FinishLyricDocument(bool close_editor = true);
     void AutoEmbedLoadedLyrics();

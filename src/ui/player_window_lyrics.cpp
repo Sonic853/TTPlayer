@@ -143,6 +143,13 @@ struct LyricFileAccessScope {
     }
 };
 
+struct LyricFileDialogScope {
+    bool& active;
+    bool previous;
+    explicit LyricFileDialogScope(bool& value) : active(value), previous(value) { active = true; }
+    ~LyricFileDialogScope() { active = previous; }
+};
+
 bool VerifyEmbeddedArchiveStream(IStream* stream, HMODULE comm) {
     Microsoft::WRL::ComPtr<IStream> cursor;
     HRESULT result = stream ? stream->Clone(&cursor) : E_POINTER;
@@ -381,19 +388,25 @@ std::wstring DecodeEditorBytes(const std::string& bytes, int& encoding,
     return result;
 }
 
-std::wstring ReadEditorFile(const std::filesystem::path& path, int& encoding,
+std::optional<std::wstring> TryReadEditorFile(const std::filesystem::path& path, int& encoding,
                             bool& bom, HMODULE comm) {
     audio::ArchiveMemberPath member;
     if (audio::ParseArchiveMemberPath(path.native(),member)) {
         try {
             const auto bytes = audio::ReadArchiveMember(member,comm);
             return DecodeEditorBytes(std::string(reinterpret_cast<const char*>(bytes.data()),bytes.size()),encoding,bom);
-        } catch (...) { return {}; }
+        } catch (...) { return std::nullopt; }
     }
     std::ifstream input(path, std::ios::binary);
-    if (!input) return {};
+    if (!input) return std::nullopt;
     const std::string bytes((std::istreambuf_iterator<char>(input)), {});
+    if (input.bad()) return std::nullopt;
     return DecodeEditorBytes(bytes, encoding, bom);
+}
+
+std::wstring ReadEditorFile(const std::filesystem::path& path, int& encoding,
+                            bool& bom, HMODULE comm) {
+    return TryReadEditorFile(path, encoding, bom, comm).value_or(std::wstring{});
 }
 
 bool WriteEditorFile(const std::filesystem::path& path, std::wstring_view text,
@@ -419,11 +432,15 @@ bool WriteEditorFile(const std::filesystem::path& path, std::wstring_view text,
             return false;
         }
         output.write(bytes.data(), static_cast<std::streamsize>(count - 1));
-        return output.good();
+        output.close();
+        return !output.fail();
     }
 
     output.write("\xef\xbb\xbf", 3);
-    if (stable.empty()) return output.good();
+    if (stable.empty()) {
+        output.close();
+        return !output.fail();
+    }
     count = WideCharToMultiByte(CP_UTF8, 0, stable.data(),
         static_cast<int>(stable.size()), nullptr, 0, nullptr, nullptr);
     if (count <= 0) return false;
@@ -431,7 +448,8 @@ bool WriteEditorFile(const std::filesystem::path& path, std::wstring_view text,
     WideCharToMultiByte(CP_UTF8, 0, stable.data(),
         static_cast<int>(stable.size()), bytes.data(), count, nullptr, nullptr);
     output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    return output.good();
+    output.close();
+    return !output.fail();
 }
 
 std::optional<std::chrono::milliseconds> ParseEditorTimestamp(
@@ -869,6 +887,18 @@ LRESULT PlayerWindow::HandleLyricMessage(UINT message, WPARAM wparam,
     case WM_NOTIFY: {
         const auto* header = reinterpret_cast<const NMHDR*>(lparam);
         if (header && header->hwndFrom == lyric_editor_) {
+            if (header->code == EN_SELCHANGE) {
+                // RichEdit also notifies while cutting/pasting. Querying
+                // EM_CANPASTE here can reenter its OLE clipboard operation.
+                // Update selection-only states now; the UI refresh updates
+                // clipboard/undo states after the edit message has returned.
+                const auto& selection = reinterpret_cast<const SELCHANGE*>(lparam)->chrg;
+                if (lyric_editor_toolbar_)
+                    for (UINT command : {kCmdEditorCut, kCmdEditorCopy})
+                        SendMessageW(lyric_editor_toolbar_, TB_ENABLEBUTTON, command,
+                            MAKELPARAM(selection.cpMin != selection.cpMax, 0));
+                return 0;
+            }
             if (header->code == EN_PROTECTED) {
                 const auto& notification =
                     *reinterpret_cast<const ENPROTECTED*>(lparam);
@@ -2586,6 +2616,7 @@ void PlayerWindow::SetLyricEditorText(std::wstring_view text, bool modified) {
         lyric_editor_document_->Undo(tomResume, nullptr);
     lyric_editor_edit_kind_ = 0;
     SendMessageW(lyric_editor_, EM_SETMODIFY, modified, 0);
+    UpdateLyricEditorToolbar();
 }
 
 void PlayerWindow::InitializeLyricEditorRichText() {
@@ -3200,11 +3231,81 @@ void PlayerWindow::DestroyLyricEditor() {
     lyric_editor_edit_kind_ = 0;
 }
 
-bool PlayerWindow::SaveLyricEditor(bool save_as, bool automatic) {
+void PlayerWindow::UpdateLyricEditorToolbar() {
+    if (!lyric_editor_ || !lyric_editor_toolbar_) return;
+    CHARRANGE selection{};
+    SendMessageW(lyric_editor_, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+    const auto enable = [this](UINT command, bool enabled) {
+        if ((SendMessageW(lyric_editor_toolbar_, TB_ISBUTTONENABLED, command, 0) != FALSE) != enabled)
+            SendMessageW(lyric_editor_toolbar_, TB_ENABLEBUTTON, command, MAKELPARAM(enabled, 0));
+    };
+    // 00449E98 updates the registered toolbar as well as the popup menu.
+    enable(kCmdEditorCut, selection.cpMin != selection.cpMax);
+    enable(kCmdEditorCopy, selection.cpMin != selection.cpMax);
+    enable(kCmdEditorPaste, SendMessageW(lyric_editor_, EM_CANPASTE, 0, 0) != FALSE);
+    enable(kCmdEditorUndo, SendMessageW(lyric_editor_, EM_CANUNDO, 0, 0) != FALSE);
+    enable(kCmdEditorRedo, SendMessageW(lyric_editor_, EM_CANREDO, 0, 0) != FALSE);
+    const auto state = audio_->State();
+    enable(kCmdPlay, PlaybackTrackForUi() && state != audio::PlaybackState::playing &&
+        state != audio::PlaybackState::opening);
+    enable(kCmdPause, state == audio::PlaybackState::playing);
+    const bool can_seek = (state == audio::PlaybackState::playing ||
+        state == audio::PlaybackState::paused) && audio_->Duration().count() > 0;
+    enable(kCmdSeekBack, can_seek);
+    enable(kCmdSeekForward, can_seek);
+}
+
+bool PlayerWindow::OpenLyricEditorFile() {
+    if (!lyric_editor_ || lyric_save_in_progress_) return false;
+    LyricFileDialogScope dialog_scope(lyric_save_in_progress_);
+    const HWND editor = lyric_editor_;
+    const HWND owner = GetAncestor(editor, GA_ROOT);
+    auto filter = BuildDialogFilter(ResourceModule(), {
+        {0x8128U, L"*.lrc;*.txt"}, {0x8124U, L"*.*"}});
+    ModernOpenFileOptions dialog;
+    dialog.owner = owner;
+    dialog.filters = ParseLegacyDialogFilter(
+        std::span<const wchar_t>(filter.data(), filter.size()));
+    dialog.initial_path = lyric_editor_path_;
+    dialog.default_extension = L"lrc";
+    // 0044D6F1 creates an OPEN dialog (0042918D's first argument is 1),
+    // then 004431A0 reads into RichEdit. It does not save the current draft.
+    const auto selected = ModernOpenFile(dialog);
+    if (!selected || lyric_editor_ != editor || !IsWindow(editor)) return false;
+    int encoding = kEditorEncodingUtf8;
+    bool bom = true;
+    const auto text = TryReadEditorFile(*selected, encoding, bom, ttpcomm_module_);
+    if (!text) {
+        auto message = ResourceText(0x8181);
+        if (message.empty()) message = i18n::Literal(L"Failed to open lyric file %s.");
+        if (const auto marker = message.find(L"%s"); marker != std::wstring::npos)
+            message.replace(marker, 2, selected->wstring());
+        MessageBoxW(owner, message.c_str(), ResourceText(0x80).c_str(), MB_OK | MB_ICONERROR);
+        return false;
+    }
+    // Commit only after a successful read. An empty file is a valid document;
+    // cancel/read failure must retain the text, path and RichEdit undo state.
+    CancelLocalLyricSearch();
+    SetLyricEditorText(*text, false);
+    FormatLyricEditorAll();
+    SendMessageW(editor, EM_SETMODIFY, FALSE, 0);
+    lyric_editor_path_ = lyric_path_ = *selected;
+    lyric_editor_encoding_ = encoding;
+    lyric_editor_bom_ = bom;
+    lyrics_embedded_ = false;
+    associated_lyric_path_.clear();
+    lyric_document_modified_ = false;
+    SetFocus(editor);
+    return true;
+}
+
+bool PlayerWindow::SaveLyricEditor(bool choose_file, bool automatic) {
+    if (choose_file && lyric_save_in_progress_) return false;
+    LyricFileDialogScope dialog_scope(lyric_save_in_progress_);
     const auto* current_track = lyric_document_track_ ? &*lyric_document_track_ : PlaybackTrackForUi();
     const auto source = current_track ? std::optional<playlist::Track>(*current_track) : std::nullopt;
     const bool game_source = source && IsOsuLibraryTrack(*source);
-    if (!save_as && lyrics_embedded_ && !game_source)
+    if (!choose_file && lyrics_embedded_ && !game_source)
         return WriteEmbeddedLyrics(lyric_editor_ ? LyricEditorText()
             : SerializeLyricDocument(lyrics_, true), false);
     auto target = lyric_editor_ ? lyric_editor_path_ : lyric_path_;
@@ -3217,20 +3318,20 @@ bool PlayerWindow::SaveLyricEditor(bool save_as, bool automatic) {
     }
     audio::ArchiveMemberPath member;
     const bool archived = audio::ParseArchiveMemberPath(target.native(),member);
-    if (archived && !save_as) {
+    if (archived && !choose_file) {
         MessageBoxW(lyric_window_ ? lyric_window_ : window_,
-            i18n::Literal(L"压缩包内歌词为只读，请使用“另存为”保存到普通文件。"),i18n::Literal(L"保存歌词"),MB_OK|MB_ICONINFORMATION);
+            i18n::Literal(L"压缩包内歌词为只读，请点击“保存”并选择普通文件。"),i18n::Literal(L"保存歌词"),MB_OK|MB_ICONINFORMATION);
         return false;
     }
     // 0044A6E6 sends the lyric HWND as lParam to 0044D824: policy saves
     // use the existing/suggested target directly, without a Save As dialog.
     if (automatic && target.empty()) target = DefaultLyricEditorPath();
-    if (save_as || target.empty()) {
+    if (choose_file || target.empty()) {
         const auto suggested = target.empty() || archived ? DefaultLyricEditorPath() : target;
         auto filter = BuildDialogFilter(ResourceModule(), {
             {0x8128U, L"*.lrc;*.txt"}, {0x8124U, L"*.*"}});
         ModernSaveFileOptions dialog;
-        dialog.owner = lyric_window_;
+        dialog.owner = lyric_editor_ ? GetAncestor(lyric_editor_, GA_ROOT) : lyric_window_;
         dialog.filters = ParseLegacyDialogFilter(
             std::span<const wchar_t>(filter.data(), filter.size()));
         dialog.initial_path = suggested;
@@ -3256,9 +3357,9 @@ bool PlayerWindow::SaveLyricEditor(bool save_as, bool automatic) {
         ? LyricEditorText() : SerializeLyricDocument(lyrics_, settings_.lyric.save_compress));
     if (!WriteEditorFile(target, text, lyric_editor_encoding_,
                          lyric_editor_bom_)) {
-        // FUN_0044D6F1 uses 0x8181 for Save As; the ordinary 0x8022 path in
-        // FUN_0044D824 uses the adjacent 0x8182 failure text.
-        std::wstring message = ResourceText(save_as ? 0x8181 : 0x8182);
+        // 0x8181 belongs to OPEN (0044D6F1). Both manual and automatic
+        // saves in 0044D824 use 0x8182.
+        std::wstring message = ResourceText(0x8182);
         if (message.empty()) message = i18n::Literal(L"Failed to save lyric file %s.");
         if (const size_t marker = message.find(L"%s");
             marker != std::wstring::npos)
@@ -3270,7 +3371,7 @@ bool PlayerWindow::SaveLyricEditor(bool save_as, bool automatic) {
     }
     lyric_editor_path_ = target;
     lyric_path_ = target;
-    if (save_as || game_source) {
+    if (choose_file || game_source) {
         associated_lyric_path_ = target;
         lyrics_embedded_ = false;
     }
@@ -4586,10 +4687,12 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
         LeaveLyricEditor(true);
         return true;
     case kCmdLyricSave:
-        SaveLyricEditor(false);
-        return true;
-    case kCmdLyricSaveAs:
+        // 0044D824 bypasses the chooser only for the automatic-save sentinel
+        // (lParam == lyric HWND). Toolbar/menu/shortcut saves always ask.
         SaveLyricEditor(true);
+        return true;
+    case kCmdLyricOpen:
+        OpenLyricEditorFile();
         return true;
     case kCmdLyricEditorInsertTag:
     case kCmdLyricEditorReplaceTag:
@@ -4705,13 +4808,11 @@ bool PlayerWindow::HandleLyricCommand(UINT command) {
         audio_->Pause();
         RefreshPlaybackUi();
         return true;
-    case 0x7d03:
-        audio_->Seek(std::max(std::chrono::milliseconds(0),
-            audio_->Position() - std::chrono::seconds(5)));
-        return true;
-    case 0x7d04:
-        audio_->Seek(audio_->Position() + std::chrono::seconds(5));
-        return true;
+    case kCmdSeekBack:
+    case kCmdSeekForward:
+        // 0044DDFF forwards these to CPlayerWnd. Reuse its seek boundary
+        // rules instead of clamping the editor's backward command to zero.
+        return HandleContextCommand(command);
     case kCmdShowLyrics:
         ToggleLyricWindow();
         return true;

@@ -2332,6 +2332,22 @@ void PlayerWindow::RestoreVisualWindow() {
 void PlayerWindow::DetachLyricControl(const RECT& target,
                                       HWND insert_after) {
     if (!lyric_control_ || !IsWindow(lyric_control_)) return;
+    // The modern transparent-input popup is owned by LyricCtrl. User32 moves
+    // owned windows during SetWindowPos; synchronously updating/destroying it
+    // from WM_WINDOWPOSCHANGED can interrupt a change of the owner's Z band.
+    // Apply the original 0044E090 layer first, then refresh the input surface.
+    struct InputRefresh {
+        PlayerWindow& player;
+        bool previous;
+        ~InputRefresh() {
+            player.fullscreen_lyric_input_updating_ = previous;
+            player.UpdateFullScreenLyricInput();
+        }
+    } input_refresh{*this, std::exchange(fullscreen_lyric_input_updating_, true)};
+    const bool was_topmost = (GetWindowLongPtrW(lyric_control_, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+    if (fullscreen_lyric_input_ &&
+        (!settings_.lyric.fullscreen_transparent || was_topmost != (insert_after == HWND_TOPMOST)))
+        DestroyFullScreenLyricInput();
     if (!fullscreen_lyric_detached_) {
         fullscreen_lyric_saved_style_ =
             GetWindowLongPtrW(lyric_control_, GWL_STYLE);

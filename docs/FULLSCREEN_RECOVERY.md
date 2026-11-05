@@ -220,3 +220,80 @@ checks the isolated comparison.
 ## Win7 Aero shell verification — 2026-09-21
 
 The current legacy Release passed the same 15 shell checkpoints on Win7 SP1 with Aero enabled, using a local native harness and silent fixtures. Coverage includes repeated overlay/spectrum transitions, a physical click in the native visual menu, transparent lyrics using the work area, visual-only/combined reentry and exit. The window hit at the taskbar position belonged to the player during fullscreen and to Explorer after exit. `TaskbarCreated` was simulated; Explorer was not restarted. See the [Aero VM report](XP_WIN7_VM_VALIDATION.md#aero-开启后的补充验证2026-09-21).
+
+## 2026-11-05：透明全屏模式切换的置顶修复
+
+### 原版规则
+
+本次重新核对根目录 5.7.9 `TTPlayer.exe`，SHA-256 为
+`c7999ea5823469c1684148cac1bd196009824348ccac5cdd45978f8fb574e28c`。
+原版依据来自已有 `reverse/decompiled/TTPlayer.exe.pseudo.c`；运行回归针对重建版，
+不把它表述为此次重新运行原版或新生成 REA 反编译证据。
+
+| 原版函数 | 关键分支 | 对应行为 |
+| --- | --- | --- |
+| `0046228D`，全屏配置 `0x2000` 分支 | `0x7DE8/0x7DE9/0x7DEA` 设置模式 1/2/3 | 仅歌词／仅视觉／歌词与视觉同屏 |
+| `0046228D`，`00462AE8` 分支 | 恢复进入前的 `TransparentFS`；支持透明时传工作区矩形和参数 1 给 `0044ABB1` | 透明“仅歌词”是桌面工作区上的置底窗口，不应强制置顶 |
+| `0046228D`，组合布局 | 按 `LrcSize*` 和 `PosRelation*` 计算分屏或叠加；传参数 0 给 `0044ABB1` | 同屏歌词应置顶，包括透明叠加歌词 |
+| `0044ABB1 → 0044E090` | `hWndInsertAfter = (param_2 != 0) * 2 - 1`，标志 `0x50` | 参数 0 是 `HWND_TOPMOST(-1)`，参数 1 是 `HWND_BOTTOM(1)`；显示而不激活。每次布局都执行，不只第一次脱离父窗 |
+| `0044ABB1 / 0044ABFC` | 脱离后把 `WS_CHILD` 改成 `WS_POPUP`；恢复时反向操作 | 复用歌词 HWND，保留退出后的父窗口和矩形 |
+| `0044E1CA`、`0046228D` 退出分支 | 先恢复原矩形与父窗口，再恢复配置和普通窗口 | 模式切换不能提前显示普通歌词窗口；退出后还原原透明偏好 |
+
+原版没有重建版为现代透明全屏空白区域增加的输入代理窗口。
+逐像素平滑文字和现代输入覆盖仍属于已记录的扩展，不宣称原版具有这些实现。
+
+### 根因与修复
+
+重建版原有 `UpdateFullScreenLayout` 已正确选择 `HWND_BOTTOM / HWND_TOPMOST`。
+故障出在 `LyricCtrl` 拥有的 `TTPlayer_FullScreenLyricInput`：它仍存在时，
+`SetWindowPos` 会连带调整被拥有窗口；歌词收到同步 `WM_WINDOWPOSCHANGED`、
+`WM_STYLECHANGED` 后又立即更新或销毁输入代理，干扰了这一轮层级迁移。
+
+修复前的真实 HWND 跟踪记录了：从透明仅歌词进入同屏模式时，输入代理取得
+`WS_EX_TOPMOST`，歌词控件的该标志仍为 0；最终代理被移除后，歌词仍未置顶。
+这不是把“透明仅歌词置底”错误地当成 BUG。对应失败日志保留在
+`tests/fullscreen_zorder_20261105/before.log`。
+
+Windows 的拥有关系会影响置顶组：提升拥有者会同时提升被拥有窗口，降低被拥有窗口
+也可能影响拥有者；`SWP_NOOWNERZORDER` 不能代替完整的层级迁移管理。
+参见 [SetWindowPos 的拥有关系与置顶规则](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos#remarks)。
+
+`DetachLyricControl` 现在按以下顺序操作：
+
+1. 暂停同步消息中的输入代理刷新；使用作用域恢复标志，避免提前恢复。
+2. 若即将改变置顶组，或进入不透明歌词，先销毁旧输入代理。
+3. 完成原版要求的父窗口、位置、层级、样式和透明绘制更新。
+4. 在最终状态下刷新输入区域；只有仍需要且系统支持时才创建代理。
+
+重复布局且层级不变时保留代理 HWND，不在每次布局中无条件销毁重建。
+歌词控件本身仍复用，退出恢复和透明仅歌词置底规则保持不变。
+没有增加新 API 导入，也没有放宽 `WS_EX_NOREDIRECTIONBITMAP` 的系统门槛：
+输入代理仍只在 Windows 8 及以上并开启桌面合成时使用；XP／Win7 沿用原有歌词窗口路径。
+
+### 验证与发行
+
+本地测试源码保存在 `tests/ui/lyric_fullscreen_visibility_tests.inc`，通过真实播放器
+窗口和原命令处理函数执行；只用测试时钟代替音频播放，不打开音频设备。
+16 组普通／迷你、透明／不透明、上下分屏／叠加、输入代理开／关组合，
+每组依次选择模式 `1→3→1→2→3→2→1→3→1`，共 144 次模式选择。
+检查实际可见性、父窗口、矩形、置顶标志、代理与歌词相邻且同属一个置顶组、
+重复布局保留代理、隐藏宿主重排不挤压全屏、双击／菜单退出后的恢复及透明偏好还原。
+
+| 环境 | 执行方式 | 结果 |
+| --- | --- | --- |
+| Windows 11，10.0.26200 | 本机 Release，实际启用现代输入代理 | 16 组通过，退出码 0 |
+| Windows XP SP3，5.1.2600 | 用户已启动的 XP 虚拟机，通过 VirtualBox MCP 复制、执行并回收日志 | 同一测试 EXE 的 16 组通过，退出码 0，现代输入代理未创建 |
+| Windows 7 SP1，6.1.7601 | 用户已启动的 Win7 虚拟机，通过 VirtualBox MCP 复制、执行并回收日志 | 同一测试 EXE 的 16 组通过，退出码 0，现代输入代理未创建 |
+
+另通过本机完整 `lyric_main_menu_tests`：上一轮 17 个工具栏按钮、逐字／区间歌词、
+快捷键、编辑中播放结束，以及此前未通过的全屏扩展回归。
+`fullscreen_lyric_drag_tests --messages-only` 的拖动、取消、捕获丢失和双击输入回归通过。
+本次没有执行共享桌面的真实鼠标 `SendInput` 测试，也不把层级断言等同于重新完成所有
+任务栏遮挡、显示器热插拔、混合 DPI 或全屏渲染像素验收。
+
+日志目录为 `tests/fullscreen_zorder_20261105`：`host-matrix-final.log`、
+`host-expanded.log`、`host-input.log`、`XP-fullscreen.log`、`Win7-fullscreen.log`，
+两台虚拟机的 `*-fullscreen-exit.txt` 均为 0。
+Release 主程序和更新器的 XP／Win7 静态导入审计通过；主程序仍为 x86、子系统 5.01。
+更新 `build/Release` 中的两种主程序及 `TTPlayerRebuild-2026.11.05.zip`、
+`TTPlayer-2026.11.05.zip`。测试只保留本地，不进入发行包或 Actions。
