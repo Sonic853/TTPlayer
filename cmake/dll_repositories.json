@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "components": [
+    {"folder": "gettext", "repository": "TTPlayerRebuild/TTPlayerI18n", "workflow": "manual-build.yml", "inputs": {"configuration": "Release"}},
+    {"folder": "makivm", "repository": "TTPlayerRebuild/TTPlayerMaki", "workflow": "build.yml"},
+    {"folder": "mbedtlsmin", "repository": "TTPlayerRebuild/TTPlayerHttps", "workflow": "build.yml"},
+    {"folder": "ttp_aac", "repository": "TTPlayerRebuild/TTPlayerAAC", "workflow": "build.yml"},
+    {"folder": "ttp_ac3dts", "repository": "TTPlayerRebuild/TTPlayer_AC_130_dts", "workflow": "build.yml"},
+    {"folder": "ttp_ape", "repository": "TTPlayerRebuild/TTPlayerAPE", "workflow": "build.yml"},
+    {"folder": "ttp_asf", "repository": "TTPlayerRebuild/TTPlayerAsf", "workflow": "build.yml"},
+    {"folder": "ttp_clienc", "repository": "TTPlayerRebuild/TTPlayerClienc", "workflow": "build.yml"},
+    {"folder": "ttp_dsd", "repository": "TTPlayerRebuild/TTPlayerDSD", "workflow": "build.yml"},
+    {"folder": "ttp_enc", "repository": "TTPlayerRebuild/TTPlayerEnc", "workflow": "build.yml"},
+    {"folder": "ttp_flac", "repository": "TTPlayerRebuild/TTPlayerFLAC", "workflow": "build.yml"},
+    {"folder": "ttp_lrcsh", "repository": "TTPlayerRebuild/TTPlayerLrcsh", "workflow": "build.yml"},
+    {"folder": "ttp_mod", "repository": "TTPlayerRebuild/TTPlayerMod", "workflow": "build.yml"},
+    {"folder": "ttp_mpc", "repository": "TTPlayerRebuild/TTPlayerMpc", "workflow": "build.yml"},
+    {"folder": "ttp_ogg", "repository": "TTPlayerRebuild/TTPlayerOGG", "workflow": "build.yml"},
+    {"folder": "ttp_osu", "repository": "TTPlayerRebuild/TTPlayerOSU", "workflow": "build.yml"},
+    {"folder": "ttp_rm", "repository": "TTPlayerRebuild/TTPlayerRm", "workflow": "build.yml"},
+    {"folder": "ttp_tak", "repository": "TTPlayerRebuild/TTPlayerTak", "workflow": "build.yml"},
+    {"folder": "ttp_vqf", "repository": "TTPlayerRebuild/TTPlayerVqf", "workflow": "build.yml"},
+    {"folder": "ttp_webm", "repository": "TTPlayerRebuild/TTPlayerWebM", "workflow": "build.yml"},
+    {"folder": "ttpbrowser", "repository": "TTPlayerRebuild/TTPlayerBrowser", "workflow": "build.yml"},
+    {"folder": "ttpcomm", "repository": "TTPlayerRebuild/TTPlayerComm", "workflow": "build.yml"},
+    {"folder": "ttpres", "repository": "TTPlayerRebuild/TTPlayerRes", "workflow": "build.yml"},
+    {"folder": "waskin", "repository": "TTPlayerRebuild/TTPlayerWaskin", "workflow": "manual-build.yml"}
+  ]
+}

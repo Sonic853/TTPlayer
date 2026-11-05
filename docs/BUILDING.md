@@ -16,6 +16,14 @@ git submodule update --init --recursive -- tests
 
 ## GitHub Actions
 
+### 手动请求全部 DLL 发布
+
+新增 **Actions → Request DLL Releases**，仅手动触发。它向 24 个 DLL 仓库
+发送条件发布请求，由各仓库在发布队列内检查：只有默认分支存在尚未发布的提交时才构建、
+打包并发布 Release。可勾选 Preview 只读预览。
+部署顺序、`DLL_RELEASE_TOKEN`／`GH_TOKEN` 权限及完整仓库清单见
+[统一 DLL 发布请求](DLL_RELEASE_REQUESTS.md)。
+
 ### 默认使用最新 TTPCOMM
 
 手动构建的 `ttpcomm_version` 默认值为 `latest`；省略或留空也使用

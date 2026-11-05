@@ -1,0 +1,41 @@
+name: Request DLL Releases
+run-name: DLL releases - ${{ inputs.dry_run && 'Preview' || 'Dispatch' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview only (do not send release requests)
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: request-dll-releases
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Request conditional releases for all DLL repositories
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Send requests (destination workflows skip released commits)
+        env:
+          GH_TOKEN: ${{ secrets.DLL_RELEASE_TOKEN || secrets.GH_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python3 cmake/dispatch_dll_releases.py
+      - name: Preserve dispatch results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dll-release-requests-${{ github.run_id }}
+          path: artifacts/dll-release-requests.json
+          if-no-files-found: ignore
+          retention-days: 14

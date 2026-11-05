@@ -53,7 +53,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -256,7 +256,7 @@ jobs:
           $info | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
 
       - name: Upload player and optional add-in bundles
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v7
         with:
           name: TTPlayer-Windows-x86-${{ inputs.configuration }}-${{ github.run_number }}
           path: artifact/
@@ -265,7 +265,7 @@ jobs:
 
       - name: Upload configure diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v7
         with:
           name: TTPlayer-configure-log-${{ github.run_number }}
           path: |
@@ -290,7 +290,7 @@ jobs:
       PREVIOUS_VERSION: ${{ needs.build.outputs.previous_version }}
     steps:
       - name: Download built player
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@v8
         with:
           name: TTPlayer-Windows-x86-${{ inputs.configuration }}-${{ github.run_number }}
           path: artifact
@@ -383,7 +383,7 @@ jobs:
           "artifact_name=TTPlayer-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Upload prepared release
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v7
         with:
           name: TTPlayer-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifact/
@@ -405,7 +405,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.prepare_release.outputs.version }}
     steps:
       - name: Download prepared release
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@v8
         with:
           name: ${{ needs.prepare_release.outputs.artifact_name }}
           path: artifact
@@ -452,7 +452,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.prepare_release.outputs.version }}
     steps:
       - name: Download prepared release
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@v8
         with:
           name: ${{ needs.prepare_release.outputs.artifact_name }}
           path: artifact
