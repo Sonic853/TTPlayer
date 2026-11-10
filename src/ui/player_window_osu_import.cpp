@@ -29,14 +29,13 @@ INT_PTR CALLBACK ConfirmProc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
     auto* state=reinterpret_cast<Confirmation*>(GetWindowLongPtrW(window,DWLP_USER));
     if(message==WM_INITDIALOG) {
         state=reinterpret_cast<Confirmation*>(lparam);SetWindowLongPtrW(window,DWLP_USER,lparam);SetWindowTextW(window,state->title.c_str());
-        Control(window,L"STATIC",state->question.c_str(),0,100,{10,9,325,25});
-        Control(window,L"STATIC",state->files.c_str(),SS_PATHELLIPSIS,101,{10,29,325,59});
-        Control(window,L"STATIC",i18n::Literal(L"将复制一份 OSZ 用于导入，原文件不会直接交给游戏。"),0,102,{10,65,325,91});
-        Control(window,L"BUTTON",i18n::Literal(L"保留 osz 文件"),WS_TABSTOP|BS_AUTOCHECKBOX,103,{10,96,325,111});
+        Control(window,L"STATIC",state->question.c_str(),0,100,{10,8,265,20});
+        Control(window,L"STATIC",state->files.c_str(),SS_PATHELLIPSIS,101,{10,24,265,40});
+        Control(window,L"BUTTON",i18n::Literal(L"保留 osz 文件"),WS_TABSTOP|BS_AUTOCHECKBOX,103,{10,44,265,57});
         CheckDlgButton(window,103,BST_CHECKED);
-        Control(window,L"STATIC",i18n::Literal(L"取消保留后，仅在确认导入成功且原文件未被播放列表使用时清理。"),0,104,{10,117,325,145});
-        const auto okay=Control(window,L"BUTTON",i18n::Literal(L"导入"),WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,{204,151,260,169});
-        Control(window,L"BUTTON",i18n::Literal(L"取消"),WS_TABSTOP,IDCANCEL,{269,151,325,169});
+        Control(window,L"STATIC",i18n::Literal(L"取消保留后，仅在确认导入成功且原文件未被播放列表使用时清理。"),0,104,{10,61,265,79});
+        const auto okay=Control(window,L"BUTTON",i18n::Literal(L"导入"),WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,{144,86,200,104});
+        Control(window,L"BUTTON",i18n::Literal(L"取消"),WS_TABSTOP,IDCANCEL,{209,86,265,104});
         Center(window);SetFocus(okay);return FALSE;
     }
     if(!state)return FALSE;
@@ -111,9 +110,12 @@ void PlayerWindow::AppendOsuImportMenu(HMENU menu) const {
         if(SelectedOsuPackages().empty())return;
         audio::OsuInstallation stable,lazer;const bool has_stable=Installation(1,settings_,stable),has_lazer=Installation(2,settings_,lazer);
         if(!has_stable&&!has_lazer)return;
-        AppendMenuW(menu,MF_SEPARATOR,0,nullptr);const UINT flags=MF_STRING|(osu_importing_?MF_GRAYED:0);
-        if(has_stable)AppendMenuW(menu,flags,kPlaylistImportOsu,i18n::Literal(L"导入到 osu!"));
-        if(has_lazer)AppendMenuW(menu,flags,kPlaylistImportOsuLazer,i18n::Literal(L"导入到 osu!lazer"));
+        const UINT flags = MF_BYCOMMAND | MF_STRING | (osu_importing_ ? MF_GRAYED : 0);
+        if (has_stable)
+            InsertMenuW(menu, kCmdPlaylistOptions, flags, kPlaylistImportOsu, i18n::Literal(L"导入到 osu!"));
+        if (has_lazer)
+            InsertMenuW(menu, kCmdPlaylistOptions, flags, kPlaylistImportOsuLazer, i18n::Literal(L"导入到 osu!lazer"));
+        InsertMenuW(menu, kCmdPlaylistOptions, MF_BYCOMMAND | MF_SEPARATOR, 0, nullptr);
     }catch(...){}
 }
 void PlayerWindow::ImportOsuSongs(unsigned source) {
@@ -131,7 +133,7 @@ void PlayerWindow::ImportOsuSongs(unsigned source) {
         confirmation.question=i18n::Text(source==1?L"是否将所选 OSZ 导入到 osu!？":L"是否将所选 OSZ 导入到 osu!lazer？");
         confirmation.files=packages.size()==1?packages.front().filename().native():
             i18n::Text(L"所选谱面包：")+std::to_wstring(packages.size())+L"\r\n"+packages.front().filename().native()+L" …";
-        const DialogTemplate confirm{{WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME,0,0,0,0,335,179},0,0,0};
+        const DialogTemplate confirm{{WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME,0,0,0,0,275,114},0,0,0};
         if(DialogBoxIndirectParamW(GetModuleHandleW(nullptr),&confirm.dialog,owner,ConfirmProc,reinterpret_cast<LPARAM>(&confirmation))!=IDOK)return;
         std::vector<Item> results;for(const auto& path:packages)results.push_back({path});
         Progress progress;progress.title=title;progress.packages=results.size();
