@@ -73,12 +73,13 @@ ExtraAddIn 根目录的 `ttpbrowser.dll` 同样放在 EXE 旁，
 
 1. 每个仓库只请求一次 GitHub `/releases/latest`，接受正式发布的有效日期版本，拒绝草稿／预发行。
 2. 精确选择 `ttp_名称-上游版本.zip`；I18n 为 `ttp_i18n-x86-上游版本.zip`。
-   Browser 为 `ttpbrowser-上游版本.zip`，沿用其根目录 DLL 与许可证说明布局。
+   Browser 为 `ttpbrowser-上游版本.zip`，提取根目录 `ttpbrowser.dll`；第三方声明保存在浏览器仓库。
    AAC、AC3/DTS、TAK、RM、VQF、DSD 等组件的 `-source.zip` 和 GitHub 自动源码附件不会被选中。
 3. 保存本次选中的标签、Release ID、附件 ID、地址及摘要。后续使用该标签的下载地址，
    并验证 GitHub API 提供的 ZIP SHA-256 和长度；同一任务中不再次切换至后来发布的版本。
 4. 检查 ZIP 路径、重复条目、文件类型、大小上限、CRC 及包内 SHA-256。
-   只读取约定的 DLL、翻译资源、浏览器许可证说明及清单，拒绝目录越界、未知 DLL、符号链接和加密 ZIP。
+   打包约定的 DLL、翻译资源及清单。既有浏览器运行 ZIP 中的声明先参与完整源包校验，再从合集及其文件清单中移除。
+   拒绝目录越界、未知文件、符号链接和加密 ZIP。
 5. 静态检查每个 DLL 为 x86 PE32、XP 可加载的系统／子系统版本；复用 YY-Thunks
    的 XP 5.1.2600 和 Win7 6.1.7600 导出表审计导入，不执行下载的 DLL。
    浏览器另外检查 `ttp_browser_get_api` 导出入口。
@@ -98,25 +99,30 @@ Release 说明自动列出每个插件的实际版本及对应上游 Release 链
 ### 2026-11-10 浏览器组件接入与验证
 
 ExtraAddIn 现有五个组件。浏览器使用 `TTPlayerRebuild/TTPlayerBrowser` 的最新正式 Release，
-选取 `ttpbrowser-日期版本.zip`，保留根目录 `ttpbrowser.dll`。
-许可证说明与 DLL 一起验证包内 SHA256，合并后的 ExtraAddIn 校验清单覆盖两者。
+选取 `ttpbrowser-日期版本.zip`，收录根目录 `ttpbrowser.dll`。
+第三方声明保存在浏览器仓库的 `THIRD_PARTY_NOTICES.md`。新运行包包含 DLL 和校验清单，
+旧运行包附带的声明仍参与源包 SHA256 校验，ExtraAddIn 及其文件清单仅收录浏览器 DLL。
 浏览器仍接受 x86 PE32、XP 系统／子系统版本和 XP／Win7 导入审计，并要求导出 `ttp_browser_get_api`。
 
-本次查询该公开仓库的 Release 列表为空，`/releases/latest` 返回 404。
+首次接入时查询该公开仓库的 Release 列表为空，`/releases/latest` 返回 404。
 需要先在浏览器仓库运行 **Build TTPlayer music window**，勾选 **Release a Version (GitHub)**，
 发布首个含上述运行 ZIP 的正式版。播放器打包遇到此情况会明确显示 `TTPlayerBrowser` 缺少正式版。
 
 本地验证使用浏览器工程现有的 `ttpbrowser-2026.10.29.zip`，测试用 Release 元数据明确标为模拟数据。
 该 ZIP 中 DLL 的 SHA256 为
 `dce223916b8dd4968d2d6fca2a94d948dd7c7ae5f1eb6c9d5e528007df60f0df`。
-19 项回归全部通过，覆盖完整 20 组件合集、确定性打包、来源只解析一次、根目录安装布局、
-许可证保留／缺失／未校验、错误路径、摘要错误、缺少导出、x64／高版本子系统／不兼容导入，
+20 项回归全部通过，覆盖完整 20 组件合集、确定性打包、来源只解析一次、根目录安装布局、
+新旧声明布局、声明排除及源包校验、两文件浏览器运行包验证、错误路径、摘要错误、缺少导出、x64／高版本子系统／不兼容导入，
 以及浏览器下载失败时保留上一份完整输出。
 
 从测试生成的 ExtraAddIn 根目录重新取出的同一 DLL，在本机 Windows 11 和 VirtualBox MCP 的
 XP、Win7 上均通过动态加载、API 1 前缀与必要回调查询、卸载检查；两个虚拟机退出码均为 0。
 本次运行验证范围为 DLL 加载与接口兼容性。Actionlint、14 段工作流 PowerShell 语法和四种发布开关组合均通过。
 源码、夹具和日志保存在 `tests/extra_browser_20261110`，测试继续仅在本地运行。
+
+声明范围调整的追加日志保存在 `tests/browser_notices_20261110`。
+已通过浏览器 `build.ps1 -Package` 实际构建两文件运行 ZIP，完成 16 DLL／381 imports 的 XP／Win7 审计，
+再用该 ZIP 生成完整合集，核对 ExtraAddIn 内容、SHA256 清单及来源记录中的浏览器载荷均为 DLL。
 
 ## 本地命令
 
