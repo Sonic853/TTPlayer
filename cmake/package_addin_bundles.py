@@ -34,6 +34,7 @@ BUNDLES = {
     'ExtraAddIn': (
         ('TTPlayerWaskin', 'ttp_waskin'), ('TTPlayerMaki', 'ttp_maki'),
         ('TTPlayerI18n', 'ttp_i18n'), ('TTPlayerOSU', 'ttp_osu'),
+        ('TTPlayerBrowser', 'ttpbrowser'),
     ),
 }
 ARCHIVE_LIMIT = 16 * 1024 * 1024
@@ -128,7 +129,8 @@ def unpack_component(repository, target, release, archive):
     asset = select_asset(repository, target, release)
     if len(archive) != asset['size'] or hashlib.sha256(archive).hexdigest() != asset['digest'][7:]:
         raise ValueError(f'{repository}: ZIP size or SHA-256 mismatch')
-    dll_path = f'AddIn/{target}.dll'
+    # The music window is loaded beside the EXE; codec/extra add-ins use AddIn.
+    dll_path = f'{target}.dll' if target == 'ttpbrowser' else f'AddIn/{target}.dll'
     files, directories, seen = {}, set(), set()
     with zipfile.ZipFile(io.BytesIO(archive)) as package:
         entries = package.infolist()
@@ -155,7 +157,8 @@ def unpack_component(repository, target, release, archive):
             translation = target == 'ttp_i18n' and (
                 name in ('i18n/README.md', 'i18n/ttplayer.pot') or
                 re.fullmatch(r'i18n/[A-Za-z0-9_-]+/ttplayer\.(po|mo)', name))
-            if name not in (dll_path, 'SHA256SUMS.txt') and not translation:
+            browser_notice = target == 'ttpbrowser' and name == 'THIRD_PARTY_NOTICES.md'
+            if name not in (dll_path, 'SHA256SUMS.txt') and not translation and not browser_notice:
                 raise ValueError(f'{repository}: unexpected runtime file: {name}')
             limit = 65536 if name == 'SHA256SUMS.txt' else ARCHIVE_LIMIT
             if entry.file_size > limit:
@@ -169,6 +172,8 @@ def unpack_component(repository, target, release, archive):
     actual = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
     if sums != actual:
         raise ValueError(f'{repository}: runtime file SHA-256 mismatch or missing checksum')
+    if target == 'ttpbrowser' and not files.get('THIRD_PARTY_NOTICES.md'):
+        raise ValueError(f'{repository}: missing browser third-party notices')
     if target == 'ttp_i18n':
         for locale in ('chs', 'cht', 'en_US'):
             if not any(f'i18n/{locale}/ttplayer.{ext}' in files for ext in ('po', 'mo')):
@@ -212,6 +217,11 @@ def audit_component(files, metadata, inventories, directory):
         if file_version(path) != metadata['version']:
             raise ValueError('OSU file version does not match its release')
     imports = inspect(path)  # Enforces x86 PE32, XP subsystem and no delay imports.
+    if path.name == 'ttpbrowser.dll':
+        from ttpcomm_abi import inspect_exports
+        if not any(item['name'] == 'ttp_browser_get_api'
+                   for item in inspect_exports(path).values()):
+            raise ValueError('Missing music window API export ttp_browser_get_api')
     for inventory_name, available in inventories.items():
         for library, names in imports.items():
             for name in names:

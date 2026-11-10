@@ -233,8 +233,7 @@ jobs:
             run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
 
-      - name: Download, verify and package latest add-ins for release
-        if: inputs.release_a_version || inputs.release_to_gitee
+      - name: Download, verify and package latest add-ins
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           PACKAGE_VERSION: ${{ steps.version.outputs.version }}
@@ -256,7 +255,7 @@ jobs:
           $info | Add-Member -NotePropertyName addin_bundles -NotePropertyValue $bundles
           $info | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath artifact/build-info.json -Encoding utf8
 
-      - name: Upload player and optional add-in bundles
+      - name: Upload player and add-in bundles
         uses: actions/upload-artifact@v7
         with:
           name: TTPlayer-Windows-x86-${{ inputs.configuration }}-${{ github.run_number }}
@@ -302,18 +301,14 @@ jobs:
           PUBLISH_RELEASE: ${{ inputs.release_a_version }}
           PUBLISH_GITEE: ${{ inputs.release_to_gitee }}
           RELEASE_INSTALL_NOTES: |
-            使用该程序前确保本地已安装有 [5.7.9](https://github.com/user-attachments/files/33088775/TTPlayer579.2.zip) 版本的千千静听（没装有？[点这里](https://github.com/user-attachments/files/33088775/TTPlayer579.2.zip)），请按照以下步骤安装重建版：
-            1. 下载并解压 TTPlayerRebuild-{version}.zip（原有命名）或 TTPlayer-{version}.zip（新增命名），任选一种。
-            2. 打开开始菜单。
-            3. 打开所有程序——千千静听——右键千千静听程序图标。
-            4. 在菜单选择“打开文件位置”
-            5. 退出播放器并备份原安装目录，将所选包内的主程序、TTPUpdater.exe、ttpcomm.dll、ttpres.dll 和 AddIn 文件夹复制到安装目录，替换同名文件并合并 AddIn 文件夹。
-            6. 启动所选包对应的 TTPlayerRebuild.exe 或 TTPlayer.exe；原有命名和快捷方式继续可用。
-            7. 享受重建版千千静听。
+            该程序可使用可选的 [TTPlayer外部引用库.zip](https://github.com/user-attachments/files/34619509/TTPlayer.zip) 请按照以下步骤安装：
+            1. 下载并解压 TTPlayerRebuild-{version}.zip（重建版命名）或 TTPlayer-{version}.zip（原版命名），任选一种。
+            2. 将程序放置在你想放置的任何地方。
+            3. 享受重建版千千静听。
 
             可选插件包（独立下载，退出播放器后解压到同一安装目录）：
             - CodecAddIn-Rebuild-{version}.zip：共 15 个编解码插件，包含 WebM、APE、FLAC/TTA、MP3/WMA 编码、OGG/Opus、AAC、MPC、AC3/DTS、MOD、命令行编码器、ASF/WMA、TAK、RM/RA、VQF、DSD（DSF／DSDIFF），合并 AddIn 文件夹。
-            - ExtraAddIn-{version}.zip：Winamp 皮肤、MAKI 虚拟机、多语言插件，合并 AddIn 和 i18n 文件夹；i18n 放在播放器旁。
+            - ExtraAddIn-{version}.zip：Winamp 皮肤、MAKI 虚拟机、多语言插件及音乐浏览器／下载窗口，合并 AddIn 和 i18n 文件夹，将根目录的 ttpbrowser.dll、THIRD_PARTY_NOTICES.md 和 i18n 文件夹放在播放器旁。
             - 插件来自各自仓库本次构建解析到的最新正式 Release；插件自身版本独立于播放器，具体版本见下表。
             - SHA256SUMS.txt 可校验上述四个 ZIP；插件包内另有各运行文件的校验清单。新版更新器更新播放器包中除根目录 SHA256SUMS.txt 外的全部文件，并保留子目录；不删除包外文件。
             - 保留 TTPlayerRebuild.exe / TTPlayerRebuild-{version}.zip，新增 TTPlayer.exe / TTPlayer-{version}.zip。TTPUpdater 按发起更新的程序名称选择对应包；不强制切换名称。TTPUpdater.exe、TTPlayerRebuild.xml、TTPlayerRebuild.rll、播放列表及其它文件命名保持不变。
