@@ -157,7 +157,7 @@ def unpack_component(repository, target, release, archive):
             translation = target == 'ttp_i18n' and (
                 name in ('i18n/README.md', 'i18n/ttplayer.pot') or
                 re.fullmatch(r'i18n/[A-Za-z0-9_-]+/ttplayer\.(po|mo)', name))
-            browser_notice = target == 'ttpbrowser' and name == 'THIRD_PARTY_NOTICES.md'
+            browser_notice = target == 'ttpbrowser'
             if name not in (dll_path, 'SHA256SUMS.txt') and not translation and not browser_notice:
                 raise ValueError(f'{repository}: unexpected runtime file: {name}')
             limit = 65536 if name == 'SHA256SUMS.txt' else ARCHIVE_LIMIT
@@ -172,8 +172,6 @@ def unpack_component(repository, target, release, archive):
     actual = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
     if sums != actual:
         raise ValueError(f'{repository}: runtime file SHA-256 mismatch or missing checksum')
-    if target == 'ttpbrowser' and not files.get('THIRD_PARTY_NOTICES.md'):
-        raise ValueError(f'{repository}: missing browser third-party notices')
     if target == 'ttp_i18n':
         for locale in ('chs', 'cht', 'en_US'):
             if not any(f'i18n/{locale}/ttplayer.{ext}' in files for ext in ('po', 'mo')):

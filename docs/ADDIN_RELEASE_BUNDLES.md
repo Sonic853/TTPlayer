@@ -24,7 +24,7 @@ DLL 保留各自上游版本和原始字节。仅构建的运行同样生成两�
 
 退出播放器后解压所需插件包到所选播放器 EXE 所在目录，合并 `AddIn`。
 ExtraAddIn 的 `i18n` 目录也放在 EXE 旁，用于多语言插件读取翻译。
-ExtraAddIn 根目录的 `ttpbrowser.dll` 和 `THIRD_PARTY_NOTICES.md` 同样放在 EXE 旁，
+ExtraAddIn 根目录的 `ttpbrowser.dll` 同样放在 EXE 旁，
 用于音乐浏览器与下载窗口。
 播放器自动更新器按发起程序名称选择对应主包，更新包内全部运行文件；两个可选插件包由用户单独下载安装。
 
@@ -60,7 +60,7 @@ ExtraAddIn 根目录的 `ttpbrowser.dll` 和 `THIRD_PARTY_NOTICES.md` 同样放�
 | [TTPlayerMaki](https://github.com/TTPlayerRebuild/TTPlayerMaki) | `AddIn/ttp_maki.dll` |
 | [TTPlayerI18n](https://github.com/TTPlayerRebuild/TTPlayerI18n) | `AddIn/ttp_i18n.dll` 和 `i18n` 翻译资源 |
 | [TTPlayerOSU](https://github.com/TTPlayerRebuild/TTPlayerOSU) | `AddIn/ttp_osu.dll` |
-| [TTPlayerBrowser](https://github.com/TTPlayerRebuild/TTPlayerBrowser) | 根目录 `ttpbrowser.dll` 和 `THIRD_PARTY_NOTICES.md` |
+| [TTPlayerBrowser](https://github.com/TTPlayerRebuild/TTPlayerBrowser) | 根目录 `ttpbrowser.dll` |
 
 保留上游已校验的 `i18n/README.md`、`i18n/ttplayer.pot`、
 `i18n/<语言>/ttplayer.po`／`.mo`，并要求简体中文、繁体中文和英文目录均有翻译。
@@ -98,7 +98,7 @@ Release 说明自动列出每个插件的实际版本及对应上游 Release 链
 ### 2026-11-10 浏览器组件接入与验证
 
 ExtraAddIn 现有五个组件。浏览器使用 `TTPlayerRebuild/TTPlayerBrowser` 的最新正式 Release，
-选取 `ttpbrowser-日期版本.zip`，保留根目录 `ttpbrowser.dll` 和 `THIRD_PARTY_NOTICES.md`。
+选取 `ttpbrowser-日期版本.zip`，保留根目录 `ttpbrowser.dll`。
 许可证说明与 DLL 一起验证包内 SHA256，合并后的 ExtraAddIn 校验清单覆盖两者。
 浏览器仍接受 x86 PE32、XP 系统／子系统版本和 XP／Win7 导入审计，并要求导出 `ttp_browser_get_api`。
 
