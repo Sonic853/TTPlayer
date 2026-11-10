@@ -2800,6 +2800,7 @@ bool PlayerWindow::Create(HINSTANCE instance, int show_command) {
         external_skin_.reset();
         UpdateMainToolRects();UpdatePlaylistToolRects();UpdateEqualizerToolRects();
     }
+    RecoverPluginWindowLayout();
     ResetSkinInfoScroll();
     if (external_skin_) ApplyAutoLyricWidth();
     RemovePluginSkinNativeTips();

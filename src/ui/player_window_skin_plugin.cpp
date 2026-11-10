@@ -38,6 +38,17 @@ void PlayerWindow::DiscoverSkinPlugins() {
     skin_plugins_discovered_=true;
     skin_plugins_=skin::SkinPluginModule::Discover(PlayerRuntimeDirectory()/L"AddIn");
 }
+void PlayerWindow::RecoverPluginWindowLayout() {
+    if (!external_skin_ || !IsWindow(window_) || IsIconic(window_)) return;
+    const HWND windows[]{window_,lyric_window_,playlist_window_,equalizer_window_};
+    RECT bounds[4]{}, previous[4]{};
+    for(size_t i=0;i<4;++i) if(IsWindow(windows[i])) GetWindowRect(windows[i],&bounds[i]);
+    std::copy(std::begin(bounds),std::end(bounds),std::begin(previous));
+    RecoverWindowLayout(bounds,WindowWorkAreas());
+    for(size_t i=0;i<4;++i) if(IsWindow(windows[i]) && !EqualRect(&bounds[i],&previous[i]))
+        SetWindowPos(windows[i],nullptr,bounds[i].left,bounds[i].top,0,0,
+            SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
+}
 bool PlayerWindow::IsPluginSkinPackage(const std::filesystem::path& path) {
     DiscoverSkinPlugins();
     return std::any_of(skin_plugins_.begin(),skin_plugins_.end(),[&](const auto& provider) {return provider->Supports(path);});
@@ -118,17 +129,25 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
         // Missing geometry in a partial target profile is a default layout,
         // not permission to inherit the outgoing provider's folded rectangles.
         auto target_player=settings_.player;
-        SetRectEmpty(&target_player.player_window);
-        SetRectEmpty(&target_player.playlist_window);
-        SetRectEmpty(&target_player.equalizer_window);
+        const bool startup=!window_;
+        if(!startup) {
+            SetRectEmpty(&target_player.player_window);
+            SetRectEmpty(&target_player.playlist_window);
+            SetRectEmpty(&target_player.equalizer_window);
+        }
         const bool profile_loaded=restore_profile && settings::LoadSkinVisualProfile(profile,
             target_player,settings_.playlist,settings_.lyric,settings_.visual,&state);
-        if(profile_loaded) settings_.player=std::move(target_player);
+        // Match native startup: root XML owns current rectangles/visibility;
+        // sidecars still supply provider state, fonts and colours. A runtime
+        // switch restores that package's saved layout instead.
+        if(profile_loaded && !startup) settings_.player=std::move(target_player);
+        RecoverSavedWindowLayout();
         TtpSkinLayout layout{};layout.size=sizeof(layout);
-        if(profile_loaded) {
+        if(profile_loaded || startup) {
             layout.windows[0]=settings_.player.player_window;
             layout.windows[1]=settings_.player.playlist_window;
             layout.windows[2]=settings_.player.equalizer_window;
+            layout.lyric_window=settings_.player.lyric_window;
             if(state.size()<std::size(layout.state)) wcscpy_s(layout.state,state.c_str());
         }
         if(!next->Layout(layout,true) && layout.state[0]) {
@@ -154,6 +173,7 @@ bool PlayerWindow::LoadPluginSkin(const std::filesystem::path& path, bool restor
             RemovePluginSkinNativeTips();return false;
         }
         external_skin_=std::move(next);
+        RecoverPluginWindowLayout();
         ResetSkinInfoScroll();
         RebuildLyricFont(false);
         UpdateLyricEditorStyle();LayoutLyricEditor();
@@ -616,7 +636,8 @@ void PlayerWindow::HandleSkinPluginContentMenuCommand(UINT command,TtpSkinConten
         else SetNativeLyricContent(content.mode,content.visual_type);
     } else if(command>=kCmdFullscreenLyrics && command<=kCmdFullscreenAll) {
         if(plugin)HandleSkinPluginCommand(TTP_SKIN_CONTENT_FULLSCREEN,
-            (command-kCmdFullscreenLyrics+1)|(content.visual_type<<8));
+            (command-kCmdFullscreenLyrics+1)|(content.visual_type<<8)|
+            (content.window==window_?TTP_SKIN_FULLSCREEN_MAIN_WINDOW:0));
         else if(!file_info_write_in_progress_ && audio_->State()==audio::PlaybackState::playing) {
             if(!fullscreen_mode_)plugin_content_fullscreen_saved_type_=settings_.visual.type;
             SetFullScreenMode(command-kCmdFullscreenLyrics+1,content.window,
@@ -677,14 +698,16 @@ void PlayerWindow::HandleSkinPluginCommand(uint32_t command,int32_t value) {
         break;
     case TTP_SKIN_EQUALIZER: ToggleEqualizerWindow();break;
     case TTP_SKIN_LYRICS: ToggleLyricWindow();break;
-    case TTP_SKIN_CONTENT_FULLSCREEN:
-        if(external_skin_->Handles(lyric_window_) && (value&255)>=1 && (value&255)<=3 &&
+    case TTP_SKIN_CONTENT_FULLSCREEN: {
+        const HWND origin=(value&TTP_SKIN_FULLSCREEN_MAIN_WINDOW)?window_:lyric_window_;
+        if(external_skin_->Handles(origin) && (value&255)>=1 && (value&255)<=3 &&
            ((value>>8)&255)<=settings::kMaximumVisualType && audio_->State()==audio::PlaybackState::playing) {
             if(fullscreen_mode_==0) plugin_content_fullscreen_saved_type_=settings_.visual.type;
-            SetFullScreenMode(value&255,lyric_window_,
+            SetFullScreenMode(value&255,origin,
                 settings_.fullscreen.last_visual_effect>0?-1:(value>>8)&255);
         }
         break;
+    }
     case TTP_SKIN_CONTENT_MENU: ShowSkinPluginContentMenu(value==1);break;
     case TTP_SKIN_MENU: {POINT p{};GetCursorPos(&p);ShowContextMenu(p);break;}
     case TTP_SKIN_OPTIONS: ShowOptions();break;

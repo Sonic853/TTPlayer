@@ -102,6 +102,7 @@ public:
 
 private:
     void DiscoverSkinPlugins();
+    void RecoverPluginWindowLayout();
     struct SkinRebindScope {
         explicit SkinRebindScope(PlayerWindow& owner);
         ~SkinRebindScope();

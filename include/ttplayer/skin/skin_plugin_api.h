@@ -8,6 +8,7 @@
 #define TTP_SKIN_ABI 1u
 #define TTP_SKIN_ENTRY "ttpGetSkinPlugin"
 #define TTP_SKIN_COMMAND_MESSAGE L"TTPlayer.SkinPlugin.Command.v1"
+#define TTP_SKIN_FULLSCREEN_MAIN_WINDOW 0x10000u
 
 enum TtpSkinCommand {
     TTP_SKIN_PLAY = 1, TTP_SKIN_PAUSE, TTP_SKIN_STOP, TTP_SKIN_PREVIOUS,
@@ -23,7 +24,7 @@ enum TtpSkinCommand {
     TTP_SKIN_SELECT_ALL, TTP_SKIN_PROPERTIES, TTP_SKIN_ALWAYS_ON_TOP,
     TTP_SKIN_VISUAL_NEXT, TTP_SKIN_VISUAL_MENU, TTP_SKIN_EQ_BANDS,
     TTP_SKIN_MOVE_SELECTION, TTP_SKIN_COPY_SELECTION, // insertion row; current native selection
-    TTP_SKIN_CONTENT_FULLSCREEN, // low byte: content mode; next byte: visual type
+    TTP_SKIN_CONTENT_FULLSCREEN, // low byte: mode; next byte: visual; bit 16: main-window origin (otherwise lyrics)
     TTP_SKIN_CONTENT_MENU, // enqueue a provider-defined menu on the content surface
     TTP_SKIN_DRAG_SELECTION, // enqueue OLE drag after releasing capture; value 1: embedded main-window playlist, 0: playlist window
     TTP_SKIN_TRACK_TIP, // tip callback only; value is the visible playlist row
@@ -99,7 +100,7 @@ typedef struct TtpSkinContent {
     RECT bounds;
     uint32_t mode, visual_type;
     // visual_type: 0 none, 1 dream, 2 spectrum, 3 scope, 4 cover, 5 pulse, 6 ripple.
-    // The fullscreen-only host extension 7 is normalized to 2 for embedded content.
+    // Fullscreen-only host extensions 7 and 8 are normalized to 2 for embedded content.
 } TtpSkinContent;
 typedef struct TtpSkinLyricColors {
     uint32_t size;
@@ -199,7 +200,10 @@ typedef struct TtpSkinLayout {
     uint32_t size;
     RECT windows[3]; // Screen rectangles: player, playlist, equalizer. Empty = default.
     wchar_t state[256]; // Provider-owned versioned text; host stores it without parsing.
+    // Optional v1 tail. Nonempty overrides an older rectangle in state.
+    RECT lyric_window;
 } TtpSkinLayout;
+#define TTP_SKIN_LAYOUT_V1_SIZE ((uint32_t)offsetof(TtpSkinLayout, lyric_window))
 
 typedef struct TtpSkinPlugin {
     uint32_t size, version;
@@ -269,6 +273,7 @@ typedef struct TtpSkinPlugin {
     // Optional native selection/search reveal. Preserve selection and window
     // visibility; scroll to row and synchronize the host's caret (-1 = none).
     // Quick find reveals its first match while retaining its last-match caret.
+    // row == UINT32_MAX clears the caret/viewport when the active list changes.
     BOOL (WINAPI *playlist_reveal)(void*, uint32_t row, int32_t caret);
     // Optional package default for playlist rows, before profile restore.
     // Independent of lyric overrides and of fixed-size title/chrome fonts.

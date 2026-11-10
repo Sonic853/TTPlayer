@@ -4043,6 +4043,8 @@ void PlayerWindow::RestorePlaylistRowSelection() {
     const auto visible = caret ? caret : ActivePlaylist().PlayingRow();
     if (!visible || *visible >= ActivePlaylist().Tracks().size()) return;
     if (!caret) {
+        if(external_skin_ && *visible<=INT32_MAX)
+            static_cast<void>(external_skin_->PlaylistReveal(static_cast<uint32_t>(*visible),-1));
         if (!playlist_window_ || !skin_) return;
         RECT client{};
         GetClientRect(playlist_window_, &client);
@@ -4103,6 +4105,7 @@ void PlayerWindow::SwitchPlaylist(size_t index) {
     playlist_selection_anchor_.reset();
     playlist_selected_rows_.clear();
     playlist_scroll_ = 0;
+    if(external_skin_) static_cast<void>(external_skin_->PlaylistReveal(UINT32_MAX,-1));
     RestorePlaylistRowSelection();
     LayoutPlaylistListControls();
     RefreshPlaylist();
