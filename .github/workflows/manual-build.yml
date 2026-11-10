@@ -142,6 +142,7 @@ jobs:
           cmake -S . -B build -G "Visual Studio 18 2026" -A Win32
           "-DCMAKE_GENERATOR_INSTANCE=$env:TTPLAYER_VS_INSTANCE"
           -DBUILD_TESTING=OFF -DTTPLAYER_STAGE_RUNTIME=OFF
+          -DTTPLAYER_BUILD_BROWSER=OFF
           -DTTPLAYER_OPTIMIZE_SIZE=ON
           "-DTTPLAYER_UPDATE_ACCESS_FILE=$env:GITHUB_WORKSPACE/build/update_access.h"
           "-DTTPLAYER_BUILD_VERSION=${{ steps.version.outputs.version }}"

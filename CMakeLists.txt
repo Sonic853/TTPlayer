@@ -188,7 +188,7 @@ add_library(ttplayer_core
   src/ui/window_drag.cpp
 )
 target_include_directories(ttplayer_core
-  PUBLIC include third_party/ttpcomm-sdk/include third_party/ttpres-sdk/include third_party/ttp-osu-sdk/include ../ttpbrowser/include
+  PUBLIC include third_party/ttpcomm-sdk/include third_party/ttpres-sdk/include third_party/ttp-osu-sdk/include third_party/ttpbrowser-sdk/include
   PRIVATE "${TTPLAYER_GENERATED_INCLUDE_DIR}"
 )
 add_dependencies(ttplayer_core ttplayer_build_date ttplayer_file_version)
@@ -248,8 +248,19 @@ add_dependencies(ttplayer_rebuild ttplayer_named)
 
 # Optional runtime component: the EXE deliberately has no import-library link
 # to ttpbrowser. Removing the DLL removes music-window and download entry points.
-option(TTPLAYER_BUILD_BROWSER "Build and stage the optional music window DLL" ON)
+# A standalone checkout contains the host ABI header. Joint builds are also
+# available in the local multi-repository workspace when its source is present.
+set(_ttplayer_build_browser_default OFF)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../ttpbrowser/CMakeLists.txt")
+  set(_ttplayer_build_browser_default ON)
+endif()
+option(TTPLAYER_BUILD_BROWSER "Build and stage the optional music window DLL" ${_ttplayer_build_browser_default})
 if(TTPLAYER_BUILD_BROWSER)
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../ttpbrowser/CMakeLists.txt")
+    message(FATAL_ERROR
+      "TTPLAYER_BUILD_BROWSER=ON requires the sibling ttpbrowser source directory. "
+      "Use -DTTPLAYER_BUILD_BROWSER=OFF to build the player independently.")
+  endif()
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ttpbrowser" "${CMAKE_CURRENT_BINARY_DIR}/ttpbrowser")
   add_dependencies(ttplayer_rebuild ttpbrowser)
   if(TTPBROWSER_BUILD_TESTS)
