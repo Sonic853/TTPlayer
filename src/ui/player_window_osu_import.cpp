@@ -10,12 +10,25 @@
 namespace ttplayer::ui {
 using namespace detail;
 namespace {
-struct DialogTemplate {DLGTEMPLATE dialog;WORD menu,cls,title;};
+struct DialogTemplate {
+    DLGTEMPLATE dialog;
+    WORD menu{}, window_class{}, title{};
+    WORD font_size{8};
+    wchar_t font_face[13]{L"MS Shell Dlg"};
+
+    DialogTemplate(short width, short height)
+        : dialog{WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT,
+                 0, 0, 0, 0, width, height} {
+        if (i18n::EnglishLayout()) dialog.cx = static_cast<short>(width * 3 / 2);
+    }
+};
 HWND Control(HWND parent,const wchar_t* type,const wchar_t* text,DWORD style,int id,RECT rect) {
     i18n::MapDialogRect(parent,&rect);
     const auto child=CreateWindowExW(0,type,text,WS_CHILD|WS_VISIBLE|style,rect.left,rect.top,
         rect.right-rect.left,rect.bottom-rect.top,parent,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
-    SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);return child;
+    const auto font = SendMessageW(parent, WM_GETFONT, 0, 0);
+    SendMessageW(child, WM_SETFONT, font, TRUE);
+    return child;
 }
 void Center(HWND window) {
     RECT bounds{},owner{};GetWindowRect(window,&bounds);GetWindowRect(GetParent(window),&owner);
@@ -29,13 +42,13 @@ INT_PTR CALLBACK ConfirmProc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
     auto* state=reinterpret_cast<Confirmation*>(GetWindowLongPtrW(window,DWLP_USER));
     if(message==WM_INITDIALOG) {
         state=reinterpret_cast<Confirmation*>(lparam);SetWindowLongPtrW(window,DWLP_USER,lparam);SetWindowTextW(window,state->title.c_str());
-        Control(window,L"STATIC",state->question.c_str(),0,100,{10,8,265,20});
-        Control(window,L"STATIC",state->files.c_str(),SS_PATHELLIPSIS,101,{10,24,265,40});
-        Control(window,L"BUTTON",i18n::Literal(L"保留 osz 文件"),WS_TABSTOP|BS_AUTOCHECKBOX,103,{10,44,265,57});
+        Control(window,L"STATIC",state->question.c_str(),0,100,{8,7,222,19});
+        Control(window,L"STATIC",state->files.c_str(),SS_PATHELLIPSIS,101,{8,22,222,41});
+        Control(window,L"BUTTON",i18n::Literal(L"保留 osz 文件"),WS_TABSTOP|BS_AUTOCHECKBOX,103,{8,44,222,55});
         CheckDlgButton(window,103,BST_CHECKED);
-        Control(window,L"STATIC",i18n::Literal(L"取消保留后，仅在确认导入成功且原文件未被播放列表使用时清理。"),0,104,{10,61,265,79});
-        const auto okay=Control(window,L"BUTTON",i18n::Literal(L"导入"),WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,{144,86,200,104});
-        Control(window,L"BUTTON",i18n::Literal(L"取消"),WS_TABSTOP,IDCANCEL,{209,86,265,104});
+        Control(window,L"STATIC",i18n::Literal(L"取消保留后，仅在确认导入成功且原文件未被播放列表使用时清理。"),0,104,{8,59,222,81});
+        const auto okay=Control(window,L"BUTTON",i18n::Literal(L"导入"),WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,{112,86,164,100});
+        Control(window,L"BUTTON",i18n::Literal(L"取消"),WS_TABSTOP,IDCANCEL,{170,86,222,100});
         Center(window);SetFocus(okay);return FALSE;
     }
     if(!state)return FALSE;
@@ -59,11 +72,11 @@ INT_PTR CALLBACK ProgressProc(HWND window,UINT message,WPARAM wparam,LPARAM lpar
     auto* state=reinterpret_cast<Progress*>(GetWindowLongPtrW(window,DWLP_USER));
     if(message==WM_INITDIALOG) {
         state=reinterpret_cast<Progress*>(lparam);SetWindowLongPtrW(window,DWLP_USER,lparam);SetWindowTextW(window,state->title.c_str());
-        Control(window,L"STATIC",Phase(0),0,100,{10,9,325,25});
-        Control(window,L"STATIC",L"",SS_PATHELLIPSIS,101,{10,29,325,46});
-        Control(window,PROGRESS_CLASSW,L"",0,102,{10,51,325,63});
-        Control(window,L"STATIC",L"",0,103,{10,73,230,89});
-        const auto cancel=Control(window,L"BUTTON",i18n::Literal(L"取消"),WS_TABSTOP|BS_DEFPUSHBUTTON,IDCANCEL,{251,71,325,90});
+        Control(window,L"STATIC",Phase(0),0,100,{8,6,222,25});
+        Control(window,L"STATIC",L"",SS_PATHELLIPSIS,101,{8,28,222,40});
+        Control(window,PROGRESS_CLASSW,L"",0,102,{8,44,222,52});
+        Control(window,L"STATIC",L"",0,103,{8,60,150,74});
+        const auto cancel=Control(window,L"BUTTON",i18n::Literal(L"取消"),WS_TABSTOP|BS_DEFPUSHBUTTON,IDCANCEL,{170,58,222,72});
         SendDlgItemMessageW(window,102,PBM_SETRANGE32,0,1000);Center(window);SetTimer(window,1,100,nullptr);SetFocus(cancel);return FALSE;
     }
     if(!state)return FALSE;
@@ -89,6 +102,71 @@ bool Installation(unsigned source,const settings::Settings& settings,audio::OsuI
     const auto& executable=source==1?settings.osu_library.stable_executable:settings.osu_library.lazer_executable;
     return !executable.empty()&&audio::ReadOsuInstallation(source,executable.c_str(),result)==S_OK&&
         static_cast<unsigned>(result.kind)==source;
+}
+
+struct ImportMessage {
+    const wchar_t* title;
+    const wchar_t* text;
+};
+
+INT_PTR CALLBACK MessageProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_INITDIALOG) {
+        const auto& content = *reinterpret_cast<const ImportMessage*>(lparam);
+        SetWindowTextW(window, content.title);
+        const auto text = Control(window, L"EDIT", content.text,
+            WS_TABSTOP | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 100,
+            {8, 7, 222, 111});
+        SendMessageW(text, EM_SETSEL, 0, 0);
+
+        const HDC dc = GetDC(text);
+        const auto previous_font = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(window, WM_GETFONT, 0, 0)));
+        TEXTMETRICW metrics{};
+        GetTextMetricsW(dc, &metrics);
+        SelectObject(dc, previous_font);
+        ReleaseDC(text, dc);
+
+        RECT body{8, 7, 222, 111};
+        RECT button{170, 0, 222, 14};
+        RECT spacing{0, 0, 0, 7};
+        i18n::MapDialogRect(window, &body);
+        i18n::MapDialogRect(window, &button);
+        i18n::MapDialogRect(window, &spacing);
+        const auto lines = static_cast<int>(SendMessageW(text, EM_GETLINECOUNT, 0, 0));
+        const int text_height = std::max(1, lines) * std::max<LONG>(1, metrics.tmHeight) + 4;
+        const int height = std::min<LONG>(text_height, body.bottom - body.top);
+        SetWindowPos(text, nullptr, body.left, body.top, body.right - body.left, height,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        if (text_height > height) ShowScrollBar(text, SB_VERT, TRUE);
+
+        const auto okay = Control(window, L"BUTTON", i18n::Literal(L"确定"),
+            WS_TABSTOP | BS_DEFPUSHBUTTON, IDOK, {170, 0, 222, 14});
+        const int button_top = body.top + height + spacing.bottom;
+        SetWindowPos(okay, nullptr, button.left, button_top, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        RECT bounds{};
+        GetClientRect(window, &bounds);
+        bounds.bottom = button_top + button.bottom + spacing.bottom;
+        AdjustWindowRectEx(&bounds, static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE)),
+                          FALSE, static_cast<DWORD>(GetWindowLongPtrW(window, GWL_EXSTYLE)));
+        SetWindowPos(window, nullptr, 0, 0, bounds.right - bounds.left, bounds.bottom - bounds.top,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        Center(window);
+        SetFocus(okay);
+        return FALSE;
+    }
+    if (message == WM_CLOSE ||
+        (message == WM_COMMAND && (LOWORD(wparam) == IDOK || LOWORD(wparam) == IDCANCEL))) {
+        EndDialog(window, IDOK);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+void ShowImportMessage(HWND owner, const wchar_t* title, const wchar_t* text) {
+    const ImportMessage message{title, text};
+    const DialogTemplate dialog{230, 100};
+    DialogBoxIndirectParamW(GetModuleHandleW(nullptr), &dialog.dialog, owner,
+                           MessageProc, reinterpret_cast<LPARAM>(&message));
 }
 }
 
@@ -126,14 +204,14 @@ void PlayerWindow::ImportOsuSongs(unsigned source) {
         const auto packages=SelectedOsuPackages();if(packages.empty())return;
         audio::OsuInstallation installation;
         if(!Installation(source,settings_,installation)) {
-            MessageBoxW(owner,i18n::Literal(L"无法正确识别所选游戏程序，请在选项的 osu! 路径设置中检查。"),title.c_str(),MB_OK|MB_ICONWARNING);return;
+            ShowImportMessage(owner, title.c_str(), i18n::Literal(L"无法正确识别所选游戏程序，请在选项的 osu! 路径设置中检查。"));return;
         }
         osu_importing_=true;struct Reset {bool& flag;~Reset(){flag=false;}} reset{osu_importing_};
         Confirmation confirmation;confirmation.title=title;
         confirmation.question=i18n::Text(source==1?L"是否将所选 OSZ 导入到 osu!？":L"是否将所选 OSZ 导入到 osu!lazer？");
         confirmation.files=packages.size()==1?packages.front().filename().native():
             i18n::Text(L"所选谱面包：")+std::to_wstring(packages.size())+L"\r\n"+packages.front().filename().native()+L" …";
-        const DialogTemplate confirm{{WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME,0,0,0,0,275,114},0,0,0};
+        const DialogTemplate confirm{230, 108};
         if(DialogBoxIndirectParamW(GetModuleHandleW(nullptr),&confirm.dialog,owner,ConfirmProc,reinterpret_cast<LPARAM>(&confirmation))!=IDOK)return;
         std::vector<Item> results;for(const auto& path:packages)results.push_back({path});
         Progress progress;progress.title=title;progress.packages=results.size();
@@ -151,7 +229,7 @@ void PlayerWindow::ImportOsuSongs(unsigned source) {
             }catch(...) {for(auto& item:results)if(item.status==E_PENDING){item.status=E_FAIL;break;}}
             std::lock_guard lock(progress.mutex);progress.ready=true;
         });
-        const DialogTemplate running{{WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME,0,0,0,0,335,100},0,0,0};
+        const DialogTemplate running{230, 80};
         if(DialogBoxIndirectParamW(GetModuleHandleW(nullptr),&running.dialog,owner,ProgressProc,reinterpret_cast<LPARAM>(&progress))==-1)progress.canceled=true;
         worker.join();size_t confirmed{},pending{},failed{},referenced{};HRESULT first_error=S_OK;std::filesystem::path pending_task;
         for(const auto& item:results){if(item.status==E_PENDING)continue;
@@ -171,7 +249,7 @@ void PlayerWindow::ImportOsuSongs(unsigned source) {
             if(HRESULT_FACILITY(first_error)==FACILITY_WIN32&&FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,
                 nullptr,HRESULT_CODE(first_error),0,error,1024,nullptr))message+=L"\r\n"+std::wstring(error);
         }
-        MessageBoxW(owner,message.c_str(),title.c_str(),MB_OK|(failed?MB_ICONWARNING:MB_ICONINFORMATION));
-    }catch(...) {MessageBoxW(owner,i18n::Literal(L"无法准备 OSZ 导入。原文件未交给游戏。"),title.c_str(),MB_OK|MB_ICONWARNING);}
+        ShowImportMessage(owner, title.c_str(), message.c_str());
+    }catch(...) {ShowImportMessage(owner, title.c_str(), i18n::Literal(L"无法准备 OSZ 导入。原文件未交给游戏。"));}
 }
 }
