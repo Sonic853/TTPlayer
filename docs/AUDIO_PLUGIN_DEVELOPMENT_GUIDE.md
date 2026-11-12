@@ -1,6 +1,6 @@
 # 音频解码插件开发指南：供后续 Codex 新建插件时使用
 
-更新时间：2026-10-20。依据本工作区的源码、构建脚本和实际测试整理。表中的版本是**仓库当前固定版本**，不表示已重新查询上游最新版。
+更新时间：2026-11-11。依据本工作区的源码、构建脚本和实际测试整理。表中的版本是**仓库当前固定版本**，不表示已重新查询上游最新版。
 
 ## 1. 开始前先读什么
 
@@ -21,14 +21,16 @@
 
 | 仓库 | 当前实现和依赖 | 适合参考的部分 | 不宜直接照搬的部分 |
 |---|---|---|---|
-| `ttp_aac` | FAAD2 2.11.4；原生 MP4 解析；AAC Reader、MP4 Reader、Decoder、Nero Encoder 工厂 | 一个 DLL 注册多个 Reader；容器与编码分离；压缩格式交给 Decoder | Nero 配置依赖旧编码组件；MP4 不是“把所有音频当 AAC” |
-| `ttp_ogg` | libogg 1.3.6、libvorbis 1.3.7、Opus 1.6.1、opusfile 0.12 | **通常首选模板**：单 Reader、多编码、标签、图片、显式提交、独立构建 | Opus 的 pre-skip、尾部裁剪、增益、映射与 Vorbis 不同 |
+| `ttp_aac` | FAAD2 2.11.4；精简 FFmpeg 9.0.2 ALAC；原生 MP4 解析；四类工厂 | 多 Reader；容器与编码分离；ALAC 直接整数 PCM | Nero 依赖旧编码组件；MP4 不是“把所有音频当 AAC” |
+| `ttp_ogg` | libogg 1.3.6、libvorbis 1.3.7、Opus 1.6.1、opusfile 0.12、Speex 1.2.1 | **通常首选模板**：单 Reader、多编码、标签、图片、显式提交、独立构建 | Opus/Speex 的延迟、granule、注释包装与 Vorbis 不同 |
 | `ttp_flac` | libFLAC 1.5.0；恢复的 TTA 实现 | 两个工厂；无损 PCM；多值标签、封面、统一保存 | TTA 历史浮点分支和外部标签规则不是通用模板 |
 | `ttp_ape` | Monkey's Audio SDK 13.30 | Reader + Encoder；APEv2；读写流与可靠保存 | APL 指向外部文件，不能把 APL 的后缀改成 APE；还有额外历史导出 |
 | `ttp_webm` | 自有 EBML/WebM 容器处理，静态 Vorbis/Opus 核心 | **新容器首选模板**：`document`、`ebml`、`codec`、Reader 分层；容器标签/图片保存 | DocType、lacing、SeekHead/Cues、时间基等必须按目标容器重新实现 |
 | `ttp_ac3dts` | a52dec 0.8.0、FFmpeg 9.0.2 DCA／E-AC3；已整合原 ttp_dts | 旧四工厂兼容、追加 E-AC3 Reader；DTS-WAV、稀疏定位、RIFF 标签／封面事务 | 原版内置 WAVE 可抢先接收 `.wav`；HD 扩展层仍待真实样本；不能把容器后缀改成内部编码 |
 | `ttp_mod` | 默认 libmodplug 0.8.9.0；可选 libopenmpt 0.8.9 | 多子格式；旧引擎与现代引擎构建切换 | 无签名 MOD 不宜自动改名；换引擎会改变混音和播放行为 |
 | `ttp_mpc` | Musepack r475 | 小型 Reader、SV7/SV8、APEv2/ReplayGain | SV7 与 SV8 的识别和标签位置不同 |
+| `ttp_wv` | WavPack 5.9.0 静态核心 | 64-bit 流回调；整数/float32 原始输出；WVC；APEv2 | 解包已恢复 SHIFT_MASK，20-bit 不可再左移；不含 DSD/4.0 前版本 |
+| `ttp_ofr` | 官方 OptimFROG 5.100 SSE2 / SDK 1.600，DLL 原字节内嵌 | SDK 流回调；原整数位宽；私有临时目录加载原名库 | 专有许可；OFS 为有损；官方库不接受 OFRX 浮点分支 |
 | `ttp_asf` | 自有 ASF/MP3 路径；Windows Media SDK、DMO 等系统组件 | 容器 Reader 与系统 Decoder 配合；动态探测系统能力 | 不能把系统编解码器可用性视为所有 XP 都相同；ASF 内部不只 WMA |
 | `ttp_rm` | 裁剪的 FFmpeg 9.0.2；原生 RM 标签实现 | **使用 FFmpeg 时的模板**：自定义 AVIO、错误桥接、最小解码配置 | 不要启用全部 FFmpeg 组件；RealMedia 写回不是通用文件重写 |
 | `ttp_tak` | 裁剪的 FFmpeg 9.0.2；TAK 标签适配 | 单格式 FFmpeg 解码、APEv2、静态发行 | 不要重新引入旧 `tak_deco_lib.dll` 依赖 |
@@ -133,6 +135,28 @@ Reader 可以输出 PCM，也可以输出压缩格式由匹配的 Decoder 解码
 - Seek 要清理解码器缓冲、预卷和 EOF 状态；时间转换检查溢出；Opus/WebM 的裁剪不能用 PCM 原始帧数简单替代。
 - QueryInterface、Read、Open 的边界要拦住 C++ 异常并转 HRESULT；不能依靠播放器 SEH 来掩盖插件越界。
 
+### 4.4 高精度 PCM 输出（新插件必须遵守）
+
+参考 `ttp_flac/src/reader.cpp`、`ttp_ape/src/reader.cpp`、`ttp_ogg/src/reader.cpp` 及 SDK 的 `ttpcomm/pcm_format.h`。**“高精度”首先是不丢失解码器已有的信息，不是把格式标签改成 64 bit。**
+
+| 解码器的真实结果 | 推荐的宿主输出 | 必须保留的语义 |
+|---|---|---|
+| 无损整数 PCM，8/16/20/24/32 有效位 | 原生整数容器；20 bit 等非整字节位深使用向上取整的容器及 EXTENSIBLE valid bits | 32-bit 整数不得先转 float32；非整容器有效位按 WAVE 约定左对齐，低补零 |
+| 原始 IEEE float32 | 保留 float32 位模式，或在确有接口需要时无损扩宽到 float64 | 不能先量化到整数；扩宽不增加原始精度 |
+| 解码器计算出的 float32（如现有 FAAD/Opus/Vorbis 路径） | float32，或像现有 Ogg Reader 一样扩宽为 float64 | 如实说明解码核心仍是 float32；不能宣称变成双精度解码 |
+| 原始/真实 float64 | IEEE float64 | 不经 float32 或整数中转，不为音量域适配先除二再乘二；这会损失次正规数等位模式 |
+
+- `Format()` 描述**实际交给宿主的字节流**；`BitDepth()` 按该插件既有语义报告源位深/标称位深，不能反过来用于计算输出帧长。解码为浮点的有损格式不因此变成无损格式。
+- 使用 `ttp::pcm::copy_format(format, channel_mask, valid_bits, out)` 分配完整格式。多声道、非默认声道掩码（包括单/双声道）或有效位少于容器位宽时使用 `WAVEFORMATEXTENSIBLE`、`cbSize=22`、正确 PCM/IEEE_FLOAT SubFormat；浮点 valid bits 等于容器位宽。
+- `nBlockAlign = channels * container_bits / 8`，`nAvgBytesPerSec = sample_rate * nBlockAlign`，运算先检查溢出。BufferSize、Read 的容量检查、复制和 Seek 均使用同一个输出帧长，不能沿用压缩位深或固定 `channels*2/4`。
+- 声道掩码必须来自容器/解码器定义；Vorbis/Opus、ALAC 等非 Windows 声道顺序应先重排再声明 Windows mask。`standard_mask()` 不是对任意未知多声道顺序的猜测许可证。
+- 保留源采样率与声道；插件内不为了“高精度”无条件重采样、下混、削波或归一化。Opus 固有 48 kHz 等编码语义除外。普通 PCM 输出是标准满幅域，`ttpcomm` 内部半幅处理域由宿主负责，不能在新 Reader 重复乘/除二。
+- `Open(flags & 2)` 是旧浮点请求，不意味着必须牺牲无损整数低位去输出 float32。若选择浮点，必须能准确表示源整数（例如至多 32-bit 整数用 float64），并让 Format/Read/缓冲和定位一起改变；不得只改 tag。
+- 损坏、取消、短读必须保持错误，不得以静音、全零高位、补样本或假 EOF 掩盖精度/完整性问题。存在编码延迟、granule 尾裁剪、MP4 edit list 时按真实样本数裁剪。
+- 至少测试：32-bit 整数非零低位、20/24-bit valid bits、满幅边界、float32/64 的负零/次正规数、1/2/多声道顺序、小缓冲/非整帧容量、重复 seek 后与顺序解码一致。用独立参考 PCM 作全曲比较；“首个非空缓冲”和“格式是 float64”均不是位精度验收。
+
+SDK 的 `pcm_format.h` 与格式 Probe 头一样属于头文件协议，独立仓库必须携带一致副本，不能依赖相邻工作区目录才能构建。
+
 ## 5. 新增格式识别接口
 
 正式头文件来自 `ttpcomm/sdk/include/ttpcomm/`。独立插件携带同内容副本到 `include/ttpcomm/`；播放器副本在 `third_party/ttpcomm-sdk/include/ttpcomm/`。这只是头文件协议，**没有新增 ttpcomm.dll 导出或强制运行时依赖**。
@@ -172,8 +196,8 @@ HRESULT Open(IStream* stream, DWORD flags) override {
 ### 置信级别和边界
 
 - `NoMatch`：没有证据；`NeedMore`：前缀不完整；`Tentative`：弱证据；`Strong`：结构性头部匹配；`Opened`：读取器已成功打开。
-- Strong 仅用于路由。单凭同步字不能提示更名。MP3/ADTS 要核对连续帧；Ogg 要区分 Vorbis/Opus；EBML 要验证 WebM DocType。
-- MP4 内是 AAC 仍建议 `.mp4`，接受 `.m4a` 等别名；WebM 内是 Opus 仍建议 `.webm`，接受 `.weba`。
+- Strong 仅用于路由。单凭同步字不能提示更名。MP3/ADTS 要核对连续帧；Ogg 要区分 Vorbis/Opus/Speex；EBML 要验证 WebM DocType。
+- MP4 内是 AAC/ALAC 仍建议 `.mp4`，接受 `.m4a/.alac/.mp4a` 等别名；WebM 内是 Opus 仍建议 `.webm`，接受 `.weba`。
 - APL、无可靠签名的 MOD、未知容器保守返回无结果。
 - 压缩包内歌曲更名必须交给宿主的外层压缩包逻辑；OSZ 不是错误后缀 ZIP。
 
@@ -223,6 +247,9 @@ cmake --build D:\Projects\Backup\TTPlayer\ttp_new\build --config Release --targe
 
 许可证保存在仓库，不嵌入 DLL。当前 AAC、RM/TAK/VQF 等发行脚本还生成独立 source 附件；不要为了让二进制 ZIP 更小而删掉现有源码附件流程。
 
+本轮新增依赖：WavPack 5.9.0（`b5291bc4…e648d1ff`）、Speex 1.2.1（`4b44d4f2…ae6628feea`）、OptimFROG SSE2 5.100 完整包（`8d2c910c…f14b34`）。完整 URL/SHA-256 以各仓库 CMake 与 `third_party/*/ORIGIN.txt` 为准。ALAC 继续固定 FFmpeg 9.0.2，仅编译 decoder + avutil；源码附件包含该次构建的完整后端源码和 GNU make 归档。
+OFR 只内嵌未经修改/可执行压缩的原 DLL，按原名在 ACL 保护的临时目录加载并清理；不把内嵌视为修改/改名第三方库的许可。source 附件保留完整官方发布 ZIP 的原名和原字节。
+
 ### Action 与播放器打包
 
 - 独立 `.github/workflows/build.yml` 的 `release_a_version` 决定是否发布；日期版本在编译前固定，通常为北京时间 `yyyy.MM.dd[pN]`。
@@ -230,6 +257,7 @@ cmake --build D:\Projects\Backup\TTPlayer\ttp_new\build --config Release --targe
 - 运行 ZIP 通常为 `ttp_new-版本.zip`，其中仅 `AddIn/ttp_new.dll` 和 `SHA256SUMS.txt`。源码包、许可证说明和 release notes 按仓库既有流程另行发布。
 - 播放器 `cmake/package_addin_bundles.py` 的 `BUNDLES` 是独立 GitHub 仓库到插件名的映射；新增插件需登记真实仓库、资产名和校验要求。
 - 本地改完 DLL 不等于播放器 Action 已拿到它。插件正式 release 发布后，播放器“最新稳定版插件包”流程才会下载新 DLL。
+- `ttp_wv` / `ttp_ofr` 当前是本地独立 Git 工程，远端仓库名及稳定 release 尚未建立。不能把猜测的仓库名加入 `BUNDLES` 导致现有合集下载失败；正式创建/发布后再登记真实映射。
 
 ## 8. 最低测试矩阵与证据
 

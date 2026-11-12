@@ -39,6 +39,7 @@ struct View {
     bool is(size_t at,const char* value) const noexcept{return is(at,value,strlen(value));}
     unsigned be32(size_t at)const noexcept{return (unsigned(p[at])<<24)|(unsigned(p[at+1])<<16)|(unsigned(p[at+2])<<8)|p[at+3];}
     unsigned le16(size_t at)const noexcept{return p[at]|(unsigned(p[at+1])<<8);}
+    unsigned le32(size_t at)const noexcept{return le16(at)|(le16(at+2)<<16);}
 };
 inline size_t MpegFrame(View b,size_t at,unsigned& identity,unsigned& layer) noexcept {
     if(at>b.n||b.n-at<4||b.p[at]!=255||(b.p[at+1]&0xe0)!=0xe0)return 0;
@@ -124,12 +125,16 @@ inline Result Identify(const Request& q,DWORD mask=All) noexcept {
     else if(b.is(0,"TTA1"))set(Tta,"tta","tta",L".tta",L"",L"True Audio");
     else if((b.is(0,"MAC ")||b.is(0,"MACF"))&&b.le16(4)>=3000&&b.le16(4)<=5000)set(Ape,"ape","ape",L".ape",L".mac",L"Monkey's Audio");
     else if(b.is(0,"MPCK")||b.is(0,"MP+"))set(Mpc,"mpc","mpc",L".mpc",L".mp+;.mpp",L"Musepack");
+    else if(b.n>=32&&b.is(0,"wvpk")&&b.le32(4)>=24&&b.le16(8)>=0x402&&b.le16(8)<=0x410)
+        set(WavPack,"wavpack","wavpack",L".wv",L"",L"WavPack");
+    else if(b.n>=23&&(b.is(0,"OFR ")||b.is(0,"OFRX"))&&b.le32(4)>=15)
+        set(OptimFrog,"optimfrog","optimfrog",L".ofr",L".ofs",L"OptimFROG");
     else if(b.is(0,"tBaK"))set(Tak,"tak","tak",L".tak",L"",L"TAK");
     else if(b.is(0,"CTENFDAM"))set(Ncm,"ncm","",L".ncm",L"",L"NCM");
     else if(b.is(0,".RMF"))set(Real,"rm","",L".rm",L".ra;.ram;.rmvb",L"RealMedia");
     else if(b.is(0,".ra\xfd",4))set(Real,"ra","",L".ra",L"",L"RealAudio");
     else if(b.is(0,"TWIN"))set(Vqf,"vqf","twinvq",L".vqf",L"",L"TwinVQ");
-    else if(b.is(4,"ftyp")&&b.be32(0)>=16&&b.be32(0)<=q.file_size)set(Mp4,"mp4","",L".mp4",L".m4a;.m4b;.m4p;.m4v;.3gp;.3g2;.mov",L"MP4 / ISO Base Media");
+    else if(b.is(4,"ftyp")&&b.be32(0)>=16&&b.be32(0)<=q.file_size)set(Mp4,"mp4","",L".mp4",L".m4a;.m4b;.m4p;.m4v;.3gp;.3g2;.mov;.alac;.mp4a",L"MP4 / ISO Base Media");
     else if(b.is(0,"\x30\x26\xb2\x75\x8e\x66\xcf\x11\xa6\xd9\x00\xaa\x00\x62\xce\x6c",16))set(Asf,"asf","",L".asf",L".wma;.wmv",L"ASF / Windows Media");
     else if(b.is(0,"MThd")&&b.be32(4)==6)set(Midi,"midi","midi",L".mid",L".midi;.kar",L"MIDI");
     else if(b.is(0,"ADIF"))set(Aac,"adif","aac",L".aac",L".adif",L"AAC (ADIF)",Tentative);
@@ -144,6 +149,9 @@ inline Result Identify(const Request& q,DWORD mask=All) noexcept {
             if((b.p[at+5]&3)==2&&ended) {
                 if(packet>=19&&b.is(body,"OpusHead"))set(Ogg,"ogg","opus",L".opus",L".ogg;.oga",L"Ogg Opus");
                 else if(packet>=30&&b.is(body,"\1vorbis",7))set(Ogg,"ogg","vorbis",L".ogg",L".oga",L"Ogg Vorbis");
+                else if(packet>=80&&b.is(body,"Speex   ",8)&&b.le32(body+32)>=80&&b.le32(body+32)<=packet&&
+                    b.le32(body+36)>0&&b.le32(body+40)<=2&&b.le32(body+48)>=1&&b.le32(body+48)<=2)
+                    set(Ogg,"ogg","speex",L".spx",L".ogg;.oga",L"Ogg Speex");
                 if(r.family)break;
             }
             at=body+length;
