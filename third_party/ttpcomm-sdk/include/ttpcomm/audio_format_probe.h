@@ -17,7 +17,8 @@ enum Family : DWORD {
     Ac3=1u<<14, Dts=1u<<15, Module=1u<<16, Wave=1u<<17,
     Aiff=1u<<18, Au=1u<<19, Midi=1u<<20,
     Mpc=1u<<21, Dsd=1u<<22, WavPack=1u<<23, OptimFrog=1u<<24,
-    Builtin=Mpeg|Wave|Aiff|Au|Midi, All=0x1ffffffu
+    Matroska=1u<<25,
+    Builtin=Mpeg|Wave|Aiff|Au|Midi, All=0x3ffffffu
 };
 enum Confidence : DWORD { NoMatch=0, NeedMore=1, Tentative=2, Strong=3, Opened=4 };
 enum ResultFlags : DWORD { HasLeadingTag=1, ContainerOnly=2 };

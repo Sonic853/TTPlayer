@@ -67,11 +67,19 @@ std::wstring AudioExtensionHint(const std::filesystem::path& path) {
     return Lower(std::filesystem::path(name).extension().native());
 }
 
+bool IsMatroskaContainerHeader(std::span<const unsigned char> header) noexcept {
+    if (header.size() > ttp::format::prefix_limit) return false;
+    ttp::format::Request request;
+    request.data = header.data(); request.bytes = static_cast<DWORD>(header.size());
+    return ttp::format::Identify(request, ttp::format::Matroska).family == ttp::format::Matroska;
+}
+
 std::wstring RecoverAudioFormatHint(
     std::wstring_view extension, std::span<const unsigned char> header) {
     auto result = Lower(extension);
     if (header.size() < 16) return result;
     if (IsWebmContainerHeader(header)) return result == L".weba" ? result : L".webm";
+    if (IsMatroskaContainerHeader(header)) return result == L".mka" ? result : L".mkv";
     if (std::memcmp(header.data(), "MAC", 3) == 0) return L".mac";
     if (std::memcmp(header.data(), "MP+", 3) == 0) return L".mpc";
     if (std::memcmp(header.data(), "TTA", 3) == 0) return L".tta";

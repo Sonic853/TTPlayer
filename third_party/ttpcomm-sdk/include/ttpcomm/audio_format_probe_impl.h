@@ -167,10 +167,15 @@ inline Result Identify(const Request& q,DWORD mask=All) noexcept {
         };
         uint64_t n{};
         if(vint(false,n)&&n<=4096&&n<=b.n-at){
-            const size_t end=at+size_t(n);bool webm=false,valid=true;
+            const size_t end=at+size_t(n);unsigned doc=0;bool valid=true;
             while(at<end){uint64_t id{},len{};if(!vint(true,id)||!vint(false,len)||at>end||len>end-at){valid=false;break;}
-                if(id==0x4282){if(webm||len!=4||!b.is(at,"webm")){valid=false;break;}webm=true;}at+=size_t(len);}
-            if(valid&&webm)set(Webm,"webm","",L".webm",L".weba",L"WebM");
+                if(id==0x4282){if(doc){valid=false;break;}
+                    if(len==4&&b.is(at,"webm"))doc=1;
+                    else if(len==8&&b.is(at,"matroska"))doc=2;
+                    else {valid=false;break;}}
+                at+=size_t(len);}
+            if(valid&&doc==1)set(Webm,"webm","",L".webm",L".weba",L"WebM");
+            if(valid&&doc==2)set(Matroska,"matroska","",L".mkv",L".mka",L"Matroska");
         }
     } else {
         unsigned id{},layer{},id2{},layer2{};

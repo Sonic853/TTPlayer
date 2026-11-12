@@ -27,6 +27,7 @@
 21. 增加 FLAC 编码的额外拓展 [TTPlayerFLAC](https://github.com/TTPlayerRebuild/TTPlayerFLAC)
 22. 重写 Enc 编码并更新编码库 [TTPlayerEnc](https://github.com/TTPlayerRebuild/TTPlayerEnc)
 23. 重写歌词服务器插件，使原版支持超过4个服务器的列表 [TTPlayerLrcsh](https://github.com/TTPlayerRebuild/TTPlayerLrcsh)
+24. 新增独立 `ttp_mkv` 插件的 MKV/MKA 音频读取、定位和多编码支持；当前为本地工程，范围及验证见 [Matroska 音频实现](docs/MATROSKA_AUDIO_20261112.md)。
 
 ## 构建
 

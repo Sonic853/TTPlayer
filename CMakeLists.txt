@@ -413,6 +413,18 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/audio/audio_forma
   set_tests_properties(audio_format_probe_tests PROPERTIES TIMEOUT 30)
 endif()
 
+if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/matroska_20261112/host_tests.cpp")
+  add_executable(mkv_host_tests tests/matroska_20261112/host_tests.cpp src/app/exports.cpp)
+  target_compile_definitions(mkv_host_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(mkv_host_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  target_link_libraries(mkv_host_tests PRIVATE ttplayer_core)
+  if(TTPLAYER_XP_RUNTIME_CONFIGURED)
+    add_dependencies(mkv_host_tests ttplayer_legacy_ttpcomm_import)
+    target_link_libraries(mkv_host_tests PRIVATE "${ttpcomm_import_library}")
+    target_link_options(mkv_host_tests PRIVATE /INCLUDE:__imp__srand48)
+  endif()
+endif()
+
 if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/audio/extension_correction_tests.cpp")
   add_executable(extension_correction_tests tests/audio/extension_correction_tests.cpp)
   target_compile_definitions(extension_correction_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

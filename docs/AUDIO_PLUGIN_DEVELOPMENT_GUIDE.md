@@ -26,6 +26,7 @@
 | `ttp_flac` | libFLAC 1.5.0；恢复的 TTA 实现 | 两个工厂；无损 PCM；多值标签、封面、统一保存 | TTA 历史浮点分支和外部标签规则不是通用模板 |
 | `ttp_ape` | Monkey's Audio SDK 13.30 | Reader + Encoder；APEv2；读写流与可靠保存 | APL 指向外部文件，不能把 APL 的后缀改成 APE；还有额外历史导出 |
 | `ttp_webm` | 自有 EBML/WebM 容器处理，静态 Vorbis/Opus 核心 | **新容器首选模板**：`document`、`ebml`、`codec`、Reader 分层；容器标签/图片保存 | DocType、lacing、SeekHead/Cues、时间基等必须按目标容器重新实现 |
+| `ttp_mkv` | 精简 FFmpeg 9.0.2 Matroska/audio；独立只读 Reader | MKV/MKA、多编码路由、真实首帧格式协商、整数/浮点原样、完整重放定位 | 不是把 WebM DocType 放开；无写入/切轨/直播；定位随目标距离增长；非整字节原生 PCM 明确拒绝 |
 | `ttp_ac3dts` | a52dec 0.8.0、FFmpeg 9.0.2 DCA／E-AC3；已整合原 ttp_dts | 旧四工厂兼容、追加 E-AC3 Reader；DTS-WAV、稀疏定位、RIFF 标签／封面事务 | 原版内置 WAVE 可抢先接收 `.wav`；HD 扩展层仍待真实样本；不能把容器后缀改成内部编码 |
 | `ttp_mod` | 默认 libmodplug 0.8.9.0；可选 libopenmpt 0.8.9 | 多子格式；旧引擎与现代引擎构建切换 | 无签名 MOD 不宜自动改名；换引擎会改变混音和播放行为 |
 | `ttp_mpc` | Musepack r475 | 小型 Reader、SV7/SV8、APEv2/ReplayGain | SV7 与 SV8 的识别和标签位置不同 |
@@ -198,6 +199,7 @@ HRESULT Open(IStream* stream, DWORD flags) override {
 - `NoMatch`：没有证据；`NeedMore`：前缀不完整；`Tentative`：弱证据；`Strong`：结构性头部匹配；`Opened`：读取器已成功打开。
 - Strong 仅用于路由。单凭同步字不能提示更名。MP3/ADTS 要核对连续帧；Ogg 要区分 Vorbis/Opus/Speex；EBML 要验证 WebM DocType。
 - MP4 内是 AAC/ALAC 仍建议 `.mp4`，接受 `.m4a/.alac/.mp4a` 等别名；WebM 内是 Opus 仍建议 `.webm`，接受 `.weba`。
+- Matroska 独立家族为 `1u<<25`，建议 `.mkv`、接受 `.mka`，不混用 WebM 家族；SDK `All=0x3ffffff`，结构、IID 和 `Builtin` 不变。
 - APL、无可靠签名的 MOD、未知容器保守返回无结果。
 - 压缩包内歌曲更名必须交给宿主的外层压缩包逻辑；OSZ 不是错误后缀 ZIP。
 
@@ -258,6 +260,7 @@ OFR 只内嵌未经修改/可执行压缩的原 DLL，按原名在 ACL 保护的
 - 播放器 `cmake/package_addin_bundles.py` 的 `BUNDLES` 是独立 GitHub 仓库到插件名的映射；新增插件需登记真实仓库、资产名和校验要求。
 - 本地改完 DLL 不等于播放器 Action 已拿到它。插件正式 release 发布后，播放器“最新稳定版插件包”流程才会下载新 DLL。
 - `ttp_wv` / `ttp_ofr` 当前是本地独立 Git 工程，远端仓库名及稳定 release 尚未建立。不能把猜测的仓库名加入 `BUNDLES` 导致现有合集下载失败；正式创建/发布后再登记真实映射。
+- `ttp_mkv` 同样是本地独立工程，尚未登记远端/稳定 Release。MKV 的容器与音频后端位于插件，不再静态链接进播放器 EXE；实现、测试和边界见 `MATROSKA_AUDIO_20261112.md`。
 
 ## 8. 最低测试矩阵与证据
 

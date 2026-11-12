@@ -1,8 +1,12 @@
 # Optional audio-format ABI v1
 
-2026-10-23。声明：`include/ttpcomm/audio_format_probe.h`。可选辅助实现：`audio_format_probe_impl.h`。
+2026-11-12。声明：`include/ttpcomm/audio_format_probe.h`。可选辅助实现：`audio_format_probe_impl.h`。
 
-本次添加 `Dsd = 1u << 22`（DSF / DSDIFF），不改变 ABI 版本、结构尺寸或任何 IID。
+现有 `Dsd = 1u << 22`（DSF / DSDIFF）基础上添加 `WavPack = 1u << 23`、`OptimFrog = 1u << 24`；不改变 ABI 版本、结构尺寸或任何 IID，`All` 扩为 `0x1ffffff`。
+2026-11-12 再添加 `Matroska = 1u << 25`，`All=0x3ffffff`，`Builtin` 不变。
+只有完整有界 EBML 头中 `DocType=matroska` 才报告 `container=matroska`、建议 `.mkv`、接受 `.mka`；WebM 仍独立分类，不能只凭 EBML 签名扩大识别。
+Ogg Speex 仍属于 Ogg 家族，报告 `codec=speex`、建议 `.spx`，接受 `.ogg/.oga`；MP4 增加 `.alac/.mp4a` 别名。MP4 中 ALAC 的成功打开信息保持 `container=mp4`、`codec=alac`，不能误建议把文件改成裸音频后缀。
+WavPack 报告 `.wv`；OptimFROG 报告 `.ofr` 并接受 `.ofs`。OFRX 可以被有界识别，但当前官方 SDK 库无法打开，Reader 必须明确拒绝，不能报告 Opened。
 WAVE 探测可进一步报告 `codec=dts`，但仍保持 `family=Wave`、`container=wave`、建议扩展名 `.wav`；不能根据解码后的 PCM 格式或内部编码把容器改名为 `.dts`。
 有界辅助探测要求连续两个有效 DTS core 帧以及一致的采样率/声道字段，支持 16/14-bit BE/LE。前缀之外的 WAVE 块须在 Reader Open 中检查。独立 `ttp_dts` 工厂显式接受 DTS-WAV；现有仅声明 Dts 家族的 AC3/DTS 工厂不会因此自动接受所有 WAVE。
 
@@ -81,6 +85,6 @@ InfoSupport 是保守辅助实现。超出其前缀预算、无可靠签名或�
 
 ## 同步与测试
 
-规范头文件在本 SDK；独立仓库携带同内容副本。`tools/sync_audio_format_sdk.py` 同步；`--check` 只检查。当前覆盖 AAC、OGG、FLAC、APE、WebM、AC3/DTS、MOD、MPC、ASF、RM、TAK、VQF 与播放器。
+规范头文件在本 SDK；独立仓库携带同内容副本。`tools/sync_audio_format_sdk.py` 同步；`--check` 只检查。当前也覆盖 MKV、DSD、WV、OFR；播放器完整 SDK snapshot 的清单由 `cmake/sync_sdk.py` 导出。
 
 播放器 `tests/audio/audio_format_probe_tests.cpp` 覆盖版本、输入限制、QI 身份、原工厂 Create 槽、短读、ID3、位置恢复、取消、不可 seek、真实文件选择和更名建议。完整新插件工程说明见相邻播放器仓库的 `docs/AUDIO_PLUGIN_DEVELOPMENT_GUIDE.md`。

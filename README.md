@@ -84,6 +84,9 @@ Current milestone (0.1):
   lifetimes, `IStream`, complete extensible formats, six-slot PCM buffers,
   read/EOF/seek/reset and executable encoder Configure/Open/Start/Write/Finalize;
   the file picker and converter expose a format only after its creator succeeds;
+- optional independent `ttp_mkv` Reader for MKV/MKA audio, including lossless PCM,
+  AAC/MPEG/AC3, Opus/Vorbis, FLAC/ALAC, E-AC3 and DTS-HD/Express. The backend stays
+  in the plugin, not the EXE; see [implementation and limits](docs/MATROSKA_AUDIO_20261112.md).
 - recovered reader metadata and thumbnail read/write slots, isolated file-info
   transactions, built-in MP3 ID3v1/ID3v2/APEv2 preservation, ReplayGain,
   one-based CUE sub-tracks, CDA conversion/grabbing source, URL dialog/source,
