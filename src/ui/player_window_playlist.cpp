@@ -4736,6 +4736,8 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
 void PlayerWindow::PreparePlaylistMenu(HMENU menu) const {
     if (!menu) return;
     PopulatePlaylistSwitchMenu(menu);
+    if (const HMENU lists = FindCommandMenu(menu, kPlaylistAddList))
+        AppendOsuLibraryMenu(lists);
     const bool has_tracks = VisiblePlaylistTrackCount() != 0;
     const bool has_selection = !playlist_selected_rows_.empty();
     const playlist::Track* focused_track = nullptr;
@@ -4966,6 +4968,8 @@ HMENU PlayerWindow::CreatePlaylistFilesMenu(std::optional<size_t> row) const {
         HMENU menu = ConvertMenuBarToPopup(i18n::LoadMenu(ResourceModule(),
             MAKEINTRESOURCEW(kMenuPlaylistToolbar)));
         PopulatePlaylistSwitchMenu(menu);
+        if (const HMENU lists = FindCommandMenu(menu, kPlaylistAddList))
+            AppendOsuLibraryMenu(lists);
         AppendOsuExportMenu(menu,false);
         return menu;
     }

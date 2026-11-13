@@ -1,5 +1,7 @@
 #include <ttpcomm/zip.h>
 #include "ttplayer/update/update.h"
+#include "ttplayer/core/json.h"
+#include "ttplayer/core/text.h"
 #include <windows.h>
 #include <objbase.h>
 #include <zlib.h>
@@ -78,8 +80,7 @@ void Write(const std::filesystem::path& file,const std::vector<unsigned char>& d
     DWORD n{};const bool ok=WriteFile(h,data.data(),static_cast<DWORD>(data.size()),&n,nullptr) && n==data.size() && FlushFileBuffers(h);
     CloseHandle(h);if(!ok) throw std::runtime_error("Cannot save staged file");
 }
-void ValidateExe(const std::filesystem::path& file,const Version& expected,bool player) {
-    if(FileVersion(file)!=expected) throw std::runtime_error("Package executable version does not match release");
+void ValidateImage(const std::filesystem::path& file,bool dll) {
     const auto bytes=Read(file,64*1024*1024);
     auto u16=[&](size_t p)->unsigned {if(p+2>bytes.size()) throw std::runtime_error("Invalid PE image");return ttpcomm::bytes::Le16(bytes.data()+p);};
     auto u32=[&](size_t p)->uint32_t {return u16(p)|uint32_t(u16(p+2))<<16;};
@@ -87,8 +88,13 @@ void ValidateExe(const std::filesystem::path& file,const Version& expected,bool 
     const auto pe=u32(0x3c);
     if(pe>bytes.size() || u32(pe)!=0x4550 || u16(pe+4)!=0x14c || u16(pe+24)!=0x10b)
         throw std::runtime_error("Package is not an x86 executable");
+    if(bool(u16(pe+22)&0x2000)!=dll) throw std::runtime_error("Unexpected package PE image type");
     if(IsXp() && (u16(pe+24+48)>5 || (u16(pe+24+48)==5 && u16(pe+24+50)>1)))
         throw std::runtime_error("Package does not support Windows XP");
+}
+void ValidateExe(const std::filesystem::path& file,const Version& expected,bool player) {
+    if(FileVersion(file)!=expected) throw std::runtime_error("Package executable version does not match release");
+    ValidateImage(file,false);
     if(player) {
         if(!IsPlayerExecutable(file)) throw std::runtime_error("Unexpected player product identity");
         return;
@@ -110,8 +116,36 @@ std::filesystem::path PackagePlayerPath(const std::filesystem::path& payload) {
     if(current==legacy) throw std::runtime_error("Update package must contain exactly one player executable");
     return payload/(current?kPlayerFileName:kRebuildPlayerFileName);
 }
+// Keep the runtime ownership map aligned with cmake/package_addin_bundles.py.
+// Unknown files are never installed just because a server included them in a ZIP.
+std::filesystem::path AddInOwner(PackageKind kind,const std::filesystem::path& relative) {
+    const auto name=relative.generic_wstring();
+    constexpr const wchar_t* codecs[]{L"ttp_webm",L"ttp_ape",L"ttp_flac",L"ttp_enc",L"ttp_ogg",L"ttp_aac",
+        L"ttp_mpc",L"ttp_ac3dts",L"ttp_mod",L"ttp_clienc",L"ttp_asf",L"ttp_tak",L"ttp_rm",L"ttp_vqf",
+        L"ttp_dsd",L"ttp_ofr",L"ttp_mkv",L"ttp_wv"};
+    constexpr const wchar_t* extras[]{L"ttp_waskin",L"ttp_maki",L"ttp_i18n",L"ttp_osu"};
+    if(kind==PackageKind::codecs) for(const auto* codec:codecs)
+        if(name==L"AddIn/"+std::wstring(codec)+L".dll") return relative;
+    if(kind==PackageKind::extras) {
+        for(const auto* extra:extras) if(name==L"AddIn/"+std::wstring(extra)+L".dll") return relative;
+        if(name==L"ttpbrowser.dll") return relative;
+        if(name==L"i18n/README.md" || name==L"i18n/ttplayer.pot") return L"AddIn/ttp_i18n.dll";
+        if(name.starts_with(L"i18n/")) {
+            const auto slash=name.find(L'/',5);
+            if(slash!=name.npos && slash>5 && name.substr(5,slash-5).find_first_not_of(L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")==name.npos &&
+                (name.substr(slash+1)==L"ttplayer.po" || name.substr(slash+1)==L"ttplayer.mo")) return L"AddIn/ttp_i18n.dll";
+        }
+    }
+    throw std::runtime_error("Unexpected file in add-in bundle: "+core::WideToUtf8(name));
 }
-void ExtractPackage(const std::filesystem::path& zip,const std::filesystem::path& staging) {
+std::wstring VersionText(const Version& version) {
+    if(ParseVersion(core::WideToUtf8(version.Text()))) return version.Text();
+    std::wstring text;
+    for(const auto part:version.parts) {if(!text.empty()) text+=L'.';text+=std::to_wstring(part);}
+    return text;
+}
+}
+void ExtractPackage(const std::filesystem::path& zip,const std::filesystem::path& staging,PackageKind kind) {
     const auto bytes=Read(zip,64*1024*1024);
     auto u16=[&](size_t p)->unsigned {if(p>bytes.size() || bytes.size()-p<2) throw std::runtime_error("Truncated ZIP");return ttpcomm::bytes::Le16(bytes.data()+p);};
     auto u32=[&](size_t p)->uint32_t {return u16(p)|uint32_t(u16(p+2))<<16;};
@@ -163,7 +197,11 @@ void ExtractPackage(const std::filesystem::path& zip,const std::filesystem::path
         if(folder) folders.push_back(path);else files.emplace(name,std::move(content));
         cursor+=entry->record_size;
     }
-    if(cursor!=end || files.contains("TTPlayer.exe")==files.contains("TTPlayerRebuild.exe") || !files.contains("SHA256SUMS.txt")) throw std::runtime_error("Incomplete or ambiguous update package");
+    if(cursor!=end || !files.contains("SHA256SUMS.txt") ||
+        (kind==PackageKind::player && files.contains("TTPlayer.exe")==files.contains("TTPlayerRebuild.exe")))
+        throw std::runtime_error("Incomplete or ambiguous update package");
+    if(kind!=PackageKind::player) for(const auto& [name,content]:files)
+        if(name!="SHA256SUMS.txt" && name!="addin-manifest.json") AddInOwner(kind,PackagePath(name));
     const auto& raw=files.at("SHA256SUMS.txt");const std::string sums(raw.begin(),raw.end());
     for(const auto& [name,folder]:paths) {
         for(size_t p=name.find(L'/');p!=name.npos;p=name.find(L'/',p+1)) {
@@ -184,14 +222,22 @@ void ExtractPackage(const std::filesystem::path& zip,const std::filesystem::path
         if(Sha256(path)!=ExpectedHash(sums,name)) throw std::runtime_error("Package file checksum mismatch");
     }
 }
-std::filesystem::path PreparePackage(Http& http,const Release& release,const std::filesystem::path& staging,const Cancel& cancel,const Progress& progress) {
+namespace {
+std::filesystem::path DownloadPackage(Http& http,const Release& release,const std::filesystem::path& staging,const Cancel& cancel,const Progress& progress) {
     std::filesystem::create_directories(staging);
     const auto expected=ExpectedHash(http.Get(release.sums_url,cancel),release.asset_name);
     const auto zip=staging/L"package.zip.part";
     http.Download(release.zip_url,zip,release.size,cancel,progress);
     if(cancel && cancel()) throw std::runtime_error("Canceled");
     if(Sha256(zip)!=expected) throw std::runtime_error("Downloaded ZIP checksum mismatch");
-    ExtractPackage(zip,staging/L"payload");
+    ExtractPackage(zip,staging/L"payload",release.kind);
+    if(cancel && cancel()) throw std::runtime_error("Canceled");
+    return staging/L"payload";
+}
+}
+std::filesystem::path PreparePackage(Http& http,const Release& release,const std::filesystem::path& staging,const Cancel& cancel,const Progress& progress) {
+    if(release.kind!=PackageKind::player) throw std::runtime_error("Expected a player release");
+    DownloadPackage(http,release,staging,cancel,progress);
     const auto exe=PackagePlayerPath(staging/L"payload");ValidateExe(exe,release.version,true);
     const auto expected_asset=std::string(PlayerNameForPath(exe)==PlayerName::ttplayer ? "TTPlayer-" : "TTPlayerRebuild-")+release.tag+".zip";
     if(release.asset_name!=expected_asset) throw std::runtime_error("Package player name does not match the selected release asset");
@@ -199,12 +245,84 @@ std::filesystem::path PreparePackage(Http& http,const Release& release,const std
     if(std::filesystem::exists(updater)) ValidateExe(updater,release.version,false);
     return exe;
 }
+std::filesystem::path PrepareAddInPackage(Http& http,const Release& release,const std::filesystem::path& staging,const Cancel& cancel,const Progress& progress) {
+    if(release.kind==PackageKind::player) throw std::runtime_error("Expected an add-in release");
+    const auto payload=DownloadPackage(http,release,staging,cancel,progress);
+    InspectAddInPackage({},payload,release.kind);
+    return payload;
+}
+std::vector<AddInUpdate> InspectAddInPackage(const std::filesystem::path& directory,const std::filesystem::path& payload,PackageKind kind) {
+    if(kind==PackageKind::player) throw std::runtime_error("Expected an add-in bundle");
+    CheckPath(payload,true);
+    std::map<std::filesystem::path,std::vector<std::filesystem::path>> groups;
+    size_t count=0,total=0;
+    for(const auto& entry:std::filesystem::recursive_directory_iterator(payload)) {
+        if(++count>4096) throw std::runtime_error("Too many add-in files");
+        CheckPath(entry.path(),entry.is_directory());
+        if(entry.is_directory()) continue;
+        if(!entry.is_regular_file()) throw std::runtime_error("Unexpected add-in file type");
+        const auto size=entry.file_size();
+        if(size>64*1024*1024 || total>64*1024*1024-size) throw std::runtime_error("Add-in payload is too large");
+        total+=static_cast<size_t>(size);
+        const auto relative=entry.path().lexically_relative(payload);
+        const auto encoded=relative.generic_u8string();
+        PackagePath(std::string_view(reinterpret_cast<const char*>(encoded.data()),encoded.size()));
+        if(relative==L"addin-manifest.json") continue;
+        groups[AddInOwner(kind,relative)].push_back(relative);
+    }
+    if(groups.empty()) throw std::runtime_error("Empty add-in bundle");
+    std::map<std::filesystem::path,Version> versions;
+    const bool has_manifest=std::filesystem::exists(payload/L"addin-manifest.json");
+    if(has_manifest) {
+        const auto bytes=Read(payload/L"addin-manifest.json",1024*1024);
+        const auto manifest=core::JsonReader(std::string_view(reinterpret_cast<const char*>(bytes.data()),bytes.size())).Read();
+        if(manifest["schema"].Integer()!=1 || manifest["bundle"].String()!=(kind==PackageKind::codecs ? "CodecAddIn-Rebuild" : "ExtraAddIn") ||
+            manifest["components"].kind!=core::Json::array || manifest["components"].items.size()!=groups.size())
+            throw std::runtime_error("Invalid add-in version manifest");
+        for(const auto& component:manifest["components"].items) {
+            const auto file=PackagePath(component["file"].String());const auto version=ParseVersion(component["version"].String());
+            if(!version || AddInOwner(kind,file)!=file || !groups.contains(file) || !versions.emplace(file,*version).second)
+                throw std::runtime_error("Invalid or duplicate add-in version");
+        }
+    }
+    std::vector<AddInUpdate> result;
+    for(auto& [file,files]:groups) {
+        if(!std::filesystem::is_regular_file(payload/file)) throw std::runtime_error("Missing add-in DLL");
+        ValidateImage(payload/file,true);
+        AddInUpdate addin;addin.file=file;addin.files=std::move(files);
+        std::optional<Version> next,current;
+        try {next=FileVersion(payload/file,false);} catch(const std::exception&) {}
+        if(has_manifest) {
+            if(next && ParseVersion(core::WideToUtf8(next->Text())) && *next!=versions.at(file))
+                throw std::runtime_error("Add-in DLL version does not match its manifest");
+            next=versions.at(file);
+        }
+        addin.next_version=next ? VersionText(*next) : i18n::Text(L"无版本信息");
+        if(!directory.empty()) {
+            CheckPath(directory/file);addin.installed=std::filesystem::exists(directory/file);
+            if(addin.installed) {try {current=FileVersion(directory/file,false);} catch(const std::exception&) {}}
+            // A versionless installed DLL can still be identified exactly by
+            // the checked bundle's bytes; do not invent a version for other files.
+            if(addin.installed && !current && next && Sha256(directory/file)==Sha256(payload/file)) current=next;
+            addin.current_version=!addin.installed ? i18n::Text(L"未安装") : current ? VersionText(*current) : i18n::Text(L"无版本信息");
+            addin.local_newer=current && next && ParseVersion(core::WideToUtf8(current->Text())) && ParseVersion(core::WideToUtf8(next->Text())) && *current>*next;
+            for(const auto& relative:addin.files) {
+                CheckPath(directory/relative);
+                if(!std::filesystem::exists(directory/relative) || Sha256(directory/relative)!=Sha256(payload/relative)) addin.can_update=true;
+            }
+            addin.can_update=addin.can_update && !addin.local_newer;
+        }
+        result.push_back(std::move(addin));
+    }
+    return result;
+}
 struct PackageInstall::Impl {
     struct File {std::filesystem::path relative;std::string next_hash,old_hash;bool existed{},touched{};};
     std::filesystem::path root,transaction;
     std::vector<File> files;
     std::vector<std::filesystem::path> folders,created;
     bool applied{},finished{},started{};
+    void Stage(const std::filesystem::path& payload,const std::set<std::filesystem::path>* selected=nullptr);
     static void Fail(const char* message,const std::filesystem::path& path,DWORD error=GetLastError()) {
         const auto name=path.u8string();
         throw std::runtime_error(std::string(message)+": "+std::string(name.begin(),name.end())+" ("+std::to_string(error)+")");
@@ -270,6 +388,25 @@ PackageInstall::PackageInstall(const std::filesystem::path& directory,const std:
     const auto installed=InstalledPlayerPath(state.root,player.filename().wstring());
     if(FileVersion(installed)>=expected) throw std::runtime_error("The installed player is already this version or newer");
     if(std::filesystem::exists(payload/L"TTPUpdater.exe")) ValidateExe(payload/L"TTPUpdater.exe",expected,false);
+    state.Stage(payload);
+}
+PackageInstall::PackageInstall(const std::filesystem::path& directory,const std::filesystem::path& payload,PackageKind kind,
+    const std::vector<std::filesystem::path>& selected):impl_(std::make_unique<Impl>()) {
+    auto& state=*impl_;state.root=std::filesystem::absolute(directory).lexically_normal();
+    CheckPath(state.root,true);
+    const auto addins=InspectAddInPackage(state.root,payload,kind);
+    std::set<std::filesystem::path> files,seen;
+    for(const auto& file:selected) {
+        const auto addin=std::find_if(addins.begin(),addins.end(),[&](const AddInUpdate& item){return item.file==file;});
+        if(addin==addins.end() || !addin->can_update || !seen.insert(file).second)
+            throw std::runtime_error("The selected add-in cannot be updated; check for updates again");
+        files.insert(addin->files.begin(),addin->files.end());
+    }
+    if(files.empty()) throw std::runtime_error("No add-ins selected");
+    state.Stage(payload,&files);
+}
+void PackageInstall::Impl::Stage(const std::filesystem::path& payload,const std::set<std::filesystem::path>* selected) {
+    auto& state=*this;
     // Enumerate without following directory reparse points. The payload is private
     // verified staging, but check it again before copying anything to the install.
     size_t total=0,count=0;
@@ -280,6 +417,7 @@ PackageInstall::PackageInstall(const std::filesystem::path& directory,const std:
         const auto encoded=relative.generic_u8string();
         PackagePath(std::string_view(reinterpret_cast<const char*>(encoded.data()),encoded.size()));
         if(Fold(relative.generic_wstring())==L"SHA256SUMS.TXT") continue;
+        if(selected && (folder || !selected->contains(relative))) continue;
         CheckPath(state.root/relative,folder);
         if(folder) {state.folders.push_back(relative);continue;}
         if(!entry.is_regular_file()) throw std::runtime_error("Unsupported staged update file");
@@ -290,6 +428,7 @@ PackageInstall::PackageInstall(const std::filesystem::path& directory,const std:
         const bool existed=std::filesystem::exists(target);
         state.files.push_back({relative,Sha256(entry.path()),existed?Sha256(target):std::string{},existed});
     }
+    if(selected && state.files.size()!=selected->size()) throw std::runtime_error("A selected add-in file disappeared from staging");
     state.Preflight();
     GUID guid{};wchar_t unique[40]{};
     if(FAILED(CoCreateGuid(&guid)) || !StringFromGUID2(guid,unique,40)) throw std::runtime_error("Cannot create update transaction identity");

@@ -25,10 +25,11 @@ struct Version {
     std::wstring Text() const;
 };
 std::optional<Version> ParseVersion(std::string_view text);
-Version FileVersion(const std::filesystem::path& file);
+Version FileVersion(const std::filesystem::path& file, bool require_date = true);
 inline constexpr wchar_t kPlayerFileName[] = L"TTPlayer.exe";
 inline constexpr wchar_t kRebuildPlayerFileName[] = L"TTPlayerRebuild.exe";
 enum class PlayerName { rebuild, ttplayer };
+enum class PackageKind { player, codecs, extras };
 PlayerName PlayerNameForPath(const std::filesystem::path& file);
 // Product identity distinguishes the rebuild from the original TTPlayer.exe.
 bool IsPlayerExecutable(const std::filesystem::path& file);
@@ -38,8 +39,10 @@ struct Release {
     std::string tag, asset_name;
     std::wstring page, zip_url, sums_url;
     uint64_t size{};
+    PackageKind kind{PackageKind::player};
 };
-std::vector<Release> ParseReleases(std::string_view json, Source source, PlayerName player = PlayerName::rebuild);
+std::vector<Release> ParseReleases(std::string_view json, Source source, PlayerName player = PlayerName::rebuild,
+                                 PackageKind kind = PackageKind::player);
 std::string ExpectedHash(std::string_view sums, std::string_view name);
 std::string Sha256(const std::filesystem::path& file);
 using Cancel = std::function<bool()>;
@@ -58,11 +61,24 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
-std::optional<Release> Check(Http& http, Source source, const Cancel& canceled = {}, PlayerName player = PlayerName::rebuild);
+std::optional<Release> Check(Http& http, Source source, const Cancel& canceled = {}, PlayerName player = PlayerName::rebuild,
+                             PackageKind kind = PackageKind::player);
 // Verify and stage every payload file, excluding the root checksum manifest.
 std::filesystem::path PreparePackage(Http& http, const Release& release,
     const std::filesystem::path& staging, const Cancel& canceled, const Progress& progress);
-void ExtractPackage(const std::filesystem::path& zip, const std::filesystem::path& staging);
+void ExtractPackage(const std::filesystem::path& zip, const std::filesystem::path& staging,
+                    PackageKind kind = PackageKind::player);
+// Add-in checks download and verify the bundle, but never load its DLLs or install files.
+std::filesystem::path PrepareAddInPackage(Http& http, const Release& release,
+    const std::filesystem::path& staging, const Cancel& canceled, const Progress& progress);
+struct AddInUpdate {
+    std::filesystem::path file;
+    std::wstring current_version, next_version;
+    bool installed{}, can_update{}, local_newer{};
+    std::vector<std::filesystem::path> files;
+};
+std::vector<AddInUpdate> InspectAddInPackage(const std::filesystem::path& directory,
+    const std::filesystem::path& payload, PackageKind kind);
 // All files are staged on the destination volume before any replacement.
 // Keep the transaction alive until the new player starts. Rollback restores
 // replaced files and removes newly installed files. Successful backups remain
@@ -71,6 +87,9 @@ class PackageInstall {
 public:
     PackageInstall(const std::filesystem::path& directory,
                    const std::filesystem::path& payload, const Version& expected);
+    // One transaction for the selected DLLs and their owned resources. Never updates the player.
+    PackageInstall(const std::filesystem::path& directory, const std::filesystem::path& payload,
+                   PackageKind kind, const std::vector<std::filesystem::path>& selected);
     ~PackageInstall();
     PackageInstall(const PackageInstall&) = delete;
     PackageInstall& operator=(const PackageInstall&) = delete;

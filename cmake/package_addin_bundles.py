@@ -281,6 +281,11 @@ def package_bundles(version, output, export_paths):
                 sources.append(metadata)
                 print(f"Verified {repository} {metadata['version']}: ZIP/files SHA-256 and XP/Win7 imports", flush=True)
             filename = f'{bundle}-{version}.zip'
+            # Checked inside the ZIP, not a separately trusted release attachment.
+            # Some add-ins have no VERSIONINFO; retain their own release versions.
+            manifest = dict(schema=1, bundle=bundle, components=[
+                dict(file=source['dll'], version=source['version']) for source in sources])
+            combined['addin-manifest.json'] = (json.dumps(manifest, indent=2) + '\n').encode('utf-8')
             write_bundle(stage / filename, combined)
             report['bundles'].append(dict(name=bundle, archive=filename,
                                           sha256=hashlib.sha256((stage / filename).read_bytes()).hexdigest(),

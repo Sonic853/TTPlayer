@@ -30,7 +30,7 @@ std::wstring Version::Text() const {
     wchar_t out[40]{};swprintf_s(out,L"%04u.%02u.%02u",parts[0],parts[1],parts[2]);
     return std::wstring(out)+(parts[3] ? L"p"+std::to_wstring(parts[3]) : L"");
 }
-Version FileVersion(const std::filesystem::path& file) {
+Version FileVersion(const std::filesystem::path& file,bool require_date) {
     DWORD unused{};const auto size=GetFileVersionInfoSizeW(file.c_str(),&unused);
     if(!size || size>1024*1024) throw std::runtime_error("Cannot read executable version");
     std::vector<unsigned char> data(size);
@@ -39,7 +39,7 @@ Version FileVersion(const std::filesystem::path& file) {
     if(!VerQueryValueW(data.data(),L"\\",reinterpret_cast<void**>(&info),&count) || count<sizeof(*info) || info->dwSignature!=0xfeef04bd)
         throw std::runtime_error("Invalid executable version");
     Version v{{HIWORD(info->dwFileVersionMS),LOWORD(info->dwFileVersionMS),HIWORD(info->dwFileVersionLS),LOWORD(info->dwFileVersionLS)}};
-    if(!ParseVersion(core::WideToUtf8(v.Text()))) throw std::runtime_error("Executable does not use a release date version");
+    if(require_date && !ParseVersion(core::WideToUtf8(v.Text()))) throw std::runtime_error("Executable does not use a release date version");
     return v;
 }
 bool IsPlayerExecutable(const std::filesystem::path& file) {
@@ -84,15 +84,17 @@ bool AssetUrl(std::string_view url,Source source) {
     return url.starts_with(prefix) && url.find_first_of("\r\n\\") == url.npos;
 }
 }
-std::vector<Release> ParseReleases(std::string_view json,Source source,PlayerName player) {
+std::vector<Release> ParseReleases(std::string_view json,Source source,PlayerName player,PackageKind kind) {
     const auto root=core::JsonReader(json).Read();
     if(root.kind!=core::Json::array) throw std::runtime_error("Release API did not return a list");
     std::vector<Release> result;
     for(const auto& row:root.items) {
         const auto tag=row["tag_name"].String();const auto version=ParseVersion(tag);
         if(!version || row["draft"].True() || row["prerelease"].True()) continue;
-        Release r;r.version=*version;r.tag=tag;
-        r.asset_name=std::string(player==PlayerName::ttplayer ? "TTPlayer-" : "TTPlayerRebuild-")+tag+".zip";
+        Release r;r.version=*version;r.tag=tag;r.kind=kind;
+        const auto prefix=kind==PackageKind::codecs ? "CodecAddIn-Rebuild-" : kind==PackageKind::extras ? "ExtraAddIn-" :
+            player==PlayerName::ttplayer ? "TTPlayer-" : "TTPlayerRebuild-";
+        r.asset_name=std::string(prefix)+tag+".zip";
         r.page=std::wstring(source==Source::gitee ? kGiteePage : kGitHubPage)+L"/tag/"+core::Utf8ToWide(tag);
         unsigned zip_count=0,sums_count=0;
         for(const auto& asset:row["assets"].items) {
@@ -101,11 +103,12 @@ std::vector<Release> ParseReleases(std::string_view json,Source source,PlayerNam
             if(name==r.asset_name) {++zip_count;r.zip_url=core::Utf8ToWide(url);r.size=asset["size"].Integer();}
             if(name=="SHA256SUMS.txt") {++sums_count;r.sums_url=core::Utf8ToWide(url);}
         }
+        // Gitee's public API can omit size; Http still enforces the download limit.
         if(zip_count==1 && sums_count==1 && r.size<=64ULL*1024*1024) result.push_back(std::move(r));
     }
     return result;
 }
-std::optional<Release> Check(Http& http,Source source,const Cancel& cancel,PlayerName player) {
+std::optional<Release> Check(Http& http,Source source,const Cancel& cancel,PlayerName player,PackageKind kind) {
     std::optional<Release> best;std::set<std::string> seen;
     for(unsigned page=1;page<=20;++page) {
         if(cancel && cancel()) throw std::runtime_error("Canceled");
@@ -116,7 +119,7 @@ std::optional<Release> Check(Http& http,Source source,const Cancel& cancel,Playe
         const auto root=core::JsonReader(text).Read();
         if(root.kind!=core::Json::array) throw std::runtime_error("Invalid release list");
         if(!seen.insert(text).second && !root.items.empty()) throw std::runtime_error("Release pagination repeated a page");
-        for(auto& release:ParseReleases(text,source,player)) if(!best || release.version>best->version) best=std::move(release);
+        for(auto& release:ParseReleases(text,source,player,kind)) if(!best || release.version>best->version) best=std::move(release);
         if(root.items.size()<20) return best;
     }
     throw std::runtime_error("Release list exceeds the check limit; open the release page");

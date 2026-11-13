@@ -26,7 +26,11 @@ DLL 保留各自上游版本和原始字节。仅构建的运行同样生成两�
 ExtraAddIn 的 `i18n` 目录也放在 EXE 旁，用于多语言插件读取翻译。
 ExtraAddIn 根目录的 `ttpbrowser.dll` 同样放在 EXE 旁，
 用于音乐浏览器与下载窗口。
-播放器自动更新器按发起程序名称选择对应主包，更新包内全部运行文件；两个可选插件包由用户单独下载安装。
+也可打开 `TTPUpdater.exe`：在“主程序”页按发起程序名称更新主包；在“音频插件”和“拓展插件”页
+分别检查上述两个插件合集，查看各插件的当前版本、更新版本，勾选后点击“更新所选插件”。
+未安装的插件默认不勾选，可以手动勾选安装；未勾选的插件不会被替换。
+选择多语言插件时会同时更新其 `i18n` 翻译资源，选择浏览器时更新根目录 `ttpbrowser.dll`。
+插件检查会下载并校验合集以读取实际版本，但不会自动安装；安装前正常退出播放器，成功后重新启动。
 
 ## CodecAddIn-Rebuild
 
@@ -51,7 +55,7 @@ ExtraAddIn 根目录的 `ttpbrowser.dll` 同样放在 EXE 旁，
 | [TTPlayerMKV](https://github.com/TTPlayerRebuild/TTPlayerMKV) | `AddIn/ttp_mkv.dll` |
 | [TTPlayerWV](https://github.com/TTPlayerRebuild/TTPlayerWV) | `AddIn/ttp_wv.dll` |
 
-包内仅有以上 18 个 DLL 和 `SHA256SUMS.txt`。这是编解码插件合集，不包含第三方 DSP 滤镜。
+包内有以上 18 个 DLL、`SHA256SUMS.txt` 和 `addin-manifest.json` 版本清单。这是编解码插件合集，不包含第三方 DSP 滤镜。
 新增八项的仓库名取自各工程 Git origin；特别是 AC3/DTS 的仓库名为 `TTPlayer_AC_130_dts`，
 其运行附件仍使用 `ttp_ac3dts-上游版本.zip`。
 
@@ -67,7 +71,8 @@ ExtraAddIn 根目录的 `ttpbrowser.dll` 同样放在 EXE 旁，
 
 保留上游已校验的 `i18n/README.md`、`i18n/ttplayer.pot`、
 `i18n/<语言>/ttplayer.po`／`.mo`，并要求简体中文、繁体中文和英文目录均有翻译。
-不复制本机的语言文件、播放器设置或皮肤包。包内另有覆盖所有运行文件的 `SHA256SUMS.txt`。
+不复制本机的语言文件、播放器设置或皮肤包。包内另有 `addin-manifest.json` 版本清单，
+`SHA256SUMS.txt` 覆盖所有运行文件和该清单；更新器不安装这两个元数据文件。
 
 ## 下载和校验
 
@@ -97,7 +102,10 @@ Token 只发给 GitHub API，不进入 ZIP、日志、来源记录或附件下�
 
 来源保存在 Actions Artifact 的 `addin-bundles.json`，同时嵌入 `build-info.json`。
 Release 说明自动列出每个插件的实际版本及对应上游 Release 链接。
-这些记录不额外混入插件运行包。两组 ZIP 使用固定顺序和时间戳；相同的上游文件生成相同 ZIP。
+完整来源记录不额外混入插件运行包。包内 `addin-manifest.json` 只记录合集名、插件 DLL 路径及其独立版本，
+用于没有 VERSIONINFO 的插件；清单参与包内 SHA-256 校验。有日期版本资源的 DLL 必须与清单版本相符。
+历史无版本清单的合集仍可更新，版本从 DLL 读取，缺少版本资源时显示“无版本信息”，不以播放器版本冒充。
+两组 ZIP 使用固定顺序和时间戳；相同的上游文件及版本生成相同 ZIP。
 
 ### 2026-11-13 OFR / MKV / WavPack 接入
 
