@@ -31,7 +31,7 @@
 | `ttp_mod` | 默认 libmodplug 0.8.9.0；可选 libopenmpt 0.8.9 | 多子格式；旧引擎与现代引擎构建切换 | 无签名 MOD 不宜自动改名；换引擎会改变混音和播放行为 |
 | `ttp_mpc` | Musepack r475 | 小型 Reader、SV7/SV8、APEv2/ReplayGain | SV7 与 SV8 的识别和标签位置不同 |
 | `ttp_wv` | WavPack 5.9.0 静态核心 | 64-bit 流回调；整数/float32 原始输出；WVC；APEv2 | 解包已恢复 SHIFT_MASK，20-bit 不可再左移；不含 DSD/4.0 前版本 |
-| `ttp_ofr` | 静态 OpenFROG 源码，兼容 SDK 1.600 C ABI | SDK 流回调；原整数位宽；单 DLL，不释放临时解码库 | 保留严格浮点与安全拒绝；OFS 为有损；OFRX 浮点仍不支持 |
+| `ttp_ofr` | 静态 OpenFROG 源码，兼容 SDK 1.600 C ABI | SDK 流回调；原整数位宽、OFRX/OFF IEEE32 位模式；单 DLL，不释放临时解码库 | 保留严格浮点与安全拒绝；OFS 为有损；仅解码，不接入上游新编码器/verify CLI |
 | `ttp_asf` | 自有 ASF/MP3 路径；Windows Media SDK、DMO 等系统组件 | 容器 Reader 与系统 Decoder 配合；动态探测系统能力 | 不能把系统编解码器可用性视为所有 XP 都相同；ASF 内部不只 WMA |
 | `ttp_rm` | 裁剪的 FFmpeg 9.0.2；原生 RM 标签实现 | **使用 FFmpeg 时的模板**：自定义 AVIO、错误桥接、最小解码配置 | 不要启用全部 FFmpeg 组件；RealMedia 写回不是通用文件重写 |
 | `ttp_tak` | 裁剪的 FFmpeg 9.0.2；TAK 标签适配 | 单格式 FFmpeg 解码、APEv2、静态发行 | 不要重新引入旧 `tak_deco_lib.dll` 依赖 |
@@ -249,7 +249,7 @@ cmake --build D:\Projects\Backup\TTPlayer\ttp_new\build --config Release --targe
 
 许可证保存在仓库，不嵌入 DLL。当前 AAC、RM/TAK/VQF 等发行脚本还生成独立 source 附件；不要为了让二进制 ZIP 更小而删掉现有源码附件流程。
 
-2026-11-11 扩展使用 WavPack 5.9.0（`b5291bc4…e648d1ff`）、Speex 1.2.1（`4b44d4f2…ae6628feea`）；OFR 最初使用官方 SSE2 5.100 原始 DLL。当前 OFR 已按用户选择改为静态 OpenFROG，固定提交 `5dc0c80cf0c357e8cadbbae9b593f1b3e62d917d`，生产源码与逐文件 SHA256 记录在 `ttp_ofr/third_party/openfrog`，构建/源码包不再下载或捆绑官方 SDK ZIP。
+2026-11-11 扩展使用 WavPack 5.9.0（`b5291bc4…e648d1ff`）、Speex 1.2.1（`4b44d4f2…ae6628feea`）；OFR 最初使用官方 SSE2 5.100 原始 DLL。当前 OFR 已按用户选择改为静态 OpenFROG，2026-11-13 更新至干净提交 `c37926cf6fc612cb2e9a0a2371964e0b4ff919d4`，24 个解码源码/头/许可证文件与逐文件、整体快照 SHA256 记录在 `ttp_ofr/third_party/openfrog`，构建/源码包不再下载或捆绑官方 SDK ZIP。新增 OFF COMP/DETA 重建，输出原始 IEEE32 位模式，不能用 host float 运算破坏 sNaN payload；默认不验证存储 CRC/MD5，不把上游新增编码器/verify 工具解释为插件新接口。更新验收见 `OFR_OPENFROG_UPDATE_20261113.md`；上一轮静态整数限定结果保留不改。
 OpenFROG 以私有静态目标接入，保留 `/fp:strict`、异常、安全资源上限及单一兼容 CRT/YY-Thunks 入口，不增加宿主导出、不使用 DLL 内存映射器。播放/读取不再依赖用户 TEMP 可写或可执行；标签安全提交在音频目录创建替换/备份文件的保护仍保留。ALAC 继续固定 FFmpeg 9.0.2，仅编译 decoder + avutil；源码附件包含该次构建的完整后端源码和 GNU make 归档。
 
 ### Action 与播放器打包
