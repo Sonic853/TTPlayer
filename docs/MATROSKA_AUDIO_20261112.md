@@ -62,9 +62,28 @@
 
 运行 ZIP 的文件布局与内外 SHA256 已校验；源码包含 **10,426** 个文件，已在独立目录按源包构建，再以 ALAC20、Opus 6 声道、96 kHz DTS-HD MA 三组验证 PCM 与主产物一致。冷重建不要求相邻插件或播放器源码，仅使用固定的兼容工具链缓存和源包自带 FFmpeg/GNU make。
 
-最终 DLL 为 **1,303,552 字节**，SHA256 `2cbdc0ad8489e38697e2774a5e0d0c503d12a29e3a8fb94d25bf3ef3bb94f780`；无外置 FFmpeg DLL。报告分别为 `matrix.json`、`integration.json`、`packages.json`、`legacy-imports.json`，运行/源码包汇总至 `out/matroska-20261112/delivery/`。
+最终 DLL 为 **1,303,552 字节**，SHA256 `2cbdc0ad8489e38697e2774a5e0d0c503d12a29e3a8fb94d25bf3ef3bb94f780`；无外置 FFmpeg DLL。报告分别为 `matrix.json`、`integration.json`、`packages.json`、`legacy-imports.json`、`virtual-machine-tests.json` 和 `no-mkv-tests.json`，运行/源码包汇总至 `out/matroska-20261112/delivery/`。
 
-**环境边界：** 本轮为 Windows 11 x86 ABI 实测；XP/Win7 仅导入审计，未完成本轮旧系统、Win10 或原版 GUI 实测，不据此宣称这些环境已验收。
+### 5.1 XP / Win7 虚拟机实测
+
+通过已接入 OpenCode 的 `virtualbox`（XP）和 `virtualbox_win7` MCP，在原本已运行的虚拟机中执行；未启动/停止/重置虚拟机或恢复快照。每台使用独立 `C:\TTPlayerMkv_20261112_1627` 目录，不覆盖已有安装。使用的 DLL 与上述交付产物 SHA256 相同。
+
+| 环境 | Reader 矩阵 | 短读复跑 | 宿主集成 | ABI / Probe self | 合计 / 失败 |
+|---|---:|---:|---:|---:|---:|
+| Windows XP SP3，5.1.2600，x86 | 59（52 解码、7 拒绝） | 52 | 52 | 2 | 165 / 0 |
+| Windows 7 SP1，6.1.7601，AMD64，运行 x86 产物 | 59（52 解码、7 拒绝） | 52 | 52 | 2 | 165 / 0 |
+
+每台的实际日志与 PCM 已复制回 `vm-results/xp/`、`vm-results/win7/`，不是仅凭 MCP 的 `(ok)` 判定成功。`compare_vm.py` 检查日志、格式字段、所有输出长度和短读一致性，并与 Windows 11 基线对照；**每台全部 52 组 PCM（包括浮点）均逐字节相同，浮点最大误差为 0**。Reader 的小缓冲、EOF、六次定位、取消、只读和 inspection 检查亦在来宾执行。来宾使用 ASCII `case-NNN` 文件名，不能据此声明来宾 Unicode 文件名已验证。
+
+### 5.2 无 MKV 插件检查
+
+另建 `C:\TTPlayerMkv_NoPlugin_20261112`，只放测试 EXE、播放器 EXE、`ttpcomm.dll`、`ttpres.dll` 和生成的 PCM WAV，输入插件目录为空。未复制或临时移动任何既有安装中的 DLL。
+
+XP SP3、Win7 SP1 **各 5 项检查，0 失败**：内置 WAV 完整解码、信息读取、格式 self test，以及 `TTPlayer.exe` / `TTPlayerRebuild.exe` 两种名称的 GUI 启动/正常退出 smoke test。两种 EXE 分别使用新目录，退出码均为 0 且成功保存独立配置；测试使用专有 IPC 并跳过文件关联检查，不干扰已运行的播放器。WAV 为 48 kHz / 2 声道 / 16-bit，96,000 字节 PCM，完整输出哈希与原始样本一致。EXE 导入表不含 `ttp_mkv.dll` 或外置 FFmpeg DLL。
+
+因此 `ttp_mkv.dll` 是**可选输入插件，不是播放器启动依赖**；不安装它不影响内置格式运行。其它插件的有/无 MKV 回归另见上述 Windows 11 的 49 项结果。缺少该插件时不保证 MKV/MKA 可用，也不以系统组件的偶然接管作为支持承诺。
+
+**环境边界：** 已完成 Windows 11、XP/Win7 的上述 ABI/宿主实测，以及 XP/Win7 的无插件启动/退出检查；尚未验证实际音频设备输出、原版播放器 GUI 或 Win10，不据此宣称全系统/全界面验收。
 
 ## 6. 不在本次范围
 
