@@ -259,8 +259,8 @@ OpenFROG 以私有静态目标接入，保留 `/fp:strict`、异常、安全资�
 - 运行 ZIP 通常为 `ttp_new-版本.zip`，其中仅 `AddIn/ttp_new.dll` 和 `SHA256SUMS.txt`。源码包、许可证说明和 release notes 按仓库既有流程另行发布。
 - 播放器 `cmake/package_addin_bundles.py` 的 `BUNDLES` 是独立 GitHub 仓库到插件名的映射；新增插件需登记真实仓库、资产名和校验要求。
 - 本地改完 DLL 不等于播放器 Action 已拿到它。插件正式 release 发布后，播放器“最新稳定版插件包”流程才会下载新 DLL。
-- `ttp_wv` / `ttp_ofr` 当前是本地独立 Git 工程，远端仓库名及稳定 release 尚未建立。不能把猜测的仓库名加入 `BUNDLES` 导致现有合集下载失败；正式创建/发布后再登记真实映射。
-- `ttp_mkv` 同样是本地独立工程，尚未登记远端/稳定 Release。MKV 的容器与音频后端位于插件，不再静态链接进播放器 EXE；实现、测试和边界见 `MATROSKA_AUDIO_20261112.md`。
+- 2026-11-13 已核实并登记 `ttp_wv → TTPlayerWV`、`ttp_ofr → TTPlayerOFR`、`ttp_mkv → TTPlayerMKV`，均位于 `TTPlayerRebuild` 组织，同时接入 `CodecAddIn-Rebuild` 和统一 DLL 发布清单。先部署目标仓库的接收工作流、发布首次正式运行 ZIP，再构建播放器合集；不能把仓库存在误当作 Release 已就绪。
+- MKV 的容器与音频后端位于插件，不静态链接进播放器 EXE；实现、测试和边界见 `MATROSKA_AUDIO_20261112.md`。
 
 ## 8. 最低测试矩阵与证据
 

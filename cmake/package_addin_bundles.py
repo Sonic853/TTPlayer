@@ -30,6 +30,8 @@ BUNDLES = {
         ('TTPlayerAsf', 'ttp_asf'), ('TTPlayerTak', 'ttp_tak'),
         ('TTPlayerRm', 'ttp_rm'), ('TTPlayerVqf', 'ttp_vqf'),
         ('TTPlayerDSD', 'ttp_dsd'),
+        ('TTPlayerOFR', 'ttp_ofr'), ('TTPlayerMKV', 'ttp_mkv'),
+        ('TTPlayerWV', 'ttp_wv'),
     ),
     'ExtraAddIn': (
         ('TTPlayerWaskin', 'ttp_waskin'), ('TTPlayerMaki', 'ttp_maki'),

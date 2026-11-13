@@ -1,6 +1,6 @@
 # Release 插件包
 
-更新日期：2026-11-10。
+更新日期：2026-11-13。
 
 ## 下载与安装
 
@@ -47,8 +47,11 @@ ExtraAddIn 根目录的 `ttpbrowser.dll` 同样放在 EXE 旁，
 | [TTPlayerRm](https://github.com/TTPlayerRebuild/TTPlayerRm) | `AddIn/ttp_rm.dll` |
 | [TTPlayerVqf](https://github.com/TTPlayerRebuild/TTPlayerVqf) | `AddIn/ttp_vqf.dll` |
 | [TTPlayerDSD](https://github.com/TTPlayerRebuild/TTPlayerDSD) | `AddIn/ttp_dsd.dll` |
+| [TTPlayerOFR](https://github.com/TTPlayerRebuild/TTPlayerOFR) | `AddIn/ttp_ofr.dll` |
+| [TTPlayerMKV](https://github.com/TTPlayerRebuild/TTPlayerMKV) | `AddIn/ttp_mkv.dll` |
+| [TTPlayerWV](https://github.com/TTPlayerRebuild/TTPlayerWV) | `AddIn/ttp_wv.dll` |
 
-包内仅有以上 15 个 DLL 和 `SHA256SUMS.txt`。这是编解码插件合集，不包含第三方 DSP 滤镜。
+包内仅有以上 18 个 DLL 和 `SHA256SUMS.txt`。这是编解码插件合集，不包含第三方 DSP 滤镜。
 新增八项的仓库名取自各工程 Git origin；特别是 AC3/DTS 的仓库名为 `TTPlayer_AC_130_dts`，
 其运行附件仍使用 `ttp_ac3dts-上游版本.zip`。
 
@@ -74,7 +77,7 @@ ExtraAddIn 根目录的 `ttpbrowser.dll` 同样放在 EXE 旁，
 1. 每个仓库只请求一次 GitHub `/releases/latest`，接受正式发布的有效日期版本，拒绝草稿／预发行。
 2. 精确选择 `ttp_名称-上游版本.zip`；I18n 为 `ttp_i18n-x86-上游版本.zip`。
    Browser 为 `ttpbrowser-上游版本.zip`，提取根目录 `ttpbrowser.dll`；第三方声明保存在浏览器仓库。
-   AAC、AC3/DTS、TAK、RM、VQF、DSD 等组件的 `-source.zip` 和 GitHub 自动源码附件不会被选中。
+   AAC、AC3/DTS、TAK、RM、VQF、DSD、OFR、MKV、WV 等组件的 `-source.zip` 和 GitHub 自动源码附件不会被选中。
 3. 保存本次选中的标签、Release ID、附件 ID、地址及摘要。后续使用该标签的下载地址，
    并验证 GitHub API 提供的 ZIP SHA-256 和长度；同一任务中不再次切换至后来发布的版本。
 4. 检查 ZIP 路径、重复条目、文件类型、大小上限、CRC 及包内 SHA-256。
@@ -95,6 +98,20 @@ Token 只发给 GitHub API，不进入 ZIP、日志、来源记录或附件下�
 来源保存在 Actions Artifact 的 `addin-bundles.json`，同时嵌入 `build-info.json`。
 Release 说明自动列出每个插件的实际版本及对应上游 Release 链接。
 这些记录不额外混入插件运行包。两组 ZIP 使用固定顺序和时间戳；相同的上游文件生成相同 ZIP。
+
+### 2026-11-13 OFR / MKV / WavPack 接入
+
+新增 `TTPlayerOFR → ttp_ofr`、`TTPlayerMKV → ttp_mkv`、`TTPlayerWV → ttp_wv`；三个映射均已核对本地 origin 和真实公开仓库，不使用猜测地址。CodecAddIn 为 18 个组件，ExtraAddIn 仍为 5 个，共 23 个来源；统一 `release-dlls` 清单为 27 个仓库。
+
+MKV 工作流补充默认关闭的 `only_if_unreleased` 输入及 `release_check`，使用与其他组件相同的离线携带脚本。检查位于既有发布并发组内，构建/日期版本/附件/发布步骤保持不变；统一入口同时请求 `release_a_version=true` 和 `only_if_unreleased=true`。
+
+离线接入发现三者旧运行包的原始 ZIP 条目名含反斜杠（Python 在 Windows 上显示的规范化文件名不能证明原始条目安全）。因此三者的 `build.ps1` 改用字节相同的 `cmake/package_runtime.py`，显式生成 `AddIn/ttp_*.dll` 和校验文件的正斜杠条目。DLL 内容和日期附件名不变；没有放宽合集对原始条目名、目录越界、额外 DLL 或校验和的拒绝规则。既有本地交付 ZIP 没有被本次修改覆盖，后续需由新构建重新发布规范运行包。
+
+本地 `tests/codec_bundle_extensions_20261113/test_actions.py` **56 项检查通过**，含原打包/安全拒绝回归、23 组件合集重复性、27 仓库接线、三个新组件的首次发布/只读预览/请求参数、缺失 Release 的原子失败、源码 ZIP 不误选及旧反斜杠 ZIP 继续拒绝。三个新组件使用已验证的本地 DLL 经实际新打包器生成运行 ZIP，GitHub Release 元数据为明确标注的离线夹具；这不等于在线 Release 已发布。另静态解析 20 个 PowerShell 工作流块及三个 `build.ps1`，共 23 份脚本无语法错误。
+
+2026-11-13 只读核对时，三者最新正式 Release 接口均为 **404**；OFR/WV 发布工作流可访问，MKV 工作流接口仍为 404。须先将组件更改（特别是 MKV 接收端）推送至默认分支，并将三仓库加入跨仓库令牌授权，再通过统一入口或各自手动工作流发布首次正式运行包，最后运行播放器构建。`release-dlls` 只负责请求，不等待组件发布完成；缺失 Release 仍会使播放器合集打包明确失败，不能静默少包。
+
+本轮没有提交、推送、创建远端 Release 或发送 workflow dispatch；只读结果和测试摘要保存在 `out/codec-bundle-extensions-20261113/`。
 
 ### 2026-11-10 浏览器组件接入与验证
 

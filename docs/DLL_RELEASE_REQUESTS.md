@@ -3,7 +3,7 @@
 在播放器仓库的 **Actions → Request DLL Releases → Run workflow** 手动运行。
 入口是 `.github/workflows/release-dlls.yml`，只配置 `workflow_dispatch`，没有 push、PR 或定时触发。
 
-默认向清单中的全部 24 个仓库发送请求。每个仓库使用自己的默认分支和现有发布工作流，携带：
+默认向清单中的全部 27 个仓库发送请求。每个仓库使用自己的默认分支和现有发布工作流，携带：
 
 ```json
 {"release_a_version": true, "only_if_unreleased": true}
@@ -13,10 +13,10 @@ gettext 另传 `configuration: Release`。各项目仍独立分配北京时间�
 
 ## 配置与首次启用
 
-1. 将本次两个接收端文件提交并推送到下面 **24 个 DLL 仓库的默认分支**：原有工作流和新增的 `cmake/check_component_release.py`。
+1. 确认下面 **27 个 DLL 仓库的默认分支**都已部署接收端：工作流的 `only_if_unreleased` 输入、`release_check` 任务和 `cmake/check_component_release.py`。本次补齐 MKV；OFR/WV 已具有相同的接收流程。
 2. 将播放器仓库的统一工作流、脚本、清单和文档提交推送到默认分支。文件夹与 GitHub 仓库的映射保存在 `cmake/dll_repositories.json`，无需在 Actions 中手填仓库名。
 3. 在播放器仓库的 **Settings → Secrets and variables → Actions** 设置 `DLL_RELEASE_TOKEN`。未设置时沿用已有的 `GH_TOKEN`。
-4. 该令牌需要访问全部 24 个目标仓库，并具有 **Actions: write、Contents: read**。组织使用 fine-grained PAT 时选择 `TTPlayerRebuild` 作为 resource owner，并授权这些仓库；也可以使用具有相应权限的 GitHub App installation token。遵循组织自身的令牌授权／SSO 设置。
+4. 该令牌需要访问全部 27 个目标仓库，并具有 **Actions: write、Contents: read**。组织使用 fine-grained PAT 时选择 `TTPlayerRebuild` 作为 resource owner，并授权这些仓库；新增 OFR/MKV/WV 后需将三者加入授权范围。也可以使用具有相应权限的 GitHub App installation token。遵循组织自身的令牌授权／SSO 设置。
 5. 首次可以勾选 **Preview only (do not send release requests)** 查看只读预览；正式请求时取消勾选。预览默认关闭。
 
 跨仓库工作流分发需要 Actions 写权限，播放器仓库自带的 `GITHUB_TOKEN` 不能替代目标仓库的跨仓库授权，见 [GitHub workflow dispatch API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)。接收端使用自身 `${{ github.token }}` 读取提交；原发布任务继续使用自身已有的发布凭据和 `contents: write` 权限，不传递播放器的跨仓库令牌。
@@ -71,14 +71,17 @@ gettext 另传 `configuration: Release`。各项目仍独立分配北京时间�
 | ttp_enc | TTPlayerRebuild/TTPlayerEnc | build.yml |
 | ttp_flac | TTPlayerRebuild/TTPlayerFLAC | build.yml |
 | ttp_lrcsh | TTPlayerRebuild/TTPlayerLrcsh | build.yml |
+| ttp_mkv | TTPlayerRebuild/TTPlayerMKV | build.yml |
 | ttp_mod | TTPlayerRebuild/TTPlayerMod | build.yml |
 | ttp_mpc | TTPlayerRebuild/TTPlayerMpc | build.yml |
+| ttp_ofr | TTPlayerRebuild/TTPlayerOFR | build.yml |
 | ttp_ogg | TTPlayerRebuild/TTPlayerOGG | build.yml |
 | ttp_osu | TTPlayerRebuild/TTPlayerOSU | build.yml |
 | ttp_rm | TTPlayerRebuild/TTPlayerRm | build.yml |
 | ttp_tak | TTPlayerRebuild/TTPlayerTak | build.yml |
 | ttp_vqf | TTPlayerRebuild/TTPlayerVqf | build.yml |
 | ttp_webm | TTPlayerRebuild/TTPlayerWebM | build.yml |
+| ttp_wv | TTPlayerRebuild/TTPlayerWV | build.yml |
 | ttpbrowser | TTPlayerRebuild/TTPlayerBrowser | build.yml |
 | ttpcomm | TTPlayerRebuild/TTPlayerComm | build.yml |
 | ttpres | TTPlayerRebuild/TTPlayerRes | build.yml |
@@ -88,8 +91,14 @@ gettext 另传 `configuration: Release`。各项目仍独立分配北京时间�
 
 `cmake/check_component_release.py` 的维护源在播放器仓库，各 DLL 仓库携带字节相同的副本，以便独立构建；运行时不下载另一个仓库中可变的脚本。修改条件检查后，同步该文件到清单中各仓库，并一起提交对应变动。
 
-本地验证材料位于 `rebuild/tests/dll_release_dispatch_20261105`。已覆盖相同／领先／落后／分叉提交、首次发布、注释标签、缺失标签和权限错误、重复请求、POST 不重试、预览不写入、24 个仓库的映射及接线、原有构建和发布任务保持原样等情况。35 项检查通过，25 份变更后的工作流通过 Actionlint 1.7.12。
+2026-11-05 本地验证材料位于 `rebuild/tests/dll_release_dispatch_20261105`。当时覆盖相同／领先／落后／分叉提交、首次发布、注释标签、缺失标签和权限错误、重复请求、POST 不重试、预览不写入、24 个仓库的映射及接线、原有构建和发布任务保持原样等情况。35 项检查通过，25 份变更后的工作流通过 Actionlint 1.7.12。当前回归清单已扩至 27 个仓库。
 
 2026-11-05 对全部 24 个远端仓库完成只读预览：12 个需要构建、12 个跳过，0 个查询失败。验证入口明确禁止 POST，未触发任何远端构建或发布。该结果只代表查询时的已推送提交；部署本次工作流修改后，新增提交会参与下一次条件检查。
 
-测试代码和测试依赖只留在本地 tests，未加入仓库交付文件、发行包或 Actions。本次只调整工作流调度，没有修改 DLL 源码、版本规则或 XP／Win7 构建选项。
+测试代码和测试依赖只留在本地 tests，未加入仓库交付文件、发行包或 Actions。2026-11-05 的调度调整没有修改 DLL 源码、版本规则或 XP／Win7 构建选项。
+
+## 2026-11-13 新增 OFR / MKV / WV
+
+清单新增三个已核实仓库，总数为 27；CodecAddIn 同时增加三个插件，总数为 18。MKV 补齐本地接收端，OFR/WV 沿用已有接收方式；27 个仓库接线及相关发布/打包回归合计 56 项检查通过。运行 ZIP 生产端同步修正原始条目名，详细边界见 [插件合集接入记录](ADDIN_RELEASE_BUNDLES.md#2026-11-13-ofr--mkv--wavpack-接入)。
+
+只读查询时三个新仓库均无正式 Release，MKV 的远端接收工作流尚未部署。先推送改动并扩展令牌授权，再请求组件发布；待三者运行 ZIP 正式发布后，才能构建完整播放器插件合集。本轮没有发送实际发布请求。
