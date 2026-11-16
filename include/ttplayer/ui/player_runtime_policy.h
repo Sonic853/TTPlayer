@@ -15,7 +15,8 @@
 namespace ttplayer::ui {
 
 // CCommandLine_FindSwitch in 004C038B/004C0DB2 writes these values into
-// COPYDATASTRUCT::dwData.  /a is the ordinary append-without-play route;
+// COPYDATASTRUCT::dwData. /a appends without forcing a playback switch (a new
+// ordinary item may still auto-start through the idle/no-marker gate);
 // /e is the retired XML ctrlparam packet route.
 enum class CommandLineFileMode : ULONG_PTR {
     open_and_play = 0,

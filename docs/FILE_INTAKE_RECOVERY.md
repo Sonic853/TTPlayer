@@ -123,6 +123,67 @@ Validation for this follow-up:
   and `SHA256SUMS.txt`; no test executables are included. Existing manual
   replacement/update behavior is unchanged.
 
+## External command-line and single-instance opens (2026-11-16)
+
+Repeated Explorer opens of one ordinary audio path used to append a fresh row
+each time. This was a compatibility defect in `OpenCommandLinePath`, not a
+reason to make every playlist insertion globally unique. Both the first
+process's startup request and subsequent `WM_COPYDATA` requests use this entry.
+
+REA/Ghidra 12.1.4 rechecked the supplied 5.7.9 baseline
+(`c7999ea5823469c1684148cac1bd196009824348ccac5cdd45978f8fb574e28c`):
+
+- `00460EDF` selects the destination and classifies the path through `004739DB`.
+- `00480AB7` scans that destination in row order and compares the full logical
+  path using `_wcsicmp`. A hit returns the existing row without importing.
+- `00461569..0046157A` retains that return value and passes it to `0047FEA3`
+  for an ordinary open. Append requests, including the one-second burst
+  conversion, still perform the lookup but do not force playback on a hit.
+- On a miss, ordinary opens insert at zero; appends insert at count. The new
+  ordinary append retains `00480386`'s idle-play gate: no destination playing
+  marker and no open player source.
+
+The fix keeps this lookup in the command-line entry rather than changing
+`ImportFiles`, `CommitImportedTracks` or `Playlist::InsertRange`. Existing
+shortcuts are resolved before matching. Missing explicit paths remain ordinary
+items even if their suffix resembles a CUE or playlist. Actual CUEs, playlists,
+archives and directories retain their existing expansion/import transactions.
+`ClearListOnCmd` still replaces the list; a match cannot bypass that setting.
+
+Lookup is limited to the selected destination after `DefaultListOnCmd` routing.
+It does not compare basenames, audio contents or physical file IDs, and does not
+canonicalize path aliases. `A/song.mp3` and `B/song.mp3` therefore remain separate
+rows. Historical duplicates are not deleted: the first matching row is reused.
+Manual duplicate additions and CUE/archive batch-local identity rules are
+unchanged. `/e` control packets and the explicit URL dialog keep their own routes.
+
+Local regression source: `tests/ui/command_line_intake_tests.cpp`, enabled with
+`TTPLAYER_BUILD_FILE_INTAKE_TESTS=ON` (default OFF; no Actions change). It first
+failed against the unmodified implementation on an existing-path reopen.
+The fixed suite covers cached metadata and order preservation, distinct
+directories, path case, first-match behavior, append/idle/burst modes, default
+list and clear settings, shortcuts, missing/URL inputs, manual additions,
+separate and same-batch CUE/archive imports, directory imports, deferred
+requests, native ListView selection/focus/visibility, and real secondary
+processes using the production single-instance forwarding implementation.
+
+Validation on local Windows 11:
+
+- CTest command-line intake and existing playback-navigation suites pass.
+- The intake executable with `--audio` passes **231 checks**, including actual
+  silent WAV playback/reopen from playing, paused and stopped states, paused
+  append preservation, clear-and-play and idle append playback.
+- Both player EXE targets build in Release and pass the XP/Win7 static import
+  audit (24 DLLs / 763 imports each). These audits are not XP/Win7 runtime tests;
+  no new VM run or release package is claimed.
+
+REA records: pseudocode
+`ev_e871a4d500c75a1fe323f2be2a5810506403d1be24d61d9ee3d63d2ce3d3a416`,
+call-site assembly
+`ev_077e968855bba099c72c9b77bc6288828d785b90a0105835736fbe838d2f26fe`,
+and supporting classification/insertion/positioning
+`ev_041da32437c98a6c8245735bfb8ea37e5c1e446b23b6fb426bd32000fccf0301`.
+
 ## Open-file dialog and multi-select layout
 
 `0048059D` composes its filter from resource-backed audio descriptions, the

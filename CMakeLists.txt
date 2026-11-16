@@ -13,6 +13,7 @@ endif()
 option(TTPLAYER_OPTIMIZE_SIZE "Optimize Release player size, retaining fast audio processing" ON)
 option(TTPLAYER_BUILD_LIBRARY_TESTS "Build local media library regression tests" OFF)
 option(TTPLAYER_BUILD_NAVIGATION_TESTS "Build local playback navigation regression tests" OFF)
+option(TTPLAYER_BUILD_FILE_INTAKE_TESTS "Build local command-line file intake regression tests" OFF)
 option(TTPLAYER_BUILD_INFO_TESTS "Build local playlist information regression tests" OFF)
 option(TTPLAYER_BUILD_WHEEL_TESTS "Build local playlist mouse wheel tests" OFF)
 option(TTPLAYER_BUILD_PREVIEW_TESTS "Build local taskbar album preview tests" OFF)
@@ -475,6 +476,19 @@ target_compile_options(playlist_info_tests PRIVATE /W4 /permissive- /EHsc /utf-8
 target_link_libraries(playlist_info_tests PRIVATE ttplayer_core)
 add_test(NAME playlist_info_tests COMMAND playlist_info_tests)
 set_tests_properties(playlist_info_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+endif()
+
+if((BUILD_TESTING OR TTPLAYER_BUILD_FILE_INTAKE_TESTS) AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ui/command_line_intake_tests.cpp")
+enable_testing()
+add_executable(command_line_intake_tests tests/ui/command_line_intake_tests.cpp
+  src/app/single_instance.cpp src/app/resources.rc)
+target_compile_definitions(command_line_intake_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(command_line_intake_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(command_line_intake_tests PRIVATE ttplayer_core)
+add_test(NAME command_line_intake_tests COMMAND command_line_intake_tests
+  "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set_tests_properties(command_line_intake_tests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 endif()
 
 if(BUILD_TESTING OR TTPLAYER_BUILD_NAVIGATION_TESTS)

@@ -497,6 +497,31 @@ std::optional<std::filesystem::path> ResolveShortcut(
     return std::filesystem::path(std::move(target));
 }
 
+std::optional<std::filesystem::path> CommandLineOrdinaryFilePath(
+    const std::filesystem::path& input) {
+    if (IsUrl(input.native())) return input;
+    auto path = input;
+    DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+        LowerExtension(path) == L".lnk") {
+        if (const auto target = ResolveShortcut(path)) {
+            path = *target;
+            attributes = GetFileAttributesW(path.c_str());
+        }
+    }
+    // 004739DB classifies missing explicit paths as ordinary items, even with
+    // a container suffix. Existing CUEs, lists, archives and directories must
+    // retain their separate expansion/batch-deduplication rules.
+    if (attributes != INVALID_FILE_ATTRIBUTES &&
+        ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+         LowerExtension(path) == L".cue" || IsPlaylistFile(path) ||
+         audio::IsArchivePath(path))) {
+        return std::nullopt;
+    }
+    return path;
+}
+
 bool QueryDropFormat(IDataObject* data, CLIPFORMAT format) {
     if (!data) return false;
     FORMATETC request{format, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
@@ -1501,11 +1526,10 @@ void PlayerWindow::ShowPlayCdDialog() {
 bool PlayerWindow::OpenPath(const std::filesystem::path& path,
                             bool start_playback) {
     if (IsPluginSkinPackage(path)) return InstallPluginSkin(path);
-    // OpenPath is also the command-line/single-instance route.  It is not the
-    // main window's 0xE101 Open command: starting a supplied media path must
-    // not silently inherit that command's replace-list flag.  Preserve the
-    // existing list for ordinary media/CUE input and put a started item at the
-    // front; an explicitly supplied playlist remains a replace operation.
+    // The URL dialog's explicit open is not the main window's 0xE101 Open
+    // command. Preserve the existing list for ordinary media/CUE input and
+    // put a started item at the front; an explicitly supplied playlist remains
+    // a replace operation. Shell requests use OpenCommandLinePath instead.
     const bool replace = IsPlaylistFile(path);
     const std::optional<size_t> insertion = replace
         ? std::optional<size_t>{0}
@@ -1516,6 +1540,7 @@ bool PlayerWindow::OpenPath(const std::filesystem::path& path,
 
 void PlayerWindow::OpenCommandLinePath(const std::filesystem::path& path,
                                        ULONG_PTR raw_mode) {
+    if (path.empty()) return;
     if(file_import_active_){deferred_import_commands_.emplace_back(path,raw_mode);return;}
     if (IsPluginSkinPackage(path)) {
         static_cast<void>(InstallPluginSkin(path));
@@ -1626,9 +1651,40 @@ void PlayerWindow::OpenCommandLinePath(const std::filesystem::path& path,
 
     const bool play = mode == CommandLineFileMode::open_and_play;
     const bool replace = play && settings_.general.clear_list_on_command;
+    const size_t playlist_index = playlists_.ActiveIndex();
+    if (playlist_index >= playlists_.Size() ||
+        playlists_.IsExternal(playlist_index)) return;
+    if (const auto ordinary = CommandLineOrdinaryFilePath(path)) {
+        // 00480AB7 scans the selected destination before creating anything.
+        // Compare the full logical path with _wcsicmp, not a filename, content
+        // hash or canonical filesystem identity. Existing duplicates retain
+        // their order: the first matching row wins, including in /a bursts.
+        // A replace request deliberately skips lookup so ClearListOnCmd is
+        // not defeated by a row that is about to be cleared.
+        if (!replace) {
+            const auto& tracks = playlists_.At(playlist_index).Tracks();
+            for (size_t row = 0; row < tracks.size(); ++row) {
+                if (_wcsicmp(tracks[row].path.c_str(), ordinary->c_str()) != 0)
+                    continue;
+                if (play) {
+                    SelectTrackFrom(playlist_index, row, false);
+                    PlayCurrent();
+                }
+                return;
+            }
+        }
+        // 00460EDF inserts a new ordinary open at zero, or at count for /a.
+        // 00480AB7 also retains 00480386's no-marker/no-source idle-play gate
+        // for a new append, but a lookup hit above never enters that gate.
+        static_cast<void>(ImportFiles(
+            {*ordinary}, playlist_index,
+            play ? std::optional<size_t>{0} : std::nullopt,
+            replace, play ? ImportPlayback::force : ImportPlayback::if_idle));
+        return;
+    }
     static_cast<void>(ImportFiles(
-        {path}, playlists_.ActiveIndex(), replace ? std::optional<size_t>{0}
-                                                  : std::nullopt,
+        {path}, playlist_index, replace ? std::optional<size_t>{0}
+                                       : std::nullopt,
         replace, play ? ImportPlayback::force : ImportPlayback::none));
 }
 
