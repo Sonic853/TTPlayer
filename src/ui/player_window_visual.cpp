@@ -1658,7 +1658,7 @@ LRESULT PlayerWindow::HandleVisualMessage(
             const auto playback = audio_->State();
             const skin::SkinLayers layers(PlayerSkinLayers(ActiveSkinElements(),
                 playback == audio::PlaybackState::playing || playback == audio::PlaybackState::opening,
-                settings_.player.play_mode, CurrentLedText(), CurrentSkinIcon(), MainSkinButtonBounds(L"play"), BrowserAvailable()),
+                settings_.player.play_mode, SkinLedText(), CurrentSkinIcon(), MainSkinButtonBounds(L"play"), BrowserAvailable()),
                 skin_->TransparentColor());
             if (const auto* hit = layers.Hit(point); hit && hit->element->name != L"visual")
                 return HTTRANSPARENT;

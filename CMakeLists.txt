@@ -749,6 +749,13 @@ target_compile_options(skin_png_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(skin_png_tests PRIVATE ttplayer_core)
 add_test(NAME skin_png_tests COMMAND skin_png_tests "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
+add_executable(led_repaint_tests tests/skin/led_repaint_tests.cpp)
+target_compile_definitions(led_repaint_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(led_repaint_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(led_repaint_tests PRIVATE ttplayer_core)
+add_test(NAME led_repaint_tests COMMAND led_repaint_tests)
+set_tests_properties(led_repaint_tests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+
 add_executable(ttplayer_dsp_probe EXCLUDE_FROM_ALL
   tools/dsp_plugin_probe.cpp src/app/dsp_worker.cpp)
 target_include_directories(ttplayer_dsp_probe PRIVATE include)

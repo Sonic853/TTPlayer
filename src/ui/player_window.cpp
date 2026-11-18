@@ -3568,6 +3568,7 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
         case kCmdShowElapsedTime:
             settings_.player.show_elapsed_time =
                 !settings_.player.show_elapsed_time;
+            InvalidateSkinElement(L"led");
             InvalidateRect(window_, nullptr, FALSE);
             return 0;
         case kCmdOptions: {
@@ -4341,6 +4342,7 @@ bool PlayerWindow::MainSkinButtonContains(std::wstring_view name, POINT point) c
 
 RECT PlayerWindow::MainSkinButtonBounds(std::wstring_view name) const {
     const auto* element = FindActiveSkinElement(name);
+    if (name == L"led") return element ? SkinLedBounds(*element, SkinLedText()) : RECT{};
     if (name != L"play" && name != L"pause") return element ? element->bounds : RECT{};
     const auto* play = FindActiveSkinElement(L"play");
     if (!play) return {};
@@ -4380,6 +4382,23 @@ void PlayerWindow::InvalidateSkinElement(std::wstring_view name) {
     if (std::find(dirty_skin_elements_.begin(), dirty_skin_elements_.end(), name) == dirty_skin_elements_.end())
         dirty_skin_elements_.emplace_back(name);
     RECT bounds = MainSkinButtonBounds(name);
+    if (name == L"led") {
+        // 004512E8 resizes the real LED child to its native glyph extent.
+        // Keep that extent separate from the XML anchor (which may be only
+        // three pixels high), and retain the old extent until invalidation.
+        skin_led_text_ = CurrentLedText();
+        const RECT next = SkinLedBounds(*element, skin_led_text_);
+        if (!EqualRect(&bounds, &next)) {
+            RECT damage{};
+            UnionRect(&damage, &bounds, &next);
+            // The old exposed strip is no longer in the current LED layer.
+            // Recompose its backing rather than clipping output to that layer.
+            // User32 accumulates these unions if several changes precede paint.
+            InvalidateSkinBacking(damage);
+            return;
+        }
+        bounds = next;
+    }
     if (name == L"volume" || name == L"progress") {
         const RECT next = SkinSliderThumbRegion(*element);
         // 00428F41 invalidates the union of the old/new thumb strips, not
@@ -4526,6 +4545,7 @@ void PlayerWindow::PaintSkin(HDC dc, const std::vector<std::wstring>* repaint) c
     if (skin_rebinding_) return;
     if (external_skin_) { external_skin_->Paint(window_, dc); return; }
     if (!skin_) return;
+    const auto led_text = SkinLedText();
     if (repaint) {
         // Direct callers (including info animation) also need the lower
         // layers when the requested area intersects an alpha button.
@@ -4554,7 +4574,7 @@ void PlayerWindow::PaintSkin(HDC dc, const std::vector<std::wstring>* repaint) c
     const bool active = playback == audio::PlaybackState::opening ||
                         playback == audio::PlaybackState::playing;
     const skin::SkinLayers layers(PlayerSkinLayers(ActiveSkinElements(), active,
-        settings_.player.play_mode, CurrentLedText(), CurrentSkinIcon(), MainSkinButtonBounds(L"play"), BrowserAvailable()), skin_->TransparentColor(), repaint);
+        settings_.player.play_mode, led_text, CurrentSkinIcon(), MainSkinButtonBounds(L"play"), BrowserAvailable()), skin_->TransparentColor(), repaint);
     for (const auto* name : {L"volume", L"progress"})
         if ((!repaint || std::find(repaint->begin(), repaint->end(), name) != repaint->end()))
             if (const auto* element = FindActiveSkinElement(name))
@@ -4751,7 +4771,7 @@ void PlayerWindow::PaintSkin(HDC dc, const std::vector<std::wstring>* repaint) c
 
     if (const auto* led = FindActiveSkinElement(L"led"); led && led->image) {
         const skin::SkinLayerClip clip(canvas, layers, led);
-        DrawSkinLed(canvas, *led, CurrentLedText(), skin_->TransparentColor());
+        DrawSkinLed(canvas, *led, led_text, skin_->TransparentColor());
     }
 
     const HICON skin_icon = CurrentSkinIcon();
@@ -4929,13 +4949,25 @@ std::wstring PlayerWindow::CurrentLedText() const {
                                         audio_->Duration() - position));
 }
 
+const std::wstring& PlayerWindow::SkinLedText() const {
+    const auto* led = FindActiveSkinElement(L"led");
+    if (skin_led_layout_ != led) {
+        skin_led_layout_ = led;
+        skin_led_text_ = CurrentLedText();
+    }
+    // Like the original LEDTimerCtrl's stored time, this advances only when
+    // the UI invalidates the LED. Layout, glyphs and hit testing must not read
+    // different decoder times across a digit-count boundary.
+    return skin_led_text_;
+}
+
 std::wstring PlayerWindow::HitTestSkin(POINT point) const {
     if (!skin_) return {};
     const auto playback = audio_->State();
     const bool active = playback == audio::PlaybackState::opening ||
                         playback == audio::PlaybackState::playing;
     const skin::SkinLayers layers(PlayerSkinLayers(ActiveSkinElements(), active,
-        settings_.player.play_mode, CurrentLedText(), CurrentSkinIcon(), MainSkinButtonBounds(L"play"), BrowserAvailable()), skin_->TransparentColor());
+        settings_.player.play_mode, SkinLedText(), CurrentSkinIcon(), MainSkinButtonBounds(L"play"), BrowserAvailable()), skin_->TransparentColor());
     if (const auto* layer = layers.Hit(point)) {
         const auto& name = layer->element->name;
         // Disabled and non-command children still occlude lower controls.

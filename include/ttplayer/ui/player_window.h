@@ -289,6 +289,7 @@ private:
     [[nodiscard]] std::wstring PlaybackStatusText() const;
     [[nodiscard]] std::wstring ChannelText() const;
     [[nodiscard]] std::wstring CurrentLedText() const;
+    [[nodiscard]] const std::wstring& SkinLedText() const;
     [[nodiscard]] skin::SkinImage ActiveSkinBackground() const noexcept;
     [[nodiscard]] SIZE ActiveSkinSize() const noexcept;
     [[nodiscard]] HICON CurrentSkinIcon() const noexcept;
@@ -1203,6 +1204,8 @@ private:
     std::vector<std::wstring> dirty_skin_elements_;
     bool skin_backing_dirty_{};
     std::unordered_map<std::wstring, std::wstring> skin_display_values_;
+    mutable const skin::SkinElement* skin_led_layout_{};
+    mutable std::wstring skin_led_text_;
     mutable std::unordered_map<std::wstring, RECT> skin_slider_thumbs_;
     std::wstring pressed_skin_element_;
     std::unordered_map<std::wstring, skin::SkinSliderState> main_skin_sliders_;
