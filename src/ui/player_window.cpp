@@ -776,9 +776,14 @@ void DrawBitmapPatch(HDC target, const skin::SkinImage& source, const RECT& dest
     if (destination_width <= 0 || destination_height <= 0 ||
         source_width <= 0 || source_height <= 0) return;
     if (!tile) {
+        // 0040A94B explicitly uses nearest colour sampling for legacy DIB
+        // patches, including compressed selected-image interiors. GDI+ keeps
+        // its own NearestNeighbor/Half policy inside SkinImage::Draw.
+        const int previous_mode = SetStretchBltMode(target, COLORONCOLOR);
         source.Draw(target, destination.left, destination.top,
                     destination_width, destination_height,
                     source_rect.left, source_rect.top, source_width, source_height);
+        if (previous_mode) SetStretchBltMode(target, previous_mode);
         return;
     }
     const int saved = SaveDC(target);
@@ -831,7 +836,8 @@ void DrawResizableSkinBitmap(HDC target, const skin::SkinBitmap& bitmap,
 }
 
 HRGN CreateColorKeyRegion(HBITMAP bitmap, int width, int height,
-                          COLORREF transparent) {
+                          COLORREF transparent, bool* completed) {
+    if (completed) *completed = false;
     if (!bitmap || width <= 0 || height <= 0) return nullptr;
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -849,6 +855,7 @@ HRGN CreateColorKeyRegion(HBITMAP bitmap, int width, int height,
 
     HRGN result = CreateRectRgn(0, 0, 0, 0);
     if (!result) return nullptr;
+    bool have_runs = false;
     for (int y = 0; y < height; ++y) {
         int run = -1;
         for (int x = 0; x <= width; ++x) {
@@ -862,14 +869,20 @@ HRGN CreateColorKeyRegion(HBITMAP bitmap, int width, int height,
             if (opaque && run < 0) run = x;
             if (!opaque && run >= 0) {
                 const HRGN row = CreateRectRgn(run, y, x, y + 1);
-                if (row) {
-                    CombineRgn(result, result, row, RGN_OR);
-                    DeleteObject(row);
+                if (!row || CombineRgn(result, result, row, RGN_OR) == ERROR) {
+                    if (row) DeleteObject(row);
+                    DeleteObject(result);
+                    return nullptr;
                 }
+                DeleteObject(row);
+                have_runs = true;
                 run = -1;
             }
         }
     }
+    if (completed) *completed = true;
+    // 00445709: no opaque runs is a successful rectangular/NULL fallback.
+    if (!have_runs) { DeleteObject(result); return nullptr; }
     return result;
 }
 
@@ -895,7 +908,16 @@ void ApplySkinButtonRegion(HWND window, const skin::SkinElement& element,
 }
 
 HRGN CreateSkinWindowRegion(const skin::SkinBitmap& bitmap, RECT resize_rect,
-                           int width, int height, bool tile, COLORREF transparent) {
+                            int width, int height, bool tile, COLORREF transparent,
+                            bool* completed) {
+    if (completed) *completed = false;
+    if (!bitmap.image || width <= 0 || height <= 0) return nullptr;
+    const bool resizable = resize_rect.right > resize_rect.left &&
+                           resize_rect.bottom > resize_rect.top;
+    // Fixed 8-bit backgrounds retain their palette indices. Resizable legacy
+    // windows instead render a true-colour backing, even at native size.
+    if (!resizable && width == bitmap.size.cx && height == bitmap.size.cy)
+        return bitmap.image.CreateRegion(transparent, 1, completed);
     // Resize the coverage mask with exactly the same nine-patch/tile mapping
     // as the background. Opaque magenta in PNG is not a BMP colour key.
     auto source = bitmap;
@@ -904,26 +926,54 @@ HRGN CreateSkinWindowRegion(const skin::SkinBitmap& bitmap, RECT resize_rect,
         transparent = RGB(0, 0, 0);
     }
     if (!source.image || width <= 0 || height <= 0) return nullptr;
-    if (width == source.size.cx && height == source.size.cy)
-        return CreateColorKeyRegion(source.image, width, height, transparent);
     const HDC screen = GetDC(nullptr);
     const HDC canvas = CreateCompatibleDC(screen);
     const HBITMAP rendered = CreateCompatibleBitmap(screen, width, height);
     ReleaseDC(nullptr, screen);
     HRGN region{};
+    bool scanned = false;
     if (canvas && rendered) {
         const HGDIOBJ old = SelectObject(canvas, rendered);
         const RECT bounds{0, 0, width, height};
         const HBRUSH brush = CreateSolidBrush(transparent);
-        FillRect(canvas, &bounds, brush);
-        DeleteObject(brush);
-        DrawResizableSkinBitmap(canvas, source, resize_rect, width, height, tile);
-        SelectObject(canvas, old);
-        region = CreateColorKeyRegion(rendered, width, height, transparent);
+        if (old && old != HGDI_ERROR && brush) {
+            FillRect(canvas, &bounds, brush);
+            DrawResizableSkinBitmap(canvas, source, resize_rect, width, height, tile);
+            SelectObject(canvas, old);
+            region = CreateColorKeyRegion(rendered, width, height, transparent, &scanned);
+        } else if (old && old != HGDI_ERROR) {
+            SelectObject(canvas, old);
+        }
+        if (brush) DeleteObject(brush);
     }
     if (rendered) DeleteObject(rendered);
     if (canvas) DeleteDC(canvas);
+    // Alpha-empty PNG coverage is truly empty, never the BMP NULL fallback.
+    if (scanned && !region && bitmap.image.IsGdiPlus()) {
+        region = CreateRectRgn(0, 0, 0, 0);
+        scanned = region != nullptr;
+    }
+    if (completed) *completed = scanned;
     return region;
+}
+
+bool IsUsableSkinWindowRegion(HRGN region, bool completed) {
+    RECT bounds{};
+    return completed && (!region || GetRgnBox(region, &bounds) > NULLREGION);
+}
+
+bool ApplySkinWindowRegion(HWND window, const skin::SkinBitmap& bitmap, RECT resize_rect,
+                           int width, int height, bool tile, COLORREF transparent) {
+    if (!window) return false;
+    bool completed = false;
+    const HRGN region = CreateSkinWindowRegion(bitmap, resize_rect, width, height,
+                                               tile, transparent, &completed);
+    if (!IsUsableSkinWindowRegion(region, completed) ||
+        !SetWindowRgn(window, region, TRUE)) {
+        if (region) DeleteObject(region);
+        return false;
+    }
+    return true;
 }
 
 RECT ResolveAlignedRect(RECT bounds, unsigned int alignment, SIZE native,
@@ -971,6 +1021,26 @@ void DrawElementFrame(HDC target, const skin::SkinElement& element, RECT bounds,
                        frame_width, element.image_size.cy, transparent);
 }
 
+void DrawSkinSliderBar(HDC target, const skin::SkinElement& element) {
+    if (!element.bar_image || element.bar_size.cx <= 0 || element.bar_size.cy <= 0) return;
+    const int width = element.bounds.right - element.bounds.left;
+    const int height = element.bounds.bottom - element.bounds.top;
+    if (width <= 0 || height <= 0) return;
+    const int saved = SaveDC(target);
+    if (!saved) return;
+    IntersectClipRect(target, element.bounds.left, element.bounds.top,
+                      element.bounds.right, element.bounds.bottom);
+    // 00451E07/0045287B: client origin, not the fill's centred geometry.
+    // Geometry is format-independent; SkinImage retains SRCCOPY for BMP and
+    // source-over alpha for PNG (including opaque magenta). Bound a smaller
+    // source without stretching or reading beyond its pixels.
+    const int copied_width = std::min<int>(width, element.bar_size.cx);
+    const int copied_height = std::min<int>(height, element.bar_size.cy);
+    element.bar_image.Draw(target, element.bounds.left, element.bounds.top,
+                          copied_width, copied_height, 0, 0, copied_width, copied_height);
+    RestoreDC(target, saved);
+}
+
 LOGFONTW PlaylistFontDescriptor(const settings::PlaylistSettings& settings) {
     NONCLIENTMETRICSW nonclient{sizeof(nonclient)};
     LOGFONTW descriptor{};
@@ -1014,9 +1084,10 @@ PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
     // shortens a one-row selection by 15 px in LX-iPlay (9 px in TT2012).
     result.scrollbar_width = track_count > static_cast<size_t>(result.page_rows)
         ? (layout.HasSkinnedScrollbar() ? layout.scrollbar_buttons.size.cx / 3 : 13) : 0;
-    // SplitterCtrl retains its five-pixel default renderer when a skin omits
-    // splitter_bar_image (TT2012); image-backed skins use the native width.
-    const int splitter_width = layout.splitter_bar.image
+    // 0047E6FC binds the bar/arrow together, otherwise retaining the five-pixel
+    // default. Geometry is shared by BMP and PNG; drawing keeps each format.
+    const bool image_splitter = layout.splitter_bar.image && layout.splitter_arrow.image;
+    const int splitter_width = image_splitter
         ? std::max<int>(0, layout.splitter_bar.size.cx) : 5;
     const int maximum_split = std::max<int>(0, result.list.right - result.list.left -
         splitter_width - result.scrollbar_width - 24);
@@ -1272,18 +1343,12 @@ std::wstring FormatAudioDescription(const audio::AudioFormat& format) {
 std::wstring FormatLedTime(std::chrono::milliseconds position) {
     const bool negative = position.count() < 0;
     const auto total = std::abs(position.count() / 1000);
-    const auto hours = total / 3600;
-    const auto minutes = total / 60 % 60;
     const auto seconds = total % 60;
-    wchar_t value[16]{};
-    if (hours != 0) {
-        swprintf_s(value, negative ? L"-%02lld:%02lld:%02lld"
-                                   : L"%02lld:%02lld:%02lld",
-                   hours, minutes, seconds);
-    } else {
-        swprintf_s(value, negative ? L"-%02lld:%02lld" : L"%02lld:%02lld",
-                   total / 60, seconds);
-    }
+    // 004511AC defaults to flags=1. The host never auto-enables the 0x2 hour
+    // column: minutes grow past 99 for BMP and PNG glyph strips alike.
+    wchar_t value[32]{};
+    swprintf_s(value, negative ? L"-%02lld:%02lld" : L"%02lld:%02lld",
+               total / 60, seconds);
     return value;
 }
 
@@ -2460,9 +2525,9 @@ bool PlayerWindow::LoadSkin(skin::SkinPackage package,
             // from loading. No fallback image can be drawn in that case.
         }
     }
-    const HRGN region = next.CreateWindowRegion();
-    RECT bounds{};
-    const bool valid_region = region && GetRgnBox(region, &bounds) > NULLREGION;
+    bool completed = false;
+    const HRGN region = next.CreateWindowRegion(false, &completed);
+    const bool valid_region = IsUsableSkinWindowRegion(region, completed);
     if (region) DeleteObject(region);
     if (!valid_region) return false;
 
@@ -4595,6 +4660,17 @@ void PlayerWindow::PaintSkin(HDC dc, const std::vector<std::wstring>* repaint) c
         // except that a live hover continues to use frame 1. Treat mute the
         // same way: it is another persistent SkinButton check state.
         const int state = MainSkinButton(element.name).Frame();
+        if (repaint) {
+            // 0040F288/00426434 do not restore a BMP child's parent before a
+            // state-only paint. New key-colour holes retain the old DC pixels.
+            // PNG overlaps promote to a full recompose above, and PNG buttons
+            // never enter this loop: alpha always needs a fresh backing.
+            const int width = displayed.bounds.right - displayed.bounds.left;
+            const int height = displayed.bounds.bottom - displayed.bounds.top;
+            if (width > 0 && height > 0)
+                BitBlt(canvas, displayed.bounds.left, displayed.bounds.top, width, height,
+                       dc, displayed.bounds.left, displayed.bounds.top, SRCCOPY);
+        }
         DrawSkinElement(canvas, displayed, state);
     }
 
@@ -4617,12 +4693,7 @@ void PlayerWindow::PaintSkin(HDC dc, const std::vector<std::wstring>* repaint) c
         const RECT strip = SkinSliderThumbRegion(*progress);
         const int logical_thumb_left = strip.left;
         const int logical_thumb_top = strip.top;
-        if (progress->bar_image && progress->bar_size.cx > 0 && progress->bar_size.cy > 0) {
-            const int x = progress->bounds.left + (control_width - progress->bar_size.cx) / 2;
-            const int y = progress->bounds.top + (control_height - progress->bar_size.cy) / 2;
-            progress->bar_image.Draw(canvas, x, y, progress->bar_size.cx,
-                progress->bar_size.cy, 0, 0, progress->bar_size.cx, progress->bar_size.cy);
-        }
+        DrawSkinSliderBar(canvas, *progress);
         const auto draw_fill = [&](const skin::SkinImage& image, SIZE fill_size, int value, int maximum, bool downloaded) {
             if (!image || fill_size.cx <= 0 || fill_size.cy <= 0 || maximum <= 0) return;
             const int fill_left = progress->bounds.left + (control_width - fill_size.cx) / 2;
@@ -4660,11 +4731,11 @@ void PlayerWindow::PaintSkin(HDC dc, const std::vector<std::wstring>* repaint) c
             : progress->bounds.top + (control_height - height) / 2;
         thumb.bounds.right = thumb.bounds.left + width;
         thumb.bounds.bottom = thumb.bounds.top + height;
-        // The slider has separate disabled-fill handling; its thumb remains
-        // frame 0 when seeking is unavailable (observable in ElegantLife).
-        const int state = IsSkinElementEnabled(L"progress") &&
-            pressed_skin_element_ == L"progress" ? 2 :
-            (IsSkinElementEnabled(L"progress") && hover_skin_element_ == L"progress" ? 1 : 0);
+        // 00451F59 selects frame 3 when disabled. PNG uses the same four-state
+        // strip contract and bypasses pulse/hover animation for that frame.
+        const bool enabled = IsSkinElementEnabled(L"progress");
+        const int state = !enabled ? 3 : pressed_skin_element_ == L"progress" ? 2 :
+            hover_skin_element_ == L"progress" ? 1 : 0;
         DrawSkinSliderThumb(canvas, thumb, state,
             playback == audio::PlaybackState::playing && duration > 0, progress->bounds);
     }
@@ -4682,18 +4753,7 @@ void PlayerWindow::PaintSkin(HDC dc, const std::vector<std::wstring>* repaint) c
         const int logical_thumb_top = strip.top;
         // FUN_00451E07 paints the slider background before the filled portion.
         // Volume used to skip this layer entirely, leaving only fill + thumb.
-        if (volume->bar_image && volume->bar_size.cx > 0 && volume->bar_size.cy > 0) {
-            const int saved = SaveDC(canvas);
-            if (saved) {
-                IntersectClipRect(canvas, volume->bounds.left, volume->bounds.top,
-                                  volume->bounds.right, volume->bounds.bottom);
-                const int x = volume->bounds.left + (control_width - volume->bar_size.cx) / 2;
-                const int y = volume->bounds.top + (control_height - volume->bar_size.cy) / 2;
-                volume->bar_image.Draw(canvas, x, y, volume->bar_size.cx, volume->bar_size.cy,
-                    0, 0, volume->bar_size.cx, volume->bar_size.cy, skin_->TransparentColor());
-                RestoreDC(canvas, saved);
-            }
-        }
+        DrawSkinSliderBar(canvas, *volume);
         if (volume->fill_image && volume->fill_size.cx > 0 &&
             volume->fill_size.cy > 0 && control_width > 0 && control_height > 0) {
             const int saved_dc = SaveDC(canvas);
@@ -5356,9 +5416,9 @@ void PlayerWindow::ToggleMiniMode() {
     const bool next_mini = !mini_mode_;
     const bool desktop_lyric_visible =
         desktop_lyric_mode_ && desktop_lyrics_.Visible();
-    const HRGN next_region = skin_->CreateWindowRegion(next_mini);
-    RECT region_bounds{};
-    if (!next_region || GetRgnBox(next_region, &region_bounds) == NULLREGION) {
+    bool completed = false;
+    const HRGN next_region = skin_->CreateWindowRegion(next_mini, &completed);
+    if (!IsUsableSkinWindowRegion(next_region, completed)) {
         if (next_region) DeleteObject(next_region);
         if (mini_mode_fade_continuation_) {
             mini_mode_fade_continuation_ = false;
@@ -5374,7 +5434,7 @@ void PlayerWindow::ToggleMiniMode() {
         // reaches zero. Validate the destination region before beginning the
         // asynchronous equivalent so a malformed mini skin cannot strand an
         // invisible player.
-        DeleteObject(next_region);
+        if (next_region) DeleteObject(next_region);
         mini_mode_fade_pending_ = true;
         BeginSkinWindowFade(window_, rendered_skin_window_alpha_, 0, true,
                             kFadeCompleteSwitchMini);
@@ -6473,9 +6533,10 @@ bool PlayerWindow::ApplyLoadedSkin(bool apply_visual_settings, bool saved_bounds
     // FUN_0045D5FA validates and constructs the replacement skin before it
     // mutates any live window.  Do the same for the color-key region so a bad
     // bitmap cannot turn the main window into an empty/invisible region.
-    const HRGN next_region = skin_->CreateWindowRegion();
-    RECT region_bounds{};
-    if (!next_region || GetRgnBox(next_region, &region_bounds) == NULLREGION) {
+    // Completed BMP NULL is the original rectangular fallback, not failure.
+    bool completed = false;
+    const HRGN next_region = skin_->CreateWindowRegion(false, &completed);
+    if (!IsUsableSkinWindowRegion(next_region, completed)) {
         if (next_region) DeleteObject(next_region);
         return false;
     }

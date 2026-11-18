@@ -35,12 +35,15 @@ public:
     [[nodiscard]] SIZE Size() const noexcept;
     // PNG window-region source: black for alpha 0, white for alpha > 0.
     // This binary mask is only for HWND shape/hit testing, never for painting.
-    // BMP callers retain their original RGB colour-key region path.
+    // Fixed 8-bit BMP regions must read the original palette indices instead.
     [[nodiscard]] SkinImage CoverageMask() const;
     // Caller owns the returned region. NULL means rectangular/default;
     // a non-NULL NULLREGION means empty (notably an alpha-empty PNG).
-    // Normal-frame masks are cached for owned images.
-    [[nodiscard]] HRGN CreateRegion(COLORREF key, int frames = 1) const;
+    // completed distinguishes a legal NULL BMP fallback (true) from a
+    // read/allocation/GDI failure (false), including on cache hits. Only
+    // completed masks/fallbacks are cached for owned images.
+    [[nodiscard]] HRGN CreateRegion(COLORREF key, int frames = 1,
+                                   bool* completed = nullptr) const;
     [[nodiscard]] COLORREF ButtonColorKey(COLORREF key) const;
     [[nodiscard]] SkinImage DarkenedBufferFill(COLORREF key) const;
     // A DIB view for legacy size/region APIs, never the PNG drawing source.

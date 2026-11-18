@@ -303,7 +303,10 @@ public:
     [[nodiscard]] const VisualSkin& Visual() const noexcept { return visual_; }
     [[nodiscard]] const SkinElement* Find(std::wstring_view name) const;
     [[nodiscard]] const SkinElement* FindMini(std::wstring_view name) const;
-    [[nodiscard]] HRGN CreateWindowRegion(bool mini = false) const;
+    // Same ownership/completion contract as SkinImage::CreateRegion:
+    // completed + NULL is a legal BMP rectangular fallback, not an empty PNG.
+    [[nodiscard]] HRGN CreateWindowRegion(bool mini = false,
+                                         bool* completed = nullptr) const;
 
     // Cache and layouts share image ownership, including across rebinds.
     SkinImage LoadBitmap(const std::filesystem::path& path, bool* replacement_started = nullptr);

@@ -497,6 +497,66 @@ std::vector<skin::SkinLayer> PlaylistLayers(const skin::PlaylistSkin& layout,
     return layers;
 }
 
+void DrawPlaylistStretchBitmap(HDC target, const skin::SkinBitmap& bitmap,
+                               const RECT& bounds) {
+    if (!target || !bitmap.image || bitmap.size.cx <= 0 ||
+        bitmap.size.cy <= 0 || IsRectEmpty(&bounds)) return;
+    // 00487C0D / 004897C1 (selected_image) and 0041C091 (splitter bar)
+    // inset the source RECT by one pixel, then call 0040A94B(..., 0).
+    // The four corners stay fixed; the edges and centre stretch, with
+    // COLORONCOLOR and SRCCOPY, not a colour key. PNG shares the geometry but
+    // SkinImage preserves source-over and opaque key-coloured pixels. Unlike
+    // window backgrounds, rows can shrink and still use nine slices.
+    const int width = bounds.right - bounds.left;
+    const int height = bounds.bottom - bounds.top;
+    const int saved = SaveDC(target);
+    if (!saved) return;
+    IntersectClipRect(target, bounds.left, bounds.top, bounds.right, bounds.bottom);
+    SetStretchBltMode(target, COLORONCOLOR);
+    if (bitmap.size.cx < 3 || bitmap.size.cy < 3 || width < 2 || height < 2) {
+        // A degenerate image/row has no positive nine-slice centre. Keep the
+        // defensive whole-image fallback inside the destination bounds.
+        bitmap.image.Draw(target, bounds.left, bounds.top, width, height,
+                          0, 0, bitmap.size.cx, bitmap.size.cy);
+    } else {
+        const LONG source_x[]{0, 1, bitmap.size.cx - 1, bitmap.size.cx};
+        const LONG source_y[]{0, 1, bitmap.size.cy - 1, bitmap.size.cy};
+        const LONG destination_x[]{bounds.left, bounds.left + 1,
+                                    bounds.right - 1, bounds.right};
+        const LONG destination_y[]{bounds.top, bounds.top + 1,
+                                    bounds.bottom - 1, bounds.bottom};
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                bitmap.image.Draw(target, destination_x[column], destination_y[row],
+                    destination_x[column + 1] - destination_x[column],
+                    destination_y[row + 1] - destination_y[row],
+                    source_x[column], source_y[row],
+                    source_x[column + 1] - source_x[column],
+                    source_y[row + 1] - source_y[row]);
+            }
+        }
+    }
+    RestoreDC(target, saved);
+}
+
+void DrawPlaylistSplitterArrow(HDC target, const skin::SkinBitmap& bitmap,
+                                const RECT& bounds, COLORREF transparent) {
+    if (!target || !bitmap.image || bitmap.size.cx <= 0 ||
+        bitmap.size.cy <= 0 || IsRectEmpty(&bounds)) return;
+    // Both formats use the first frame of a two-frame horizontal strip.
+    const int frame_width = bitmap.size.cx / 2;
+    if (frame_width <= 0) return;
+    const int arrow_y = bounds.top + std::max(
+        0L, (bounds.bottom - bounds.top - bitmap.size.cy) / 2);
+    // 0041C356 limits the copied source width, not a rescaled full frame,
+    // then centres that width in the splitter's client rectangle.
+    const int width = std::min<LONG>(frame_width, bounds.right - bounds.left);
+    const int height = std::min<LONG>(bitmap.size.cy, bounds.bottom - arrow_y);
+    const int arrow_x = bounds.left + (bounds.right - bounds.left - width) / 2;
+    bitmap.image.Draw(target, arrow_x, arrow_y, width, height,
+        0, 0, width, height, bitmap.image.IsGdiPlus() ? CLR_INVALID : transparent);
+}
+
 PlaylistScrollbarMetrics ResolvePlaylistScrollbarMetrics(
     const PlaylistGeometry& geometry, const skin::PlaylistSkin& layout,
     size_t item_count, size_t page_size, size_t position) noexcept {
@@ -2996,18 +3056,24 @@ bool PlayerWindow::CreatePlaylistWindow(bool for_provider) {
     // It supplies the actual geometry when attaching to this empty container.
     int width = layout.valid ? layout.background.size.cx : 1;
     int height = layout.valid ? layout.background.size.cy : 1;
+    const bool resizable = layout.resize_rect.right > layout.resize_rect.left &&
+                           layout.resize_rect.bottom > layout.resize_rect.top;
     const RECT saved = settings_.player.playlist_window;
     if (saved.right > saved.left && saved.bottom > saved.top) {
         x = saved.left;
         y = saved.top;
-        const bool resizable = layout.resize_rect.right > layout.resize_rect.left &&
-                               layout.resize_rect.bottom > layout.resize_rect.top;
         if (resizable) {
             // FUN_0046BCBE/FUN_0048B8C7 use the background's native extent as
             // the minimum track size and retain only larger saved dimensions.
             width = std::max<int>(width, saved.right - saved.left);
             height = std::max<int>(height, saved.bottom - saved.top);
         }
+    } else if (layout.valid && resizable) {
+        // 00468363 -> 0046BCBE supplies the translated XML rectangle when no
+        // saved bounds exist; 0046BD54-0046BD73 clamp each axis to the native
+        // background minimum, just like the later skin-rebind path.
+        width = std::max<int>(width, layout.position.right - layout.position.left);
+        height = std::max<int>(height, layout.position.bottom - layout.position.top);
     }
     if (width <= 0 || height <= 0) return false;
     playlist_window_ = CreateWindowExW(WS_EX_TOOLWINDOW, kPlaylistWindowClass, L"PlayList",
@@ -3099,13 +3165,8 @@ void PlayerWindow::UpdatePlaylistWindowRegion() {
     const int height = client.bottom - client.top;
     if (width <= 0 || height <= 0) return;
     const auto& layout = skin_->Playlist();
-    HRGN region = CreateSkinWindowRegion(layout.background, layout.resize_rect,
+    ApplySkinWindowRegion(playlist_window_, layout.background, layout.resize_rect,
         width, height, layout.resize_tile, skin_->TransparentColor());
-    RECT bounds{};
-    if (!region || GetRgnBox(region, &bounds) == NULLREGION ||
-        !SetWindowRgn(playlist_window_, region, TRUE)) {
-        if (region) DeleteObject(region);
-    }
 }
 
 bool PlayerWindow::CreateToolTipWindow() {
@@ -4337,7 +4398,7 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
                                                width, height,
                                                VisiblePlaylistTrackCount(), PlaylistRowHeight(), playlists_.Size(), settings_.playlist.library_mode);
     if (layout.title.image)
-        DrawElementFrame(canvas, layout.title, metrics.title, 0, skin_->TransparentColor());
+        DrawElementFrame(canvas, layout.title, metrics.title, 0, CLR_INVALID);
     const skin::SkinLayers layers(PlaylistLayers(layout, metrics), skin_->TransparentColor());
     if (metrics.list.right > metrics.list.left && metrics.list.bottom > metrics.list.top) {
         const skin::SkinLayerClip clip(canvas, layers, nullptr);
@@ -4375,7 +4436,7 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
             const bool focused = playlist_list_focus_ == index &&
                                  control_focused;
             if (selected && layout.selected.image) {
-                TileBitmap(canvas, layout.selected, row_bounds);
+                DrawPlaylistStretchBitmap(canvas, layout.selected, row_bounds);
             } else if (selected) {
                 // 004897C1 uses the same selected-image/vertical-gradient
                 // branch as the Files ListCtrl.  LVS_SHOWSELALWAYS is absent,
@@ -4401,7 +4462,7 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
             RECT group_text = row_bounds;
             InflateRect(&group_text, -2, 0);
             DrawTextW(canvas, playlists_.Entries()[index].playlist.Title().c_str(), -1,
-                      &group_text, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+                      &group_text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             if (focused) DrawSolidFrame(canvas, row_bounds, color);
         }
 
@@ -4421,19 +4482,12 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
             }
         }
 
-        if (layout.splitter_bar.image) {
-            TileBitmap(canvas, layout.splitter_bar, metrics.splitter);
-            if (layout.splitter_arrow.image) {
-                // The 14x7 legacy asset is a two-frame strip (collapsed /
-                // expanded), not a single 14-pixel glyph.
-                const int arrow_width = std::max(1L, layout.splitter_arrow.size.cx / 2);
-                const int arrow_y = metrics.list.top + std::max(0L, (metrics.list.bottom - metrics.list.top -
-                                                             layout.splitter_arrow.size.cy) / 2);
-                layout.splitter_arrow.image.Draw(canvas,
-                    metrics.splitter.right - arrow_width, arrow_y,
-                    arrow_width, layout.splitter_arrow.size.cy, 0, 0,
-                    arrow_width, layout.splitter_arrow.size.cy, skin_->TransparentColor());
-            }
+        // 0047E6FC binds the pair only when both images loaded successfully.
+        // Use the same component rule as MakePlaylistGeometry for all formats.
+        if (layout.splitter_bar.image && layout.splitter_arrow.image) {
+            DrawPlaylistStretchBitmap(canvas, layout.splitter_bar, metrics.splitter);
+            DrawPlaylistSplitterArrow(canvas, layout.splitter_arrow, metrics.splitter,
+                                      skin_->TransparentColor());
         } else {
             // Default SplitterCtrl paint: Color_Text fades toward
             // Color_Bkgnd, with the text color repeated on the far edge.
@@ -4478,7 +4532,7 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
             const bool selected = playlist_selected_rows_.contains(index) &&
                 selection_visible;
             if (selected && layout.selected.image) {
-                TileBitmap(canvas, layout.selected, row_bounds);
+                DrawPlaylistStretchBitmap(canvas, layout.selected, row_bounds);
             } else if (selected) {
                 // FUN_00487C0D -> FUN_0045032C creates one vertical gradient
                 // per selected item when the skin has no selected_image.
@@ -4661,13 +4715,32 @@ void PlayerWindow::PaintPlaylist(HDC dc) const {
             track_count > static_cast<size_t>(
                 std::max(1, bar_geometry.page_rows))) {
             const skin::SkinLayerClip clip(canvas, layers, nullptr);
-            if (layout.HasSkinnedScrollbar())
-                TileBitmap(canvas, layout.scrollbar_bar, bar_geometry.scrollbar);
-            else FillRect(canvas, &bar_geometry.scrollbar, GetSysColorBrush(COLOR_SCROLLBAR));
             const auto state = ResolvePlaylistScrollbarMetrics(
                 bar_geometry, layout, track_count,
                 static_cast<size_t>(std::max(1, bar_geometry.page_rows)),
                 catalogue ? playlist_list_scroll_ : playlist_scroll_);
+            if (layout.HasSkinnedScrollbar()) {
+                // 00488463 parts 2/3 each start tiling at source (0,0).
+                const RECT page_up{bar_geometry.scrollbar.left, state.track_top,
+                    bar_geometry.scrollbar.right, state.thumb_top};
+                const RECT page_down{bar_geometry.scrollbar.left, state.thumb_bottom,
+                    bar_geometry.scrollbar.right, state.track_bottom};
+                // Keep the existing image underlay beneath alpha buttons and
+                // thumbs, but exclude both pages from that pass. Each page
+                // then composites once over the original canvas background,
+                // never over an already alpha-composited scrollbar texture.
+                const int saved = SaveDC(canvas);
+                if (saved) {
+                    ExcludeClipRect(canvas, page_up.left, page_up.top,
+                                    page_up.right, page_up.bottom);
+                    ExcludeClipRect(canvas, page_down.left, page_down.top,
+                                    page_down.right, page_down.bottom);
+                    TileBitmap(canvas, layout.scrollbar_bar, bar_geometry.scrollbar);
+                    RestoreDC(canvas, saved);
+                }
+                TileBitmap(canvas, layout.scrollbar_bar, page_up);
+                TileBitmap(canvas, layout.scrollbar_bar, page_down);
+            } else FillRect(canvas, &bar_geometry.scrollbar, GetSysColorBrush(COLOR_SCROLLBAR));
             if (layout.HasSkinnedScrollbar()) {
                 const int source_frame_width = std::max(
                     1, static_cast<int>(layout.scrollbar_buttons.size.cx / 3));

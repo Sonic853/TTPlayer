@@ -532,10 +532,13 @@ void DrawBitmapPatch(HDC target, const skin::SkinImage& source, const RECT& dest
 void DrawResizableSkinBitmap(HDC target, const skin::SkinBitmap& bitmap,
                              RECT resize_rect, int width, int height, bool tile);
 HRGN CreateColorKeyRegion(HBITMAP bitmap, int width, int height,
-                          COLORREF transparent);
+                          COLORREF transparent, bool* completed = nullptr);
 void ApplySkinButtonRegion(HWND window, const skin::SkinElement& element,
                            COLORREF transparent);
 HRGN CreateSkinWindowRegion(const skin::SkinBitmap& bitmap, RECT resize_rect,
+                            int width, int height, bool tile, COLORREF transparent,
+                            bool* completed = nullptr);
+bool ApplySkinWindowRegion(HWND window, const skin::SkinBitmap& bitmap, RECT resize_rect,
                            int width, int height, bool tile, COLORREF transparent);
 // Independent, initial-state main-window preview (0049A6EF), never live state.
 HBITMAP RenderSkinPreview(const skin::LegacySkin& source,
@@ -544,7 +547,8 @@ HBITMAP RenderSkinPreview(const skin::LegacySkin& source,
 RECT ResolveAlignedRect(RECT bounds, unsigned int alignment, SIZE native,
                         int width, int height, SIZE image_size = {});
 void DrawElementFrame(HDC target, const skin::SkinElement& element, RECT bounds,
-                      int state, COLORREF transparent);
+                       int state, COLORREF transparent);
+void DrawSkinSliderBar(HDC target, const skin::SkinElement& element);
 PlaylistGeometry MakePlaylistGeometry(const skin::PlaylistSkin& layout,
                                       int split_on_lists, int width, int height,
                                       size_t track_count, int row_height = 16,

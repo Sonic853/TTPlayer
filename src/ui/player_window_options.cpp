@@ -2821,12 +2821,7 @@ void DrawPreviewSlider(HDC dc, const skin::SkinElement& element, COLORREF key) {
     if (!saved) return;
     IntersectClipRect(dc, element.bounds.left, element.bounds.top,
                       element.bounds.right, element.bounds.bottom);
-    if (element.bar_image) {
-        // 00451E07 copies the slider's backing, not a sprite-strip frame.
-        element.bar_image.Draw(dc, element.bounds.left, element.bounds.top,
-            element.bar_size.cx, element.bar_size.cy, 0, 0,
-            element.bar_size.cx, element.bar_size.cy);
-    }
+    DrawSkinSliderBar(dc, element);
     // 00451E07 / 0045287B derive fill from the thumb's rounded centre,
     // including the small filled part at position zero. The extra buffered
     // fill_image2 layer has length zero in the preview (004525CB).

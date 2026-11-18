@@ -78,6 +78,16 @@ private:
     static bool Letter(wchar_t ch) {
         return (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || ch == L'_';
     }
+    static bool SameClosingName(std::wstring_view left, std::wstring_view right) {
+        // 004C7177 -> 004C6B86(..., false): only closing-tag comparison
+        // ignores ASCII case. Node paths and attribute lookup stay exact.
+        const auto fold = [](wchar_t ch) {
+            return ch >= L'A' && ch <= L'Z' ? static_cast<wchar_t>(ch + L'a' - L'A') : ch;
+        };
+        return left.size() == right.size() &&
+            std::equal(left.begin(), left.end(), right.begin(),
+                [&](wchar_t a, wchar_t b) { return fold(a) == fold(b); });
+    }
     bool At(std::wstring_view token) const { return text_.compare(pos_, token.size(), token) == 0; }
     void Space() { while (pos_ < text_.size() && White(text_[pos_])) ++pos_; }
     [[noreturn]] void Fail(const char* reason) const {
@@ -163,7 +173,10 @@ private:
                 while (pos_ < text_.size() && !White(text_[pos_]) && text_[pos_] != L'>' &&
                     text_[pos_] != L'"' && text_[pos_] != L'\'' && !At(L"/>")) ++pos_;
             }
-            auto value = Value(std::wstring_view(text_).substr(start, pos_ - start));
+            const auto raw = std::wstring_view(text_).substr(start, pos_ - start);
+            // 004C76CB copies unquoted values literally; only quoted values
+            // enter the named-entity decoder. Keep numeric/unknown entities.
+            auto value = quote ? Value(raw) : std::wstring(raw);
             if (std::none_of(node->attributes.begin(), node->attributes.end(),
                 [&](const auto& attribute) { return attribute.first == name; }))
                 node->attributes.emplace_back(std::move(name), std::move(value));
@@ -173,7 +186,7 @@ private:
             if (pos_ >= text_.size()) Fail("unterminated element");
             if (At(L"</")) {
                 pos_ += 2;
-                if (Name() != node->name) Fail("mismatched closing element");
+                if (!SameClosingName(Name(), node->name)) Fail("mismatched closing element");
                 Space();
                 if (!At(L">")) Fail("invalid closing element");
                 ++pos_; return node;

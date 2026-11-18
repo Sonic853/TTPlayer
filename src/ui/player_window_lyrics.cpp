@@ -1819,13 +1819,8 @@ void PlayerWindow::UpdateLyricWindowRegion() {
     const int height = client.bottom;
     if (width <= 0 || height <= 0) return;
     const auto& layout = skin_->Lyric();
-    HRGN region = CreateSkinWindowRegion(layout.background, layout.resize_rect,
+    ApplySkinWindowRegion(lyric_window_, layout.background, layout.resize_rect,
         width, height, layout.resize_tile, skin_->TransparentColor());
-    RECT bounds{};
-    if (!region || GetRgnBox(region, &bounds) == NULLREGION ||
-        !SetWindowRgn(lyric_window_, region, TRUE)) {
-        if (region) DeleteObject(region);
-    }
 }
 
 void PlayerWindow::PaintLyricWindow(HDC dc) const {
@@ -1855,7 +1850,7 @@ void PlayerWindow::PaintLyricWindow(HDC dc) const {
             DrawResizableSkinBitmap(canvas, layout.background, layout.resize_rect,
                                     width, height, layout.resize_tile);
             DrawElementFrame(canvas, layout.title, LyricElementBounds(layout.title),
-                             0, skin_->TransparentColor());
+                             0, CLR_INVALID);
         } else {
             // mini_border belongs to FUN_00449313's DAT_0054775C (mini-mode)
             // branch and surrounds the lyric popup client, not LyricCtrl.
@@ -1949,7 +1944,7 @@ void PlayerWindow::PaintLyricControl(HWND control, HDC dc, bool present_layered,
         DrawResizableSkinBitmap(parent_dc, layout.background, layout.resize_rect,
             parent_client.right, parent_client.bottom, layout.resize_tile);
         DrawElementFrame(parent_dc, layout.title, LyricElementBounds(layout.title),
-                         0, skin_->TransparentColor());
+                         0, CLR_INVALID);
         const bool png_chrome = skin::IsPngSkinButton(layout.close) ||
             skin::IsPngSkinButton(layout.ontop) || skin::IsPngSkinButton(layout.desklrc);
         if (png_chrome) {

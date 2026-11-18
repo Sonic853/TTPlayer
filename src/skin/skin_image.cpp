@@ -6,7 +6,10 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <mutex>
+#include <new>
+#include <stdexcept>
 #include <vector>
 
 namespace ttplayer::skin {
@@ -38,6 +41,11 @@ struct SkinImage::Storage {
     std::unique_ptr<Gdiplus::Bitmap> image;
     HBITMAP dib{};
     SIZE size{};
+    // GetObject(DIBSECTION) normalizes biHeight to positive even when the
+    // pixels still have top-down row order. Retain our creation-time layout.
+    bool dib_top_down{};
+    // An entry always represents a completed scan; nullptr is a legal BMP
+    // rectangular fallback, never a cached allocation/read/GDI failure.
     struct RegionEntry { COLORREF key; int frames; HRGN region; COLORREF drawing_key; };
     std::vector<RegionEntry> regions;
     ~Storage() {
@@ -125,6 +133,7 @@ SkinImage SkinImage::Load(const std::filesystem::path& path, bool* replacement_s
         if (!data->dib || !pixels) return result;
         std::memcpy(pixels, bytes.data() + offset, static_cast<size_t>(stride * height));
         data->size = {header.biWidth, static_cast<LONG>(height)};
+        data->dib_top_down = header.biHeight < 0;
     } else {
         // 00522A01 -> 0046A76A -> GdipCreateBitmapFromStream. Dispatch by
         // bytes, not filename extension; RGB PNG also belongs to this path.
@@ -152,6 +161,7 @@ SkinImage SkinImage::Load(const std::filesystem::path& path, bool* replacement_s
         info.bmiHeader.biHeight = -static_cast<LONG>(height);
         info.bmiHeader.biPlanes = 1;
         info.bmiHeader.biBitCount = 32;
+        data->dib_top_down = true;
         void* pixels{};
         data->dib = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
         if (!data->dib) return result;
@@ -191,6 +201,7 @@ SkinImage SkinImage::CoverageMask() const {
         !source.dsBm.bmBits || source.dsBm.bmBitsPixel != 32) return result;
     auto data = std::make_shared<Storage>();
     data->size = storage_->size;
+    data->dib_top_down = true;
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     info.bmiHeader.biWidth = data->size.cx;
@@ -203,7 +214,8 @@ SkinImage SkinImage::CoverageMask() const {
     auto* target = static_cast<DWORD*>(pixels);
     const auto* bytes = static_cast<const unsigned char*>(source.dsBm.bmBits);
     for (LONG y = 0; y < data->size.cy; ++y) {
-        const auto* row = bytes + static_cast<size_t>(y) * source.dsBm.bmWidthBytes;
+        const LONG source_row = storage_->dib_top_down ? y : data->size.cy - 1 - y;
+        const auto* row = bytes + static_cast<size_t>(source_row) * source.dsBm.bmWidthBytes;
         for (LONG x = 0; x < data->size.cx; ++x)
             *target++ = row[x * 4 + 3] ? 0xffffffff : 0xff000000;
     }
@@ -231,6 +243,7 @@ SkinImage SkinImage::DarkenedBufferFill(COLORREF key) const {
     info.bmiHeader.biBitCount = 24;
     auto data = std::make_shared<Storage>();
     data->size = {source.bmWidth, source.bmHeight};
+    data->dib_top_down = true;
     BYTE* pixels{};
     const HDC dc = CreateCompatibleDC(nullptr);
     data->dib = CreateDIBSection(dc, &info, DIB_RGB_COLORS,
@@ -251,18 +264,20 @@ SkinImage SkinImage::DarkenedBufferFill(COLORREF key) const {
 }
 
 namespace {
-bool IndexedButtonRuns(HBITMAP bitmap, COLORREF key, std::vector<RECT>& runs, bool& disable_key) {
-    DIBSECTION section{};
-    if (!GetObjectW(bitmap, sizeof(section), &section) || !section.dsBm.bmBits ||
-        section.dsBm.bmBitsPixel != 8) return false;
+bool IndexedImageRuns(HBITMAP bitmap, const DIBSECTION& section, COLORREF key,
+    int width, bool top_down, std::vector<RECT>& runs, bool& disable_key) {
+    if (!section.dsBm.bmBits || section.dsBm.bmBitsPixel != 8 ||
+        section.dsBm.bmWidthBytes < section.dsBm.bmWidth ||
+        width <= 0 || width > section.dsBm.bmWidth || section.dsBm.bmHeight <= 0) return false;
     const HDC dc = CreateCompatibleDC(nullptr);
     if (!dc) return false;
     const auto old = SelectObject(dc, bitmap);
+    if (!old || old == HGDI_ERROR) { DeleteDC(dc); return false; }
     RGBQUAD colors[256]{};
     const UINT count = GetDIBColorTable(dc, 0, 256, colors);
-    SelectObject(dc, old);
-    DeleteDC(dc);
-    if (!count) return false;
+    const auto restored = SelectObject(dc, old);
+    const BOOL released = DeleteDC(dc);
+    if (!count || !restored || restored == HGDI_ERROR || !released) return false;
     UINT transparent = count;
     for (UINT i = 0; i < count; ++i)
         if (RGB(colors[i].rgbRed, colors[i].rgbGreen, colors[i].rgbBlue) == key) {
@@ -270,10 +285,11 @@ bool IndexedButtonRuns(HBITMAP bitmap, COLORREF key, std::vector<RECT>& runs, bo
         }
     disable_key = transparent == count;
     if (disable_key) return true;
-    const int width = section.dsBm.bmWidth / 4, height = section.dsBm.bmHeight;
+    const int height = section.dsBm.bmHeight;
     for (int y = 0; y < height; ++y) {
-        const int row = section.dsBmih.biHeight < 0 ? y : height - 1 - y;
-        const auto* pixels = static_cast<const BYTE*>(section.dsBm.bmBits) + row * section.dsBm.bmWidthBytes;
+        const int row = top_down ? y : height - 1 - y;
+        const auto* pixels = static_cast<const BYTE*>(section.dsBm.bmBits) +
+            static_cast<size_t>(row) * section.dsBm.bmWidthBytes;
         int start = -1;
         for (int x = 0; x <= width; ++x) {
             const bool opaque = x < width && pixels[x] != transparent;
@@ -281,93 +297,161 @@ bool IndexedButtonRuns(HBITMAP bitmap, COLORREF key, std::vector<RECT>& runs, bo
             if (!opaque && start >= 0) { runs.push_back({start,y,x,y+1}); start = -1; }
         }
     }
-    // 00452FFF: no runs from the 8-bit path means a rectangular button and
-    // CLR_INVALID for every state, not an invisible/click-through window.
+    // The image generator itself returns NULL for no match/no runs. Only
+    // 00452FFF's four-state button caller also disables the drawing key.
     disable_key = runs.empty();
+    return true;
+}
+
+bool RgbImageRuns(HBITMAP bitmap, SIZE size, int width, COLORREF key, std::vector<RECT>& runs) {
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = size.cx;
+    info.bmiHeader.biHeight = -size.cy;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    // Read the full source stride, then scan only the normal frame. Checking
+    // the returned row count prevents an unread bitmap becoming a legal NULL.
+    std::vector<DWORD> pixels(static_cast<size_t>(size.cx) * size.cy);
+    const HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc) return false;
+    const int rows = GetDIBits(dc, bitmap, 0, static_cast<UINT>(size.cy),
+        pixels.data(), &info, DIB_RGB_COLORS);
+    const BOOL released = DeleteDC(dc);
+    if (rows != size.cy || !released) return false;
+    const DWORD rgb = (GetRValue(key) << 16) | (GetGValue(key) << 8) | GetBValue(key);
+    for (int y = 0; y < size.cy; ++y) {
+        int start = -1;
+        for (int x = 0; x <= width; ++x) {
+            const bool opaque = x < width && (key == CLR_INVALID ||
+                (pixels[static_cast<size_t>(y) * size.cx + x] & 0xffffff) != rgb);
+            if (opaque && start < 0) start = x;
+            if (!opaque && start >= 0) { runs.push_back({start,y,x,y+1}); start = -1; }
+        }
+    }
     return true;
 }
 }
 
 COLORREF SkinImage::ButtonColorKey(COLORREF key) const {
     if (IsGdiPlus()) return key;
-    const HRGN region = CreateRegion(key, 4);
+    bool completed{};
+    const HRGN region = CreateRegion(key, 4, &completed);
     if (region) DeleteObject(region);
+    if (!completed) return key;
     if (storage_) for (const auto& entry : storage_->regions)
         if (entry.key == key && entry.frames == 4) return entry.drawing_key;
-    std::vector<RECT> runs;
-    bool disable{};
-    return IndexedButtonRuns(*this, key, runs, disable) && disable ? CLR_INVALID : key;
+    // Borrowed bitmaps have no cache; retain their existing button semantics.
+    try {
+        DIBSECTION section{};
+        std::vector<RECT> runs;
+        bool disable{};
+        return GetObjectW(*this, sizeof(section), &section) == static_cast<int>(sizeof(section)) &&
+            IndexedImageRuns(*this, section, key, section.dsBm.bmWidth / 4,
+                section.dsBmih.biHeight < 0, runs, disable) &&
+            disable ? CLR_INVALID : key;
+    } catch (const std::bad_alloc&) {
+        return key;
+    } catch (const std::length_error&) {
+        return key;
+    }
 }
 
-HRGN SkinImage::CreateRegion(COLORREF key, int frames) const {
-    const SIZE size = Size();
-    const int width = size.cx / std::max(1, frames);
-    if (!static_cast<HBITMAP>(*this) || width <= 0 || size.cy <= 0) return nullptr;
-    const auto copy = [](HRGN source) {
-        if (!source) return static_cast<HRGN>(nullptr);
+HRGN SkinImage::CreateRegion(COLORREF key, int frames, bool* completed) const {
+    if (completed) *completed = false;
+    const auto copy = [completed](HRGN source) -> HRGN {
+        if (!source) {
+            if (completed) *completed = true;
+            return nullptr;
+        }
         const HRGN result = CreateRectRgn(0, 0, 0, 0);
-        CombineRgn(result, source, nullptr, RGN_COPY);
+        if (!result) return nullptr;
+        if (CombineRgn(result, source, nullptr, RGN_COPY) == ERROR) {
+            DeleteObject(result);
+            return nullptr;
+        }
+        if (completed) *completed = true;
         return result;
     };
-    if (storage_) for (const auto& entry : storage_->regions)
-        if (entry.key == key && entry.frames == frames) return copy(entry.region);
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = width;
-    info.bmiHeader.biHeight = -size.cy;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    DWORD* pixels{};
-    const HDC dc = CreateCompatibleDC(nullptr);
-    const HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS,
-        reinterpret_cast<void**>(&pixels), nullptr, 0);
-    if (!dc || !bitmap || !pixels) {
-        if (bitmap) DeleteObject(bitmap);
-        if (dc) DeleteDC(dc);
+    try {
+        const HBITMAP bitmap = *this;
+        const SIZE size = Size();
+        frames = std::max(1, frames);
+        const int width = size.cx / frames;
+        DIBSECTION section{};
+        const int object_size = bitmap ? GetObjectW(bitmap, sizeof(section), &section) : 0;
+        if (object_size < static_cast<int>(sizeof(BITMAP)) || width <= 0 || size.cy <= 0 ||
+            size.cx > 16384 || size.cy > 16384 ||
+            static_cast<uint64_t>(size.cx) * size.cy > 32 * 1024 * 1024 ||
+            section.dsBm.bmWidth != size.cx || section.dsBm.bmHeight != size.cy) return nullptr;
+        if (storage_) for (const auto& entry : storage_->regions)
+            if (entry.key == key && entry.frames == frames) return copy(entry.region);
+        if (!GdiFlush()) return nullptr;
+        const bool alpha = IsGdiPlus();
+        const bool indexed = !alpha && (frames == 1 || frames == 4) && section.dsBm.bmBitsPixel == 8;
+        // Owned images know their original sign; borrowed HBITMAPs retain
+        // the existing GetObject-based orientation policy.
+        const bool top_down = storage_ ? storage_->dib_top_down : section.dsBmih.biHeight < 0;
+        std::vector<RECT> runs;
+        bool disable_key{};
+        if (indexed) {
+            if (object_size != static_cast<int>(sizeof(section)) ||
+                !IndexedImageRuns(bitmap, section, key, width, top_down, runs, disable_key)) return nullptr;
+            // Do not apply this button-only policy to fixed backgrounds:
+            // 0048C9CA's NULL is a legal rectangular HWND fallback there.
+            if (frames == 4 && disable_key) runs.push_back({0, 0, width, size.cy});
+        } else if (alpha) {
+            // Read straight BGRA from the owned PNG DIB. RGB conversion or
+            // source-over drawing can discard alpha=1 coverage or key pink.
+            if (object_size != static_cast<int>(sizeof(section)) || !section.dsBm.bmBits ||
+                section.dsBm.bmBitsPixel != 32 || section.dsBm.bmWidthBytes < size.cx * 4)
+                return nullptr;
+            for (int y = 0; y < size.cy; ++y) {
+                const int row = top_down ? y : size.cy - 1 - y;
+                const auto* pixels = static_cast<const BYTE*>(section.dsBm.bmBits) +
+                    static_cast<size_t>(row) * section.dsBm.bmWidthBytes;
+                int start = -1;
+                for (int x = 0; x <= width; ++x) {
+                    const bool opaque = x < width && pixels[x * 4 + 3] > 0;
+                    if (opaque && start < 0) start = x;
+                    if (!opaque && start >= 0) { runs.push_back({start,y,x,y+1}); start = -1; }
+                }
+            }
+        } else if (!RgbImageRuns(bitmap, size, width, key, runs)) return nullptr;
+        HRGN region{};
+        if (!runs.empty()) {
+            const size_t max_bytes = (std::numeric_limits<DWORD>::max)();
+            if (runs.size() > (max_bytes - sizeof(RGNDATAHEADER)) / sizeof(RECT)) return nullptr;
+            const size_t bytes = sizeof(RGNDATAHEADER) + runs.size() * sizeof(RECT);
+            std::vector<unsigned char> data(bytes);
+            auto* rgn = reinterpret_cast<RGNDATA*>(data.data());
+            rgn->rdh = {sizeof(RGNDATAHEADER), RDH_RECTANGLES, static_cast<DWORD>(runs.size()),
+                static_cast<DWORD>(runs.size() * sizeof(RECT)), {0,0,width,size.cy}};
+            std::memcpy(rgn->Buffer, runs.data(), runs.size() * sizeof(RECT));
+            region = ExtCreateRegion(nullptr, static_cast<DWORD>(bytes), rgn);
+            if (!region) return nullptr;
+        } else if (alpha) {
+            // Alpha-empty PNG is a real empty region, never a BMP fallback.
+            region = CreateRectRgn(0,0,0,0);
+            if (!region) return nullptr;
+        }
+        if (storage_) {
+            try {
+                storage_->regions.push_back({key, frames, region,
+                    indexed && frames == 4 && disable_key ? CLR_INVALID : key});
+            } catch (...) {
+                if (region) DeleteObject(region);
+                throw;
+            }
+            return copy(region);
+        }
+        if (completed) *completed = true;
+        return region;
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    } catch (const std::length_error&) {
         return nullptr;
     }
-    const auto old = SelectObject(dc, bitmap);
-    const bool alpha = IsGdiPlus();
-    if (alpha) CoverageMask().Draw(dc, 0, 0, width, size.cy, 0, 0, width, size.cy);
-    else Draw(dc, 0, 0, width, size.cy, 0, 0, width, size.cy);
-    GdiFlush();
-    const DWORD rgb = (GetRValue(key) << 16) | (GetGValue(key) << 8) | GetBValue(key);
-    std::vector<RECT> runs;
-    bool disable_key{};
-    const bool indexed = frames == 4 && !alpha && IndexedButtonRuns(*this, key, runs, disable_key);
-    if (indexed && disable_key) runs.push_back({0, 0, width, size.cy});
-    for (int y = 0; !indexed && y < size.cy; ++y) {
-        int start = -1;
-        for (int x = 0; x <= width; ++x) {
-            const bool opaque = x < width && (alpha ? (pixels[y * width + x] & 0xffffff) != 0
-                : key == CLR_INVALID || (pixels[y * width + x] & 0xffffff) != rgb);
-            if (opaque && start < 0) start = x;
-            if (!opaque && start >= 0) { runs.push_back({start,y,x,y+1}); start = -1; }
-        }
-    }
-    SelectObject(dc, old);
-    DeleteObject(bitmap);
-    DeleteDC(dc);
-    HRGN region{};
-    if (!runs.empty()) {
-        const size_t bytes = sizeof(RGNDATAHEADER) + runs.size() * sizeof(RECT);
-        std::vector<unsigned char> data(bytes);
-        auto* rgn = reinterpret_cast<RGNDATA*>(data.data());
-        rgn->rdh = {sizeof(RGNDATAHEADER), RDH_RECTANGLES, static_cast<DWORD>(runs.size()),
-            static_cast<DWORD>(runs.size() * sizeof(RECT)), {0,0,width,size.cy}};
-        std::memcpy(rgn->Buffer, runs.data(), runs.size() * sizeof(RECT));
-        region = ExtCreateRegion(nullptr, static_cast<DWORD>(bytes), rgn);
-    }
-    // 004506AF returns NULL when a non-indexed BMP has no opaque runs:
-    // SetWindowRgn(NULL) leaves a rectangular HWND (and keeps the key).
-    // PNG is an extension: an alpha-empty sprite has a genuinely empty hit
-    // region. Do not collapse that region into the BMP rectangular fallback.
-    if (!region && alpha) region = CreateRectRgn(0,0,0,0);
-    if (storage_) {
-        storage_->regions.push_back({key, frames, region, disable_key ? CLR_INVALID : key});
-        return copy(region);
-    }
-    return region;
 }
 
 bool SkinImage::Draw(HDC dc, int x, int y, int width, int height,

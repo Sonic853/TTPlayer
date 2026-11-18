@@ -756,6 +756,15 @@ target_link_libraries(led_repaint_tests PRIVATE ttplayer_core)
 add_test(NAME led_repaint_tests COMMAND led_repaint_tests)
 set_tests_properties(led_repaint_tests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
 
+foreach(_skin_test IN ITEMS skin_render_compat_tests playlist_render_compat_tests skin_region_compat_tests)
+  add_executable(${_skin_test} "tests/skin/${_skin_test}.cpp")
+  target_compile_definitions(${_skin_test} PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(${_skin_test} PRIVATE /W4 /permissive- /EHsc /utf-8)
+  target_link_libraries(${_skin_test} PRIVATE ttplayer_core)
+  add_test(NAME ${_skin_test} COMMAND ${_skin_test})
+  set_tests_properties(${_skin_test} PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+endforeach()
+
 add_executable(ttplayer_dsp_probe EXCLUDE_FROM_ALL
   tools/dsp_plugin_probe.cpp src/app/dsp_worker.cpp)
 target_include_directories(ttplayer_dsp_probe PRIVATE include)

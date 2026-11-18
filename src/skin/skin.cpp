@@ -925,45 +925,10 @@ const SkinElement* LegacySkin::FindMini(std::wstring_view name) const {
     return found == mini_.elements.end() ? nullptr : &*found;
 }
 
-HRGN LegacySkin::CreateWindowRegion(bool mini) const {
+HRGN LegacySkin::CreateWindowRegion(bool mini, bool* completed) const {
     const auto& image = mini ? mini_.background : background_;
-    const auto mask = image.IsGdiPlus() ? image.CoverageMask() : image;
-    const HBITMAP background = mask;
-    const COLORREF transparent = image.IsGdiPlus() ? RGB(0, 0, 0) : transparent_color_;
-    if (!background) return nullptr;
-    BITMAP info{};
-    GetObjectW(background, sizeof(info), &info);
-    BITMAPINFO bitmap_info{};
-    bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bitmap_info.bmiHeader.biWidth = info.bmWidth;
-    bitmap_info.bmiHeader.biHeight = -info.bmHeight;
-    bitmap_info.bmiHeader.biPlanes = 1;
-    bitmap_info.bmiHeader.biBitCount = 32;
-    bitmap_info.bmiHeader.biCompression = BI_RGB;
-    std::vector<unsigned char> pixels(static_cast<size_t>(info.bmWidth) * info.bmHeight * 4);
-    const HDC dc = GetDC(nullptr);
-    GetDIBits(dc, background, 0, static_cast<UINT>(info.bmHeight), pixels.data(), &bitmap_info, DIB_RGB_COLORS);
-    ReleaseDC(nullptr, dc);
-
-    HRGN result = CreateRectRgn(0, 0, 0, 0);
-    for (int y = 0; y < info.bmHeight; ++y) {
-        int run = -1;
-        for (int x = 0; x <= info.bmWidth; ++x) {
-            bool opaque = false;
-            if (x < info.bmWidth) {
-                const size_t offset = (static_cast<size_t>(y) * info.bmWidth + x) * 4;
-                const COLORREF color = RGB(pixels[offset + 2], pixels[offset + 1], pixels[offset]);
-                opaque = color != transparent;
-            }
-            if (opaque && run < 0) run = x;
-            if (!opaque && run >= 0) {
-                const HRGN row = CreateRectRgn(run, y, x, y + 1);
-                CombineRgn(result, result, row, RGN_OR);
-                DeleteObject(row);
-                run = -1;
-            }
-        }
-    }
-    return result;
+    // 0046D0C1 uses 0048C9CA for the original fixed 8-bit DIB. Converting
+    // to RGB here would erase the distinction between duplicate palette RGBs.
+    return image.CreateRegion(transparent_color_, 1, completed);
 }
 } // namespace ttplayer::skin
