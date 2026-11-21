@@ -59,6 +59,7 @@ using InitializeLyricSearch = HRESULT(WINAPI*)(void*, void*, const LyricNetworkC
 using NoArgumentMethod = HRESULT(WINAPI*)(void*);
 using OpenReader = HRESULT(WINAPI*)(void*, IStream*, DWORD);
 using GetReaderDword = HRESULT(WINAPI*)(void*, DWORD*);
+using GetReaderWord = HRESULT(WINAPI*)(void*, WORD*);
 using GetReaderFormat = HRESULT(WINAPI*)(void*, WAVEFORMATEX**);
 using ReadReader = HRESULT(WINAPI*)(void*, void*);
 using SeekReader = HRESULT(WINAPI*)(void*, DWORD*);
@@ -588,6 +589,20 @@ HRESULT InvokeReaderDword(void* reader, size_t slot, DWORD* value) noexcept {
     }
 #else
     return reinterpret_cast<GetReaderDword>(table[slot])(reader, value);
+#endif
+}
+
+HRESULT InvokeReaderBitDepth(void* reader, WORD* value) noexcept {
+    auto table = Vtable(reader);
+    if (!table || !table[10] || !value) return E_POINTER;
+#if defined(_MSC_VER)
+    __try {
+        return reinterpret_cast<GetReaderWord>(table[10])(reader, value);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return E_UNEXPECTED;
+    }
+#else
+    return reinterpret_cast<GetReaderWord>(table[10])(reader, value);
 #endif
 }
 
@@ -1433,6 +1448,12 @@ DWORD LegacyReaderSession::EncodedBitsPerSecond() const noexcept {
     return impl_ ? impl_->encoded_bits_per_second : 0;
 }
 
+WORD LegacyReaderSession::ReportedBitDepth() const noexcept {
+    WORD bits{};
+    return impl_ && InvokeReaderBitDepth(impl_->reader, &bits) == S_OK &&
+        bits <= 64 ? bits : 0;
+}
+
 DWORD LegacyReaderSession::Capabilities() const noexcept {
     return impl_ ? impl_->capabilities : 0;
 }
@@ -1684,6 +1705,15 @@ HRESULT LegacyReaderSession::CommitMetadata() noexcept {
     impl_->metadata_commit_result = InvokeNoArgument(commit, 3);
     Release(commit);
     return impl_->metadata_commit_result;
+}
+
+bool LegacyReaderSession::HasExplicitMetadataWriter() const noexcept {
+    if (!impl_ || !impl_->metadata) return false;
+    void* commit{};
+    const bool available = InvokeQueryInterface(
+        impl_->reader, kMetadataCommitInterface, &commit) == S_OK && commit;
+    if (commit) Release(commit);
+    return available;
 }
 
 struct LegacyDecoderSession::Impl {

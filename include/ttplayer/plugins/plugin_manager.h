@@ -101,6 +101,8 @@ public:
     [[nodiscard]] DWORD DurationMilliseconds() const noexcept;
     [[nodiscard]] DWORD SuggestedBufferBytes() const noexcept;
     [[nodiscard]] DWORD EncodedBitsPerSecond() const noexcept;
+    // Reader slot 10, independent of the actual format used for audio I/O.
+    [[nodiscard]] WORD ReportedBitDepth() const noexcept;
     [[nodiscard]] DWORD Capabilities() const noexcept;
     [[nodiscard]] const std::wstring& CodecName() const noexcept;
     [[nodiscard]] const std::optional<ttp::format::Result>& DetectedFormat() const noexcept;
@@ -141,6 +143,9 @@ public:
     // Otherwise returns the explicit save result. A supporting session is
     // terminal afterwards, including on failure; retry with a fresh reader.
     HRESULT CommitMetadata() noexcept;
+    // Both the metadata and explicit Commit interfaces are available.
+    // This says nothing about the write access of the current stream.
+    [[nodiscard]] bool HasExplicitMetadataWriter() const noexcept;
 
 private:
     struct Impl;

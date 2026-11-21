@@ -86,6 +86,18 @@ void PopulateReaderResult(
                             (reader.Capabilities() & 4U) != 0;
     result.cover_maximum_bytes = reader.MaximumThumbnailBytes();
     result.format = reader.Format();
+    if (const auto& source = reader.DetectedFormat();
+        source && source->family == ttp::format::Mp4) {
+        const std::string_view codec(source->codec);
+        if (codec == "aac") {
+            const WORD bits = reader.ReportedBitDepth();
+            // Older ttp_aac DLLs report 32 here for trimmed AAC. Keep the
+            // original nominal 16-bit display without changing PCM or bitrate.
+            result.display_bits_per_sample = bits && bits != 32 ? bits : 16;
+        } else if (codec == "alac") {
+            result.display_bits_per_sample = reader.ReportedBitDepth();
+        }
+    }
     result.duration_ms = static_cast<DWORD>(std::clamp<std::int64_t>(
         reader.DurationMilliseconds(), 0,
         static_cast<std::int64_t>(MAXDWORD)));
@@ -279,6 +291,23 @@ std::unique_ptr<ttplayer::plugins::LegacyReaderSession> OpenReader(
     }
 }
 
+bool CanStageLocalTagEdits(const std::filesystem::path& path) noexcept {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY)))
+        return false;
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        // Playback can deny writes while the dialog collects edits. Save
+        // releases those playback handles and still requires a writable stream.
+        return GetLastError() == ERROR_SHARING_VIOLATION;
+    }
+    CloseHandle(file);
+    return true;
+}
+
 ttplayer::ui::detail::FileInfoProbeReadResult ReadCdaMetadata(const std::filesystem::path& logical_path) {
     using namespace ttplayer;
     ui::detail::FileInfoProbeReadResult result;
@@ -356,6 +385,20 @@ int ReadFileInfo(const std::filesystem::path& addin_directory,
                 result.status = VerifyArchiveInfo(stream.Get(), ttpcomm);
                 result.capabilities &= ~4U;
                 result.cover_writable = 0;
+            } else if ((result.capabilities & 4U) == 0) {
+                const auto& source = reader->DetectedFormat();
+                // ttp_aac advertises metadata and Commit for MP4 even on
+                // read-only inspection streams. The dialog needs to know if
+                // it can stage edits, not if this particular stream can write.
+                if (source && source->family == ttp::format::Mp4 &&
+                    reader->HasExplicitMetadataWriter()) {
+                    const bool has_cover = reader->HasThumbnailInterface();
+                    reader.reset(); // Inspection itself denies concurrent writes.
+                    if (CanStageLocalTagEdits(logical_path)) {
+                        result.capabilities |= 4U;
+                        result.cover_writable = has_cover;
+                    }
+                }
             }
             completed = true;
         }

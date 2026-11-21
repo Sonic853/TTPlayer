@@ -47,7 +47,7 @@ TrackInfoState ApplyFileInfoProbeToTrack(
     track.bitrate_bps = static_cast<std::uint32_t>(std::min<std::uint64_t>(encoded, 0x7fffffffU));
     track.sample_rate_hz = probe->format.nSamplesPerSec;
     track.channels = probe->format.nChannels;
-    track.bits_per_sample = probe->format.wBitsPerSample;
+    track.bits_per_sample = probe->DisplayBitsPerSample();
     const auto previous = track.metadata;
     track.metadata.clear();
     track.metadata.reserve(probe->metadata.size());

@@ -20,7 +20,7 @@ namespace ttplayer::ui::detail {
 // helper without ever terminating an in-process thread or trusting partial
 // output from a killed process.
 inline constexpr std::uint32_t kFileInfoProbeMagic = 0x50494654U; // TFIP
-inline constexpr std::uint32_t kFileInfoProbeVersion = 7;
+inline constexpr std::uint32_t kFileInfoProbeVersion = 8;
 inline constexpr std::uint32_t kFileInfoProbeReadPacket = 1;
 inline constexpr std::uint32_t kFileInfoProbeWriteRequestPacket = 2;
 inline constexpr std::uint32_t kFileInfoProbeWriteResultPacket = 3;
@@ -41,11 +41,16 @@ struct FileInfoProbeReadResult {
     DWORD cover_writable{};
     DWORD cover_maximum_bytes{};
     WAVEFORMATEX format{};
+    WORD display_bits_per_sample{}; // 0: use the format's sample width.
     DWORD duration_ms{};
     DWORD encoded_bits_per_second{};
     std::wstring codec;
     std::vector<FileInfoProbeMetadata> metadata;
     std::vector<unsigned char> cover;
+
+    [[nodiscard]] WORD DisplayBitsPerSample() const noexcept {
+        return display_bits_per_sample ? display_bits_per_sample : format.wBitsPerSample;
+    }
 };
 
 struct FileInfoProbeWriteField {
@@ -251,6 +256,7 @@ inline bool WriteFileInfoProbeReadResult(
         FileInfoProbeWriteScalar(file, result.cover_writable) &&
         FileInfoProbeWriteScalar(file, result.cover_maximum_bytes) &&
         FileInfoProbeWriteScalar(file, result.format) &&
+        FileInfoProbeWriteScalar(file, result.display_bits_per_sample) &&
         FileInfoProbeWriteScalar(file, result.duration_ms) &&
         FileInfoProbeWriteScalar(file, result.encoded_bits_per_second) &&
         FileInfoProbeWriteWide(file, result.codec) &&
@@ -281,6 +287,7 @@ inline bool ReadFileInfoProbeReadResult(
         FileInfoProbeReadScalar(file, decoded.cover_writable) &&
         FileInfoProbeReadScalar(file, decoded.cover_maximum_bytes) &&
         FileInfoProbeReadScalar(file, decoded.format) &&
+        FileInfoProbeReadScalar(file, decoded.display_bits_per_sample) &&
         FileInfoProbeReadScalar(file, decoded.duration_ms) &&
         FileInfoProbeReadScalar(file, decoded.encoded_bits_per_second) &&
         FileInfoProbeReadWide(file, decoded.codec) &&

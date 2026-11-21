@@ -899,14 +899,13 @@ target_compile_options(playlist_network_commands_tests PRIVATE
 target_link_libraries(playlist_network_commands_tests PRIVATE ttplayer_core)
 
 add_executable(file_info_probe_protocol_tests
-  tests/file_info_probe_protocol_tests.cpp
-  src/platform/windows_features.cpp
-  src/ui/file_info_probe_client.cpp)
-target_include_directories(file_info_probe_protocol_tests PRIVATE src/ui include)
+  tests/file_info_probe_protocol_tests.cpp)
+target_include_directories(file_info_probe_protocol_tests PRIVATE src/ui)
 target_compile_definitions(file_info_probe_protocol_tests PRIVATE
   UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(file_info_probe_protocol_tests PRIVATE
   /W4 /permissive- /EHsc /utf-8 /UNDEBUG)
+target_link_libraries(file_info_probe_protocol_tests PRIVATE ttplayer_core)
 
 add_executable(builtin_file_info_tests
   tests/builtin_file_info_tests.cpp

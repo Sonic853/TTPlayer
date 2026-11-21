@@ -403,15 +403,15 @@ FileInfoRecord ReadFileInfoRecord(
     }
     const WAVEFORMATEX& format = probe->format;
     record.channel_count = format.nChannels;
-    record.bits_per_sample = format.wBitsPerSample;
+    record.bits_per_sample = probe->DisplayBitsPerSample();
     record.codec = probe->codec;
     if (const auto separator = record.codec.find(L'|'); separator != std::wstring::npos)
         record.codec.erase(0, separator + 1);
     record.channels = FormatChannels(format.nChannels, strings.channel_names);
     if (format.nSamplesPerSec != 0)
         record.sample_rate = std::to_wstring(format.nSamplesPerSec) + L" Hz";
-    if (format.wBitsPerSample != 0)
-        record.bits = std::to_wstring(format.wBitsPerSample) + L" Bits";
+    if (record.bits_per_sample != 0)
+        record.bits = std::to_wstring(record.bits_per_sample) + L" Bits";
     const std::uint64_t encoded = probe->encoded_bits_per_second != 0
         ? probe->encoded_bits_per_second
         : static_cast<std::uint64_t>(format.nAvgBytesPerSec) * 8U;
