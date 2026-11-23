@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "components": [
-    {"folder": "gettext", "repository": "TTPlayerRebuild/TTPlayerI18n", "workflow": "manual-build.yml", "inputs": {"configuration": "Release"}},
+    {"folder": "gettext", "repository": "TTPlayerRebuild/TTPlayerI18n", "workflow": "manual-build.yml", "inputs": {"configuration": "Release"}, "build_job": "Build shared i18n DLL (VS 2026, Windows x86)"},
     {"folder": "makivm", "repository": "TTPlayerRebuild/TTPlayerMaki", "workflow": "build.yml"},
-    {"folder": "mbedtlsmin", "repository": "TTPlayerRebuild/TTPlayerHttps", "workflow": "build.yml"},
+    {"folder": "mbedtlsmin", "repository": "TTPlayerRebuild/TTPlayerHttps", "workflow": "build.yml", "build_job": "Build HTTPS DLL (VS 2026, x86)"},
     {"folder": "ttp_aac", "repository": "TTPlayerRebuild/TTPlayerAAC", "workflow": "build.yml"},
     {"folder": "ttp_ac3dts", "repository": "TTPlayerRebuild/TTPlayer_AC_130_dts", "workflow": "build.yml"},
     {"folder": "ttp_ape", "repository": "TTPlayerRebuild/TTPlayerAPE", "workflow": "build.yml"},
@@ -27,6 +27,6 @@
     {"folder": "ttpbrowser", "repository": "TTPlayerRebuild/TTPlayerBrowser", "workflow": "build.yml"},
     {"folder": "ttpcomm", "repository": "TTPlayerRebuild/TTPlayerComm", "workflow": "build.yml"},
     {"folder": "ttpres", "repository": "TTPlayerRebuild/TTPlayerRes", "workflow": "build.yml"},
-    {"folder": "waskin", "repository": "TTPlayerRebuild/TTPlayerWaskin", "workflow": "manual-build.yml"}
+    {"folder": "waskin", "repository": "TTPlayerRebuild/TTPlayerWaskin", "workflow": "manual-build.yml", "build_job": "Build DLL (VS 2026, Windows x86)"}
   ]
 }

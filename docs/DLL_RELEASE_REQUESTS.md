@@ -45,10 +45,12 @@ gettext 另传 `configuration: Release`。各项目仍独立分配北京时间�
 
 ## 查看结果与重试
 
-统一 Action 的 Summary 列出各仓库的请求结果和运行链接，同时保存 `dll-release-requests.json` Artifact。
+统一 Action 的 Summary 将请求（**Request**）与构建（**Build**）分列，并保留运行链接和 `dll-release-requests.json` Artifact。
 
-- `requested` 表示请求已被 GitHub 接收，**不表示 DLL 已经编译或 Release 已发布**。打开对应运行，查看 `Check for unpublished commits`、构建和发布任务的结果。
-- `would-build`／`would-skip` 是勾选 Preview 后的只读预测，不会发送请求。
+- `requested` 仅表示 GitHub 已接收请求。分发完毕后，控制器按返回的运行 ID 查询对应运行，轮询窗口为 120 秒，不等待编译或发布完成。
+- `build-queued`／`building`／`built` 分别表示观察到构建任务等待启动、执行中或已经成功，**不表示 Release 已发布**。`skipped` 表示目标构建任务确实被跳过；发布检查或构建没有成功时单独显示，而不是视为正常跳过。
+- 若目标仍在排队、读不到任务或没有返回运行 ID，显示 `pending`／`unavailable`。尽可能附上当前默认分支的 `would-build`／`would-skip` 快照及比较依据；快照不是已分发运行的结果，最终以目标运行的 `Check for unpublished commits` 和构建任务为准。
+- 勾选 Preview 只显示 `would-build`／`would-skip` 的只读判定，不会发送请求。
 - 一个仓库请求失败后继续处理其他仓库，最后统一 Action 报告失败，保留所有结果。
 - POST 请求不自动重试。连接中断可能发生在请求已被接收之后，应先查看目标 Actions，再决定重跑。再次请求已成功发布的提交会由接收端跳过。
 - 网络或权限错误不会回退匿名请求，也不会忽略条件直接发布。令牌只通过环境变量使用，不写入 Artifact。
@@ -90,6 +92,8 @@ gettext 另传 `configuration: Release`。各项目仍独立分配北京时间�
 ## 维护和本地验证
 
 `cmake/check_component_release.py` 的维护源在播放器仓库，各 DLL 仓库携带字节相同的副本，以便独立构建；运行时不下载另一个仓库中可变的脚本。修改条件检查后，同步该文件到清单中各仓库，并一起提交对应变动。
+
+构建状态通过 GitHub Actions 的任务列表读取。若某个组件自定义了 `build` 任务的显示名，在 `cmake/dll_repositories.json` 中用 `build_job` 记录该名称；未指定时按 `build` 匹配。
 
 2026-11-05 本地验证材料位于 `rebuild/tests/dll_release_dispatch_20261105`。当时覆盖相同／领先／落后／分叉提交、首次发布、注释标签、缺失标签和权限错误、重复请求、POST 不重试、预览不写入、24 个仓库的映射及接线、原有构建和发布任务保持原样等情况。35 项检查通过，25 份变更后的工作流通过 Actionlint 1.7.12。当前回归清单已扩至 27 个仓库。
 
