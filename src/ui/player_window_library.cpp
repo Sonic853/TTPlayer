@@ -609,7 +609,7 @@ private:
             GlobalFree(memory);
         }
     }
-    auto Find(const FORMATETC& request) const {
+    std::vector<Entry>::const_iterator Find(const FORMATETC& request) const {
         return std::find_if(entries_.begin(), entries_.end(),
             [&request](const Entry& entry) {
                 return request.cfFormat == entry.format.cfFormat &&
