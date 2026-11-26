@@ -12,4 +12,13 @@ namespace ttplayer::audio {
     return duration_ms > 0 && position_ms > duration_ms ? duration_ms : position_ms;
 }
 
+// waveOut reports 32-bit counters even for high-rate, multichannel PCM.
+// Less than 4 GiB can be queued, so the submitted count identifies the wrap
+// unambiguously. Both values are in the same unit and restart at each reset.
+[[nodiscard]] constexpr std::uint64_t ExpandWaveOutPosition(
+    std::uint32_t reported, std::uint64_t submitted) noexcept {
+    constexpr std::uint64_t period = UINT64_C(1) << 32;
+    return reported > submitted ? submitted : reported + (submitted - reported) / period * period;
+}
+
 } // namespace ttplayer::audio

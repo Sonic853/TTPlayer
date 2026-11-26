@@ -481,6 +481,7 @@ private:
     std::atomic<Backend> backend_{Backend::none};
     HWAVEOUT device_{};
     IDirectSoundBuffer8* direct_sound_buffer_{};
+    bool device_balance_in_pcm_{}; // No usable per-channel device pan; master volume stays live.
     HANDLE completion_event_{};
     std::jthread worker_;
     std::jthread fade_worker_;

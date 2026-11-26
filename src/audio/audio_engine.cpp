@@ -2222,6 +2222,48 @@ std::wstring WaveOutErrorMessage(std::wstring_view operation,
     return message;
 }
 
+std::wstring DescribeSignalFormat(const WAVEFORMATEX& wave) {
+    TtpCommPcmFormat pcm{};
+    if (!DescribeHiresPcm(wave, pcm)) return i18n::Literal(L"未知格式");
+    auto bits = std::to_wstring(pcm.valid_bits);
+    if (pcm.valid_bits != pcm.bits) bits += L"/" + std::to_wstring(pcm.bits);
+    return std::to_wstring(pcm.sample_rate) + L" Hz / " + bits +
+        (pcm.floating_point ? L" bit float / " : L" bit PCM / ") +
+        std::to_wstring(pcm.channels) + L" ch";
+}
+
+bool SameDevicePcm(const WAVEFORMATEX& requested, const WAVEFORMATEX& actual) {
+    TtpCommPcmFormat a{}, b{};
+    return DescribeHiresPcm(requested, a) && DescribeHiresPcm(actual, b) &&
+        a.sample_rate == b.sample_rate && a.bits == b.bits && a.valid_bits == b.valid_bits &&
+        a.floating_point == b.floating_point && a.channels == b.channels && a.channel_mask == b.channel_mask;
+}
+
+HRESULT CreateDirectSoundStream(IDirectSound8& device, WAVEFORMATEXTENSIBLE& format, DWORD bytes,
+                                bool hardware, bool verify, ComPtr<IDirectSoundBuffer>& buffer,
+                                const wchar_t*& operation) {
+    DSBUFFERDESC desc{};
+    desc.dwSize = sizeof(desc);
+    desc.dwFlags = DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_GLOBALFOCUS | DSBCAPS_CTRLVOLUME |
+                   (format.Format.nChannels <= 2 ? DSBCAPS_CTRLPAN : 0) |
+                   (hardware ? DSBCAPS_LOCHARDWARE : DSBCAPS_LOCSOFTWARE);
+    desc.dwBufferBytes = bytes;
+    desc.lpwfxFormat = &format.Format;
+    operation = L"IDirectSound::CreateSoundBuffer(stream)";
+    HRESULT hr = device.CreateSoundBuffer(&desc, buffer.ReleaseAndGetAddressOf(), nullptr);
+    if (FAILED(hr)) return hr;
+    if (!buffer) return E_UNEXPECTED;
+    if (!verify) return S_OK;
+
+    WAVEFORMATEXTENSIBLE actual{};
+    operation = L"IDirectSoundBuffer::GetFormat";
+    hr = buffer->GetFormat(&actual.Format, sizeof(actual), nullptr);
+    if (SUCCEEDED(hr) && !SameDevicePcm(format.Format, actual.Format)) hr = DSERR_BADFORMAT;
+    if (FAILED(hr)) buffer.Reset();
+    else format = actual;
+    return hr;
+}
+
 using LegacyOutputBackend = OutputBackend;
 
 struct WaveOutSelection {
@@ -2779,16 +2821,9 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
     const auto pcm_mode=options.pcm_mode;
     const bool precise=pcm_mode==PcmPlaybackMode::high_precision;
     const bool unaltered=pcm_mode==PcmPlaybackMode::bit_exact;
-    if (pcm_mode!=PcmPlaybackMode::compatible &&
-        output.requested_backend!=LegacyOutputBackend::wasapi_shared &&
-        output.requested_backend!=LegacyOutputBackend::wasapi_exclusive &&
-        output.requested_backend!=LegacyOutputBackend::asio &&
-        output.requested_backend!=LegacyOutputBackend::kernel_streaming) {
-        SetError(i18n::Literal(L"高精度／原样输出需要选择 WASAPI、ASIO 或 Kernel Streaming；"
-                 L"WaveOut 和 DirectSound 请使用原版兼容模式。"));
-        return;
-    }
-    if (unaltered && output.requested_backend==LegacyOutputBackend::wasapi_shared) {
+    if (unaltered && output.requested_backend != LegacyOutputBackend::wasapi_exclusive &&
+        output.requested_backend != LegacyOutputBackend::asio &&
+        output.requested_backend != LegacyOutputBackend::kernel_streaming) {
         SetError(i18n::Literal(L"原样输出需要 WASAPI 独占、ASIO 或 Kernel Streaming；共享模式经过系统混音器。"));
         return;
     }
@@ -2883,6 +2918,88 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         wave_format.cbSize=0;
     }
 
+    // DirectSound and waveOut consume the final encoded bytes themselves.
+    // Prefer IEEE float on these shared paths: boosted DSP samples can keep
+    // their headroom until the mixer applies live volume. Integer-only devices
+    // use the same >=24-valid-bit candidates and final TPDF encoder as KS.
+    const auto shared_device_formats = [&] {
+        if (!precise) return std::vector<WAVEFORMATEXTENSIBLE>{native_format};
+        auto formats = HiresOutputCandidates(native_format.Format, pcm_mode);
+        std::stable_partition(formats.begin(), formats.end(), [](const auto& f) {
+            return PcmProcessingTag(f.Format) == WAVE_FORMAT_IEEE_FLOAT;
+        });
+        return formats;
+    };
+    const auto use_shared_format = [&](const WAVEFORMATEXTENSIBLE& actual) {
+        if (precise && !output_transform.SetHighPrecisionEndpoint(actual, ttpcomm_module_, options.dither)) {
+            if (!stop_requested_) SetError(output_transform.Error());
+            return false;
+        }
+        native_format = actual;
+        wave_format = output_transform.OutputFormat(); // self-contained tag, actual frame size/rate
+        return true;
+    };
+    const auto precision_requirement = [&] {
+        return L"; " + i18n::Text(L"高精度处理") + L": " + std::to_wstring(wave_format.nSamplesPerSec) +
+            L" Hz / " + std::to_wstring(wave_format.nChannels) + L" ch / float32, float64, PCM ≥ 24 bit";
+    };
+    const auto signal_prefix = [&] {
+        return DescribeSignalFormat(source_format) +
+            (precise ? i18n::Literal(L" → float64 处理（Winamp 旁路） → ") :
+             unaltered ? i18n::Literal(L" → 原样（处理／音量旁路） → ") : i18n::Literal(L" → 原版兼容 → ")) +
+            BackendName(output.requested_backend) + L" ";
+    };
+    bool balance_in_pcm = precise && wave_format.nChannels > 2 &&
+        (output.requested_backend == LegacyOutputBackend::direct_sound ||
+         output.requested_backend == LegacyOutputBackend::wave_out);
+    std::vector<std::byte> converted_packet;
+    const auto process_packet = [&](std::vector<std::byte>& pcm, bool eof) {
+        const auto revision = processor_revision_.load();
+        if (revision != processor_revision) {
+            PlaybackOptions current;
+            {
+                std::scoped_lock lock(mutex_);
+                current = options_;
+            }
+            processors.Update(current);
+            for (auto& diagnostic : processors.TakeDiagnostics(true))
+                RecordDiagnostic(std::move(diagnostic));
+            processor_revision = revision;
+        }
+        if (unaltered || (pcm.empty() && !eof)) return true;
+        // Even empty EOF must drain the modern FIR before draining SSRC.
+        const bool processing = processors.Active() && (!pcm.empty() || precise);
+        std::vector<double> samples;
+        if (processing && !processors.Process(pcm, dsp_enabled_.load(), &samples, eof)) {
+            if (!stop_requested_) SetError(L"The recovered audio processor chain failed");
+            return false;
+        }
+        if (balance_in_pcm && !samples.empty()) {
+            int balance;
+            {
+                std::scoped_lock lock(mutex_);
+                balance = balance_;
+            }
+            if (balance) {
+                const double gain = (100 - std::abs(balance)) / 100.0;
+                for (size_t i = balance > 0 ? 0 : 1; i < samples.size(); i += wave_format.nChannels)
+                    samples[i] *= gain;
+            }
+        }
+        output_transform.SetWinampDsp(dsp_chain_.get(),
+            pcm_mode == PcmPlaybackMode::compatible && dsp_enabled_.load());
+        const bool ok = processing ? output_transform.ProcessSamples(std::move(samples), converted_packet, eof)
+                                   : output_transform.Process(pcm, converted_packet, eof);
+        if (!ok) {
+            if (!stop_requested_) SetError(output_transform.Error());
+            return false;
+        }
+        for (auto& diagnostic : processors.TakeDiagnostics()) RecordDiagnostic(std::move(diagnostic));
+        for (auto& diagnostic : output_transform.TakeDiagnostics()) RecordDiagnostic(std::move(diagnostic));
+        pcm.swap(converted_packet);
+        return true;
+    };
+
     if (output.requested_backend == LegacyOutputBackend::direct_sound) {
         // FUN_004C3170 creates the DirectSound device selected by the
         // persisted GUID.  The synthetic DEF00000 key represents the null
@@ -2933,54 +3050,45 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                         L"IDirectSound::CreateSoundBuffer(primary)", result));
                 return;
             }
-            result = primary->SetFormat(&native_format.Format);
-            if (FAILED(result)) {
-                if (!stop_requested_)
-                    SetError(HResultMessage(
-                        L"IDirectSoundBuffer::SetFormat(primary)", result));
-                return;
-            }
         }
 
-        const auto plan = PlanDirectSoundBuffer(source_format, source->PacketBytes(), wave_format,
-            options.output_buffer_ms, IsNetworkMediaLocation(path));
-        if (!plan || plan->RingBytes() > DSBSIZE_MAX) {
-            if (!stop_requested_) SetError(L"The PCM packets exceed the DirectSound buffer limit");
-            return;
-        }
-        DSBUFFERDESC description{};
-        description.dwSize = sizeof(description);
-        description.dwFlags = DSBCAPS_GETCURRENTPOSITION2 |
-                              DSBCAPS_GLOBALFOCUS |
-                              DSBCAPS_CTRLVOLUME |
-                              (wave_format.nChannels <= 2 ? DSBCAPS_CTRLPAN : 0) |
-                              (options.hardware_buffer
-                                   ? DSBCAPS_LOCHARDWARE
-                                   : DSBCAPS_LOCSOFTWARE);
-        description.dwBufferBytes = plan->RingBytes();
-        description.lpwfxFormat = &native_format.Format;
+        const auto reader_bytes = source->PacketBytes();
+        const bool url = IsNetworkMediaLocation(path);
+        std::optional<DirectSoundBufferPlan> plan;
         ComPtr<IDirectSoundBuffer> base_buffer;
-        result = direct_sound->CreateSoundBuffer(
-            &description, &base_buffer, nullptr);
-        if ((FAILED(result) || !base_buffer) && options.hardware_buffer) {
-            // FUN_004C3170 004C3240..004C325C retries FUN_004C3C86 with its
-            // hardware flag cleared.  HardwareBuffer is a preference, not a
-            // reason for the default configuration to become unplayable.
-            base_buffer.Reset();
-            description.dwFlags &= ~DSBCAPS_LOCHARDWARE;
-            description.dwFlags |= DSBCAPS_LOCSOFTWARE;
-            result = direct_sound->CreateSoundBuffer(
-                &description, &base_buffer, nullptr);
-            if (SUCCEEDED(result) && base_buffer) {
-                RecordDiagnostic(
-                    L"DirectSound hardware buffer is unavailable; using a "
-                    L"software buffer");
+        const wchar_t* operation = L"IDirectSound::CreateSoundBuffer(stream)";
+        result = DSERR_BADFORMAT;
+        for (auto candidate : shared_device_formats()) {
+            if (stop_requested_) return;
+            const auto geometry = PlanDirectSoundBuffer(source_format, reader_bytes, candidate.Format,
+                                                        options.output_buffer_ms, url);
+            if (!geometry || geometry->RingBytes() > DSBSIZE_MAX) {
+                operation = L"DirectSound PCM buffer capacity";
+                result = E_INVALIDARG;
+                continue;
             }
+            if (primary) {
+                operation = L"IDirectSoundBuffer::SetFormat(primary)";
+                result = primary->SetFormat(&candidate.Format);
+                if (FAILED(result)) continue;
+            }
+            result = CreateDirectSoundStream(*direct_sound.Get(), candidate, geometry->RingBytes(),
+                                             options.hardware_buffer, precise, base_buffer, operation);
+            const bool retry_software = FAILED(result) && options.hardware_buffer;
+            if (retry_software)
+                result = CreateDirectSoundStream(*direct_sound.Get(), candidate, geometry->RingBytes(),
+                                                 false, precise, base_buffer, operation);
+            if (FAILED(result)) continue;
+            if (!use_shared_format(candidate)) return;
+            if (retry_software)
+                RecordDiagnostic(L"DirectSound hardware buffer is unavailable; using a software buffer");
+            plan = geometry;
+            break;
         }
-        if (FAILED(result) || !base_buffer) {
-            if (!stop_requested_)
-                SetError(HResultMessage(
-                    L"IDirectSound::CreateSoundBuffer(stream)", result));
+        if (!plan) {
+            auto message = HResultMessage(operation, result);
+            if (precise) message += precision_requirement();
+            if (!stop_requested_) SetError(std::move(message), result);
             return;
         }
         ComPtr<IDirectSoundBuffer8> sound_buffer;
@@ -3053,9 +3161,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         auto decode_more = [&]() -> bool {
             decoded.clear();
             decoded_offset = 0;
-            std::vector<std::byte> native;
             downloaded_percent_ = source->DownloadedPercent();
-            if (!source->Read(plan->reader_bytes, native, decoder_eof)) {
+            if (!source->Read(plan->reader_bytes, decoded, decoder_eof)) {
                 if (seek_request_ms_.load() >= 0) return true;
                 if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                 return false;
@@ -3063,34 +3170,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             if (stop_requested_) return false;
             if (seek_request_ms_.load() >= 0) return true;
             refresh_metadata();
-            const uint64_t latest_revision = processor_revision_.load();
-            if (latest_revision != processor_revision) {
-                PlaybackOptions current;
-                {
-                    std::scoped_lock lock(mutex_);
-                    current = options_;
-                }
-                processors.Update(current);
-                processor_revision = latest_revision;
-            }
-            std::vector<double> processed;
-            const bool processing = !native.empty() && processors.Active();
-            if (processing && !processors.Process(native, dsp_enabled_.load(), &processed, decoder_eof)) {
-                if (!stop_requested_)
-                    SetError(L"The recovered audio processor chain failed");
-                return false;
-            }
-            for (auto& diagnostic : processors.TakeDiagnostics())
-                RecordDiagnostic(std::move(diagnostic));
-            output_transform.SetWinampDsp(dsp_chain_.get(),
-                        pcm_mode==PcmPlaybackMode::compatible && dsp_enabled_.load());
-            if (!(processing ? output_transform.ProcessSamples(
-                      std::move(processed), decoded, decoder_eof)
-                  : output_transform.Process(native, decoded, decoder_eof))) {
-                if (!stop_requested_) SetError(output_transform.Error());
-                return false;
-            }
-            for(auto& message:output_transform.TakeDiagnostics()) RecordDiagnostic(std::move(message));
+            if (!process_packet(decoded, decoder_eof)) return false;
             if (decoded.size() % wave_format.nBlockAlign) {
                 if (!stop_requested_) SetError(L"DirectSound received a partial output PCM frame");
                 return false;
@@ -3232,11 +3312,9 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             std::scoped_lock lock(mutex_);
             if (stop_requested_) return;
             direct_sound_buffer_ = sound_buffer.Get();
+            device_balance_in_pcm_ = balance_in_pcm;
             backend_ = Backend::direct_sound;
-            signal_path_=i18n::Literal(L"原版兼容 → DirectSound ")+
-                std::to_wstring(wave_format.nSamplesPerSec)+L" Hz / "+
-                std::to_wstring(wave_format.wBitsPerSample)+L" bit / "+
-                std::to_wstring(wave_format.nChannels)+L" ch";
+            signal_path_ = signal_prefix() + DescribeSignalFormat(native_format.Format);
             ApplyVolumeLocked();
             metadata_ = std::move(opened_metadata);
             ++metadata_revision_;
@@ -3437,35 +3515,6 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         buffer_bytes = static_cast<size_t>(asio_sink->PeriodFrames()) *
                        wave_format.nBlockAlign;
     }
-    {
-        const auto describe=[](const WAVEFORMATEX& f) {
-            TtpCommPcmFormat info{};
-            if (!DescribeHiresPcm(f,info)) return std::wstring(i18n::Literal(L"未知格式"));
-            return std::to_wstring(info.sample_rate)+L" Hz / "+
-                std::to_wstring(info.valid_bits)+L" bit "+
-                (info.floating_point ? L"float" : L"PCM")+
-                L" / "+std::to_wstring(info.channels)+L" ch";
-        };
-        std::wstring signal=describe(source_format);
-        signal+=precise ? i18n::Literal(L" → float64 处理（Winamp 旁路） → ") :
-                unaltered ? i18n::Literal(L" → 原样（处理／音量旁路） → ") : i18n::Literal(L" → 原版兼容 → ");
-        signal+=BackendName(output.requested_backend)+L" ";
-        if (wasapi_sink) signal+=describe(wasapi_sink->DeviceFormat());
-        else if (ks_sink) signal+=describe(ks_sink->DeviceFormat());
-        else if (asio_sink) {
-            signal+=std::to_wstring(asio_sink->SampleRate())+L" Hz";
-            size_t channel{};
-            for (const auto& layout:asio_sink->ChannelLayouts())
-                signal+=L" / ch"+std::to_wstring(++channel)+L": "+
-                    std::to_wstring(layout.valid_bits)+L" bit "+
-                    (layout.floating_point?L"float":L"PCM");
-        } else signal+=describe(wave_format);
-        if (output.requested_backend==LegacyOutputBackend::wasapi_shared)
-            signal+=i18n::Literal(L"（系统共享混音）");
-        std::scoped_lock lock(mutex_);
-        signal_path_=std::move(signal);
-    }
-
     HANDLE completion = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!completion) {
         if (!stop_requested_)
@@ -3488,15 +3537,46 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             return;
         }
     }
-    MMRESULT open_result = (ks_sink || asio_sink || wasapi_sink) ? MMSYSERR_NOERROR : waveOutOpen(
-        &opened_device, output_device, &native_format.Format,
-        reinterpret_cast<DWORD_PTR>(&WaveOutCallback),
-        reinterpret_cast<DWORD_PTR>(completion), CALLBACK_FUNCTION);
-    if (open_result != MMSYSERR_NOERROR) {
-        CloseHandle(completion);
-        if (!stop_requested_)
-            SetError(WaveOutErrorMessage(L"waveOutOpen", open_result));
-        return;
+    if (output.requested_backend == LegacyOutputBackend::wave_out) {
+        MMRESULT open_result = WAVERR_BADFORMAT;
+        for (const auto& candidate : shared_device_formats()) {
+            if (stop_requested_) break;
+            // WAVE_FORMAT_QUERY can succeed even when a real open fails.
+            // DIRECT prevents the ACM mapper from narrowing a high-precision stream.
+            open_result = waveOutOpen(&opened_device, output_device, &candidate.Format,
+                reinterpret_cast<DWORD_PTR>(&WaveOutCallback), reinterpret_cast<DWORD_PTR>(completion),
+                CALLBACK_FUNCTION | (precise ? WAVE_FORMAT_DIRECT : 0));
+            if (open_result != MMSYSERR_NOERROR) continue;
+            if (!use_shared_format(candidate)) {
+                waveOutClose(opened_device);
+                CloseHandle(completion);
+                return;
+            }
+            buffer_bytes = OutputSegmentBytes(wave_format, options.output_buffer_ms);
+            break;
+        }
+        if (open_result != MMSYSERR_NOERROR) {
+            CloseHandle(completion);
+            auto message = WaveOutErrorMessage(L"waveOutOpen", open_result);
+            if (precise) message += precision_requirement();
+            if (!stop_requested_) SetError(std::move(message));
+            return;
+        }
+        // A slow FIR prefill must not consume the first headers at zero
+        // opening gain. PublishOpened starts this paused queue atomically.
+        if (precise) {
+            const auto paused = waveOutPause(opened_device);
+            if (paused != MMSYSERR_NOERROR) {
+                waveOutClose(opened_device);
+                CloseHandle(completion);
+                if (!stop_requested_) SetError(WaveOutErrorMessage(L"waveOutPause", paused));
+                return;
+            }
+            WAVEOUTCAPSW caps{};
+            if (wave_format.nChannels == 2 && waveOutGetDevCapsW(reinterpret_cast<UINT_PTR>(opened_device),
+                    &caps, sizeof(caps)) == MMSYSERR_NOERROR && !(caps.dwSupport & WAVECAPS_LRVOLUME))
+                balance_in_pcm = true;
+        }
     }
     // Original 004E2585 stores the pre-playback stereo gain at output+0x0C,
     // before any player volume, balance or opening fade reaches the handle.
@@ -3510,8 +3590,22 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         RecordDiagnostic(L"waveOutGetVolume failed; using the original full-volume restore fallback");
     }
     {
+        std::wstring signal = signal_prefix();
+        if (wasapi_sink) signal += DescribeSignalFormat(wasapi_sink->DeviceFormat());
+        else if (ks_sink) signal += DescribeSignalFormat(ks_sink->DeviceFormat());
+        else if (asio_sink) {
+            signal += std::to_wstring(asio_sink->SampleRate()) + L" Hz";
+            size_t channel{};
+            for (const auto& layout : asio_sink->ChannelLayouts())
+                signal += L" / ch" + std::to_wstring(++channel) + L": " +
+                    std::to_wstring(layout.valid_bits) + L" bit " + (layout.floating_point ? L"float" : L"PCM");
+        } else signal += DescribeSignalFormat(native_format.Format);
+        if (output.requested_backend == LegacyOutputBackend::wasapi_shared)
+            signal += i18n::Literal(L"（系统共享混音）");
         std::scoped_lock lock(mutex_);
+        signal_path_ = std::move(signal);
         device_ = opened_device;
+        device_balance_in_pcm_ = balance_in_pcm;
         completion_event_ = completion;
         backend_ = wasapi_sink ? Backend::wasapi : asio_sink ? Backend::asio :
                    ks_sink ? Backend::kernel_streaming : Backend::wave_out;
@@ -3539,6 +3633,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         size_t written{};
         while (!stop_requested_ && written < output.data.size() &&
                (decoded_offset < decoded.size() || !decoder_eof)) {
+            if (opened_device && precise && seek_request_ms_.load() >= 0) return true;
             if (decoded_offset == decoded.size()) {
                 decoded.clear();
                 decoded_offset = 0;
@@ -3549,41 +3644,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 }
                 refresh_metadata();
                 if (stop_requested_) return false;
-                const uint64_t latest_revision = processor_revision_.load();
-                if (latest_revision != processor_revision) {
-                    PlaybackOptions current;
-                    {
-                        std::scoped_lock lock(mutex_);
-                        current = options_;
-                    }
-                    processors.Update(current);
-                    for (auto& diagnostic : processors.TakeDiagnostics(true))
-                        RecordDiagnostic(std::move(diagnostic));
-                    processor_revision = latest_revision;
-                }
-                std::vector<double> processed;
-                const bool processing = (!decoded.empty() || (precise && decoder_eof)) && processors.Active();
-                if (processing && !processors.Process(decoded, dsp_enabled_.load(), &processed, decoder_eof)) {
-                    if (!stop_requested_)
-                        SetError(L"The recovered audio processor chain failed");
-                    return false;
-                }
-                if (!unaltered && (!decoded.empty() || decoder_eof)) {
-                    std::vector<std::byte> converted;
-                    output_transform.SetWinampDsp(dsp_chain_.get(),
-                        pcm_mode==PcmPlaybackMode::compatible && dsp_enabled_.load());
-                    if (!(processing ? output_transform.ProcessSamples(
-                              std::move(processed), converted, decoder_eof)
-                          : output_transform.Process(decoded, converted, decoder_eof))) {
-                        if (!stop_requested_)
-                            SetError(output_transform.Error());
-                        return false;
-                    }
-                    for(auto& message:output_transform.TakeDiagnostics()) RecordDiagnostic(std::move(message));
-                    decoded = std::move(converted);
-                }
-                for (auto& diagnostic : processors.TakeDiagnostics())
-                    RecordDiagnostic(std::move(diagnostic));
+                if (!process_packet(decoded, decoder_eof)) return false;
                 if (decoded.empty()) continue;
             }
             const size_t copy = std::min(output.data.size() - written,
@@ -3785,12 +3846,19 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             } else if (asio_sink) {
                 if (!asio_sink->Reset()) { SetError(asio_sink->Error()); break; }
             } else {
-                waveOutReset(opened_device);
+                const auto reset = waveOutReset(opened_device);
+                if (reset != MMSYSERR_NOERROR) {
+                    SetError(WaveOutErrorMessage(L"waveOutReset", reset)); break;
+                }
                 // Reset clears waveOut's pause state. A push decoder can
                 // take several callbacks to prefill; pause BEFORE the first
                 // waveOutWrite or a paused seek audibly advances 10-20 ms.
-                if (previous_state == PlaybackState::paused)
-                    waveOutPause(opened_device);
+                if (precise || previous_state == PlaybackState::paused) {
+                    const auto paused = waveOutPause(opened_device);
+                    if (paused != MMSYSERR_NOERROR) {
+                        SetError(WaveOutErrorMessage(L"waveOutPause", paused)); break;
+                    }
+                }
             }
             for (auto& buffer : buffers) {
                 if (!ks_sink && !asio_sink && !wasapi_sink &&
@@ -3811,10 +3879,13 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             position_base_ms = std::clamp<int64_t>(requested, 0, duration_ms_.load());
             if (requested >= duration_ms_.load()) {
                 CompleteSeek(request, position_base_ms);
+                std::scoped_lock lock(mutex_);
+                if (request.revision != seek_revision_) continue;
                 state_ = PlaybackState::stopped;
                 break;
             }
             if (!source->Seek(std::chrono::milliseconds(position_base_ms))) {
+                if (seek_request_ms_.load() >= 0) continue;
                 if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                 break;
             }
@@ -3824,6 +3895,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 if (!fill(buffer)) { usable = false; break; }
                 if (decoder_eof && decoded_offset == decoded.size()) break;
             }
+            if (!usable) break;
+            if (seek_request_ms_.load() >= 0) continue;
             if (ks_sink) {
                 if (!ks_sink->SetPaused(previous_state == PlaybackState::paused)) {
                     SetError(ks_sink->Error()); break;
@@ -3836,7 +3909,21 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 waveOutPause(opened_device);
             else if (usable && queued != 0)
                 publish_at(0, true);
-            if (usable) CompleteSeek(request, position_base_ms);
+            CompleteSeek(request, position_base_ms);
+            if (opened_device && precise && queued) {
+                // Resume defers to us while a seek is pending. Check the live
+                // state *after* its ACK so a racing Resume cannot strand a
+                // prefilled queue, or start one superseded by another seek.
+                MMRESULT restarted = MMSYSERR_NOERROR;
+                {
+                    std::scoped_lock lock(mutex_);
+                    if (!stop_requested_ && request.revision == seek_revision_ &&
+                        state_ == PlaybackState::playing) restarted = waveOutRestart(opened_device);
+                }
+                if (restarted != MMSYSERR_NOERROR) {
+                    SetError(WaveOutErrorMessage(L"waveOutRestart", restarted)); break;
+                }
+            }
         }
 
         if ((ks_sink && !ks_sink->SetPaused(state_.load() == PlaybackState::paused)) ||
@@ -3900,18 +3987,16 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 played_bytes = native_position;
                 relative = static_cast<int64_t>(native_position * 1000 / wave_format.nAvgBytesPerSec);
             } else if (position.wType == TIME_BYTES) {
-                relative = static_cast<int64_t>(position.u.cb) * 1000 /
-                           wave_format.nAvgBytesPerSec;
-                played_bytes = position.u.cb;
+                played_bytes = ExpandWaveOutPosition(position.u.cb, next_stream_byte);
+                relative = static_cast<int64_t>(played_bytes * 1000 / wave_format.nAvgBytesPerSec);
             } else if (position.wType == TIME_SAMPLES) {
-                relative = static_cast<int64_t>(position.u.sample) * 1000 /
-                           wave_format.nSamplesPerSec;
-                played_bytes = static_cast<uint64_t>(position.u.sample) *
-                               wave_format.nBlockAlign;
+                const auto frames = ExpandWaveOutPosition(position.u.sample, next_stream_byte / wave_format.nBlockAlign);
+                relative = static_cast<int64_t>(frames * 1000 / wave_format.nSamplesPerSec);
+                played_bytes = frames * wave_format.nBlockAlign;
             } else if (position.wType == TIME_MS) {
-                relative = position.u.ms;
-                played_bytes = static_cast<uint64_t>(position.u.ms) *
-                               wave_format.nAvgBytesPerSec / 1000;
+                relative = static_cast<int64_t>(ExpandWaveOutPosition(position.u.ms,
+                    next_stream_byte * 1000 / wave_format.nAvgBytesPerSec));
+                played_bytes = static_cast<uint64_t>(relative) * wave_format.nAvgBytesPerSec / 1000;
             }
             position_ms_ = BoundPlaybackClock(position_base_ms + relative, duration_ms_.load());
             UpdateTrackFade(position_ms_.load());
@@ -3919,6 +4004,8 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 publish_at(played_bytes, false);
         }
         if (decoder_eof && decoded_offset == decoded.size() && queued == 0) {
+            std::scoped_lock lock(mutex_);
+            if (seek_request_ms_.load() >= 0) continue;
             if (const auto duration = duration_ms_.load(); duration > 0)
                 position_ms_ = duration;
             state_ = PlaybackState::stopped;
@@ -4094,12 +4181,20 @@ bool AudioEngine::PublishOpened(Backend backend, const AudioFormat& format,
             // Do not briefly play position zero when an async open has a
             // pending restore/seek. Serialize the first Play with UI state
             // just as the ring monitor does for subsequent starts.
-            if (backend == Backend::direct_sound && !opening_paused_ &&
-                !(opening_seek_ms_ >= 0 && duration.count() > 0)) {
+            const bool start_here = !opening_paused_ && !(opening_seek_ms_ >= 0 && duration.count() > 0);
+            if (backend == Backend::direct_sound && start_here) {
                 const HRESULT hr = direct_sound_buffer_->Play(0, 0, DSBPLAY_LOOPING);
                 if (FAILED(hr)) {
                     lock.unlock();
                     if (!stop_requested_) SetError(HResultMessage(L"IDirectSoundBuffer::Play", hr), hr);
+                    return false;
+                }
+            } else if (backend == Backend::wave_out && start_here &&
+                       active_pcm_mode_ == PcmPlaybackMode::high_precision) {
+                const auto result = waveOutRestart(device_);
+                if (result != MMSYSERR_NOERROR) {
+                    lock.unlock();
+                    if (!stop_requested_) SetError(WaveOutErrorMessage(L"waveOutRestart", result));
                     return false;
                 }
             }
@@ -4191,7 +4286,8 @@ void AudioEngine::Resume() {
     if (state_.load() != PlaybackState::paused) return;
     bool success{};
     if (backend_.load() == Backend::wave_out && device_)
-        success = waveOutRestart(device_) == MMSYSERR_NOERROR;
+        success = (active_pcm_mode_ == PcmPlaybackMode::high_precision && pending_seek_position_ms_ >= 0) ||
+                  waveOutRestart(device_) == MMSYSERR_NOERROR;
     else if (backend_.load() == Backend::direct_sound && direct_sound_buffer_) {
         // Only the ring monitor can distinguish a user pause from a stopped
         // low-water/seek prefill. Publish intent even while the reader is blocked.
@@ -4620,8 +4716,10 @@ void AudioEngine::ApplyVolumeLocked() {
     DWORD right = base;
     // FUN_004E263A: positive balance attenuates left; negative attenuates
     // right, then packs right in the high word and left in the low word.
-    if (balance_ > 0) left = static_cast<DWORD>(MulDiv(base, 100 - balance_, 100));
-    else if (balance_ < 0) right = static_cast<DWORD>(MulDiv(base, 100 + balance_, 100));
+    if (!device_balance_in_pcm_) {
+        if (balance_ > 0) left = static_cast<DWORD>(MulDiv(base, 100 - balance_, 100));
+        else if (balance_ < 0) right = static_cast<DWORD>(MulDiv(base, 100 + balance_, 100));
+    }
     if (device_) waveOutSetVolume(device_, (right << 16) | (left & 0xffff));
     if (direct_sound_buffer_) {
         const float audible = std::max(effective, 0.00001F);
@@ -4631,8 +4729,8 @@ void AudioEngine::ApplyVolumeLocked() {
                 static_cast<double>(DSBVOLUME_MIN),
                 static_cast<double>(DSBVOLUME_MAX)));
         direct_sound_buffer_->SetVolume(attenuation);
-        direct_sound_buffer_->SetPan(static_cast<LONG>(
-            std::clamp(balance_, -100, 100) * 100));
+        if (!device_balance_in_pcm_)
+            direct_sound_buffer_->SetPan(static_cast<LONG>(std::clamp(balance_, -100, 100) * 100));
     }
 }
 

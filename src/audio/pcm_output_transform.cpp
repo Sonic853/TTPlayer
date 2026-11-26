@@ -14,6 +14,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <optional>
 #include <utility>
 
 namespace ttplayer::audio {
@@ -29,7 +30,9 @@ struct PcmOutputTransform::Impl {
     WAVEFORMATEX output{};
     bool input_floating_point{};
     WORD input_valid_bits{};
-    DWORD input_channel_mask{};
+    std::optional<DWORD> input_channel_mask;
+    std::optional<WAVEFORMATEXTENSIBLE> endpoint_format;
+    HiresPcmEncoder endpoint_encoder;
     std::wstring error;
     ttpcomm::client::ModuleReference module_reference;
     void* resampler{};
@@ -83,6 +86,11 @@ struct PcmOutputTransform::Impl {
             error=L"PCM output block is too large or the quantizer is unavailable";return false;
         }
         bytes.resize(static_cast<size_t>(size));uint32_t produced{};
+        if (endpoint_format) {
+            if (endpoint_encoder.EncodeHalf(samples, bytes)) return true;
+            error = L"The high precision output encoder rejected the PCM block";
+            return false;
+        }
         const auto result=runtime->quantizer_encode(quantizer,samples.data(),static_cast<uint32_t>(samples.size()),
             bytes.data(),static_cast<uint32_t>(size),&produced);
         if(result!=TTPCOMM_OK || produced!=size) {error=L"The output quantizer rejected the PCM block";return false;}
@@ -114,7 +122,8 @@ bool PcmOutputTransform::Open(const WAVEFORMATEX& input,
     impl_->input.cbSize = 0;
     impl_->input_floating_point = encoding.floating_point;
     impl_->input_valid_bits = encoding.valid_bits;
-    impl_->input_channel_mask = encoding.channel_mask;
+    if (input.wFormatTag == WAVE_FORMAT_EXTENSIBLE)
+        impl_->input_channel_mask = encoding.channel_mask;
     const WORD bits = options.floating_point ? 64 : static_cast<WORD>(ResolveOutputBits(
         options.output_bits, options.source_bits ? options.source_bits :
         (encoding.floating_point ? 0 : encoding.valid_bits)));
@@ -161,6 +170,30 @@ bool PcmOutputTransform::Open(const WAVEFORMATEX& input,
 #endif
 }
 
+bool PcmOutputTransform::SetHighPrecisionEndpoint(const WAVEFORMATEXTENSIBLE& device,
+                                                  HMODULE module, int dither) {
+    TtpCommPcmFormat processing{}, target{};
+    if (!impl_) return false;
+    if (impl_->endpoint_format || impl_->output.wFormatTag != WAVE_FORMAT_IEEE_FLOAT ||
+        !DescribeHiresPcm(impl_->output, processing) || !DescribeHiresPcm(device.Format, target)) {
+        impl_->error = L"Invalid high precision processing or device format";
+        return false;
+    }
+    processing.channel_mask = impl_->input_channel_mask.value_or(processing.channel_mask);
+    // EncodeHalf consumes the already processed doubles, with no fixed packet
+    // size or second integer quantizer. Live device volume also reaches audio
+    // queued before an opening fade, mute, or balance change.
+    if (!impl_->endpoint_encoder.Open(module, processing, target, PcmPlaybackMode::high_precision,
+                                     0, impl_->error, dither)) return false;
+    impl_->endpoint_format = device;
+    impl_->output = device.Format;
+    impl_->output.wFormatTag = target.floating_point ? WAVE_FORMAT_IEEE_FLOAT : WAVE_FORMAT_PCM;
+    impl_->output.cbSize = 0;
+    impl_->dsp_enabled = false;
+    impl_->error.clear();
+    return true;
+}
+
 bool PcmOutputTransform::Process(const std::vector<std::byte>& input,
                                  std::vector<std::byte>& output,
                                  bool end_of_stream) {
@@ -174,7 +207,7 @@ bool PcmOutputTransform::Process(const std::vector<std::byte>& input,
     // Preserve the valid-bit count captured before the caller's extensible
     // format went out of scope, and convert once per block inside the DLL.
     auto format=ttpcomm::host::pcm::Format(impl_->input);
-    format.valid_bits=impl_->input_valid_bits;format.channel_mask=impl_->input_channel_mask;
+    format.valid_bits=impl_->input_valid_bits;format.channel_mask=impl_->input_channel_mask.value_or(0);
     const uint64_t count=uint64_t(input.size()/impl_->input.nBlockAlign)*impl_->input.nChannels;
     if(!impl_->runtime || input.size()>UINT32_MAX || count>UINT32_MAX || count>samples.max_size()) return false;
     samples.resize(static_cast<size_t>(count));uint32_t produced{};
@@ -282,7 +315,7 @@ bool PcmOutputTransform::ProcessSamples(std::vector<double> samples,
 }
 
 void PcmOutputTransform::SetWinampDsp(WinampDspChain* chain, bool enabled) noexcept {
-    if(impl_){impl_->dsp=chain;impl_->dsp_enabled=enabled;}
+    if(impl_){impl_->dsp=chain;impl_->dsp_enabled=enabled && !impl_->endpoint_format;}
 }
 std::vector<std::wstring> PcmOutputTransform::TakeDiagnostics() {
     return impl_ ? std::exchange(impl_->diagnostics,{}) : std::vector<std::wstring>{};
@@ -294,6 +327,7 @@ void PcmOutputTransform::Reset() noexcept {
     Impl::ResetObject(impl_->resampler);
 #endif
     if(impl_->runtime) { impl_->runtime->quantizer_reset(impl_->quantizer); impl_->runtime->quantizer_reset(impl_->dsp_quantizer); }
+    impl_->endpoint_encoder.Reset();
 }
 
 WAVEFORMATEX PcmOutputTransform::OutputFormat() const noexcept {
@@ -301,11 +335,12 @@ WAVEFORMATEX PcmOutputTransform::OutputFormat() const noexcept {
 }
 WAVEFORMATEXTENSIBLE PcmOutputTransform::OutputWaveFormat() const noexcept {
     if (!impl_) return {};
+    if (impl_->endpoint_format) return *impl_->endpoint_format;
     TtpCommPcmFormat pcm{};
     if (!DescribeHiresPcm(impl_->output, pcm)) return {};
-    const bool custom_mask = impl_->input_channel_mask &&
-        impl_->input_channel_mask != pcm.channel_mask;
-    if (impl_->input_channel_mask) pcm.channel_mask = impl_->input_channel_mask;
+    const auto input_mask = impl_->input_channel_mask.value_or(0);
+    const bool custom_mask = input_mask && input_mask != pcm.channel_mask;
+    if (input_mask) pcm.channel_mask = input_mask;
     return MakeHiresWave(pcm, pcm.channels > 2 || custom_mask);
 }
 

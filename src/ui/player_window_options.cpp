@@ -357,8 +357,8 @@ void UpdatePcmModeControls(HWND dialog, int mode) {
                  processing && IsChecked(dialog, 2036));
     EnableWindow(GetDlgItem(dialog, 2186),
                  processing && IsChecked(dialog, 2036));
-    EnableWindow(GetDlgItem(dialog, 2033), compatible);
-    EnableWindow(GetDlgItem(dialog, 2034), compatible);
+    EnableWindow(GetDlgItem(dialog, 2033), processing);
+    EnableWindow(GetDlgItem(dialog, 2034), processing);
 }
 
 int TreeCheckState(HWND tree, HTREEITEM item) {
@@ -5955,8 +5955,6 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
                 std::clamp(ComboSelection(dialog, 2041), 0, 4) * 8;
             settings_.device.dither = IsChecked(dialog, 2037)
                 ? std::clamp(ComboSelection(dialog, 2043), 0, 3) + 1 : 0;
-            settings_.device.hardware_buffer = IsChecked(dialog, 2033);
-            settings_.device.create_primary = IsChecked(dialog, 2034);
         } else if (settings_.device.pcm_mode == 1) {
             // Any enabled dither uses TPDF in the high-precision path.
             // Keep the saved legacy type for switching back to mode 0.
@@ -5964,6 +5962,8 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
                 ? std::max(settings_.device.dither, 1) : 0;
         }
         if (settings_.device.pcm_mode != 2) {
+            settings_.device.hardware_buffer = IsChecked(dialog, 2033);
+            settings_.device.create_primary = IsChecked(dialog, 2034);
             settings_.device.resample_rate = IsChecked(dialog, 2036)
                 ? kOptionsResampleRates[static_cast<size_t>(std::clamp(
                       ComboSelection(dialog, 2042), 0,
@@ -6387,11 +6387,11 @@ bool PlayerWindow::CommitOptionsControl(
             break;
         }
         case 2033:
-            if (settings_.device.pcm_mode == 0)
+            if (settings_.device.pcm_mode != 2)
                 settings_.device.hardware_buffer = IsChecked(dialog, 2033);
             break;
         case 2034:
-            if (settings_.device.pcm_mode == 0)
+            if (settings_.device.pcm_mode != 2)
                 settings_.device.create_primary = IsChecked(dialog, 2034);
             break;
         default: return false;
@@ -6901,16 +6901,13 @@ void PlayerWindow::UpdateOptionsDeviceDetails(HWND dialog) {
     };
     add(i18n::Text(L"处理模式"), pcm_mode == 0 ? i18n::Text(L"原版兼容") :
         pcm_mode == 1 ? i18n::Text(L"高精度处理") : i18n::Text(L"原样输出"));
-    const bool supported = pcm_mode == 0 || entry.backend == 2 ||
-        entry.backend == 3 || entry.backend == 5 ||
-        (pcm_mode == 1 && entry.backend == 4);
+    const bool supported = pcm_mode != 2 || entry.backend == 2 ||
+        entry.backend == 3 || entry.backend == 5;
     add(i18n::Text(L"设备兼容"), supported
         ? i18n::Text(L"支持此模式；实际格式需设备接受")
         : i18n::Text(L"不支持此模式，播放时将报告错误"));
     if (!supported) {
-        add(i18n::Text(L"可用输出"), pcm_mode == 1
-            ? L"WASAPI / ASIO / Kernel Streaming"
-            : i18n::Text(L"WASAPI 独占 / ASIO / Kernel Streaming"));
+        add(i18n::Text(L"可用输出"), i18n::Text(L"WASAPI 独占 / ASIO / Kernel Streaming"));
     }
     add(i18n::Text(L"音频处理"), pcm_mode == 0
         ? i18n::Text(L"原版兼容 DSP 链")

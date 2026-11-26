@@ -135,7 +135,8 @@ bool HiresPcmEncoder::EncodeHalf(std::span<const double> samples,
         samples.size()/target_.channels>UINT32_MAX) return false;
     TtpCommAudioEncodeResult result{sizeof(result)};
     return api_.encoder_encode(encoder_,samples.data(),uint32_t(samples.size()/target_.channels),
-        nullptr,0,output.data(),uint32_t(output.size()),&result)==TTPCOMM_OK;
+        nullptr,0,output.data(),uint32_t(output.size()),&result)==TTPCOMM_OK &&
+        result.bytes == output.size();
 }
 bool HiresPcmEncoder::Convert(std::span<const std::byte> input,float left,float right,
     std::span<std::byte> output) noexcept {

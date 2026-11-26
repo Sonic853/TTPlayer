@@ -37,6 +37,10 @@ public:
     bool Open(const WAVEFORMATEX& input,
               const PcmOutputTransformOptions& options,
               HMODULE ttpcomm_module);
+    // Bind a negotiated device format before the first packet. Encode the
+    // post-SSRC doubles directly, including FIR/SSRC output drained at EOF.
+    bool SetHighPrecisionEndpoint(const WAVEFORMATEXTENSIBLE& device,
+                                  HMODULE ttpcomm_module, int dither);
     bool Process(const std::vector<std::byte>& input,
                  std::vector<std::byte>& output,
                  bool end_of_stream = false);
