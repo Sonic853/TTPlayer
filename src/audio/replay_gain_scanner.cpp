@@ -394,7 +394,8 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
     std::stop_token stop, ReplayGainProgress progress, int subtrack,
-    ReplayGainCheckpoint checkpoint, const ReplayGainScanConcurrency* concurrency) {
+    ReplayGainCheckpoint checkpoint, const ReplayGainScanConcurrency* concurrency,
+    int file_buffer_bytes) {
     if (!LegacyReplayGainAvailable(ttpcomm))
         return Error(ReplayGainScanStatus::unsupported, E_NOINTERFACE,
                      L"ttpcomm ReplayGain ordinals 100/101 are unavailable");
@@ -428,13 +429,15 @@ ReplayGainScanResult AnalyzeReplayGainTrack(
     if (!cda && source_version.empty())
         return Error(ReplayGainScanStatus::decode_error, HRESULT_FROM_WIN32(ERROR_FILE_INVALID),
                      L"cannot identify the source file before analysis");
-    if (!cue && !cda) reader = library.OpenReader(path, &opened, &diagnostic);
+    if (!cue && !cda) reader = library.OpenReader(path, &opened, &diagnostic, file_buffer_bytes);
     if (!reader) {
         if (!cue && !cda && IsTerminalAudioOpenError(opened))
             return Error(ReplayGainScanStatus::decode_error, opened, std::move(diagnostic));
         media.Start();
         segment = CreateDecodedAudioSource(path, subtrack, &library, ttpcomm);
-        if (!segment->Open(path, {})) return Error(ReplayGainScanStatus::decode_error,
+        PlaybackOptions options;
+        options.file_buffer_bytes = file_buffer_bytes;
+        if (!segment->Open(path, options)) return Error(ReplayGainScanStatus::decode_error,
             segment->ErrorResult(), segment->Error());
     }
     if (skip_existing && (segment ? ExistingGain(segment->Metadata())
@@ -691,10 +694,10 @@ ReplayGainScanResult ScanReplayGainTrack(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
     std::stop_token stop, ReplayGainProgress progress, int subtrack,
-    ReplayGainCheckpoint checkpoint) {
+    ReplayGainCheckpoint checkpoint, int file_buffer_bytes) {
     auto analysis = AnalyzeReplayGainTrack(
         library, ttpcomm, path, skip_existing, stop, std::move(progress), subtrack,
-        checkpoint);
+        checkpoint, nullptr, file_buffer_bytes);
     if (analysis.status != ReplayGainScanStatus::completed) return analysis;
     if (stop.stop_requested() || (checkpoint && !checkpoint()))
         return Error(ReplayGainScanStatus::cancelled,

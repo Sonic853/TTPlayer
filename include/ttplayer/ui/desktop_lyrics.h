@@ -6,6 +6,7 @@
 #include <string>
 #include <windows.h>
 
+namespace ttplayer::audio { struct PlaybackClockSnapshot; }
 namespace ttplayer::lyrics { struct Lyrics; }
 namespace ttplayer::settings {
 struct DesktopLyricSettings;
@@ -24,6 +25,7 @@ public:
     // menu renderer.  Tests and non-skinned hosts may leave this empty.
     using PopupMenuTracker =
         std::function<UINT(HMENU menu, POINT screen_point, HWND owner)>;
+    using PlaybackClock = std::function<audio::PlaybackClockSnapshot()>;
 
     DesktopLyricsWindow();
     ~DesktopLyricsWindow();
@@ -34,7 +36,7 @@ public:
                 HMODULE resource_module,
                 settings::DesktopLyricSettings* settings,
                 RECT* persisted_bounds,
-                PopupMenuTracker popup_tracker = {});
+                PopupMenuTracker popup_tracker = {}, PlaybackClock clock = {});
     void Destroy() noexcept;
 
     void SetSkin(const skin::LegacySkin* skin, HICON default_icon = nullptr);

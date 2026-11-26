@@ -143,6 +143,7 @@ public:
     bool Seek(std::chrono::milliseconds) override { return Fail(E_NOTIMPL); }
     bool CanOverlapPlayback() const override { return false; }
     const WAVEFORMATEX& OutputFormat() const override { return wave_; }
+    std::uint32_t PacketBytes() const override { return frame_.samples * wave_.nBlockAlign; }
     AudioFormat DisplayFormat() const override { return {WAVE_FORMAT_MPEGLAYER3,wave_.nChannels,wave_.nSamplesPerSec,0,wave_.nBlockAlign,64,L"MPEG Audio (HTTP)"}; }
     std::chrono::milliseconds Duration() const override { return {}; }
     std::wstring Error() const override { return L"HTTP MPEG decoder"; }

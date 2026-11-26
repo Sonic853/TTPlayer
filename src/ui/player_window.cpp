@@ -7705,6 +7705,7 @@ void PlayerWindow::PollFadingAudio(bool cancel) {
 void PlayerWindow::CancelWaveTrackChange(bool preserve_archive) {
     if (!preserve_archive) audio_->CancelArchiveTrackChange();
     pending_wave_track_change_.reset();
+    pending_track_restore_.reset();
     wave_track_change_deadline_ = 0;
     if (window_) KillTimer(window_, kWaveTrackChangeTimer);
 }
@@ -7720,8 +7721,16 @@ void PlayerWindow::PollWaveTrackChange() {
     const bool still_requested = requested &&
         _wcsicmp(requested->path.c_str(), pending_wave_track_change_->path.c_str()) == 0 &&
         requested->subtrack == pending_wave_track_change_->subtrack;
-    CancelWaveTrackChange(still_requested);
-    if (still_requested) static_cast<void>(PlayCurrent());
+    if (!still_requested) {
+        CancelWaveTrackChange();
+        return;
+    }
+    const auto track = *requested;
+    const auto restore = pending_track_restore_;
+    CancelWaveTrackChange(true);
+    ScopedVisualTrackChange cover_transition(visual_track_change_in_progress_);
+    if (OpenPlaybackTrack(track) && restore)
+        RestoreRequestedPlayback(restore->first, restore->second);
 }
 
 bool PlayerWindow::PrepareTrackChange(bool same_item) {
@@ -7731,30 +7740,33 @@ bool PlayerWindow::PrepareTrackChange(bool same_item) {
     // Additional clicks replace the destination, not the old curve's start
     // time. No second WaveOut handle exists during this wait.
     if (pending_wave_track_change_) return false;
-    if (same_item) return true;
-    if (audio_->BeginWaveOutTrackChange()) {
-        playback_was_active_ = false; // the stop is not natural EOF
-        wave_track_change_deadline_ = GetTickCount64() +
-            audio::RecoveredStopFadeCloseBudgetMs(settings_.playback.fade_duration[3]);
-        if (window_) SetTimer(window_, kWaveTrackChangeTimer,
-                              kWaveTrackChangeIntervalMs, nullptr);
-        return false;
+    const bool serial_fade = !same_item && audio_->BeginWaveOutTrackChange();
+    if (!serial_fade && !same_item && fading_audio_.size() < 2 && audio_->CanRetainForTrackChange()) {
+        auto next = audio_->CreateSuccessor();
+        fading_audio_.reserve(fading_audio_.size() + 1);
+        if (audio_->BeginStopFade(true)) {
+            fading_audio_.push_back(audio_);
+            std::scoped_lock lock(visual_worker_mutex_);
+            audio_ = std::move(next);
+            return true;
+        }
     }
-    if (!audio_->CanRetainForTrackChange()) return true;
-    // A driver/reader ignoring cancellation must not create an unbounded
-    // chain of workers on rapid Next presses. Reuse the foreground session
-    // through its existing bounded Stop/Play path if two tails still unwind.
-    if (fading_audio_.size() >= 2) return true;
-    auto next = audio_->CreateSuccessor();
-    fading_audio_.reserve(fading_audio_.size() + 1);
-    if (!audio_->BeginStopFade(true)) return true;
-    fading_audio_.push_back(audio_);
-    {
-        // The visualization worker takes a shared snapshot under this lock.
-        std::scoped_lock lock(visual_worker_mutex_);
-        audio_ = std::move(next);
-    }
-    return true;
+    if (!serial_fade && !audio_->BeginImmediateTrackChange()) return true;
+    playback_was_active_ = false; // the outgoing stop is not natural EOF
+    wave_track_change_deadline_ = GetTickCount64() + (serial_fade
+        ? audio::RecoveredStopFadeCloseBudgetMs(settings_.playback.fade_duration[3])
+        : audio::AudioEngine::kStopWaitBudget.count());
+    if (window_) SetTimer(window_, kWaveTrackChangeTimer, kWaveTrackChangeIntervalMs, nullptr);
+    return false;
+}
+
+void PlayerWindow::RestoreRequestedPlayback(std::chrono::milliseconds position, bool paused) {
+    if (pending_wave_track_change_ || network_open_pending_)
+        pending_track_restore_.emplace(position, paused);
+    if (!pending_wave_track_change_)
+        audio_->RestoreAfterOutputRestart(position, paused);
+    settings_.player.playing_time = static_cast<int>(
+        std::clamp<int64_t>(position.count(), 0, INT_MAX));
 }
 
 bool PlayerWindow::PlayCurrent() {
@@ -7764,6 +7776,7 @@ bool PlayerWindow::PlayCurrent() {
     // Both explicit and automatic requests use the same nonmodal notice.
     ClearAudioError();
     network_open_pending_ = false;
+    pending_track_restore_.reset();
     pending_natural_play_ = false;
     pending_failed_advance_ = false;
     if (!media_library_playback_active_) {
@@ -7822,25 +7835,20 @@ bool PlayerWindow::PlayCurrent() {
         RefreshPlaybackUi();
         return true;
     }
+    return OpenPlaybackTrack(requested_track);
+}
+
+bool PlayerWindow::OpenPlaybackTrack(const playlist::Track& requested_track) {
     ConfigureNetworkDownloads();
     audio_->Configure(PlaybackOptionsFromSettings(
         settings_, PlayerRuntimeDirectory(), &requested_track));
-    if (!audio_->Play(requested_track.path, requested_track.subtrack)) {
-        taskbar_preview_.Clear();
-        system_media_controls_.Clear();
-        playback_source_open_ = false;
-        opened_track_.reset();
-        if (indexed_playback && audio_->LastErrorResult()!=HRESULT_FROM_WIN32(ERROR_CANCELLED) && PlaybackPlaylist().SetDuration(*current_, -1) &&
-            playback_playlist_index)
-            playlists_.MarkDirty(*playback_playlist_index);
-        // FUN_0047FEA3:0047FF9E publishes +0x1c through 0047FB0C even
-        // when the synchronous player request reports failure.
-        ClearPersistedPlaybackIdentity();
-        playback_was_active_ = false;
-        ShowAudioError(requested_track.path);
+    const bool accepted = audio_->PlayWithNotification(requested_track.path, requested_track.subtrack);
+    const auto state = audio_->State();
+    if (!accepted || state == audio::PlaybackState::failed) {
+        FailPlaybackOpen(requested_track);
         return false;
     }
-    if (audio_->State() == audio::PlaybackState::opening) {
+    if (state != audio::PlaybackState::playing && state != audio::PlaybackState::paused) {
         opened_track_ = requested_track;
         playback_source_open_ = false;
         playback_was_active_ = true;
@@ -7850,6 +7858,22 @@ bool PlayerWindow::PlayCurrent() {
         return true;
     }
     return CompletePlaybackOpen(requested_track);
+}
+
+void PlayerWindow::FailPlaybackOpen(const playlist::Track& track) {
+    pending_track_restore_.reset();
+    taskbar_preview_.Clear();
+    system_media_controls_.Clear();
+    playback_source_open_ = false;
+    opened_track_.reset();
+    if (audio_->LastErrorResult() != HRESULT_FROM_WIN32(ERROR_CANCELLED) &&
+        HasPlaybackTrack() && PlaybackPlaylist().Tracks()[*current_].path == track.path &&
+        PlaybackPlaylist().Tracks()[*current_].subtrack == track.subtrack &&
+        PlaybackPlaylist().SetDuration(*current_, -1) && playing_playlist_index_)
+        playlists_.MarkDirty(*playing_playlist_index_);
+    ClearPersistedPlaybackIdentity();
+    playback_was_active_ = false;
+    ShowAudioError(track.path);
 }
 
 bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) {
@@ -7864,7 +7888,8 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
     // replace the last-playing identity.
     settings_.player.playing_file_name = requested_track.path.wstring();
     settings_.player.playing_file_subtrack = requested_track.subtrack;
-    settings_.player.playing_time = 0;
+    if (!pending_track_restore_) settings_.player.playing_time = 0;
+    pending_track_restore_.reset();
     playback_source_open_ = true;
     opened_track_ = requested_track;
     auto metadata = audio_->Metadata();
@@ -7985,15 +8010,22 @@ bool PlayerWindow::CompletePlaybackOpen(const playlist::Track& requested_track) 
 
 void PlayerWindow::PollNetworkPlayback() {
     if (!opened_track_) return;
+    if (network_open_pending_) audio_->PollOpenTimeout();
     const bool network = audio::AudioEngine::IsNetworkMediaLocation(opened_track_->path);
     const auto state = audio_->State();
     if (network_open_pending_) {
         if (state == audio::PlaybackState::opening) return;
         network_open_pending_ = false;
-        if (state == audio::PlaybackState::playing || state == audio::PlaybackState::paused) {
+        // A short file can reach EOF before the window handles its open
+        // notification. Publish its accepted format/row before advancing.
+        if (state == audio::PlaybackState::playing || state == audio::PlaybackState::paused ||
+            (state == audio::PlaybackState::stopped && audio_->Format().sample_rate != 0)) {
             const auto track = *opened_track_;
             CompletePlaybackOpen(track);
             playback_metadata_revision_ = 0;
+        } else if (state == audio::PlaybackState::failed) {
+            const auto track = *opened_track_;
+            FailPlaybackOpen(track);
         }
         return;
     }

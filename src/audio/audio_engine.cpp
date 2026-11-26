@@ -41,11 +41,11 @@
 #include <array>
 #include <cmath>
 #include <cstring>
-#include <fstream>
 #include <iomanip>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <new>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -182,14 +182,10 @@ private:
 };
 namespace {
 
-// Decoder creation is synchronous from the caller's point of view, but it is
-// performed on the playback worker because legacy reader plug-ins and Media
-// Foundation can enter third-party/file-system code.  These budgets keep that
-// synchronous contract from turning a stalled reader into an indefinitely
-// ghosted player window.  A timed-out worker remains owned by AudioEngine and
-// is joined once it really exits; it is never detached or forcibly killed.
+// Local opens have the same deadline whether the caller waits for the worker
+// or receives completion on the window thread. A timed-out worker stays owned
+// until its reader actually exits.
 constexpr auto kOpenWaitBudget = std::chrono::seconds(4);
-constexpr auto kStopWaitBudget = std::chrono::milliseconds(1500);
 using Microsoft::WRL::ComPtr;
 
 constexpr size_t kOutputBufferCount = 4;
@@ -200,9 +196,16 @@ constexpr DWORD kAllStreams = static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS);
 constexpr DWORD kFirstAudioStream =
     static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
 
+size_t OutputSegmentBytes(const WAVEFORMATEX& format, int duration_ms) noexcept {
+    const uint64_t bytes = static_cast<uint64_t>(format.nAvgBytesPerSec) *
+        duration_ms / (1000 * kOutputBufferCount);
+    const size_t bounded = static_cast<size_t>(std::clamp<uint64_t>(
+        bytes, format.nBlockAlign, 4U * 1024U * 1024U));
+    return bounded - bounded % format.nBlockAlign;
+}
+
 size_t SourceReadBytes(const WAVEFORMATEX& source,
-                       const WAVEFORMATEX& output,
-                       size_t output_bytes, int file_buffer_bytes) noexcept {
+                       const WAVEFORMATEX& output, size_t segment_bytes) noexcept {
     // Decoder/DSP packets are in the SOURCE format. In particular, shrinking
     // a 24-bit read to the remaining 16-bit output space converges to 1-2
     // frames and breaks legacy DSPs (Vinyl's filter requires at least three).
@@ -210,11 +213,13 @@ size_t SourceReadBytes(const WAVEFORMATEX& source,
     // decoded_offset already retains all processed output for the next fill.
     // 004B1375/004AC166 process reader PCM before handing it to the output.
     const std::uint64_t align = std::max<WORD>(1, source.nBlockAlign);
-    const std::uint64_t bytes = std::max<std::uint64_t>(file_buffer_bytes,
-        static_cast<std::uint64_t>(output_bytes) * source.nAvgBytesPerSec /
-            std::max<DWORD>(1, output.nAvgBytesPerSec) + align);
+    const std::uint64_t bytes = static_cast<std::uint64_t>(segment_bytes) *
+        source.nAvgBytesPerSec / std::max<DWORD>(1, output.nAvgBytesPerSec) + align;
     constexpr std::uint64_t limit = 64U * 1024U * 1024U;
-    const auto bounded = std::min(bytes, limit - align);
+    // A short device period must still allow the PCM reader to return a
+    // complete 1/24-second processing packet. The fill retains the surplus.
+    const auto request = std::max<uint64_t>(bytes, PcmReaderPacketBytes(source));
+    const auto bounded = std::min(request, limit - align);
     return static_cast<size_t>((bounded + align - 1) / align * align);
 }
 
@@ -372,7 +377,7 @@ std::optional<double> MetadataNumber(std::wstring_view value) {
 class MediaFoundationSource final : public DecodedAudioSource {
 public:
     explicit MediaFoundationSource(HMODULE ttpcomm = nullptr, IStream* input = nullptr)
-        : ttpcomm_(ttpcomm), archive_stream_(input) {}
+        : ttpcomm_(ttpcomm), input_(input) {}
 
     bool Open(const std::filesystem::path& path,
               const PlaybackOptions&) override {
@@ -381,27 +386,26 @@ public:
         if (SUCCEEDED(result)) {
             attributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, FALSE);
             ArchiveMemberPath member;
-            if (archive_stream_) {
-                result = platform::MFCreateMFByteStreamOnStream(archive_stream_.Get(), &archive_byte_stream_);
-                if (SUCCEEDED(result)) result = platform::MFCreateSourceReaderFromByteStream(
-                    archive_byte_stream_.Get(), attributes.Get(), &reader_);
-            } else if (ParseArchiveMemberPath(path.native(), member)) {
+            const bool archive = ParseArchiveMemberPath(path.native(), member);
+            if (!input_ && archive) {
                 try {
-                    archive_stream_.Attach(OpenArchiveMemberStream(member, ttpcomm_));
-                    if (!archive_stream_) {
-                        result = HRESULT_FROM_WIN32(ERROR_OUTOFMEMORY);
-                    } else {
-                        result = platform::MFCreateMFByteStreamOnStream(
-                            archive_stream_.Get(), &archive_byte_stream_);
-                    }
-                    if (SUCCEEDED(result)) {
-                        result = platform::MFCreateSourceReaderFromByteStream(
-                            archive_byte_stream_.Get(), attributes.Get(), &reader_);
-                    }
+                    input_.Attach(OpenArchiveMemberStream(member, ttpcomm_));
+                    if (!input_) return Fail(L"Open archive member stream", E_OUTOFMEMORY);
                 } catch (const ArchiveError& error) {
                     return Fail(error.Message(), error.Result());
                 } catch (const std::exception&) {
                     result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+                }
+            }
+            if (input_) {
+                result = platform::MFCreateMFByteStreamOnStream(input_.Get(), &byte_stream_);
+                if (SUCCEEDED(result)) {
+                    ComPtr<IMFAttributes> stream_attributes;
+                    if (!archive && !AudioEngine::IsNetworkMediaLocation(path) &&
+                        SUCCEEDED(byte_stream_.As(&stream_attributes)))
+                        stream_attributes->SetString(MF_BYTESTREAM_ORIGIN_NAME, path.c_str());
+                    result = platform::MFCreateSourceReaderFromByteStream(
+                        byte_stream_.Get(), attributes.Get(), &reader_);
                 }
             } else {
                 result = platform::MFCreateSourceReaderFromURL(
@@ -662,8 +666,8 @@ private:
     ULONGLONG next_statistics_tick_{};
     int downloaded_percent_{-1};
     ComPtr<IMFSourceReader> reader_;
-    ComPtr<IStream> archive_stream_;
-    ComPtr<IMFByteStream> archive_byte_stream_;
+    ComPtr<IStream> input_;
+    ComPtr<IMFByteStream> byte_stream_;
     HMODULE ttpcomm_{};
     WAVEFORMATEX wave_format_{};
     AudioFormat display_format_{};
@@ -712,12 +716,13 @@ public:
         : manager_(manager), ttpcomm_(ttpcomm), network_input_(input) {}
 
     bool Open(const std::filesystem::path& path,
-              const PlaybackOptions&) override {
+              const PlaybackOptions& options) override {
         path_ = path;
         HRESULT result{};
         std::wstring diagnostic;
         ArchiveMemberPath member;
-        if (network_input_) reader_ = manager_.OpenReader(path, network_input_.Get(), &result, &diagnostic);
+        if (network_input_) reader_ = manager_.OpenReader(path, network_input_.Get(), &result,
+                                                          &diagnostic, options.file_buffer_bytes);
         else if (ParseArchiveMemberPath(path.native(), member)) {
             try {
                 ComPtr<IStream> stream;
@@ -727,7 +732,7 @@ public:
                                 HRESULT_FROM_WIN32(ERROR_OUTOFMEMORY));
                 }
                 reader_ = manager_.OpenReader(path, stream.Get(), &result,
-                                              &diagnostic);
+                                              &diagnostic, options.file_buffer_bytes);
             } catch (const ArchiveError& error) {
                 return Fail(error.Message(), error.Result());
             } catch (const std::exception&) {
@@ -735,7 +740,7 @@ public:
                             HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
             }
         } else {
-            reader_ = manager_.OpenReader(path, &result, &diagnostic);
+            reader_ = manager_.OpenReader(path, &result, &diagnostic, options.file_buffer_bytes);
         }
         if (!reader_) return Fail(diagnostic.empty()
             ? std::wstring_view(L"IPlayerSoundReader::Open")
@@ -836,6 +841,9 @@ public:
         static constexpr WAVEFORMATEX empty{};
         return reader_ ? reader_->Format() : empty;
     }
+    std::uint32_t PacketBytes() const override {
+        return reader_ ? reader_->SuggestedBufferBytes() : 0;
+    }
     [[nodiscard]] AudioFormat DisplayFormat() const override {
         return display_format_;
     }
@@ -873,61 +881,41 @@ private:
 // a whole archive member into another memory buffer or named extraction file.
 class PcmInputStream {
 public:
-    explicit PcmInputStream(IStream* input = nullptr) : member_(input) {}
-    void Open(const std::filesystem::path& path, HMODULE comm) {
-        if (member_) return;
-        ArchiveMemberPath member;
-        if (ParseArchiveMemberPath(path.native(), member))
-            member_.Attach(OpenArchiveMemberStream(member, comm));
-        else file_.open(path, std::ios::binary);
-    }
-    explicit operator bool() const { return member_ ? good_ : static_cast<bool>(file_); }
-    void clear() { if (member_) good_=true; else file_.clear(); }
+    explicit PcmInputStream(IStream* input) : input_(input) {}
+    explicit operator bool() const { return input_ && good_; }
+    void clear() { good_ = true; }
     void read(char* bytes, std::streamsize count) {
-        if (!member_) { file_.read(bytes,count); return; }
         read_=0;
         if (!good_) return;
         if (count<0 || static_cast<uint64_t>(count)>ULONG_MAX) { good_=false; return; }
         ULONG actual{};
-        const HRESULT hr=member_->Read(bytes,static_cast<ULONG>(count),&actual);
+        const HRESULT hr=input_->Read(bytes,static_cast<ULONG>(count),&actual);
         read_=actual; good_=SUCCEEDED(hr) && actual==static_cast<uint64_t>(count);
     }
-    std::streamsize gcount() const { return member_ ? read_ : file_.gcount(); }
+    std::streamsize gcount() const { return read_; }
     void seekg(std::streamoff offset, std::ios::seekdir direction=std::ios::beg) {
-        if (!member_) { file_.seekg(offset,direction); return; }
         if (!good_) return;
         LARGE_INTEGER move{}; move.QuadPart=offset;
         const DWORD origin=direction==std::ios::beg ? STREAM_SEEK_SET :
                            direction==std::ios::cur ? STREAM_SEEK_CUR : STREAM_SEEK_END;
-        good_=SUCCEEDED(member_->Seek(move,origin,nullptr));
+        good_=SUCCEEDED(input_->Seek(move,origin,nullptr));
     }
     std::streamoff tellg() {
-        if (!member_) return file_.tellg();
         if (!good_) return -1;
         LARGE_INTEGER zero{}; ULARGE_INTEGER position{};
-        good_=SUCCEEDED(member_->Seek(zero,STREAM_SEEK_CUR,&position)) && position.QuadPart<=INT64_MAX;
+        good_=SUCCEEDED(input_->Seek(zero,STREAM_SEEK_CUR,&position)) && position.QuadPart<=INT64_MAX;
         return good_ ? static_cast<std::streamoff>(position.QuadPart) : -1;
     }
 private:
-    std::ifstream file_;
-    ComPtr<IStream> member_;
+    ComPtr<IStream> input_;
     std::streamsize read_{};
     bool good_{true};
 };
 
 class PcmFileSource final : public DecodedAudioSource {
 public:
-    explicit PcmFileSource(HMODULE comm, IStream* input = nullptr)
-        : ttpcomm_(comm), stream_(input) {}
-    bool Open(const std::filesystem::path& path,
-              const PlaybackOptions&) override {
-        try { stream_.Open(path,ttpcomm_); }
-        catch (const ArchiveError& error) {
-            error_=error.Message(); error_result_=error.Result(); return false;
-        }
-        catch (const std::exception&) {
-            error_=L"Unable to read audio file"; return false;
-        }
+    explicit PcmFileSource(IStream* input) : stream_(input) {}
+    bool Open(const std::filesystem::path&, const PlaybackOptions&) override {
         if (!stream_) {
             error_ = L"Unable to open audio file";
             return false;
@@ -959,9 +947,7 @@ public:
         // reader boundary independent of the device lookahead/file cache:
         // 004B1B81 takes at most one input packet from the EQ output queue,
         // so changing the packet size changes its final retained samples.
-        const size_t packet_bytes = std::max<size_t>(wave_format_.nBlockAlign,
-            wave_format_.nAvgBytesPerSec / 24 / wave_format_.nBlockAlign *
-                wave_format_.nBlockAlign);
+        const size_t packet_bytes = PcmReaderPacketBytes(wave_format_);
         size_t count = static_cast<size_t>(std::min<uint64_t>(
             remaining, std::min(requested_bytes, packet_bytes)));
         count -= count % wave_format_.nBlockAlign;
@@ -1250,7 +1236,6 @@ private:
     }
 
     PcmInputStream stream_;
-    HMODULE ttpcomm_{};
     HRESULT error_result_{E_FAIL};
     WAVEFORMATEX wave_format_{};
     WAVEFORMATEXTENSIBLE extended_format_{};
@@ -1405,20 +1390,43 @@ public:
             result_ = HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
             return false;
         }
+        // Native readers start with the ordinary 4 KiB stream. Apply the
+        // user's capacity only after Open, on the same stream the decoder
+        // will read. Neither format probing nor SetCapacity reads the file
+        // into a separate playback buffer.
+        const auto attempt_stream = [&](const auto& create, bool builtin_tags) {
+            if (archive) return attempt(create(archive_stream_.Get()), builtin_tags);
+            ComPtr<IStream> file;
+            result_ = plugins::CreateLegacyFileStream(path.c_str(),
+                STGM_READ | STGM_SHARE_DENY_NONE, &file);
+            if (FAILED(result_)) { error_ = HResultMessage(L"Open input stream", result_); return false; }
+            if (!attempt(create(file.Get()), builtin_tags)) return false;
+            plugins::SetLegacyFileBuffer(file.Get(), options.file_buffer_bytes);
+            return true;
+        };
         if (hint == L".wav" || hint == L".wave" || hint == L".aif" ||
             hint == L".aiff" || hint == L".aifc" || hint == L".au" || hint == L".snd") {
-            if (attempt(std::make_unique<PcmFileSource>(comm_,archive_stream_.Get()), archive)) return true;
+            if (attempt_stream([](IStream* input) {
+                    return std::make_unique<PcmFileSource>(input);
+                }, archive)) return true;
             if (result_ == HRESULT_FROM_WIN32(ERROR_BAD_FORMAT)) return false;
             if (IsTerminalAudioOpenError(result_)) return false;
         }
-        const auto system_source = [&]() -> std::unique_ptr<DecodedAudioSource> {
-            if (platform::HasMediaFoundation()) return std::make_unique<MediaFoundationSource>(comm_,archive_stream_.Get());
-            return CreateLegacyWindowsSource(comm_,archive_stream_.Get());
-        };
         const bool mpeg = hint == L".mp3" || hint == L".mp2" || hint == L".mp1" ||
                           hint == L".mpa" || hint == L".mp3pro";
+        const auto system_source = [&](IStream* input) -> std::unique_ptr<DecodedAudioSource> {
+            std::unique_ptr<DecodedAudioSource> source;
+            if (platform::HasMediaFoundation()) source = std::make_unique<MediaFoundationSource>(comm_, input);
+            else source = CreateLegacyWindowsSource(comm_, input);
+            return mpeg ? WrapMp3ProSource(std::move(source)) : std::move(source);
+        };
+        const auto attempt_system = [&] {
+            if (attempt_stream(system_source, true)) return true;
+            // Some platform codecs only resolve physical filenames.
+            return !archive && !IsTerminalAudioOpenError(result_) && attempt(system_source(nullptr), true);
+        };
         if (mpeg) {
-            if (attempt(WrapMp3ProSource(system_source()), true)) return true;
+            if (attempt_system()) return true;
             if (IsTerminalAudioOpenError(result_)) return false;
         }
         // The original final factory has an empty extension restriction.
@@ -1429,7 +1437,7 @@ public:
             if (IsTerminalAudioOpenError(result_)) return false;
         }
         // Retain the reconstruction's modern codecs after the recovered path.
-        return !mpeg && attempt(system_source(), true);
+        return !mpeg && attempt_system();
     }
     bool Read(size_t count, std::vector<std::byte>& out, bool& end) override {
         const bool ok=source_ && source_->Read(count,out,end);
@@ -1454,6 +1462,7 @@ public:
         return source_ ? source_->LastSeekPosition() : std::nullopt;
     }
     void SetPaused(bool paused) override { if (source_) source_->SetPaused(paused); }
+    std::uint32_t PacketBytes() const override { return source_ ? source_->PacketBytes() : 0; }
     bool CanOverlapPlayback() const override { return source_ && source_->CanOverlapPlayback(); }
     HRESULT WriteLyrics(std::wstring_view text) override {
         if (!source_ || finished_) return E_NOINTERFACE;
@@ -1598,7 +1607,7 @@ public:
         }
         // XP's Windows Media reader does not accept WAV through OpenStream.
         // Reuse the file/archive PCM parser for this same seekable IStream.
-        if (attempt(std::make_unique<PcmFileSource>(comm_, stream_.Get()))) return true;
+        if (attempt(std::make_unique<PcmFileSource>(stream_.Get()))) return true;
         if (manager_ && attempt(std::make_unique<LegacyPluginSource>(*manager_, comm_, stream_.Get()))) return true;
         return platform::HasMediaFoundation()
             ? attempt(std::make_unique<MediaFoundationSource>(comm_, stream_.Get()))
@@ -1619,8 +1628,10 @@ public:
     }
     std::optional<std::chrono::milliseconds> LastSeekPosition() const override { return source_->LastSeekPosition(); }
     bool CanOverlapPlayback() const override { return false; }
+    void SetPaused(bool paused) override { source_->SetPaused(paused); }
     int DownloadedPercent() override { return stream_ ? stream_->DownloadedPercent() : source_ ? 100 : -1; }
     const WAVEFORMATEX& OutputFormat() const override { return source_->OutputFormat(); }
+    std::uint32_t PacketBytes() const override { return source_->PacketBytes(); }
     AudioFormat DisplayFormat() const override { return source_->DisplayFormat(); }
     std::chrono::milliseconds Duration() const override { return source_ ? source_->Duration() : std::chrono::milliseconds{}; }
     AudioMetadata Metadata() const override {
@@ -1660,6 +1671,7 @@ public:
     void SetPaused(bool value) override{source_->SetPaused(value);}
     int DownloadedPercent() override{return source_->DownloadedPercent();}
     const WAVEFORMATEX& OutputFormat() const override{return source_->OutputFormat();}
+    std::uint32_t PacketBytes() const override { return source_->PacketBytes(); }
     AudioFormat DisplayFormat() const override{return source_->DisplayFormat();}
     std::chrono::milliseconds Duration() const override{return source_->Duration();}
     std::wstring Error() const override{return source_->Error();}
@@ -1692,6 +1704,7 @@ public:
         return inner_ && inner_->CanOverlapPlayback();
     }
     void SetPaused(bool paused) override { if (inner_) inner_->SetPaused(paused); }
+    std::uint32_t PacketBytes() const override { return inner_ ? inner_->PacketBytes() : 0; }
     CueSegmentSource(const plugins::PluginManager* manager, HMODULE ttpcomm,
                      int subtrack)
         : manager_(manager), ttpcomm_(ttpcomm), subtrack_(subtrack) {}
@@ -2425,7 +2438,6 @@ void AudioEngine::Configure(const PlaybackOptions& options) {
     // hwndParent is a runtime attachment made after WM_CREATE. Aggregate
     // settings updates must not clear it merely because it is not persisted.
     if (!options_.dsp_parent_window) options_.dsp_parent_window = existing_dsp_parent;
-    options_.file_buffer_bytes = std::clamp(options_.file_buffer_bytes, 4096, 4 * 1024 * 1024);
     options_.output_buffer_ms = std::clamp(options_.output_buffer_ms, 100, 10000);
     options_.balance = std::clamp(options_.balance, -100, 100);
     options_.surround = std::clamp(options_.surround, 0, 16);
@@ -2459,6 +2471,11 @@ void AudioEngine::SetStateNotification(HWND window, UINT message) {
     std::scoped_lock lock(mutex_);
     state_notification_window_ = window;
     state_notification_message_ = message;
+}
+
+bool AudioEngine::HasStateNotification() const {
+    std::scoped_lock lock(mutex_);
+    return state_notification_window_ && state_notification_message_;
 }
 
 void AudioEngine::SetDspParentWindow(HWND window) {
@@ -2542,11 +2559,27 @@ bool AudioEngine::BeginWaveOutTrackChange() {
     return BeginStopFade(false, true);
 }
 
+bool AudioEngine::BeginImmediateTrackChange() {
+    if (!worker_.joinable() || !HasStateNotification() || TryReapStopped()) return false;
+    // Keep an archive handoff prepared by the window for the incoming track.
+    if (!stop_requested_) RequestStop();
+    return !TryReapStopped();
+}
+
 bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
+    return StartPlayback(path, subtrack, false);
+}
+
+bool AudioEngine::PlayWithNotification(const std::filesystem::path& path, int subtrack) {
+    return StartPlayback(path, subtrack, HasStateNotification());
+}
+
+bool AudioEngine::StartPlayback(const std::filesystem::path& path, int subtrack, bool async_open) {
     PrepareArchiveTrackChange(path, subtrack);
     std::shared_ptr<ArchivePlaybackSession> handoff;
     { std::scoped_lock lock(mutex_); handoff = std::move(archive_handoff_); }
-    Stop();
+    if (async_open) StopAsync();
+    else Stop();
     // The worker may have returned immediately after Stop exhausted its
     // bounded wait.  Reap that completed thread before deciding that a new
     // decoder must be rejected.
@@ -2566,6 +2599,9 @@ bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
     stop_requested_ = false;
     state_ = PlaybackState::opening;
     backend_ = Backend::none;
+    ArchiveMemberPath archive;
+    const bool local = !IsNetworkMediaLocation(path) &&
+        !ParseArchiveMemberPath(path.native(), archive);
     {
         std::scoped_lock lock(mutex_);
         error_.clear();
@@ -2576,6 +2612,9 @@ bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
         format_ = {};
         metadata_ = {};
         open_complete_ = false;
+        local_open_deadline_.reset();
+        if (local && async_open)
+            local_open_deadline_ = std::chrono::steady_clock::now() + kOpenWaitBudget;
         opening_seek_ms_ = -1;
         opening_paused_ = false;
         source_can_overlap_ = false;
@@ -2600,12 +2639,9 @@ bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
     // Password requests are dispatched to the window thread. Do not block
     // that thread waiting for a decoder which is itself waiting for its dialog.
     // Large/solid archives also need time to finish integrity verification.
-    ArchiveMemberPath archive;
-    if (IsNetworkMediaLocation(path) || ParseArchiveMemberPath(path.native(), archive)) return true;
-    // Local decoder/reader creation is synchronous in the original command.
-    // Waiting here also makes Duration/Format valid before PlayerWindow
-    // updates the playlist row and scrolling skin text.  A private reader is
-    // not, however, allowed to keep the window thread here forever.
+    if (async_open || !local) return true;
+    // For synchronous callers a successful local Play still guarantees that
+    // the reader, duration and output format are available on return.
     std::unique_lock lock(mutex_);
     if (!open_condition_.wait_for(
             lock, kOpenWaitBudget, [this] { return open_complete_; })) {
@@ -2617,6 +2653,19 @@ bool AudioEngine::Play(const std::filesystem::path& path, int subtrack) {
     }
     return state_.load() == PlaybackState::playing ||
            state_.load() == PlaybackState::paused;
+}
+
+void AudioEngine::PollOpenTimeout() {
+    {
+        std::scoped_lock lock(mutex_);
+        if (open_complete_ || state_ != PlaybackState::opening || !local_open_deadline_ ||
+            std::chrono::steady_clock::now() < *local_open_deadline_) return;
+        // Claim the timeout under the same lock as PublishOpened, so a late
+        // reader cannot publish success between the check and cancellation.
+        stop_requested_ = true;
+    }
+    RequestStop();
+    SetError(L"The audio decoder did not open within 4 seconds");
 }
 
 void AudioEngine::RestoreAfterOutputRestart(
@@ -2893,18 +2942,12 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             }
         }
 
-        size_t ring_bytes = std::max<size_t>(
-            static_cast<size_t>(options.file_buffer_bytes) * kOutputBufferCount,
-            static_cast<size_t>(wave_format.nAvgBytesPerSec) *
-                static_cast<size_t>(options.output_buffer_ms) / 1000);
-        ring_bytes = std::clamp<size_t>(
-            ring_bytes, static_cast<size_t>(wave_format.nBlockAlign) * 4,
-            16U * 1024U * 1024U);
-        size_t segment_bytes = ring_bytes / kOutputBufferCount;
-        segment_bytes -= segment_bytes % wave_format.nBlockAlign;
-        if (segment_bytes == 0) segment_bytes = wave_format.nBlockAlign;
-        ring_bytes = segment_bytes * kOutputBufferCount;
-
+        const auto plan = PlanDirectSoundBuffer(source_format, source->PacketBytes(), wave_format,
+            options.output_buffer_ms, IsNetworkMediaLocation(path));
+        if (!plan || plan->RingBytes() > DSBSIZE_MAX) {
+            if (!stop_requested_) SetError(L"The PCM packets exceed the DirectSound buffer limit");
+            return;
+        }
         DSBUFFERDESC description{};
         description.dwSize = sizeof(description);
         description.dwFlags = DSBCAPS_GETCURRENTPOSITION2 |
@@ -2914,7 +2957,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                               (options.hardware_buffer
                                    ? DSBCAPS_LOCHARDWARE
                                    : DSBCAPS_LOCSOFTWARE);
-        description.dwBufferBytes = static_cast<DWORD>(ring_bytes);
+        description.dwBufferBytes = plan->RingBytes();
         description.lpwfxFormat = &native_format.Format;
         ComPtr<IDirectSoundBuffer> base_buffer;
         result = direct_sound->CreateSoundBuffer(
@@ -2955,66 +2998,84 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             return;
         }
 
+        DSBCAPS caps{sizeof(caps)};
+        result = sound_buffer->GetCaps(&caps);
+        if (FAILED(result) || caps.dwBufferBytes < plan->RingBytes() ||
+            caps.dwBufferBytes > DSBSIZE_MAX || caps.dwBufferBytes % wave_format.nBlockAlign) {
+            if (!stop_requested_) SetError(L"Invalid DirectSound physical buffer capacity",
+                                           FAILED(result) ? result : E_UNEXPECTED);
+            return;
+        }
+        // Use the actual wrap point even if a driver rounded up the allocation.
+        // Driver padding, like the reserve, never extends the logical queue.
+        const DWORD ring_bytes = caps.dwBufferBytes;
         const std::byte silence = wave_format.wBitsPerSample == 8
             ? std::byte{0x80} : std::byte{0};
-        std::vector<std::byte> ring_shadow(ring_bytes, silence);
-        auto write_ring = [&](size_t offset, const std::byte* bytes,
+        std::vector<std::byte> ring_shadow;
+        try {
+            ring_shadow.resize(ring_bytes);
+        } catch (const std::bad_alloc&) {
+            if (!stop_requested_) SetError(L"Unable to allocate the DirectSound PCM ring", E_OUTOFMEMORY);
+            return;
+        }
+        auto write_ring = [&](uint64_t position, const std::byte* bytes,
                               size_t count) -> bool {
+            const auto offset = static_cast<DWORD>(position % ring_bytes);
             void* first{};
             void* second{};
             DWORD first_bytes{};
             DWORD second_bytes{};
-            const HRESULT locked = sound_buffer->Lock(
-                static_cast<DWORD>(offset), static_cast<DWORD>(count),
+            HRESULT hr = sound_buffer->Lock(offset, static_cast<DWORD>(count),
                 &first, &first_bytes, &second, &second_bytes, 0);
-            if (FAILED(locked)) {
+            if (FAILED(hr)) {
                 if (!stop_requested_)
-                    SetError(HResultMessage(L"IDirectSoundBuffer::Lock", locked));
+                    SetError(HResultMessage(L"IDirectSoundBuffer::Lock", hr), hr);
                 return false;
             }
-            if (first_bytes != 0) std::memcpy(first, bytes, first_bytes);
-            if (second_bytes != 0)
-                std::memcpy(second, bytes + first_bytes, second_bytes);
-            sound_buffer->Unlock(first, first_bytes, second, second_bytes);
-            std::memcpy(ring_shadow.data() + offset, bytes,
-                        std::min(count, ring_bytes - offset));
-            if (count > ring_bytes - offset)
-                std::memcpy(ring_shadow.data(),
-                            bytes + (ring_bytes - offset),
-                            count - (ring_bytes - offset));
-            return true;
+            const auto copy = [&](void* device, size_t at, size_t length, size_t from) {
+                if (!length) return;
+                auto* shadow = ring_shadow.data() + at;
+                if (bytes) std::memcpy(shadow, bytes + from, length);
+                else std::fill_n(shadow, length, silence);
+                std::memcpy(device, shadow, length);
+            };
+            copy(first, offset, first_bytes, 0);
+            copy(second, 0, second_bytes, first_bytes);
+            hr = sound_buffer->Unlock(first, first_bytes, second, second_bytes);
+            if (FAILED(hr) && !stop_requested_)
+                SetError(HResultMessage(L"IDirectSoundBuffer::Unlock", hr), hr);
+            return SUCCEEDED(hr);
         };
 
         std::vector<std::byte> decoded;
         size_t decoded_offset{};
         bool decoder_eof{};
-        bool stream_eof{};
-        uint64_t direct_processor_revision = processor_revision;
-        auto decode_more = [&](size_t requested) -> bool {
+        auto decode_more = [&]() -> bool {
             decoded.clear();
             decoded_offset = 0;
             std::vector<std::byte> native;
-            const size_t native_request = SourceReadBytes(
-                source_format, wave_format, requested, options.file_buffer_bytes);
             downloaded_percent_ = source->DownloadedPercent();
-            if (!source->Read(native_request, native, decoder_eof)) {
+            if (!source->Read(plan->reader_bytes, native, decoder_eof)) {
+                if (seek_request_ms_.load() >= 0) return true;
                 if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                 return false;
             }
+            if (stop_requested_) return false;
+            if (seek_request_ms_.load() >= 0) return true;
             refresh_metadata();
             const uint64_t latest_revision = processor_revision_.load();
-            if (latest_revision != direct_processor_revision) {
+            if (latest_revision != processor_revision) {
                 PlaybackOptions current;
                 {
                     std::scoped_lock lock(mutex_);
                     current = options_;
                 }
                 processors.Update(current);
-                direct_processor_revision = latest_revision;
+                processor_revision = latest_revision;
             }
             std::vector<double> processed;
             const bool processing = !native.empty() && processors.Active();
-            if (processing && !processors.Process(native, dsp_enabled_.load(), &processed)) {
+            if (processing && !processors.Process(native, dsp_enabled_.load(), &processed, decoder_eof)) {
                 if (!stop_requested_)
                     SetError(L"The recovered audio processor chain failed");
                 return false;
@@ -3030,63 +3091,146 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 return false;
             }
             for(auto& message:output_transform.TakeDiagnostics()) RecordDiagnostic(std::move(message));
-            stream_eof = decoder_eof;
-            return true;
-        };
-
-        std::optional<uint64_t> final_stream_byte;
-        uint64_t stream_write_byte{};
-        // Device progress must be observed even while a decoder/DSP blocks.
-        // The recovered 004AC605 coordinator pauses at low water instead of
-        // allowing DSBPLAY_LOOPING to replay previously consumed ring data.
-        std::mutex ring_mutex;
-        uint64_t observed_played{};
-        DWORD observed_cursor{};
-        bool ring_buffering{}, ring_suspended{};
-        HRESULT ring_error = S_OK;
-        auto fill_segment = [&]() -> bool {
-            std::vector<std::byte> segment(segment_bytes, silence);
-            size_t written{};
-            while (!stop_requested_ && written < segment.size()) {
-                if (decoded_offset == decoded.size()) {
-                    if (stream_eof) break;
-                    if (!decode_more(segment.size() - written)) return false;
-                    if (decoded.empty() && stream_eof) break;
-                    if (decoded.empty()) continue;
-                }
-                const size_t copy = std::min(segment.size() - written,
-                    decoded.size() - decoded_offset);
-                std::memcpy(segment.data() + written,
-                            decoded.data() + decoded_offset, copy);
-                written += copy;
-                decoded_offset += copy;
-            }
-            written -= written % wave_format.nBlockAlign;
-            std::scoped_lock ring_lock(ring_mutex);
-            if (stream_eof && decoded_offset == decoded.size() &&
-                !final_stream_byte) {
-                final_stream_byte = stream_write_byte + written;
-            }
-            if (!write_ring(static_cast<size_t>(stream_write_byte % ring_bytes),
-                            segment.data(), segment.size())) {
+            if (decoded.size() % wave_format.nBlockAlign) {
+                if (!stop_requested_) SetError(L"DirectSound received a partial output PCM frame");
                 return false;
             }
-            stream_write_byte += segment_bytes;
             return true;
         };
 
-        for (size_t index = 0;
-             index < kOutputBufferCount && !final_stream_byte; ++index) {
-            if (!fill_segment()) return;
-        }
-        if (final_stream_byte && *final_stream_byte == 0) {
+        // The worker owns decoding and the PCM shadow. Publish only committed
+        // real audio under mutex_, which also serializes device transitions
+        // with the UI/fade thread. No reader or DSP callback holds this lock.
+        uint64_t stream_write_byte{};
+        bool input_finished{};
+        uint64_t observed_played{};
+        DWORD observed_cursor{};
+        bool ring_buffering{};
+        int64_t position_base_ms{};
+        HRESULT ring_error = S_OK;
+        auto submit_packet = [&](size_t writable) -> bool {
+            if (decoded_offset == decoded.size() && !decoder_eof) {
+                try {
+                    if (!decode_more()) return false;
+                } catch (const std::bad_alloc&) {
+                    if (!stop_requested_) SetError(L"Unable to allocate the DirectSound PCM packet", E_OUTOFMEMORY);
+                    return false;
+                }
+            }
+            if (stop_requested_) return false;
+            if (seek_request_ms_.load() >= 0) return true;
+            // A large packet can straddle a partly consumed logical queue,
+            // or SSRC can return more than its nominal packet on a drain.
+            // Retain its tail; never shorten the next source/DSP request.
+            const auto count = std::min({writable, size_t(plan->packet_bytes),
+                                         decoded.size() - decoded_offset});
+            if (count) {
+                if (!write_ring(stream_write_byte, decoded.data() + decoded_offset, count))
+                    return false;
+                decoded_offset += count;
+            }
+            const bool end = decoder_eof && decoded_offset == decoded.size();
+            // The loop may advance a few frames before the EOF poll stops it.
+            // Silence the guard even on a wrapped final packet, without adding it to the clock.
+            if (end && !write_ring(stream_write_byte + count, nullptr, plan->reserve_bytes))
+                return false;
+            std::scoped_lock lock(mutex_);
+            stream_write_byte += count;
+            input_finished = end;
+            return true;
+        };
+        auto prefill = [&]() -> bool {
+            while (!stop_requested_ && seek_request_ms_.load() < 0 &&
+                   plan->NeedsPrefill(stream_write_byte, input_finished)) {
+                if (!submit_packet(plan->packet_bytes)) return false;
+            }
+            return !stop_requested_;
+        };
+        if (!write_ring(0, nullptr, ring_bytes) || !prefill()) return;
+        if (!stream_write_byte) {
             if (!stop_requested_)
                 SetError(L"The audio stream contains no decodable samples");
             return;
         }
 
+        // Poll independently of a possibly blocking reader or Winamp DSP. A
+        // paused seek remains pending from acceptance through its last prefill
+        // write. Resume cannot start that ring (or an underfilled one) early.
+        const auto poll_ring_locked = [&]() -> HRESULT {
+            if (state_ == PlaybackState::opening) return S_OK;
+            DWORD status{}, cursor{};
+            HRESULT hr = sound_buffer->GetStatus(&status);
+            if (FAILED(hr)) return hr;
+            const bool running = (status & DSBSTATUS_PLAYING) != 0;
+            const auto state = state_.load();
+            const bool fading_out = state == PlaybackState::stopped && stop_fade_pending_;
+            if (stop_requested_ || pending_seek_position_ms_.load() >= 0 || state == PlaybackState::failed ||
+                (state == PlaybackState::stopped && !fading_out))
+                return running ? sound_buffer->Stop() : S_OK;
+            hr = sound_buffer->GetCurrentPosition(&cursor, nullptr);
+            if (FAILED(hr)) return hr;
+            if (cursor >= ring_bytes) return E_UNEXPECTED;
+            cursor -= cursor % wave_format.nBlockAlign;
+            const auto delta = cursor >= observed_cursor ? cursor - observed_cursor
+                                                        : ring_bytes - observed_cursor + cursor;
+            observed_cursor = cursor;
+            observed_played += delta;
+            if (observed_played > stream_write_byte) {
+                // A late device poll reached the guard. Freeze on the next
+                // unwritten frame, not past it, before accepting more PCM.
+                hr = sound_buffer->Stop();
+                if (FAILED(hr)) return hr;
+                observed_played = stream_write_byte;
+                observed_cursor = static_cast<DWORD>(observed_played % ring_bytes);
+                hr = sound_buffer->SetCurrentPosition(observed_cursor);
+                if (FAILED(hr)) return hr;
+            }
+            position_ms_ = BoundPlaybackClock(position_base_ms +
+                static_cast<int64_t>(observed_played * 1000 / wave_format.nAvgBytesPerSec),
+                duration_ms_.load());
+            const auto ready = stream_write_byte - observed_played;
+            if (input_finished && !ready)
+                return running ? sound_buffer->Stop() : S_OK;
+            // A fresh, stopped seek has already met the startup watermark.
+            // Even an unusually large reader hint must get its first Play
+            // before low water can turn this into an 80% refill.
+            if ((running || observed_played != 0) && plan->BelowLowWater(ready, input_finished)) {
+                ring_buffering = true;
+                return running ? sound_buffer->Stop() : S_OK;
+            }
+            if (!running && (state == PlaybackState::playing || fading_out) && ready &&
+                (!ring_buffering || plan->Refilled(ready, input_finished))) {
+                ring_buffering = false;
+                return sound_buffer->Play(0, 0, DSBPLAY_LOOPING);
+            }
+            return S_OK;
+        };
+        const auto monitor_device = [&](std::stop_token stop) {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+            while (!stop.stop_requested()) {
+                {
+                    std::scoped_lock lock(mutex_);
+                    ring_error = poll_ring_locked();
+                    if (FAILED(ring_error) || stop_requested_) {
+                        sound_buffer->Stop();
+                        break;
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        };
+        std::jthread ring_monitor;
+        try {
+            ring_monitor = std::jthread(monitor_device);
+        } catch (const std::exception&) {
+            if (!stop_requested_) SetError(L"Unable to start the DirectSound playback monitor",
+                                           HRESULT_FROM_WIN32(ERROR_NO_SYSTEM_RESOURCES));
+            return;
+        }
+        auto opened_metadata = source->Metadata();
         {
             std::scoped_lock lock(mutex_);
+            if (stop_requested_) return;
             direct_sound_buffer_ = sound_buffer.Get();
             backend_ = Backend::direct_sound;
             signal_path_=i18n::Literal(L"原版兼容 → DirectSound ")+
@@ -3094,67 +3238,13 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                 std::to_wstring(wave_format.wBitsPerSample)+L" bit / "+
                 std::to_wstring(wave_format.nChannels)+L" ch";
             ApplyVolumeLocked();
-            metadata_ = source->Metadata();
+            metadata_ = std::move(opened_metadata);
             ++metadata_revision_;
         }
-        sound_buffer->SetCurrentPosition(0);
-        result = sound_buffer->Play(0, 0, DSBPLAY_LOOPING);
-        if (FAILED(result)) {
-            {
-                std::scoped_lock lock(mutex_);
-                direct_sound_buffer_ = nullptr;
-                backend_ = Backend::none;
-            }
-            if (!stop_requested_)
-                SetError(HResultMessage(L"IDirectSoundBuffer::Play", result));
-            return;
-        }
-        bool usable = PublishOpened(
+        const bool usable = PublishOpened(
             Backend::direct_sound, source->DisplayFormat(), source->Duration());
         if (usable) replay_gain_commit.MarkPlaybackAccepted();
-        uint64_t played_bytes{};
-        int64_t position_base_ms{};
         uint64_t last_visual_byte = std::numeric_limits<uint64_t>::max();
-        const uint64_t low_water = std::min<uint64_t>(
-            segment_bytes, std::max<uint64_t>(wave_format.nBlockAlign,
-                                             wave_format.nAvgBytesPerSec / 10));
-        const uint64_t resume_water = ReachableRefillWatermark(
-            ring_bytes, segment_bytes, ring_bytes * 8 / 10);
-        std::jthread ring_monitor([&](std::stop_token stop) {
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-            while (!stop.stop_requested()) {
-                {
-                    std::scoped_lock ring_lock(ring_mutex);
-                    if (!ring_suspended && SUCCEEDED(ring_error)) {
-                        DWORD cursor{}, write_cursor{}, status{};
-                        ring_error = sound_buffer->GetCurrentPosition(&cursor, &write_cursor);
-                        if (SUCCEEDED(ring_error)) ring_error = sound_buffer->GetStatus(&status);
-                        if (SUCCEEDED(ring_error)) {
-                            observed_played += cursor >= observed_cursor
-                                ? cursor - observed_cursor
-                                : ring_bytes - observed_cursor + cursor;
-                            observed_cursor = cursor;
-                            const uint64_t ready = stream_write_byte > observed_played
-                                ? stream_write_byte - observed_played : 0;
-                            if (final_stream_byte && observed_played >= *final_stream_byte) {
-                                ring_error = sound_buffer->Stop();
-                            } else if ((status & DSBSTATUS_PLAYING) &&
-                                       !final_stream_byte && ready < low_water) {
-                                ring_error = sound_buffer->Stop();
-                                ring_buffering = true;
-                            } else if (ring_buffering && !stop_requested_ &&
-                                       state_.load() == PlaybackState::playing &&
-                                       (ready >= resume_water || final_stream_byte)) {
-                                ring_error = sound_buffer->Play(0, 0, DSBPLAY_LOOPING);
-                                ring_buffering = false;
-                            }
-                        }
-                    }
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            }
-        });
-
         bool natural_replay_gain_end{};
         while (usable && !stop_requested_) {
             ProcessLyricWrite(*source);
@@ -3163,95 +3253,77 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
             const auto request = TakeSeekRequest();
             const int64_t requested = request.position_ms;
             if (requested >= 0) {
-                const auto previous_state = state_.load();
                 {
-                    std::scoped_lock ring_lock(ring_mutex);
-                    ring_suspended = true;
-                    sound_buffer->Stop();
-                    sound_buffer->SetCurrentPosition(0);
-                    final_stream_byte.reset();
+                    std::scoped_lock lock(mutex_);
+                    result = sound_buffer->Stop();
+                    if (SUCCEEDED(result)) result = sound_buffer->SetCurrentPosition(0);
+                    input_finished = false;
                     stream_write_byte = observed_played = 0;
                     observed_cursor = 0;
                     ring_buffering = false;
+                    position_base_ms = std::clamp<int64_t>(requested, 0, duration_ms_.load());
+                }
+                if (FAILED(result)) {
+                    if (!stop_requested_) SetError(HResultMessage(L"DirectSound seek reset", result), result);
+                    break;
                 }
                 decoded.clear();
                 decoded_offset = 0;
                 decoder_eof = false;
-                stream_eof = false;
-                played_bytes = 0;
-                position_base_ms = std::clamp<int64_t>(
-                    requested, 0, duration_ms_.load());
                 processors.Reset();
                 output_transform.Reset();
                 if (requested >= duration_ms_.load()) {
                     CompleteSeek(request, position_base_ms);
+                    std::scoped_lock lock(mutex_);
+                    if (request.revision != seek_revision_) continue;
                     state_ = PlaybackState::stopped;
                     break;
                 }
                 if (!source->Seek(std::chrono::milliseconds(position_base_ms))) {
+                    if (seek_request_ms_.load() >= 0) continue;
                     if (!stop_requested_) SetError(source->Error(), source->ErrorResult());
                     break;
                 }
-                std::fill(ring_shadow.begin(), ring_shadow.end(), silence);
-                if (!write_ring(0, ring_shadow.data(), ring_shadow.size())) break;
-                for (size_t index = 0;
-                     index < kOutputBufferCount && !final_stream_byte; ++index) {
-                    if (!fill_segment()) { usable = false; break; }
-                }
-                if (!usable) break;
-                if (previous_state == PlaybackState::playing) {
-                    const HRESULT replay = sound_buffer->Play(
-                        0, 0, DSBPLAY_LOOPING);
-                    if (FAILED(replay)) {
-                        if (!stop_requested_)
-                            SetError(HResultMessage(
-                                L"IDirectSoundBuffer::Play(seek)", replay));
-                        break;
-                    }
-                }
-                {
-                    std::scoped_lock ring_lock(ring_mutex);
-                    ring_suspended = false;
-                }
+                if (!write_ring(0, nullptr, ring_bytes) || !prefill()) break;
                 last_visual_byte = std::numeric_limits<uint64_t>::max();
                 ClearVisualization();
                 CompleteSeek(request, position_base_ms);
             }
 
             DWORD cursor{};
+            uint64_t played_bytes{};
             HRESULT positioned;
-            const auto observe = [&] {
-                std::scoped_lock ring_lock(ring_mutex);
+            bool pause_complete{};
+            {
+                std::scoped_lock lock(mutex_);
+                if (stop_requested_) break;
+                if (seek_request_ms_.load() >= 0) continue;
                 cursor = observed_cursor;
                 played_bytes = observed_played;
                 positioned = ring_error;
-            };
-            observe();
+                pause_complete = state_ == PlaybackState::paused &&
+                    !(fade_pending_ && fade_completion_ == FadeCompletion::pause);
+                if (SUCCEEDED(positioned) && input_finished && played_bytes >= stream_write_byte) {
+                    if (const auto duration = duration_ms_.load(); duration > 0)
+                        position_ms_ = duration;
+                    state_ = PlaybackState::stopped;
+                    natural_replay_gain_end = true;
+                    break;
+                }
+            }
             if (FAILED(positioned)) {
                 if (!stop_requested_)
-                    SetError(HResultMessage(
-                        L"IDirectSoundBuffer::GetCurrentPosition", positioned));
+                    SetError(HResultMessage(L"DirectSound playback cursor", positioned), positioned);
                 break;
             }
-            while (!final_stream_byte &&
-                   (stream_write_byte > played_bytes ? stream_write_byte - played_bytes : 0) <=
-                       ring_bytes - segment_bytes) {
-                if (!fill_segment()) { usable = false; break; }
-                observe();
-            }
-            if (!usable) break;
-            position_ms_ = BoundPlaybackClock(
-                position_base_ms +
-                    static_cast<int64_t>(played_bytes * 1000 /
-                                         wave_format.nAvgBytesPerSec),
-                duration_ms_.load());
             UpdateTrackFade(position_ms_.load());
 
+            const auto ready = static_cast<size_t>(stream_write_byte - played_bytes);
             if (state_.load() == PlaybackState::playing &&
                 played_bytes != last_visual_byte) {
                 VisualizationSamples samples;
                 samples.sample_rate = wave_format.nSamplesPerSec;
-                const size_t offset = cursor - cursor % wave_format.nBlockAlign;
+                const size_t offset = cursor;
                 AppendVisualizationFrames(
                     ring_shadow.data() + offset, ring_bytes - offset,
                     wave_format, samples);
@@ -3267,40 +3339,30 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
                     wave_format.nSamplesPerSec / 1000 +
                     aligned_played / wave_format.nBlockAlign;
                 extended.playback_frame = extended.first_frame;
-                // The legacy view may include the zero-padded ring tail.
-                // Analysis must exclude stale data beyond written input/EOF.
-                const uint64_t ready_end = final_stream_byte
-                    ? std::min(stream_write_byte, *final_stream_byte)
-                    : stream_write_byte;
-                const size_t available = ready_end > aligned_played
-                    ? static_cast<size_t>(std::min<uint64_t>(
-                        ready_end - aligned_played, ring_bytes)) : 0;
-                const size_t first = std::min(available, ring_bytes - offset);
+                // Analysis excludes the legacy view's silence/unused ring tail.
+                const size_t first = std::min<size_t>(ready, ring_bytes - offset);
                 AppendVisualizationFrames(ring_shadow.data() + offset, first,
                     wave_format, extended);
-                if (available > first &&
+                if (ready > first &&
                     extended.count < ExtendedVisualizationSamples::capacity)
-                    AppendVisualizationFrames(ring_shadow.data(), available - first,
+                    AppendVisualizationFrames(ring_shadow.data(), ready - first,
                         wave_format, extended);
                 if (samples.count != 0)
                     PublishVisualization(std::move(samples), std::move(extended));
                 last_visual_byte = played_bytes;
             }
-            if (final_stream_byte && played_bytes >= *final_stream_byte) {
-                if (const auto duration = duration_ms_.load(); duration > 0)
-                    position_ms_ = duration;
-                state_ = PlaybackState::stopped;
-                natural_replay_gain_end = true;
-                break;
+            if (!pause_complete && !input_finished && ready < plan->logical_bytes) {
+                if (!submit_packet(plan->logical_bytes - ready)) break;
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
         ring_monitor.request_stop();
         ring_monitor.join();
-        sound_buffer->Stop();
         {
             std::scoped_lock lock(mutex_);
+            sound_buffer->Stop();
             if (direct_sound_buffer_ == sound_buffer.Get())
                 direct_sound_buffer_ = nullptr;
             backend_ = Backend::none;
@@ -3313,15 +3375,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         return;
     }
 
-    size_t buffer_bytes = std::max<size_t>(
-        static_cast<size_t>(options.file_buffer_bytes),
-        static_cast<size_t>(wave_format.nAvgBytesPerSec) *
-            static_cast<size_t>(options.output_buffer_ms) /
-            (1000 * kOutputBufferCount));
-    buffer_bytes = std::clamp<size_t>(buffer_bytes, wave_format.nBlockAlign,
-                                     4 * 1024 * 1024);
-    buffer_bytes -= buffer_bytes % wave_format.nBlockAlign;
-    if (buffer_bytes == 0) buffer_bytes = wave_format.nBlockAlign;
+    size_t buffer_bytes = OutputSegmentBytes(wave_format, options.output_buffer_ms);
 
     std::unique_ptr<KernelStreamingSink> ks_sink;
     std::unique_ptr<WasapiSink> wasapi_sink;
@@ -3480,8 +3534,7 @@ void AudioEngine::WaveOutWorker(const std::filesystem::path& path,
         kOutputBufferCount < ExtendedVisualizationSamples::capacity;
     detail::VisualizationHistory analysis_history;
 
-    const size_t native_request = SourceReadBytes(
-        source_format, wave_format, buffer_bytes, options.file_buffer_bytes);
+    const size_t native_request = SourceReadBytes(source_format, wave_format, buffer_bytes);
     auto fill = [&](OutputBuffer& output) -> bool {
         size_t written{};
         while (!stop_requested_ && written < output.data.size() &&
@@ -4036,8 +4089,20 @@ bool AudioEngine::PublishOpened(Backend backend, const AudioFormat& format,
                                 std::chrono::milliseconds duration) {
     bool published{};
     {
-        std::scoped_lock lock(mutex_);
+        std::unique_lock lock(mutex_);
         if (!stop_requested_) {
+            // Do not briefly play position zero when an async open has a
+            // pending restore/seek. Serialize the first Play with UI state
+            // just as the ring monitor does for subsequent starts.
+            if (backend == Backend::direct_sound && !opening_paused_ &&
+                !(opening_seek_ms_ >= 0 && duration.count() > 0)) {
+                const HRESULT hr = direct_sound_buffer_->Play(0, 0, DSBPLAY_LOOPING);
+                if (FAILED(hr)) {
+                    lock.unlock();
+                    if (!stop_requested_) SetError(HResultMessage(L"IDirectSoundBuffer::Play", hr), hr);
+                    return false;
+                }
+            }
             backend_ = backend;
             format_ = format;
             duration_ms_ = std::max<int64_t>(0, duration.count());
@@ -4127,8 +4192,17 @@ void AudioEngine::Resume() {
     bool success{};
     if (backend_.load() == Backend::wave_out && device_)
         success = waveOutRestart(device_) == MMSYSERR_NOERROR;
-    else if (backend_.load() == Backend::direct_sound && direct_sound_buffer_)
-        success = SUCCEEDED(direct_sound_buffer_->Play(0, 0, DSBPLAY_LOOPING));
+    else if (backend_.load() == Backend::direct_sound && direct_sound_buffer_) {
+        // Only the ring monitor can distinguish a user pause from a stopped
+        // low-water/seek prefill. Publish intent even while the reader is blocked.
+        success = true;
+        if (fade_pending_ && fade_completion_ == FadeCompletion::pause) {
+            fade_pending_ = false;
+            fade_completion_ = FadeCompletion::none;
+            ++fade_generation_;
+            fade_condition_.notify_all();
+        }
+    }
     else if (backend_.load() == Backend::kernel_streaming ||
              backend_.load() == Backend::asio ||
              backend_.load() == Backend::wasapi)
@@ -4265,7 +4339,6 @@ void AudioEngine::SeekImpl(std::chrono::milliseconds position,
 void AudioEngine::RequestStop() noexcept {
     std::shared_ptr<ArchivePlaybackSession> previous;
     stop_requested_ = true;
-    state_ = PlaybackState::stopped;
     ClearVisualization();
     if (worker_.joinable()) {
         worker_.request_stop();
@@ -4276,6 +4349,9 @@ void AudioEngine::RequestStop() noexcept {
     }
     {
         std::scoped_lock lock(mutex_);
+        // PublishOpened may already have passed its cancellation check. Make
+        // stopped the final state even when we do not wait for its worker.
+        state_ = PlaybackState::stopped;
         previous = std::move(archive_session_);
         CancelSeekLocked();
         fade_pending_ = false;
@@ -4329,6 +4405,11 @@ void AudioEngine::StopAndWait() {
 
 void AudioEngine::StopWithFade() {
     if (BeginStopFade()) return;
+    if (state_ == PlaybackState::opening && HasStateNotification()) {
+        StopAsync();
+        SignalOpenComplete();
+        return;
+    }
     Stop();
 }
 

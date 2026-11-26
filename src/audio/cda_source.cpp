@@ -134,6 +134,11 @@ public:
     }
     std::optional<std::chrono::milliseconds> LastSeekPosition() const override {return seek_position_;}
     const WAVEFORMATEX& OutputFormat() const override {return decoder_ ? decoder_->OutputFormat() : wave_;}
+    std::uint32_t PacketBytes() const override {
+        if (!decoder_) return 2 * 2352; // 004E7CFD: two sectors per PCM reader packet
+        DWORD input{}, output{};
+        return SUCCEEDED(decoder_->BufferSizes(input, output)) ? output : 0;
+    }
     AudioFormat DisplayFormat() const override {return format_;}
     std::chrono::milliseconds Duration() const override {return duration_;}
     std::wstring Error() const override {return error_;}

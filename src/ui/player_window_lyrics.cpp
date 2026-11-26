@@ -1324,7 +1324,7 @@ bool PlayerWindow::CreateDesktopLyrics() {
     if (!desktop_lyrics_.Create(instance_, lyric_window_, window_,
             ResourceModule(), &settings_.desktop_lyric,
             &settings_.player.desktop_lyric_window,
-            std::move(track_popup))) {
+            std::move(track_popup), [this] { return audio_->ClockSnapshot(); })) {
         return false;
     }
     desktop_lyrics_.SetSkin(skin_ ? &*skin_ : nullptr, window_icon_small_);

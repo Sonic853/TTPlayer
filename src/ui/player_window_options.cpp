@@ -826,12 +826,12 @@ std::wstring GetText(HWND dialog, int control) {
 }
 
 void PopulateResourceCombo(HWND dialog, int control, HMODULE resources,
-                           size_t count, int selection) {
+                           size_t count, int selection, UINT string_id = 0) {
     const HWND combo = GetDlgItem(dialog, control);
     if (!combo) return;
     SendMessageW(combo, CB_RESETCONTENT, 0, 0);
     for (size_t index = 0; index < count; ++index) {
-        const auto text = ResourceListItem(resources, control, index);
+        const auto text = ResourceListItem(resources, string_id ? string_id : control, index);
         if (!text.empty()) SendMessageW(combo, CB_ADDSTRING, 0,
             reinterpret_cast<LPARAM>(text.c_str()));
     }
@@ -4977,7 +4977,7 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         SetChecked(dialog, 2130, value.auto_scan_gain);
         SetChecked(dialog, 2131, value.skip_scan_gain);
         SetSpinRange(dialog, 1096, 0, 10);
-        SetSpinRange(dialog, 1097, 1, 1024 * 16);
+        SetSpinRange(dialog, 1097, 0, 1024 * 16);
         EnableWindow(GetDlgItem(dialog, 2092), IsChecked(dialog, 1070));
         for (int index = 0; index < 5; ++index) {
             const bool enabled = IsChecked(dialog, 2070 + index);
@@ -5637,8 +5637,10 @@ void PlayerWindow::InitializeOptionsPage(HWND dialog, UINT template_id) {
         }
         PopulateTextCombo(dialog, 2257, {L"1",L"2"},
                           std::clamp(settings_.desktop_lyric.lines - 1, 0, 1));
-        PopulateResourceCombo(dialog, 1037, resources, 3,
-                              std::clamp(settings_.desktop_lyric.align, 0, 2));
+        // Control 1037 is shared with window lyrics, but DeskLrc/@Align
+        // indexes its own list: center, left, right, split across two rows.
+        PopulateResourceCombo(dialog, 1037, resources, 4,
+                              std::clamp(settings_.desktop_lyric.align, 0, 3), 2258);
         SetChecked(dialog, 2258, settings_.desktop_lyric.shadow);
         SetChecked(dialog, 2150, settings_.desktop_lyric.karaoke_mode);
         SetChecked(dialog, 2259, settings_.desktop_lyric.smooth);
@@ -5779,7 +5781,7 @@ void PlayerWindow::CommitOptionsPage(HWND dialog, UINT template_id) {
         value.thread_priority = priorities[static_cast<size_t>(std::clamp(
             ComboSelection(dialog, 1100), 0, 2))];
         value.file_buffer = GetInteger(dialog, 2195,
-            value.file_buffer / 1024, 1, 16384) * 1024;
+            value.file_buffer / 1024, 0, 16384) * 1024;
         value.sound_fade_mode = 0;
         for (int index = 0; index < 4; ++index) {
             if (IsChecked(dialog, 2070 + index))
@@ -6159,7 +6161,7 @@ bool PlayerWindow::CommitOptionsControl(
         }
         case 2195:
             value.file_buffer = GetInteger(
-                dialog, 2195, value.file_buffer / 1024, 1, 16384) * 1024;
+                dialog, 2195, value.file_buffer / 1024, 0, 16384) * 1024;
             break;
         case 2070: case 2071: case 2072: case 2073: case 2074: {
             const int bit = control == 2074
@@ -6770,11 +6772,9 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
         ApplyOptionsRuntime();
         if (output_restart != OutputRestartState::none &&
             PlayCurrent()) {
-            audio_->RestoreAfterOutputRestart(
+            RestoreRequestedPlayback(
                 output_restart_position,
                 output_restart == OutputRestartState::paused);
-            settings_.player.playing_time = static_cast<int>(std::clamp<int64_t>(
-                output_restart_position.count(), 0, INT_MAX));
             RefreshPlaybackUi();
         }
         return;
@@ -6805,11 +6805,9 @@ void PlayerWindow::ApplyOptionsChangeMask(UINT mask, LPARAM source_control) {
     if ((mask & 0x4000U) != 0) ApplyOptionsRuntime(385);
     if (output_restart != OutputRestartState::none &&
         PlayCurrent()) {
-        audio_->RestoreAfterOutputRestart(
+        RestoreRequestedPlayback(
             output_restart_position,
             output_restart == OutputRestartState::paused);
-        settings_.player.playing_time = static_cast<int>(std::clamp<int64_t>(
-            output_restart_position.count(), 0, INT_MAX));
         RefreshPlaybackUi();
     }
 }

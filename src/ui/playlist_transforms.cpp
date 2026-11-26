@@ -88,6 +88,7 @@ struct ScanDialogState {
     std::shared_ptr<plugins::PluginManager> library;
     std::vector<playlist::Track> tracks;
     bool skip_existing{};
+    int file_buffer_bytes{plugins::kDefaultFileBufferBytes};
     std::vector<RowState> rows;
     std::vector<std::wstring> diagnostics;
     std::mutex mutex;
@@ -356,7 +357,8 @@ void RunScan(ScanDialogLifetime lifetime, std::stop_token stop) {
                                 }
                             }
                             if (changed) PostScanRefresh(state);
-                        }, track.subtrack, [&] { return state.Checkpoint(); }, policy.get());
+                        }, track.subtrack, [&] { return state.Checkpoint(); }, policy.get(),
+                        state.file_buffer_bytes);
                 } catch (...) {
                     job.result.status = audio::ReplayGainScanStatus::decode_error;
                     job.result.result = E_FAIL;
@@ -1573,7 +1575,6 @@ PlaylistConversionResult ConvertPlaylistTrack(
     auto source = audio::CreateDecodedAudioSource(track.path, track.subtrack, &library, ttpcomm);
     if (!source) return fail(E_OUTOFMEMORY, i18n::Literal(L"unable to create decoded audio source"));
     audio::PlaybackOptions source_options=network_options;
-    source_options.file_buffer_bytes = 64 * 1024;
     source_options.network_canceled=[stop, previous=source_options.network_canceled] {
         return stop.stop_requested() || (previous && previous());
     };
@@ -1786,7 +1787,8 @@ bool ShowPlaylistReplayGainScanner(
     HWND owner, HMODULE resources, HMODULE ttpcomm,
     const plugins::PluginManager* library,
     std::vector<playlist::Track> tracks, bool skip_existing,
-    unsigned concurrency, std::function<void(unsigned)> concurrency_changed) {
+    unsigned concurrency, std::function<void(unsigned)> concurrency_changed,
+    int file_buffer_bytes) {
     if (g_scan_dialog && IsWindow(g_scan_dialog)) {
         ShowWindow(g_scan_dialog, SW_RESTORE);
         BringWindowToTop(g_scan_dialog);
@@ -1813,6 +1815,7 @@ bool ShowPlaylistReplayGainScanner(
         state->library = retained_library;
         state->tracks = std::move(tracks);
         state->skip_existing = skip_existing;
+        state->file_buffer_bytes = file_buffer_bytes;
         state->concurrency.store(std::clamp(concurrency, 1U, 4U));
         state->concurrency_changed = std::move(concurrency_changed);
         holder = new ScanDialogLifetime(state);

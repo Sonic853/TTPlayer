@@ -886,7 +886,10 @@ private:
     std::wstring_view ActiveMainSkinButton(std::wstring_view name) const;
     void StartSkinInfoItem();
     bool PlayCurrent();
+    bool OpenPlaybackTrack(const playlist::Track& track);
     bool CompletePlaybackOpen(const playlist::Track& track);
+    void FailPlaybackOpen(const playlist::Track& track);
+    void RestoreRequestedPlayback(std::chrono::milliseconds position, bool paused);
     void PollNetworkPlayback();
     uint64_t playback_metadata_revision_{};
     void PollNetworkDownloads();
@@ -1227,11 +1230,12 @@ private:
     bool have_mini_window_bounds_{};
     bool playback_was_active_{};
     bool playback_source_open_{};
-    bool network_open_pending_{};
+    bool network_open_pending_{}; // Local, archive and network opens share the completion path.
     bool visual_track_change_in_progress_{};
     bool natural_completion_dispatch_{};
     bool pending_natural_play_{};
     std::optional<playlist::Track> pending_wave_track_change_;
+    std::optional<std::pair<std::chrono::milliseconds, bool>> pending_track_restore_;
     ULONGLONG wave_track_change_deadline_{};
     bool pending_failed_advance_{};
     ULONGLONG pending_natural_play_tick_{};

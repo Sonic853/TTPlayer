@@ -126,6 +126,7 @@ add_library(ttplayer_core
   src/platform/optional_windows_api.cpp
   src/platform/windows_features.cpp
   src/plugins/plugin_manager.cpp
+  src/plugins/legacy_file_stream.cpp
   src/plugins/builtin_mpeg_decoder.cpp
   src/plugins/builtin_acm_decoder.cpp
   src/plugins/legacy_host_exports.cpp
@@ -969,7 +970,7 @@ if(TTPLAYER_XP_RUNTIME_CONFIGURED)
   target_link_libraries(audio_recovery_tests PRIVATE "${ttpcomm_import_library}")
   target_link_options(audio_recovery_tests PRIVATE /INCLUDE:__imp__srand48)
 endif()
-add_dependencies(audio_recovery_tests ttp_mock_incompatible ttp_mock_stalling)
+add_dependencies(audio_recovery_tests ttp_mock_incompatible ttp_mock_stalling dsp_probe_valid)
 
 foreach(revision_target IN ITEMS ttpcomm_mock_revision ttpcomm_mock_no_version)
   add_library(${revision_target} SHARED tests/mock_ttpcomm_revision.c)

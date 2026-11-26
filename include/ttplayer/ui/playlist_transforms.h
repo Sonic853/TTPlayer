@@ -80,7 +80,8 @@ bool ShowPlaylistReplayGainScanner(
     HWND owner, HMODULE resources, HMODULE ttpcomm,
     const plugins::PluginManager* library,
     std::vector<playlist::Track> tracks, bool skip_existing,
-    unsigned concurrency = 2, std::function<void(unsigned)> concurrency_changed = {});
+    unsigned concurrency = 2, std::function<void(unsigned)> concurrency_changed = {},
+    int file_buffer_bytes = plugins::kDefaultFileBufferBytes);
 
 bool TranslatePlaylistReplayGainScannerMessage(MSG& message);
 void ClosePlaylistReplayGainScanner(HWND owner);

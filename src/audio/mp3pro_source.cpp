@@ -453,6 +453,10 @@ public:
     const WAVEFORMATEX& OutputFormat() const override {
         return bridge_ ? wave_format_ : fallback_->OutputFormat();
     }
+    std::uint32_t PacketBytes() const override {
+        // 004E71F8: the enhanced decoder advertises 1152 output frames.
+        return bridge_ ? 1152U * wave_format_.nBlockAlign : fallback_->PacketBytes();
+    }
     AudioFormat DisplayFormat() const override {
         return bridge_ ? display_format_ : fallback_->DisplayFormat();
     }

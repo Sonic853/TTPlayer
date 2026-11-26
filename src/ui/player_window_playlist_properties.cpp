@@ -2216,7 +2216,7 @@ void PlayerWindow::ShowPlaylistProperties(
             requested->subtrack != resume->track.subtrack ||
             audio_->State() != audio::PlaybackState::stopped || close_after_skin_window_fade_) return;
         if (PlayCurrent()) {
-            audio_->RestoreAfterOutputRestart(resume->position, resume->paused);
+            RestoreRequestedPlayback(resume->position, resume->paused);
             RefreshPlaybackUi();
         }
     };

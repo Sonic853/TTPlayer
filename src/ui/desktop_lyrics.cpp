@@ -3,6 +3,7 @@
 #include "ttplayer/i18n/i18n.h"
 #include "ttplayer/ui/wtl_menu.h"
 #include "ttplayer/ui/desktop_lyrics.h"
+#include "ttplayer/audio/audio_engine.h"
 #include "ttplayer/ui/desktop_lyric_layout.h"
 #include "ttplayer/ui/window_drag.h"
 
@@ -269,7 +270,7 @@ public:
     bool Create(HINSTANCE instance, HWND lyric_owner, HWND command_target,
                 HMODULE resource_module,
                 settings::DesktopLyricSettings* desktop_settings,
-                RECT* persisted_bounds, PopupMenuTracker tracker) {
+                RECT* persisted_bounds, PopupMenuTracker tracker, PlaybackClock clock) {
         Destroy();
         if (!instance || !lyric_owner || !desktop_settings ||
             !persisted_bounds) return false;
@@ -280,6 +281,7 @@ public:
         settings_ = desktop_settings;
         persisted_bounds_ = persisted_bounds;
         popup_tracker_ = std::move(tracker);
+        playback_clock_ = std::move(clock);
 
         if (!RegisterClassIfMissing(instance_, kControlClass, ControlProc) ||
             !RegisterClassIfMissing(instance_, kPaintClass, PaintProc, 0) ||
@@ -328,6 +330,8 @@ public:
 
     void Destroy() noexcept {
         visible_ = false;
+        playback_clock_ = {};
+        paused_clock_.reset();
         const HWND capture = GetCapture();
         if (capture &&
             (capture == control_ || capture == bar_ ||
@@ -380,6 +384,7 @@ public:
 
     void SetLyrics(const lyrics::Lyrics* value) {
         lyrics_ = value;
+        paused_clock_.reset();
         mask_cache_dirty_ = true;
         rendered_line_ = std::numeric_limits<size_t>::max();
         RenderLayered();
@@ -1763,7 +1768,7 @@ private:
         LOGFONTW descriptor = settings_->font;
         if (descriptor.lfHeight == 0) descriptor.lfHeight = -40;
         if (descriptor.lfWeight == 0) descriptor.lfWeight = FW_BOLD;
-        descriptor.lfQuality = ANTIALIASED_QUALITY;
+        descriptor.lfQuality = settings_->smooth ? ANTIALIASED_QUALITY : NONANTIALIASED_QUALITY;
         font_ = CreateFontIndirectW(&descriptor);
         if (!font_) {
             wcsncpy_s(descriptor.lfFaceName, L"Microsoft YaHei",
@@ -1787,9 +1792,23 @@ private:
                         : std::max(1, configured_height);
     }
 
-    std::chrono::milliseconds EffectivePosition() const {
-        if (!playing_ || !settings_ || !settings_->smooth)
-            return anchor_position_;
+    std::chrono::milliseconds EffectivePosition() {
+        if (playback_clock_) {
+            // Sample the output clock on each render tick. During a seek it
+            // publishes the target until the new output actually starts.
+            const auto clock = playback_clock_();
+            if (clock.state != audio::PlaybackState::paused) {
+                paused_clock_.reset();
+                return clock.position;
+            }
+            // A pause fade can still move the physical cursor. Hold the lyric
+            // until resume, unless a new seek changes the paused position.
+            if (!paused_clock_ || clock.seek_pending ||
+                paused_clock_->timeline_revision != clock.timeline_revision)
+                paused_clock_ = clock;
+            return paused_clock_->position;
+        }
+        if (!playing_) return anchor_position_;
         return anchor_position_ +
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - anchor_time_);
@@ -2099,6 +2118,8 @@ private:
     settings::DesktopLyricSettings* settings_{};
     RECT* persisted_bounds_{};
     PopupMenuTracker popup_tracker_;
+    PlaybackClock playback_clock_;
+    std::optional<audio::PlaybackClockSnapshot> paused_clock_;
     const skin::LegacySkin* skin_{};
     HICON default_icon_{}; // Borrowed application fallback, never the main skin icon.
     const lyrics::Lyrics* lyrics_{};
@@ -2142,10 +2163,10 @@ DesktopLyricsWindow::~DesktopLyricsWindow() = default;
 bool DesktopLyricsWindow::Create(HINSTANCE instance, HWND lyric_owner,
     HWND command_target, HMODULE resource_module,
     settings::DesktopLyricSettings* settings, RECT* persisted_bounds,
-    PopupMenuTracker popup_tracker) {
+    PopupMenuTracker popup_tracker, PlaybackClock clock) {
     return impl_->Create(instance, lyric_owner, command_target, resource_module,
                          settings, persisted_bounds,
-                         std::move(popup_tracker));
+                         std::move(popup_tracker), std::move(clock));
 }
 
 void DesktopLyricsWindow::Destroy() noexcept { impl_->Destroy(); }

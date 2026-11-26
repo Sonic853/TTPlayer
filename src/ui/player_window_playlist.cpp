@@ -6179,7 +6179,8 @@ bool PlayerWindow::HandlePlaylistCommand(UINT command) {
             playlist_window_, ResourceModule(), ttpcomm_module_,
             sound_library_, std::move(tracks), settings_.playback.skip_scan_gain,
             settings_.playback.scan_gain_threads,
-            [this](unsigned count) { settings_.playback.scan_gain_threads = count; }));
+            [this](unsigned count) { settings_.playback.scan_gain_threads = count; },
+            settings_.playback.file_buffer));
         return true;
     }
     if (command == kPlaylistReplayGainRemove) {

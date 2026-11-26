@@ -79,6 +79,7 @@ public:
         return source_->ArchiveSession();
     }
     const WAVEFORMATEX& OutputFormat() const override { return source_->OutputFormat(); }
+    std::uint32_t PacketBytes() const override { return source_->PacketBytes(); }
     AudioFormat DisplayFormat() const override { return source_->DisplayFormat(); }
     std::chrono::milliseconds Duration() const override { return source_->Duration(); }
     std::wstring Error() const override {

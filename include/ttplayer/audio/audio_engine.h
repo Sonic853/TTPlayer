@@ -1,7 +1,9 @@
 #pragma once
 #include <ttpcomm/audio_format_probe.h>
+#include "ttplayer/audio/buffering_contract.h"
 #include "ttplayer/audio/builtin_file_info.h"
 #include "ttplayer/audio/hires_output.h"
+#include "ttplayer/plugins/legacy_file_stream.h"
 
 #include <array>
 #include <atomic>
@@ -156,7 +158,7 @@ struct PlaybackOptions {
     PcmPlaybackMode pcm_mode{PcmPlaybackMode::compatible};
     Mp3TagPolicy mp3_tags;
     std::filesystem::path lyric_recovery_folder;
-    int file_buffer_bytes{16384};
+    int file_buffer_bytes{plugins::kDefaultFileBufferBytes}; // On-demand encoded input buffer; zero disables read-ahead.
     int output_buffer_ms{1000};
     int output_bits{16};
     int resample_rate{};
@@ -241,6 +243,11 @@ public:
     virtual int DownloadedPercent() { return -1; }
     [[nodiscard]] virtual std::shared_ptr<ArchivePlaybackSession> ArchiveSession() const { return {}; }
     [[nodiscard]] virtual const WAVEFORMATEX& OutputFormat() const = 0;
+    // Size of a decoded PCM reader packet after Open, before effects, channel
+    // mapping or resampling. Pull sources without a native hint use the PCM default.
+    [[nodiscard]] virtual std::uint32_t PacketBytes() const {
+        return PcmReaderPacketBytes(OutputFormat());
+    }
     [[nodiscard]] virtual AudioFormat DisplayFormat() const = 0;
     [[nodiscard]] virtual std::chrono::milliseconds Duration() const = 0;
     [[nodiscard]] virtual std::wstring Error() const = 0;
@@ -276,6 +283,10 @@ public:
     AudioEngine& operator=(const AudioEngine&) = delete;
 
     bool Play(const std::filesystem::path& path, int subtrack = 0);
+    // With a registered window, return once the request is queued; inspect
+    // State() on notification and poll PollOpenTimeout() while still opening.
+    // With no receiver this has the same local-open contract as Play().
+    bool PlayWithNotification(const std::filesystem::path& path, int subtrack = 0);
     void PrepareArchiveTrackChange(const std::filesystem::path& path, int subtrack);
     void CancelArchiveTrackChange();
     // A stable second session lets the old sound finish its stop fade while
@@ -285,6 +296,11 @@ public:
     // WaveOut volume can be shared across handles. Fade on the current
     // handle, then let the UI open the successor after TryReapStopped().
     [[nodiscard]] bool BeginWaveOutTrackChange();
+    // Serial replacement without a fade: cancel now and let the window poll
+    // until a non-overlapping reader/endpoint has really been released.
+    [[nodiscard]] bool BeginImmediateTrackChange();
+    static constexpr auto kStopWaitBudget = std::chrono::milliseconds(1500);
+    void PollOpenTimeout();
     void StopAsync() noexcept;
     [[nodiscard]] bool TryReapStopped() noexcept;
     bool PlayWave(const std::filesystem::path& path) { return Play(path); }
@@ -321,8 +337,7 @@ public:
     }
     void SetTtpCommModule(HMODULE module) noexcept { ttpcomm_module_ = module; }
     void SetDspParentWindow(HWND window);
-    // Wake the window thread after the worker has released its source/output.
-    // The message is a request to inspect current state, not an EOF command.
+    // Wake the owner on open or worker exit; the message is not an EOF command.
     void SetStateNotification(HWND window, UINT message);
     void SetDspStorageDirectory(const std::filesystem::path& directory);
     [[nodiscard]] bool ConfigureDsp(const std::filesystem::path& module);
@@ -406,6 +421,8 @@ private:
                                      std::chrono::milliseconds duration);
     void SignalOpenComplete();
     void RequestStop() noexcept;
+    [[nodiscard]] bool HasStateNotification() const;
+    bool StartPlayback(const std::filesystem::path& path, int subtrack, bool async_open);
     [[nodiscard]] bool ReapWorker(std::chrono::milliseconds timeout) noexcept;
     void SeekImpl(std::chrono::milliseconds position, bool allow_fade);
     void QueueSeekLocked(int64_t position_ms);
@@ -437,6 +454,7 @@ private:
     mutable std::mutex mutex_;
     HWND state_notification_window_{};
     UINT state_notification_message_{};
+    std::optional<std::chrono::steady_clock::time_point> local_open_deadline_;
     std::condition_variable lyric_write_condition_;
     std::shared_ptr<LyricWriteRequest> lyric_write_request_;
     std::filesystem::path lyric_source_path_;

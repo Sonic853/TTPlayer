@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ttplayer/plugins/legacy_file_stream.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -97,7 +99,8 @@ private:
     const std::filesystem::path& path, bool skip_existing,
     std::stop_token stop = {}, ReplayGainProgress progress = {}, int subtrack = 0,
     ReplayGainCheckpoint checkpoint = {},
-    const ReplayGainScanConcurrency* concurrency = nullptr);
+    const ReplayGainScanConcurrency* concurrency = nullptr,
+    int file_buffer_bytes = plugins::kDefaultFileBufferBytes);
 
 [[nodiscard]] ReplayGainScanResult CommitReplayGainTrack(
     const plugins::PluginManager& library,
@@ -153,6 +156,7 @@ void QueueReplayGainCommit(
     const plugins::PluginManager& library, HMODULE ttpcomm,
     const std::filesystem::path& path, bool skip_existing,
     std::stop_token stop = {}, ReplayGainProgress progress = {}, int subtrack = 0,
-    ReplayGainCheckpoint checkpoint = {});
+    ReplayGainCheckpoint checkpoint = {},
+    int file_buffer_bytes = plugins::kDefaultFileBufferBytes);
 
 } // namespace ttplayer::audio

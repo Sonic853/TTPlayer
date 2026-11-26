@@ -244,7 +244,7 @@ void PlayerWindow::PromptExtensionCorrection() {
         RefreshPlaylist();
     }
     if (affected && active && PlayCurrent())
-        audio_->RestoreAfterOutputRestart(position,state==audio::PlaybackState::paused);
+        RestoreRequestedPlayback(position,state==audio::PlaybackState::paused);
     RefreshPlaybackUi();
     if (result.error) {
         wchar_t* system_text{};

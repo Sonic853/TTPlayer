@@ -1,4 +1,5 @@
 #pragma once
+#include "ttplayer/plugins/legacy_file_stream.h"
 #include <ttpcomm/audio_format_probe.h>
 
 #include <cstddef>
@@ -15,10 +16,6 @@
 #include <objidl.h>
 
 namespace ttplayer::plugins {
-
-// 004C51D3, also exported by the host EXE for old AddIns using temporary WAVs.
-HRESULT CreateLegacyFileStream(const wchar_t* path, DWORD mode,
-                              IStream** output) noexcept;
 
 // Optional new interface, never appended to an original Reader/Metadata vtable.
 // IUnknown slots 0..2, HRESULT __stdcall Commit() at slot 3; terminal, single attempt.
@@ -313,7 +310,7 @@ public:
     [[nodiscard]] bool HasReaderForContent(const std::filesystem::path& path) const;
     [[nodiscard]] std::unique_ptr<LegacyReaderSession> OpenReader(
         const std::filesystem::path& path, HRESULT* result = nullptr,
-        std::wstring* diagnostic = nullptr) const;
+        std::wstring* diagnostic = nullptr, int file_buffer_bytes = kDefaultFileBufferBytes) const;
     // Opens the same recovered reader ABI around a read/write IStream.  The
     // metadata slot-6 implementations in the shipped FLAC/APE readers write
     // through the stream and return STG_E_ACCESSDENIED when handed the normal
@@ -335,7 +332,8 @@ public:
     // in-memory IStream exactly as it does for a physical file.
     [[nodiscard]] std::unique_ptr<LegacyReaderSession> OpenReader(
         const std::filesystem::path& logical_path, IStream* stream,
-        HRESULT* result = nullptr, std::wstring* diagnostic = nullptr) const;
+        HRESULT* result = nullptr, std::wstring* diagnostic = nullptr,
+        int file_buffer_bytes = kDefaultFileBufferBytes) const;
 
     // FUN_004CD045 selects the first IDecoderCreator accepting the encoded
     // WAVE subtype, creates its decoder and invokes decoder slot 3 with the
@@ -369,7 +367,7 @@ private:
     [[nodiscard]] std::unique_ptr<LegacyReaderSession> OpenReaderWithFlags(
         const std::filesystem::path& logical_path, IStream* stream,
         DWORD open_flags, HRESULT* result,
-        std::wstring* diagnostic) const;
+        std::wstring* diagnostic, int file_buffer_bytes = 0) const;
 
     struct ReaderFactory {
         ReaderFormat format;

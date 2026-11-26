@@ -16,7 +16,6 @@
 #include <limits>
 #include <objbase.h>
 #include <objidl.h>
-#include <shlwapi.h>
 #include <system_error>
 
 namespace ttplayer::plugins {
@@ -134,134 +133,6 @@ struct LegacyBuffer {
     DWORD capacity{};
     DWORD length{};
 };
-
-// The original exported CreateStreamOnFile (004C51D3) returns an IStream
-// whose Stat name is the physical path.  SHCreateStreamOnFileEx leaves that
-// field empty on this host; the FLAC metadata implementation consequently
-// cannot run GetFileAttributesW and reports capabilities 0x2 instead of 0x6,
-// making metadata slot 6 return E_ACCESSDENIED.  Preserve the ordinary shell
-// stream behavior while restoring the named-Stat contract used by the add-ins.
-class NamedFileStream final : public IStream {
-public:
-    NamedFileStream(IStream* inner, std::filesystem::path path,
-                    DWORD mode) noexcept
-        : inner_(inner), path_(std::move(path)), mode_(mode) {}
-
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** value) override {
-        if (!value) return E_POINTER;
-        *value = nullptr;
-        if (InlineIsEqualGUID(iid, IID_IUnknown) ||
-            InlineIsEqualGUID(iid, IID_ISequentialStream) ||
-            InlineIsEqualGUID(iid, IID_IStream)) {
-            *value = static_cast<IStream*>(this);
-            AddRef();
-            return S_OK;
-        }
-        return inner_ ? inner_->QueryInterface(iid, value) : E_NOINTERFACE;
-    }
-    ULONG STDMETHODCALLTYPE AddRef() override {
-        return static_cast<ULONG>(InterlockedIncrement(&references_));
-    }
-    ULONG STDMETHODCALLTYPE Release() override {
-        const ULONG remaining = static_cast<ULONG>(
-            InterlockedDecrement(&references_));
-        if (remaining == 0) delete this;
-        return remaining;
-    }
-    HRESULT STDMETHODCALLTYPE Read(void* value, ULONG size,
-                                   ULONG* read) override {
-        return inner_->Read(value, size, read);
-    }
-    HRESULT STDMETHODCALLTYPE Write(const void* value, ULONG size,
-                                    ULONG* written) override {
-        return inner_->Write(value, size, written);
-    }
-    HRESULT STDMETHODCALLTYPE Seek(LARGE_INTEGER move, DWORD origin,
-                                   ULARGE_INTEGER* position) override {
-        return inner_->Seek(move, origin, position);
-    }
-    HRESULT STDMETHODCALLTYPE SetSize(ULARGE_INTEGER size) override {
-        return inner_->SetSize(size);
-    }
-    HRESULT STDMETHODCALLTYPE CopyTo(IStream* target, ULARGE_INTEGER size,
-        ULARGE_INTEGER* read, ULARGE_INTEGER* written) override {
-        return inner_->CopyTo(target, size, read, written);
-    }
-    HRESULT STDMETHODCALLTYPE Commit(DWORD flags) override {
-        return inner_->Commit(flags);
-    }
-    HRESULT STDMETHODCALLTYPE Revert() override { return inner_->Revert(); }
-    HRESULT STDMETHODCALLTYPE LockRegion(ULARGE_INTEGER offset,
-        ULARGE_INTEGER size, DWORD type) override {
-        return inner_->LockRegion(offset, size, type);
-    }
-    HRESULT STDMETHODCALLTYPE UnlockRegion(ULARGE_INTEGER offset,
-        ULARGE_INTEGER size, DWORD type) override {
-        return inner_->UnlockRegion(offset, size, type);
-    }
-    HRESULT STDMETHODCALLTYPE Stat(STATSTG* stat, DWORD flags) override {
-        if (!stat) return STG_E_INVALIDPOINTER;
-        const HRESULT result = inner_->Stat(stat, flags);
-        if (FAILED(result)) return result;
-        stat->grfMode = mode_;
-        if ((flags & STATFLAG_NONAME) == 0) {
-            if (stat->pwcsName) CoTaskMemFree(stat->pwcsName);
-            stat->pwcsName = nullptr;
-            const auto& value = path_.native();
-            const size_t bytes = (value.size() + 1) * sizeof(wchar_t);
-            stat->pwcsName = static_cast<wchar_t*>(CoTaskMemAlloc(bytes));
-            if (!stat->pwcsName) return E_OUTOFMEMORY;
-            std::memcpy(stat->pwcsName, value.c_str(), bytes);
-        }
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE Clone(IStream** value) override {
-        if (!value) return E_POINTER;
-        *value = nullptr;
-        IStream* clone{};
-        const HRESULT result = inner_->Clone(&clone);
-        if (FAILED(result) || !clone) return FAILED(result) ? result : E_FAIL;
-        auto* named = new (std::nothrow) NamedFileStream(clone, path_, mode_);
-        if (!named) {
-            clone->Release();
-            return E_OUTOFMEMORY;
-        }
-        *value = named;
-        return S_OK;
-    }
-
-private:
-    ~NamedFileStream() {
-        if (inner_) inner_->Release();
-    }
-    LONG references_{1};
-    IStream* inner_{};
-    std::filesystem::path path_;
-    DWORD mode_{};
-};
-
-HRESULT CreateNamedFileStream(const std::filesystem::path& path, DWORD mode,
-                              IStream** output) noexcept {
-    if (!output) return E_POINTER;
-    *output = nullptr;
-    IStream* inner{};
-    const HRESULT opened = SHCreateStreamOnFileEx(
-        path.c_str(), mode, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &inner);
-    if (FAILED(opened) || !inner)
-        return FAILED(opened) ? opened : E_NOINTERFACE;
-    try {
-        auto* named = new (std::nothrow) NamedFileStream(inner, path, mode);
-        if (!named) {
-            inner->Release();
-            return E_OUTOFMEMORY;
-        }
-        *output = named;
-        return S_OK;
-    } catch (...) {
-        inner->Release();
-        return E_OUTOFMEMORY;
-    }
-}
 
 HRESULT WINAPI BufferQuery(LegacyBuffer* self, REFIID iid, void** result) {
     if (!result) return E_POINTER;
@@ -575,6 +446,23 @@ HRESULT InvokeReaderOpen(void* reader, IStream* stream, DWORD flags) noexcept {
     }
 #else
     return reinterpret_cast<OpenReader>(table[3])(reader, stream, flags);
+#endif
+}
+
+// 004AC067 pushes FileBuffer by value (reader vtable +0x2C). A reader may
+// forward this to its stream or leave buffering entirely to its own decoder.
+HRESULT InvokeReaderSetFileBuffer(void* reader, DWORD bytes) noexcept {
+    auto table = Vtable(reader);
+    if (!table || !table[11]) return E_NOTIMPL;
+    using SetBufferSize = HRESULT(WINAPI*)(void*, DWORD);
+#if defined(_MSC_VER)
+    __try {
+        return reinterpret_cast<SetBufferSize>(table[11])(reader, bytes);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return E_UNEXPECTED;
+    }
+#else
+    return reinterpret_cast<SetBufferSize>(table[11])(reader, bytes);
 #endif
 }
 
@@ -1177,18 +1065,6 @@ bool PatternMatchesPath(std::wstring_view pattern,
 }
 
 } // namespace
-
-HRESULT CreateLegacyFileStream(const wchar_t* path, DWORD mode,
-                              IStream** output) noexcept {
-    if (!output) return E_POINTER;
-    *output = nullptr;
-    if (!path || !*path) return E_INVALIDARG;
-    try {
-        return CreateNamedFileStream(std::filesystem::path(path), mode, output);
-    } catch (...) {
-        return E_OUTOFMEMORY;
-    }
-}
 
 struct PluginManager::EncoderDependencyState {
     std::filesystem::path directory;
@@ -1932,8 +1808,8 @@ HRESULT LegacyEncoderSession::Open(const std::filesystem::path& destination,
     IStream* stream{};
     constexpr DWORD kEncoderStreamMode = STGM_READWRITE |
         STGM_SHARE_DENY_WRITE | STGM_CREATE; // literal 0x1022 in 004CD30C
-    HRESULT result = CreateNamedFileStream(
-        destination, kEncoderStreamMode, &stream);
+    HRESULT result = CreateLegacyFileStream(
+        destination.c_str(), kEncoderStreamMode, &stream);
     if (SUCCEEDED(result) && stream)
         result = InvokeEncoderStreamOpen(
             stream_encoder, stream, const_cast<WAVEFORMATEX*>(&pcm_format));
@@ -2406,7 +2282,7 @@ bool PluginManager::HasReaderForContent(const std::filesystem::path& path) const
     if (path.native().find(L"://") != std::wstring::npos ||
         path.native().find(L'|') != std::wstring::npos) return false;
     IStream* stream{};
-    if (FAILED(CreateNamedFileStream(path, STGM_READ | STGM_SHARE_DENY_NONE, &stream)) || !stream)
+    if (FAILED(CreateLegacyFileStream(path.c_str(), STGM_READ | STGM_SHARE_DENY_NONE, &stream)) || !stream)
         return false;
     ttp::format::Snapshot snapshot;
     const auto sampled = ttp::format::ReadSnapshot(stream, snapshot);
@@ -2432,18 +2308,18 @@ bool PluginManager::HasReaderForContent(const std::filesystem::path& path) const
 
 std::unique_ptr<LegacyReaderSession> PluginManager::OpenReader(
     const std::filesystem::path& path, HRESULT* result,
-    std::wstring* diagnostic) const {
+    std::wstring* diagnostic, int file_buffer_bytes) const {
     if (diagnostic) diagnostic->clear();
     IStream* stream{};
-    const HRESULT opened = CreateNamedFileStream(
-        path, STGM_READ | STGM_SHARE_DENY_WRITE, &stream);
+    const HRESULT opened = CreateLegacyFileStream(
+        path.c_str(), STGM_READ | STGM_SHARE_DENY_WRITE, &stream);
     if (FAILED(opened) || !stream) {
         if (result) *result = FAILED(opened) ? opened : E_NOINTERFACE;
         if (diagnostic) *diagnostic = L"creating file IStream";
         if (stream) stream->Release();
         return {};
     }
-    auto session = OpenReader(path, stream, result, diagnostic);
+    auto session = OpenReader(path, stream, result, diagnostic, file_buffer_bytes);
     stream->Release();
     return session;
 }
@@ -2460,8 +2336,8 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderForMetadata(
         return {};
     }
     IStream* stream{};
-    const HRESULT opened = CreateNamedFileStream(
-        path, STGM_READWRITE | STGM_SHARE_DENY_WRITE, &stream);
+    const HRESULT opened = CreateLegacyFileStream(
+        path.c_str(), STGM_READWRITE | STGM_SHARE_DENY_WRITE, &stream);
     if (FAILED(opened) || !stream) {
         if (result) *result = FAILED(opened) ? opened : E_NOINTERFACE;
         if (diagnostic) *diagnostic = L"creating writable file IStream";
@@ -2478,8 +2354,8 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderForInspection(
     const std::filesystem::path& path, HRESULT* result,
     std::wstring* diagnostic) const {
     IStream* stream{};
-    const HRESULT opened = CreateNamedFileStream(
-        path, STGM_READ | STGM_SHARE_DENY_WRITE, &stream);
+    const HRESULT opened = CreateLegacyFileStream(
+        path.c_str(), STGM_READ | STGM_SHARE_DENY_WRITE, &stream);
     if (FAILED(opened) || !stream) {
         if (result) *result = FAILED(opened) ? opened : E_NOINTERFACE;
         if (diagnostic) *diagnostic = L"creating metadata input IStream";
@@ -2499,18 +2375,18 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderForInspection(
 
 std::unique_ptr<LegacyReaderSession> PluginManager::OpenReader(
     const std::filesystem::path& logical_path, IStream* stream,
-    HRESULT* result, std::wstring* diagnostic) const {
+    HRESULT* result, std::wstring* diagnostic, int file_buffer_bytes) const {
     // 004B0D80 passes 3 to FUN_004b0b51 -> FUN_004e323b for playback.
     // Bit 0 enables decoding; bit 1 requests IEEE float ((flags & 2) | 1).
     // The shipped ttp_aac MP4 decoder writes float samples even with tag 1,
     // so the integer request mislabels its samples and produces loud noise.
     // Metadata-only opens deliberately keep flags 0 in the separate path.
-    return OpenReaderWithFlags(logical_path, stream, 3, result, diagnostic);
+    return OpenReaderWithFlags(logical_path, stream, 3, result, diagnostic, file_buffer_bytes);
 }
 
 std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderWithFlags(
     const std::filesystem::path& logical_path, IStream* stream,
-    DWORD open_flags, HRESULT* result, std::wstring* diagnostic) const {
+    DWORD open_flags, HRESULT* result, std::wstring* diagnostic, int file_buffer_bytes) const {
     if (diagnostic) diagnostic->clear();
     if (!stream) {
         if (result) *result = E_POINTER;
@@ -2771,6 +2647,19 @@ std::unique_ptr<LegacyReaderSession> PluginManager::OpenReaderWithFlags(
                 detected_format = detected;
         }
         if (format_info) Release(format_info);
+        if (open_flags & 1U) {
+            current = InvokeReaderSetFileBuffer(reader, static_cast<DWORD>(std::max(0, file_buffer_bytes)));
+            // Some AddIns do not implement this optional hint. The local file
+            // stream can also keep reading directly if allocating it failed.
+            if (FAILED(current) && current != E_NOTIMPL && current != E_NOINTERFACE &&
+                current != E_OUTOFMEMORY) {
+                Release(reader);
+                last_result = current;
+                if (diagnostic) *diagnostic = L"reader slot 11 SetFileBuffer";
+                if (audio::IsTerminalAudioOpenError(current)) break;
+                continue;
+            }
+        }
         try {
             auto implementation = std::make_unique<LegacyReaderSession::Impl>();
             implementation->detected_format = detected_format;
