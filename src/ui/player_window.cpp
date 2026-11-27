@@ -2695,7 +2695,8 @@ void PlayerWindow::ApplyApplicationIcons() {
     SetClassLongPtrW(window_, GCLP_HICON, reinterpret_cast<LONG_PTR>(large_icon));
     SendMessageW(window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
     SendMessageW(window_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large_icon));
-    taskbar_icon_file_ = PublishTaskbarIcon(window_, small_icon, large_icon, DefaultPlayerTitle());
+    taskbar_icon_file_ = PublishTaskbarIcon(window_, small_icon, large_icon,
+        DefaultPlayerTitle(/*include_version=*/false));
     desktop_lyrics_.SetSkin(skin_ ? &*skin_ : nullptr, window_icon_small_);
     UpdateTrayIcon();
     InvalidateRect(window_, nullptr, FALSE);
@@ -8450,10 +8451,10 @@ void PlayerWindow::Stop() {
     RefreshPlaybackUi();
 }
 
-std::wstring PlayerWindow::DefaultPlayerTitle() const {
+std::wstring PlayerWindow::DefaultPlayerTitle(bool include_version) const {
     auto title = ResourceText(0x80);
     if (title.empty()) title = L"TTPlayer";
-    title += L" " + std::wstring(build::Version());
+    if (include_version) title += L" " + std::wstring(build::Version());
     const auto personal = PersonalEditionText();
     if (!personal.empty()) title += L" " + personal;
     return title;

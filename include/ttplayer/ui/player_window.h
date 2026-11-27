@@ -939,7 +939,7 @@ private:
     bool SwitchMediaLibraryCatalogue(bool wrap);
     void AdvanceAfterNaturalEnd();
     void Stop();
-    [[nodiscard]] std::wstring DefaultPlayerTitle() const;
+    [[nodiscard]] std::wstring DefaultPlayerTitle(bool include_version = true) const;
     [[nodiscard]] std::wstring PersonalEditionText() const;
     [[nodiscard]] std::wstring LyricFallbackText(bool desktop = false) const;
     void ShowAudioError(const std::filesystem::path& path);

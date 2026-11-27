@@ -1,4 +1,6 @@
 #include "ttplayer/ui/taskbar_icon.h"
+#include "ttplayer/core/text.h"
+#include "ttplayer/update/update.h"
 
 #include <array>
 #include <cstdint>
@@ -153,8 +155,30 @@ std::filesystem::path CacheIcon(HICON small_icon, HICON large_icon, const std::w
     return path;
 }
 
-bool UpdatePinnedIcons(const std::filesystem::path& executable,
-                       const std::filesystem::path& icon, const std::wstring& id, bool& changed) {
+bool RenameVersionedPin(const std::filesystem::path& shortcut, const std::wstring& title) {
+    // Explorer uses the .lnk filename for an existing pin. Only remove a
+    // release tag if the rest is exactly the player's localized relaunch name.
+    const auto name = shortcut.stem().wstring();
+    if (name.size() <= title.size()) return false;
+    for (auto space = name.find(L' '); space != name.npos;) {
+        const auto end = name.find(L' ', space + 1);
+        const auto word = std::wstring_view(name).substr(space + 1, end - space - 1);
+        if (word.size() + 1 == name.size() - title.size() &&
+            std::wstring(name).erase(space, word.size() + 1) == title &&
+            update::ParseVersion(core::WideToUtf8(word))) {
+            const auto renamed = shortcut.parent_path() / (title + shortcut.extension().wstring());
+            // MoveFileW never replaces a colliding shortcut.
+            if (!MoveFileW(shortcut.c_str(), renamed.c_str())) return false;
+            SHChangeNotify(SHCNE_RENAMEITEM, SHCNF_PATHW | SHCNF_FLUSH, shortcut.c_str(), renamed.c_str());
+            return true;
+        }
+        space = end;
+    }
+    return false;
+}
+
+bool UpdatePinnedShortcuts(const std::filesystem::path& executable, const std::filesystem::path& icon,
+                           const std::wstring& id, const std::wstring& title, bool& changed) {
     wchar_t appdata[MAX_PATH]{};
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appdata))) return false;
     const auto directory = std::filesystem::path(appdata) /
@@ -167,8 +191,9 @@ bool UpdatePinnedIcons(const std::filesystem::path& executable,
     for (std::filesystem::recursive_directory_iterator it(directory, error), end; !error && it != end; it.increment(error)) {
         if (_wcsicmp(it->path().extension().c_str(), L".lnk") != 0) continue;
         const auto result = UpdatePlayerShortcutIcon(it->path(), executable, icon, id);
-        if (result == ShortcutIconUpdate::failed) ok = false;
-        if (result == ShortcutIconUpdate::updated) changed = true;
+        if (result == ShortcutIconUpdate::unrelated) continue;
+        if (result == ShortcutIconUpdate::failed) { ok = false; continue; }
+        if (RenameVersionedPin(it->path(), title) || result == ShortcutIconUpdate::updated) changed = true;
     }
     return ok && !error;
 }
@@ -245,7 +270,7 @@ std::filesystem::path PublishTaskbarIcon(HWND window, HICON small_icon, HICON la
     // Migrate legacy implicit-ID pins as well, so they match the startup
     // process identity and do not retain a separate group after an upgrade.
     bool changed{};
-    const bool links_ready = UpdatePinnedIcons(executable, icon, id, changed);
+    const bool links_ready = UpdatePinnedShortcuts(executable, icon, id, title, changed);
     if (!links_ready) return {};
     SetString(store.get(), PKEY_AppUserModel_RelaunchCommand, L"\"" + executable.wstring() + L"\"");
     SetString(store.get(), PKEY_AppUserModel_RelaunchDisplayNameResource, title);
